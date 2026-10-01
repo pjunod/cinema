@@ -726,6 +726,7 @@ async fn vod_segment_response_before(
     // this function, and the session registry lock is long released by the
     // time it runs.
     let delivery = std::sync::Arc::clone(&ready.delivery);
+    let retained_lease = ready.retained_lease;
     let reader = tokio_util::io::ReaderStream::with_capacity(
         tokio::io::AsyncReadExt::take(ready.file, len),
         MEDIA_BODY_READ_BUFFER,
@@ -782,6 +783,7 @@ async fn vod_segment_response_before(
             true
         },
         move || {
+            let _retained_lease = retained_lease;
             let (manager, session, authorization, complete_object, permit) = completion;
             settle_streamed_response_completion(
                 manager,

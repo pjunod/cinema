@@ -966,7 +966,10 @@ pattern = "VodPublication"
 # answer; it does not create or forward one.
 # 25 -> 26: the init facade maps one `VodPublication` while retaining its
 # response owner; it does not create or transfer another producer owner.
-expected_occurrences = 26
+# S10 #680: +2 in vod/serve/delivery.rs::segment_before. Both retained-object
+# early results carry the already captured ResponseOwner; neither creates an
+# owner, producer, or recovery decision.
+expected_occurrences = 28
 
 [[module_symbols]]
 id = "m4-vod-status-owner-admission"
@@ -1053,7 +1056,10 @@ pattern = "admitted_serving_generation"
 # rechecked by the same owner. No second serving token or authority is minted.
 # +1 threads that existing token into the immutable object promise installed
 # by its exact publication owner.
-expected_occurrences = 29
+# S10 #680: +2 in manager/create.rs::create_cluster_session_for_receiver,
+# the parameter and forwarding call for the existing admitted generation.
+# Negotiated receipt capture does not mint another serving authority.
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -1584,7 +1590,10 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-keyed-vod-build-owner"
 pattern = "rendition_build_gate"
-expected_occurrences = 14
+# S10 #680: +2 in vod/retained.rs::repair_exact and link_complete. Both
+# acquire the EXISTING recipe-key build gate before validating/linking exact
+# bytes; neither starts a build nor owns a second producer/recovery loop.
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -2385,7 +2394,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # fixture owns its test server and aborts it when its proof completes.
 # S09 current-effort composition: shared local-media pump regression retains
 # one additional joined task; measured 688 on the merged source.
-expected_occurrences = 688
+# S10 #680: +6, all in vod/retained.rs: one reservation-owned detached
+# assembly (offer), plus awaited spawn_blocking namespace lease acquisition,
+# orphan iterator open, bounded orphan iteration, private directory creation,
+# and hardlink mutation. One assembly reservation bounds work; blocking
+# mutations retain artifact Arc leases until settlement so cancellation cannot
+# let GC overtake filesystem writes. Existing maintenance owns GC, not a new
+# scheduler or rolling recovery task.
+expected_occurrences = 694
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3543,7 +3559,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline; takeover recipe restoration shares its existing takeover deadline;
 # complete VOD cache inspection bounds manifest/member reads to 500 ms.
 # Every future is awaited by its request; none spawns a producer or timer owner.
-expected_occurrences = 1132
+# S10 #680: +2 in vod/retained.rs: one awaited retained-open repair timeout
+# uses the caller's existing response budget; one 20 ms test-only sleep polls
+# completed artifact assembly in the new measured-cost fixture. No new
+# production periodic timer or rolling lifecycle deadline owner.
+expected_occurrences = 1134
 
 [[module_structures]]
 id = "bare-time-constructor"

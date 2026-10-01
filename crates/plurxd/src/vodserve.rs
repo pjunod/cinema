@@ -296,6 +296,7 @@ pub struct VodHlsFacts {
 /// session that reused the durable session id.
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
+    retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,
     /// Present only for a live media owner. Terminal owners deliberately do
@@ -318,6 +319,13 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+impl ResponseOwner {
+    pub(crate) fn retained_output_facts(&self) -> Option<crate::transcode::RetainedOutputFacts> {
+        let artifact = self.retained_output.as_ref()?;
+        Some(artifact.facts())
     }
 }
 
@@ -482,6 +490,8 @@ pub struct VodStart {
 /// The durable request plus an already resolved encoder recipe. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
+    pub(crate) measured_candidate: Option<RetainedCandidateBinding>,
+    pub(crate) retained_capture: RetainedOutputCapture,
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
 }
@@ -489,10 +499,35 @@ pub(crate) struct VodRecipeRequest<'a> {
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
     fn from(request: &'a SessionRequest) -> Self {
         Self {
+            measured_candidate: None,
             request,
+            retained_capture: RetainedOutputCapture::New,
             encoding: None,
         }
     }
+}
+
+/// Private dispatch-attested identity, never a client proof or catalog budget.
+#[derive(Clone, Debug)]
+pub(crate) struct RetainedCandidateBinding {
+    pub(crate) kind: SessionKind,
+    pub(crate) normalized_geometry: bool,
+    pub(crate) profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+    pub(crate) candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub(crate) recipe_digest: [u8; 32],
+    pub(crate) file_id: i64,
+    pub(crate) audio_index: Option<i64>,
+    pub(crate) audio_offset_ms: i64,
+    pub(crate) subtitle_burn: Option<i64>,
+    pub(crate) grade: plurx_core::transcode::OutputGrade,
+    pub(crate) route: plurx_core::playback::candidate::CandidateRoute,
+}
+
+#[derive(Clone)]
+pub(crate) enum RetainedOutputCapture {
+    New,
+    ReceiverUnavailable,
+    Restore(Option<crate::transcode::RetainedOutputFacts>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -625,6 +660,8 @@ pub enum VodSupersedeError {
 /// An open, verified segment ready to stream.
 #[derive(Debug)]
 pub struct SegmentReady {
+    /// Immutable plan duration, rounded outward to milliseconds; init is None.
+    pub observed_media_duration_ms: Option<u32>,
     pub file: tokio::fs::File,
     pub len: u64,
     /// Strong: rendition key + plan index + materialization instant + length.
@@ -636,6 +673,7 @@ pub struct SegmentReady {
     /// with. The delivery rate remains advisory preparation and fleet
     /// telemetry; a body served against no meter would silently lose it.
     pub delivery: Arc<crate::meter::Meter>,
+    pub(crate) retained_lease: Option<Arc<retained::RetainedVodArtifact>>,
 }
 
 // split: begin vod-reader
@@ -692,6 +730,7 @@ struct Shared {
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
+    retained_artifacts: retained::RetainedArtifactRegistry,
     /// Fair starting point for the bounded terminal route-confirmation batch.
     terminal_eviction_cursor: AtomicU64,
     /// The registry's test points (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8),
@@ -897,6 +936,11 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+#[path = "vod/output_measurement.rs"]
+mod output_measurement;
+use output_measurement::PublishedOutputMeasurement;
+#[path = "vod/retained.rs"]
+pub(crate) mod retained;
 // split: end vod-generation
 
 // split: begin vod-plan

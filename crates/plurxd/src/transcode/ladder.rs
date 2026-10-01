@@ -87,18 +87,23 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
 ///
-/// A transcode's output is described by the argument list that produced it,
-/// not by a probe: unlike the copy path there is no source sample entry to
-/// read, and unlike an fMP4 session there is no `init.mp4` for
-/// `http::hls::exact_hls_context` to open (this muxer writes MPEG-TS). So the
-/// string is the grade's, and the grade is the pipeline's.
+/// Without a qualified frozen plan, SDR knows its codec family but not its
+/// profile/compatibility/level triplet. This is not a CODECS declaration;
+/// SDR master emission remains deferred, and fMP4 reads its actual init.
 pub(super) fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
     match grade {
-        OutputGrade::Sdr => "avc1.640034,mp4a.40.2".to_owned(),
+        OutputGrade::Sdr => "avc1,mp4a.40.2".to_owned(),
         OutputGrade::Hdr10 if target_height > HDR10_HEIGHT => {
             format!("{HDR10_4K_HLS_CODEC},mp4a.40.2")
         }
         OutputGrade::Hdr10 => format!("{HDR10_HLS_CODEC},mp4a.40.2"),
+    }
+}
+
+pub(super) fn transcoded_hls_codecs_for_plan(plan: &ResolvedTranscode) -> String {
+    match plan.output_contract().sdr_avc() {
+        Some(proof) => format!("{},mp4a.40.2", proof.codec()),
+        None => transcoded_hls_codecs(plan.codec_contract().grade, plan.options().target_height),
     }
 }
 
@@ -111,7 +116,16 @@ pub(super) fn audio_delivery_hls_codecs(
         return codecs;
     };
     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
-    let audio_codec = match audio.codec() {
+    let audio_codec = audio_sample_type(audio.codec());
+    if let Some(audio_codec) = audio_codec {
+        codecs.push(',');
+        codecs.push_str(audio_codec);
+    }
+    codecs
+}
+
+pub(super) fn audio_sample_type(codec: Option<&str>) -> Option<&'static str> {
+    match codec {
         Some("aac") => Some("mp4a.40.2"),
         Some("ac3" | "ac-3") => Some("ac-3"),
         Some("eac3" | "eac-3" | "ec-3") => Some("ec-3"),
@@ -119,12 +133,7 @@ pub(super) fn audio_delivery_hls_codecs(
         Some("alac") => Some("alac"),
         Some("flac") => Some("fLaC"),
         _ => None,
-    };
-    if let Some(audio_codec) = audio_codec {
-        codecs.push(',');
-        codecs.push_str(audio_codec);
     }
-    codecs
 }
 
 pub fn advertised_ladder_with_audio(

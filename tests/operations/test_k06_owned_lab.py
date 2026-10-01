@@ -18,11 +18,15 @@ def manifest():
                 "source": "d" * 40, "tree": "e" * 40, "archive_sha256": "f" * 64,
                 "build": "d" * 40, "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
                 "command": "cargo build --offline --locked --release -p plurxd --bin plurxd"}
+    artifact.update(config_digest="9" * 64, rootfs_diff_ids=["sha256:" + "8" * 64],
+                    image_config={"Labels": {"org.opencontainers.image.revision": artifact["source"],
+                                              "tv.plurx.k06-source-tree": artifact["tree"]}})
     nodes = []
     for host, ip in LAB.HOSTS:
         stem = "plurx-k06-measure." + owner + "-" + host
         nodes.append({"host": host, "ip": ip, "root": "/var/tmp/" + stem,
-                      "name": stem, "network_name": stem + "-net"})
+                      "name": stem, "network_name": stem + "-net",
+                      "docker_image_id": artifact["image"]})
     return {"schema": 1, "owner": owner, "artifact": artifact, "nodes": nodes, "phase": "planned"}
 
 
