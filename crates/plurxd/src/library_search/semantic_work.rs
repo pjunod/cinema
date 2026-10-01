@@ -70,20 +70,25 @@ pub(super) async fn run(
     if !loaded {
         return Ok(false);
     }
-    let Some(admission) = state.transcode.admit_fragment().await else {
-        return Ok(false);
-    };
-    let page = state
+    let mut page = state
         .store
         .job_candidates(CandidateQuery {
             node_id: state.node_id.clone(),
             kinds: vec![JobKind::SemanticEmbedding],
-            after: cursor.take(),
+            after: cursor.clone(),
             now_ms: now_ms(),
             limit: 64,
         })
         .await?;
-    *cursor = page.next;
+    page.jobs.retain(|job| matches!(job.supported_payload(), Ok(JobPayload::SemanticEmbedding { model_digest, .. }) if model_digest == model_identity().digest()));
+    if page.jobs.is_empty() {
+        *cursor = page.next;
+        return Ok(false);
+    }
+    let Some(admission) = state.transcode.admit_fragment().await else {
+        return Ok(false);
+    };
+
     let identity = model_identity();
     for candidate in page.jobs {
         let Ok(JobPayload::SemanticEmbedding {
@@ -97,7 +102,8 @@ pub(super) async fn run(
         if model_digest != identity.digest() {
             continue;
         }
-        if shutdown.is_cancelled()
+        if !authority.may_execute_job(JobKind::SemanticEmbedding).await
+            || shutdown.is_cancelled()
             || !ENABLED.load(Ordering::Acquire)
             || !state.transcode.fragment_worker_idle(&admission)
         {
@@ -139,7 +145,8 @@ pub(super) async fn run(
             let Some(entry) = entries.first().filter(|entry| entry.input().is_ok_and(|input| input.id == item_id)
                 && source_key(entry) == content_digest) else {
                 fence.settle(JobSettlement::Stop { error_code: "embedding_source_changed".into() }).await?;
-                return Ok(true);
+                *cursor = None;
+        return Ok(true);
             };
             let text = embedding_text(entry)?;
             let source_json = entry.source_json.clone();
@@ -205,5 +212,6 @@ pub(super) async fn run(
         active.finish().await;
         return Ok(true);
     }
+    *cursor = page.next;
     Ok(false)
 }

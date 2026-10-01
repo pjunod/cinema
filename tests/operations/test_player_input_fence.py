@@ -160,6 +160,15 @@ class PlayerInputFenceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.fence.web_allowed_lines(path, ["nothing();"])
 
+    def test_activity_tab_adapter_does_not_exempt_other_handlers(self):
+        relative = Path("crates/plurxd/src/web/pages/activity.js")
+        lines = (ROOT / relative).read_text(encoding="utf-8").splitlines()
+        lines.append('window.addEventListener("keydown", event => event.key);')
+        allowed = self.fence.web_allowed_lines(relative, lines)
+        failures = self.fence.scan_lines(relative, lines, allowed)
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(all(f":{len(lines)}:" in failure for failure in failures))
+
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 
