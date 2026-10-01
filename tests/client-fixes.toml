@@ -3473,3 +3473,20 @@ source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlA
 source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-staged-advertised-interval-proof"
+commits = ["13a69219"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoVODAdvertisedIntervals(_ data: Data)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-staged-completed-load-interval-proof"
+commits = []
+supplements = "apple.auto-staged-advertised-interval-proof"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline()"

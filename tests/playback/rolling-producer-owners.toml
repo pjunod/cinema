@@ -480,7 +480,11 @@ also_in = ["crates/plurxd/src/transcode"]
 # test-side: `session_shipped_shape`'s two polling sleeps (the playlist poll and the retirement
 # poll, each inside a bound) and the position test's `PLAYLIST_WAIT_POLL * 2` wait that shows a
 # playlist below the first-playlist gate has not reached its hook point. No production timer.
-expected_occurrences = 51
+# S11 #690: +1 in feature-only tests/rolling_grid_campaign.rs. The awaited
+# 250 ms stop-file poll is bounded by its 600 s deadline; the enclosing test
+# stops its actual manager session. This timer adds no separate producer or
+# recovery owner, and the external acquisition supervisor bounds drain.
+expected_occurrences = 52
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1257,7 +1261,10 @@ pattern = "publication_ready_at_ms"
 # A05 prepared observations: +4 refusal-only/publication references: initial
 # and final staged route checks, intake staged route check, and one actual
 # blocked activation fixture. No observation publishes a body or moves a fence.
-expected_occurrences = 100
+# S11 #690: +2 in feature-only tests/rolling_grid_campaign.rs: the owned
+# MemoryStore activation starts blocked, then the existing Confirm settlement
+# publishes it at zero. No shipped activation/publication policy changes.
+expected_occurrences = 102
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1297,7 +1304,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # confirmed through the existing durable activation API; no shipped write.
 # The same four prepared observations above; three refusal-only reads and
 # one blocked activation fixture. Existing publication ownership is unchanged.
-expected_occurrences = 33
+# S11 #690: +1 for that same feature-only MemoryStore blocked activation in
+# tests/rolling_grid_campaign.rs, settled by the existing activation API.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -3593,7 +3602,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # accepted capture, proposed cost/Link proof, post-prime registration, and
 # staged intake actor queries. All preserve original EOF/absolute deadlines;
 # no producer, periodic lifecycle timer, recovery owner, or authority renewal.
-expected_occurrences = 1153
+# S11 #690: +1 for the same awaited 250 ms stop-file sleep in feature-only
+# tests/rolling_grid_campaign.rs, reviewed under all-async-sleeps above. Its
+# enclosing test owns/stops the actual session; no independent timer owner.
+expected_occurrences = 1154
 
 [[module_structures]]
 id = "bare-time-constructor"

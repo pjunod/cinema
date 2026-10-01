@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""Explicit private headless-browser acquisition, never physical qualification.
+
+No downloads or builds: supply a reviewed feature-enabled test binary and an
+existing browser executable. Operational execution needs a separate resource
+window; validation alone neither launches producer nor browser.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import time
+import signal
+
+ENTRY = "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell"
+MAX_MEDIA = 512 * 1024 * 1024
+PAGE = r'''<!doctype html><meta charset="utf-8"><video id="v" muted autoplay width="640" height="360"></video><script src="/hls.js"></script><script>
+const ready=READY, v=document.querySelector('#v');
+const attachment=Object.freeze({session:ready.session,generation:ready.generation,attempt:ready.producer_attempt});
+let last=null,sentFrames=0,sentMedia=-1,busy=false,failed=null;
+const hls=new Hls({startPosition:0,maxBufferLength:20,maxMaxBufferLength:30,backBufferLength:5});
+hls.on(Hls.Events.ERROR,(_,e)=>{if(e.fatal)failed=e.details;});
+hls.attachMedia(v);hls.loadSource('/media/'+ready.nonce+'/index.m3u8');
+hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(e=>failed=e.name));
+if(typeof v.requestVideoFrameCallback!=='function') throw Error('RVFC unavailable');
+function frame(now,m){if(document.querySelector('#v')!==v||hls.media!==v)return;
+ if(!v.paused&&!v.seeking&&v.playbackRate===1&&Number.isFinite(m.mediaTime)&&Number.isFinite(m.presentedFrames))
+ last={at:performance.now(),media:m.mediaTime,frames:m.presentedFrames};
+ v.requestVideoFrameCallback(frame);}
+v.requestVideoFrameCallback(frame);
+setInterval(async()=>{
+ if(busy||failed||!last||performance.now()-last.at>750||v.paused||v.seeking||v.playbackRate!==1||last.frames<=sentFrames||last.media<=sentMedia||hls.media!==v)return;
+ let range=null;for(let i=0;i<v.buffered.length;i++)if(v.buffered.start(i)<=v.currentTime&&v.buffered.end(i)>=v.currentTime)range=[v.buffered.start(i),v.buffered.end(i)];
+ if(!range)return;const observed={...last};busy=true;
+ try{const r=await fetch('/frame',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce:ready.nonce,generation:attachment.generation,session:attachment.session,producer_attempt:attachment.attempt,presented_frames:observed.frames,media_time:observed.media,current_time:v.currentTime,buffered_from:range[0],buffered_through:range[1]})});
+ if(r.ok){sentFrames=observed.frames;sentMedia=observed.media;}else failed='control_refused_'+r.status;
+ }catch(e){failed=e.name;}finally{busy=false;}
+},500);
+window.labStatus=()=>({failed,presented_frames:last?.frames||0,media_time:last?.media??null,accepted_frames:sentFrames,playback_rate:v.playbackRate});
+</script>'''
+
+
+def read_json(path, cap=65536):
+    with Path(path).open("rb") as source:
+        data = source.read(cap + 1)
+    if len(data) > cap:
+        raise ValueError("input exceeds byte cap")
+    return json.loads(data)
+
+
+def sha(path, cap=None):
+    digest = hashlib.sha256()
+    total = 0
+    with Path(path).open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            total += len(chunk)
+            if cap is not None and total > cap:
+                raise ValueError("hash input exceeds cap")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def private_file(path):
+    path = Path(path)
+    if not path.is_absolute() or path.is_symlink() or path.resolve() != path or not path.is_file():
+        raise ValueError("exact non-symlink file required")
+    return path
+
+
+def admit_owner(manifest):
+    """Cheap bounded ownership admission; never hash or inspect media/tools."""
+    if set(manifest) != {"nonce", "root", "source", "source_sha256", "probe", "height", "page", "test_binary", "test_binary_sha256", "browser", "browser_sha256", "hls_sha256", "ffmpeg", "ffmpeg_sha256", "ffprobe", "ffprobe_sha256"}:
+        raise ValueError("unknown or missing manifest fields")
+    nonce = manifest["nonce"]
+    if not isinstance(nonce, str) or not re.fullmatch(r"[a-f0-9]{64}", nonce):
+        raise ValueError("invalid owner nonce")
+    root = Path(manifest["root"])
+    if not root.is_absolute() or root.is_symlink() or root.resolve() != root or root.parent not in (Path("/private/tmp"), Path("/var/tmp")):
+        raise ValueError("exact private nonce root required")
+    if root.stat().st_mode & 0o077 or root.stat().st_uid != os.getuid():
+        raise ValueError("root must be owned and mode700")
+    if read_json(root / "owner.json") != {"nonce": nonce}:
+        raise ValueError("owner mismatch")
+    return root
+
+
+def validate(manifest):
+    root = admit_owner(manifest)
+    if manifest["height"] not in (360, 480, 720, 1080):
+        raise ValueError("unsupported cell rung")
+    for key in ("source", "probe", "page", "test_binary", "browser", "ffmpeg", "ffprobe"):
+        private_file(manifest[key])
+    for key in ("source", "test_binary", "browser", "ffmpeg", "ffprobe"):
+        if sha(manifest[key], 2 * 1024**3) != manifest[key + "_sha256"]:
+            raise ValueError(key + " hash mismatch")
+    for key in ("probe", "page"):
+        if not Path(manifest[key]).is_relative_to(root):
+            raise ValueError("owned sidecar escaped root")
+    with Path(manifest["page"]).open("rb") as source:
+        if source.read(65537) != PAGE.encode():
+            raise ValueError("browser observation source differs from reviewed page")
+    probe = read_json(manifest["probe"], 1024 * 1024)
+    video = [s for s in probe.get("streams", []) if s.get("codec_type") == "video"]
+    if len(video) != 1 or video[0].get("height", 0) < manifest["height"] or float(probe.get("format", {}).get("duration", 0)) < 64:
+        raise ValueError("actual full-duration source geometry unavailable")
+    hls = Path(__file__).resolve().parent.parent / "crates/plurxd/src/web/hls.min.js"
+    if sha(hls) != manifest["hls_sha256"]:
+        raise ValueError("vendored HLS identity mismatch")
+    if any((root / name).exists() for name in ("ready.json", "stop", "complete.json", "media")):
+        raise ValueError("existing acquisition state refuses restart")
+    return root
+
+
+def stop_owned(process, expected_pid):
+    """Only this exact child handle; no names, discovered PIDs or process groups."""
+    if process.pid != expected_pid:
+        raise ValueError("owned process identity mismatch")
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def execution_envelope():
+    """Refuse bare-host execution; caller supplies a bounded owned cgroup.
+
+    This ceiling applies to the whole local bridge/browser process tree.
+    It is conservative, not a claim that separate GPU/producer cells qualify.
+    """
+    root=Path("/sys/fs/cgroup")
+    try:
+        quota,period=(root/"cpu.max").read_text().split()
+        memory=(root/"memory.max").read_text().strip()
+        pids=(root/"pids.max").read_text().strip()
+        if quota=="max" or memory=="max" or pids=="max" or int(quota)/int(period)>2 or int(memory)>2*1024**3 or int(pids)>256:
+            raise ValueError("unbounded or oversized execution cgroup")
+    except (OSError,ValueError) as error:
+        raise ValueError("owned Linux cgroup required: <=2CPU/2GiB/256PID; no bare-host execution") from error
+    return {"cpu_max":quota+" "+period,"memory_max":memory,"pids_max":pids}
+
+
+class OwnedNamespace:
+    """Fresh bounded container PID1 only; no shared/host namespace adoption.
+
+    All subsequent namespace processes descend from this sole initial process.
+    pidfds bind signals to identities, including reparented/setsid descendants.
+    Kernel namespace teardown is the final backstop when this PID1 exits.
+    """
+    def __init__(self, nonce):
+        if os.getpid() != 1 or self.pids() != {1}:
+            raise ValueError('fresh task-only container PID namespace with supervisor PID1 required')
+        self.nonce = nonce
+        self.namespace = os.readlink('/proc/self/ns/pid')
+        if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+            raise ValueError('Linux pidfd cleanup support required')
+
+    @staticmethod
+    def pids():
+        return {int(p.name) for p in Path('/proc').iterdir() if p.name.isdecimal()}
+
+    def kill(self):
+        if os.getpid() != 1 or os.readlink('/proc/self/ns/pid') != self.namespace:
+            raise ValueError('owned namespace identity changed')
+        for pid in sorted(self.pids() - {1}):
+            try:
+                fd = os.pidfd_open(pid)
+            except ProcessLookupError:
+                continue
+            try:
+                signal.pidfd_send_signal(fd, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            finally:
+                os.close(fd)
+
+    def empty(self):
+        # PID1 adopts orphaned descendants and explicitly reaps their zombies.
+        while True:
+            try:
+                if os.waitpid(-1, os.WNOHANG)[0] == 0:
+                    break
+            except ChildProcessError:
+                break
+        return self.pids() == {1}
+
+    def remove(self):
+        if not self.empty():
+            raise ValueError('owned namespace descendants remain')
+
+
+def supervise_owned(process, group, deadline, stop, record):
+    """No browser calls here. Reserve 15 seconds of the absolute wall budget.
+
+    Every cleanup action is independent; failures never bypass subtree kill.
+    Production and fake-only regressions use this same consumer.
+    """
+    errors = []
+    expired = False
+    try:
+        try:
+            process.wait(timeout=max(0, deadline - time.monotonic() - 15))
+            if process.returncode != 0:
+                errors.append('worker failed: ' + str(process.returncode))
+        except subprocess.TimeoutExpired:
+            expired = True
+            errors.append('absolute wall deadline reached (cleanup reserve)')
+        except BaseException as error:
+            errors.append('supervisor wait: ' + repr(error))
+    finally:
+        for label, action in (('stop', stop), ('subtree kill', group.kill)):
+            try:
+                action()
+            except BaseException as error:
+                errors.append(label + ': ' + repr(error))
+        try:
+            # Exact Popen child only, even if attachment itself failed.
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=max(.01, min(5, deadline - time.monotonic())))
+        except BaseException as error:
+            errors.append('worker reap: ' + repr(error))
+        try:
+            while not group.empty() and time.monotonic() < deadline:
+                group.kill()  # close fork races inside this exact owned namespace
+                time.sleep(.05)
+            group.remove()  # refuses nonempty subtree; never reports false cleanup
+        except BaseException as error:
+            errors.append('subtree verification/removal: ' + repr(error))
+        try:
+            record({'expired': expired, 'worker_pid': process.pid,
+                    'returncode': process.returncode, 'errors': list(errors),
+                    'deadline_monotonic': deadline, 'finished_monotonic': time.monotonic()})
+        except BaseException as error:
+            errors.append('supervisor receipt: ' + repr(error))
+    if errors:
+        raise RuntimeError('; '.join(errors))
+
+
+def acquire(manifest):
+    deadline = time.monotonic() + 600
+    root = admit_owner(manifest)
+    envelope = execution_envelope()
+    # Normal unprivileged Docker private PID namespace; no cgroup delegation,
+    # Docker socket, host-PID sharing or writable kernel mounts are required.
+    group = OwnedNamespace(manifest['nonce'])
+    (root / 'execution-envelope.json').write_text(json.dumps(envelope))
+    manifest_path = root / 'supervised-manifest.json'
+    manifest_path.write_text(json.dumps(manifest))
+    manifest_path.chmod(0o600)
+    command = [sys.executable, str(Path(__file__).resolve()), '--exec-owned-cell',
+               str(manifest_path), str(deadline - 15)]
+    env = {'PATH': os.defpath, 'HOME': str(root)}
+    try:
+        process = subprocess.Popen(command, env=env)
+    except BaseException as error:
+        for label, action in (('namespace kill', group.kill), ('namespace verification', group.remove)):
+            try:
+                action()
+            except BaseException as cleanup_error:
+                error.add_note(label + ': ' + repr(cleanup_error))
+        raise
+    supervise_owned(process, group, deadline, lambda: (root / 'stop').touch(),
+                    lambda result: (root / 'supervisor-final.json').write_text(json.dumps(result)))
+    if not (root / 'complete.json').is_file():
+        raise RuntimeError('worker completed without acquisition evidence')
+
+
+def acquire_worker(manifest, deadline):
+    root = validate(manifest)
+    envelope=execution_envelope()
+    (root/"execution-envelope.json").write_text(json.dumps(envelope))
+    source_before = Path(manifest["source"]).stat()
+    cell = {k: manifest[k] for k in ("nonce", "root", "source", "source_sha256", "probe", "height", "page")}
+    cell_path = root / "cell.json"
+    cell_path.write_text(json.dumps(cell))
+    os.chmod(cell_path, 0o600)
+    log = (root / "bridge.log").open("xb")
+    os.chmod(root / "bridge.log",0o600)
+    env = {"PATH":os.defpath,"HOME":str(root),"PLURX_ROLLING_CELL":str(cell_path),"PLURX_FFMPEG":manifest["ffmpeg"],"PLURX_FFPROBE":manifest["ffprobe"]}
+    command = [sys.executable,str(Path(__file__).resolve()),"--exec-owned-test",manifest["test_binary"]]
+    process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
+    pid = process.pid
+    browser = None
+    primary_error = None
+    try:
+        while not (root / "ready.json").exists():
+            if process.poll() is not None or time.monotonic() >= deadline or (root/"bridge.log").stat().st_size>64*1024**2:
+                raise RuntimeError("bridge unavailable before deadline")
+            time.sleep(.1)
+        ready = read_json(root / "ready.json")
+        if ready["nonce"] != manifest["nonce"] or ready["source_sha256"] != manifest["source_sha256"]:
+            raise ValueError("bridge identity mismatch")
+        # Existing local runtime only. Playwright never downloads a browser.
+        from playwright.sync_api import sync_playwright
+        media = root / "media"
+        media.mkdir(mode=0o700)
+        total = 0
+        segments = {}
+        durations = {}
+        snapshots = []
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(executable_path=manifest["browser"], headless=True,
+                env={"PATH":os.defpath,"HOME":str(root)},
+                args=["--autoplay-policy=no-user-gesture-required", "--disable-background-timer-throttling", "--disable-gpu"])
+            browser_build=browser.version
+            context = browser.new_context(viewport={"width": 800, "height": 600})
+            page = context.new_page()
+            def captured(response):
+                nonlocal total
+                path = response.url.split("/media/" + manifest["nonce"] + "/", 1)
+                if len(path) != 2 or response.status != 200:
+                    return
+                name = path[1]
+                if not re.fullmatch(r"index\.m3u8|seg[0-9]+\.ts", name):
+                    raise ValueError("unexpected served object")
+                data = response.body()  # actual consumer-completed response; truncation raises
+                total += len(data)
+                if total > MAX_MEDIA or (root / "bridge.log").stat().st_size > 64 * 1024**2:
+                    raise ValueError("campaign byte cap exceeded")
+                digest = hashlib.sha256(data).hexdigest()
+                if name == "index.m3u8":
+                    if len(data) > 1024**2 or len(snapshots) >= 4096:
+                        raise ValueError("snapshot cap exceeded")
+                    target = media / f"playlist-{len(snapshots):04}.m3u8"
+                    target.write_bytes(data)
+                    snapshots.append({"name": target.name, "sha256": digest, "at_monotonic": time.monotonic()})
+                    for duration, uri in re.findall(rb"#EXTINF:([0-9.]+),[^\n]*\n(seg[0-9]+\.ts)",data):
+                        uri=uri.decode();duration=float(duration)
+                        if duration<=0 or duration>30 or (uri in durations and durations[uri]!=duration):
+                            raise ValueError("advertised duration invalid or mutated")
+                        durations[uri]=duration
+                elif name in segments:
+                    if segments[name]["sha256"] != digest:
+                        raise ValueError("served object mutated")
+                else:
+                    if len(segments) >= 256:
+                        raise ValueError("segment count cap exceeded")
+                    (media / name).write_bytes(data)
+                    segments[name] = {"sha256": digest, "bytes": len(data)}
+            page.on("response", captured)
+            page.goto(f"http://127.0.0.1:{ready['port']}/page/{manifest['nonce']}", timeout=30000)
+            while time.monotonic() < deadline:
+                page.wait_for_timeout(500)
+                if (root/"bridge.log").stat().st_size>64*1024**2:
+                    raise ValueError("log cap exceeded")
+                status = page.evaluate("window.labStatus&&window.labStatus()")
+                if status and status["failed"]:
+                    raise RuntimeError(status["failed"])
+                completed=sorted(segments,key=lambda x:int(re.search(r"[0-9]+",x)[0]))
+                indices=[int(re.search(r"[0-9]+",x)[0]) for x in completed]
+                contiguous=indices==list(range(indices[0],indices[0]+len(indices))) if indices else False
+                if len(segments) >= 30 and contiguous and all(x in durations for x in segments) and sum(durations[x] for x in segments)>=60 and status and status["media_time"] is not None and status["media_time"] >= 60:
+                    break
+                if process.poll() is not None:
+                    raise RuntimeError("bridge terminated")
+            else:
+                raise RuntimeError("cell deadline exceeded")
+            browser.close()
+            browser = None
+        source_after = Path(manifest["source"]).stat()
+        if (source_before.st_dev, source_before.st_ino, source_before.st_size, source_before.st_mtime_ns) != (source_after.st_dev, source_after.st_ino, source_after.st_size, source_after.st_mtime_ns):
+            raise ValueError("source changed")
+        (root / "stop").touch()
+        if process.wait(timeout=15) != 0:
+            raise RuntimeError("bridge qualification refused")
+        (root / "complete.json").write_text(json.dumps({"scope":"test-binary/internal-manager/shipped-handler/headless-browser-presentation", "physical":False,"ready":ready,"snapshots":snapshots,"segments":segments,"advertised_durations":durations,"browser_status":status,"browser_build":browser_build,"command":command},indent=2))
+    except BaseException as error:
+        primary_error = error
+        try:
+            (root/"failed.json").write_text(json.dumps({"scope":"interrupted-unqualified-private-cell","error_type":type(error).__name__,"error":str(error),"pid":pid,"command":command}))
+        except BaseException as receipt_error:
+            error.add_note('failure receipt: ' + repr(receipt_error))
+        raise
+    finally:
+        cleanup_errors = []
+        for label, action in (
+            ('stop', lambda: (root / 'stop').touch(exist_ok=True)),
+            ('producer', lambda: stop_owned(process, pid)),
+            ('browser close', lambda: browser.close() if browser is not None else None),
+            ('log close', log.close),
+        ):
+            try:
+                action()
+            except BaseException as error:
+                cleanup_errors.append(label + ': ' + repr(error))
+        if cleanup_errors:
+            # Outer supervisor still kills/verifies the entire owned subtree
+            # if this receipt, browser.close or an earlier error cannot return.
+            try:
+                (root / 'worker-cleanup-errors.json').write_text(json.dumps(cleanup_errors))
+            except BaseException as error:
+                cleanup_errors.append('cleanup receipt: ' + repr(error))
+            if primary_error is not None:
+                primary_error.add_note('; '.join(cleanup_errors))
+            else:
+                raise RuntimeError('; '.join(cleanup_errors))
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifest", type=Path, nargs="?")
+    parser.add_argument("--page-template", type=Path)
+    parser.add_argument("--execute", action="store_true")
+    args = parser.parse_args()
+    if args.page_template is not None:
+        target=args.page_template
+        root=target.parent
+        if not target.is_absolute() or root.resolve()!=root or root.is_symlink() or root.stat().st_uid!=os.getuid() or root.stat().st_mode&0o077 or not re.fullmatch(r"[a-f0-9]{64}",read_json(root/"owner.json").get("nonce","")):
+            raise ValueError("owned mode700 root required for page template")
+        with target.open("xb") as output:
+            output.write(PAGE.encode())
+        target.chmod(0o600)
+        return
+    if args.manifest is None:
+        parser.error("manifest required")
+    manifest = read_json(args.manifest)
+    if args.execute:
+        acquire(manifest)
+    else:
+        validate(manifest)
+        print("validated only; no producer/browser launched")
+
+
+if __name__ == "__main__":
+    if len(sys.argv)==4 and sys.argv[1]=='--exec-owned-cell':
+        manifest = read_json(sys.argv[2])
+        root = admit_owner(manifest)
+        if os.getppid() != 1:
+            raise ValueError('worker must belong to exact PID1 supervisor')
+        acquire_worker(manifest, float(sys.argv[3]))
+    elif len(sys.argv)==3 and sys.argv[1]=="--exec-owned-test":
+        # Fresh standalone process: no preexec_fn/post-fork Python callback.
+        import resource
+        resource.setrlimit(resource.RLIMIT_FSIZE,(64*1024**2,64*1024**2))
+        resource.setrlimit(resource.RLIMIT_CPU,(600,600))
+        binary=str(private_file(sys.argv[2]))
+        os.execve(binary,[binary,ENTRY,"--exact","--ignored","--nocapture"],dict(os.environ))
+    else:
+        main()
