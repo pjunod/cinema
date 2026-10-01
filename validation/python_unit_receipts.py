@@ -96,7 +96,8 @@ class API:
     def bytes(self, path, query=None):
         self.requests += 1
         require(self.requests <= 200, "Receipt request budget exhausted; inspect retained evidence")
-        require(path.startswith("/") and ".." not in path, "Unsafe API path")
+        require((path == "" or path.startswith("/")) and ".." not in path,
+                "Unsafe API path")
         url = self.root + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
@@ -168,6 +169,13 @@ def validate_journal(journal, scope, run, commit, completed=True):
             "Receipt artifact/run/source mismatch")
     require(not completed or journal.get("complete") is True,
             f"Incomplete receipt attempt {run}; preserve artifact and recover individual evidence")
+    fixture_errors = journal.get("fixture_errors")
+    require(isinstance(fixture_errors, list) and len(fixture_errors) <= MAX_TESTS
+            and all(isinstance(item, str) and len(item) <= 4096 for item in fixture_errors),
+            "Invalid/missing unit fixture-error evidence")
+    require(not fixture_errors,
+            f"Unresolved fixture errors in run {run}: {'; '.join(fixture_errors[:3])}; "
+            "preserve successes and recover failed-fixture-only evidence")
     passes = journal.get("passes")
     require(isinstance(passes, dict) and len(passes) <= MAX_TESTS,
             "Invalid receipt success map")
@@ -444,9 +452,10 @@ def discover(suite_name):
 
 
 class RecordingResult(unittest.TextTestResult):
-    def __init__(self, *args, journal, path, suite, **kwargs):
+    def __init__(self, *args, journal, path, suite, known_ids, **kwargs):
         super().__init__(*args, **kwargs)
         self.journal, self.path, self.suite = journal, path, suite
+        self.known_ids = known_ids
 
     def addSuccess(self, test):
         super().addSuccess(test)
@@ -454,8 +463,25 @@ class RecordingResult(unittest.TextTestResult):
             "commit": self.journal["commit"], "run": self.journal["run"]}
         atomic_json(self.path, self.journal)
 
+    def addError(self, test, error):
+        super().addError(test, error)
+        self.record_fixture_outcome(test)
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self.record_fixture_outcome(test)
+
+    def record_fixture_outcome(self, test):
+        if test.id() not in self.known_ids:
+            error_id = self.suite + ":" + test.id()
+            if error_id not in self.journal["fixture_errors"]:
+                self.journal["fixture_errors"].append(error_id)
+            atomic_json(self.path, self.journal)
+
 
 def execute(journal, path, suites=None):
+    require(not journal.get("fixture_errors"), "Unresolved fixture error; never rerun successful methods")
+    journal.setdefault("fixture_errors", [])
     failed = False
     for suite_name in SUITES:
         tests = suites[suite_name] if suites is not None else discover(suite_name)
@@ -466,7 +492,8 @@ def execute(journal, path, suites=None):
         print(f"{suite_name}: discovered={len(tests)}, historical-passes={len(tests)-len(pending)}, pending={len(pending)}")
         if pending:
             runner = unittest.TextTestRunner(verbosity=2, resultclass=lambda *a, **kw:
-                RecordingResult(*a, **kw, journal=journal, path=path, suite=suite_name))
+                RecordingResult(*a, **kw, journal=journal, path=path, suite=suite_name,
+                                known_ids=set(ids)))
             result = runner.run(unittest.TestSuite(pending))
             failed |= not result.wasSuccessful() or bool(result.skipped) or bool(result.expectedFailures)
         require(all(suite_name + ":" + test_id in journal["passes"] for test_id in ids)
@@ -502,7 +529,8 @@ def main(argv=None):
         return 0
     if args.command == "prepare":
         journal = {"version": VERSION, "scope": scope, "run": run,
-                   "commit": commit, "complete": False, "passes": restore(api, scope, run)}
+                   "commit": commit, "complete": False, "fixture_errors": [],
+                   "passes": restore(api, scope, run)}
         atomic_json(path, journal)
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             output.write(f"receipt_key={key(scope)}\nreceipt_job={job_name(scope)}\n")

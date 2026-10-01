@@ -17,7 +17,7 @@ COMMIT = "a" * 40
 
 def journal():
     return {"version": 1, "scope": dict(SCOPE), "run": 10,
-            "commit": COMMIT, "complete": False, "passes": {}}
+            "commit": COMMIT, "complete": False, "passes": {}, "fixture_errors": []}
 
 
 def Fake(name, events, outcome="pass"):
@@ -187,6 +187,70 @@ class PythonReceiptCase(unittest.TestCase):
                                                                   "branch": "codex/other"}), {})
             finally:
                 os.chdir(previous)
+
+    def test_effort_node_units_have_only_the_existing_web_lane(self):
+        root = Path(__file__).resolve().parents[2]
+        workflow = (root / ".github/workflows/effort-ci.yml").read_text()
+        preflight = workflow.split("  preflight:", 1)[1].split("  web_static:", 1)[0]
+        self.assertNotIn("player-input-contract.test.js", preflight)
+        self.assertNotIn("player-dom.test.js", preflight)
+        self.assertIn("make web-check", workflow.split("  web_static:", 1)[1])
+        makefile = (root / "Makefile").read_text()
+        self.assertIn("player-input-contract.test.js", makefile)
+        self.assertIn("player-dom.test.js", makefile)
+
+    def test_real_api_transport_accepts_only_explicit_repository_root_or_safe_suffix(self):
+        api = receipts.API("https://forge.example.test/api/v1", "owner/repo", "fixture-token")
+        calls = []
+        class FakeOpener:
+            def open(self, request, timeout):
+                calls.append((request.full_url, timeout))
+                return io.BytesIO(b'{"id":7}')
+        api.opener = FakeOpener()
+        self.assertEqual(api.get(""), {"id": 7})
+        self.assertEqual(calls, [("https://forge.example.test/api/v1/repos/owner/repo", 15)])
+        for unsafe in ("../escape", "/../escape", "relative"):
+            with self.assertRaises(receipts.ReceiptError):
+                api.get(unsafe)
+        self.assertEqual(len(calls), 1)
+
+    def test_post_success_class_fixture_skip_is_not_silently_green(self):
+        events, state = [], journal()
+        class Fixture(unittest.TestCase):
+            def test_method(self):
+                events.append("method")
+            @classmethod
+            def tearDownClass(cls):
+                raise unittest.SkipTest("intentional fixture skip")
+        method = Fixture("test_method")
+        self.execute(state, {"validation": [method], "operations": [Fake("ops", events)]})
+        self.assertIn("validation:" + method.id(), state["passes"])
+        self.assertEqual(len(state["fixture_errors"]), 1)
+        with self.assertRaises(receipts.ReceiptError):
+            receipts.validate_journal(state, SCOPE, 10, COMMIT)
+
+    def test_post_success_class_fixture_error_is_persisted_and_blocks_reuse(self):
+        events, state = [], journal()
+        class Fixture(unittest.TestCase):
+            def test_method(self):
+                events.append("method")
+
+            @classmethod
+            def tearDownClass(cls):
+                raise RuntimeError("intentional post-success fixture failure")
+        method = Fixture("test_method")
+        self.assertEqual(self.execute(state, {
+            "validation": [method], "operations": [Fake("ops", events)]}), 1)
+        self.assertIn("validation:" + method.id(), state["passes"])
+        self.assertEqual(len(state["fixture_errors"]), 1)
+        self.assertIn("tearDownClass", state["fixture_errors"][0])
+        with self.assertRaises(receipts.ReceiptError):
+            receipts.validate_journal(state, SCOPE, 10, COMMIT)
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(receipts.ReceiptError):
+                receipts.execute(state, Path(root) / "receipt.json", {
+                    "validation": [Fixture("test_method")], "operations": [Fake("ops", events)]})
+        self.assertEqual(events, ["method", "ops"])
 
 
 if __name__ == "__main__":
