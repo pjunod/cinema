@@ -1127,3 +1127,75 @@ correction; its final verdict found no actionable blockers. Corrected focused
 probe test and pinned all-target check passed; final Clippy/hook passed.
 M1 source commit is `76a883fa0`; the B-R1 follow-up `78e9ba0ee` is retained
 on the effort and integrated into this task before exact-tree revalidation.
+### 9.2.2 Authoritative-main refresh — 2026-09-30
+
+While PR657's corrected preflight passed, authoritative main advanced from
+`28964229cdb4a70aa0872a49e78fdb096ecf4083` to
+`f16be4f22296f98a6bce9f2a38b76b2411759e53` (worker Activity/admitted throughput,
+cluster probe batching and DVR/Activity contract inventories). This refresh
+is fetched-main evidence, distinct from the earlier planning snapshots. The
+only merge conflict was the process-shaped sentinel: main407 plus the two
+reviewed B-R1 HTTP status reads gives409; both independent explanations remain.
+
+Rechecked source seams: strict playback/control/intent/create/replay boundaries
+and decode_facts production probe query are unchanged by this main delta.
+Manager construction now integrates bounded source-probe job capacity; retain
+that ownership rather than introducing an independent probe/cache lifecycle.
+Existing results against28964229 remain historical evidence. Compilation,
+focused parser/relay/replay/digest regressions and static contracts were rerun
+on this actual merged tree: pinned all-target check passed; core playback87,
+parser3, actual owner/refusal1, durable replay/remote-path1 and actual response
+relay1 passed; validation253 (one skip) and affected operations85 passed.
+No old-base result qualifies it. The sole reviewed conflict was rechecked with
+no blockers; final normal hook/commit checks remain recorded separately.
+
+### 9.2.3 Required receive-only runtime decoder snapshot (in progress)
+
+The parser floor also carries optional `decoder_caps` in control capabilities
+and remote worker context. Omission retains the legacy/unknown baseline; presence
+is a full snapshot, never a patch. An empty `video` array explicitly states no
+available decoder. Each entry retains its canonical codec token (including
+VP9/decode-only and future unknown tokens), profile tokens, availability, grade
+and DV profile claims, and optional width/height, rational frame-rate and bitrate
+limits. Unknown codec/profile tokens provide no admission proof. Multiple
+entries remain separate; no global minimum collapses their profile constraints.
+
+Structural bounds are 16 video entries, eight profiles per entry, 32-byte
+lowercase ASCII/digit/underscore/hyphen tokens, four grades, eight DV profiles
+1–10, positive axes through 16384, positive rational components through 1000000
+with ratio at most 1000 fps, and bitrate at most 1000000000000 bit/s. Snapshot
+and presentation revisions are positive JSON-safe integers through
+9007199254740991 so native/JavaScript round trips cannot silently round them.
+
+Revision ordering belongs to the scoped client lifetime at the B-R2 owner:
+lower revisions cannot replace newer state, an equal revision with differing
+contents is a conflict, and an in-flight successor must be checked against the
+latest accepted target/decoder state before commit. This subsection records the
+consumption contract; B-R2 enforcement is still pending implementation.
+
+B-R1 preserves the snapshot through structural ingress and relay, then refuses
+unsupported nonterminal local dispatch even when `candidate_id` is absent.
+Terminal cleanup and retained-response replay retain their earlier ordering.
+Remote execution/takeover refuses any snapshot it cannot enforce. Target geometry
+alone remains advisory. No client emits these fields yet; the conformance audit
+allows exactly the two optional, omitted legacy extensions and fails when a
+native client gains either field, requiring restoration of complete parity.
+Focused evidence: strict conformance 15/15; complete static validation 253
+(one existing skip); docs index 4/4; nested relay/worker parser fixtures 3/3;
+actual owner refusal preserving the active session/drain 1/1; snapshot-bearing
+public ingress and retained terminal replay 1/1; candidate/revision tests with
+`hiqlite-store` 4/4. The final all-target compiler check and workspace Clippy passed on pinned
+Rust 1.97.1. Independent schema/relay review found no actionable blockers;
+the normal commit hook remains pending. These are source checks, not a parser-floor deployment
+receipt or feature qualification.
+
+### 9.4 Dependency integration after parser snapshot qualification
+
+The M1 source retains its reviewed geometry/capability/settings implementation,
+with authoritative main f16be4f22 and parser snapshot source 357d47a07 integrated.
+The snapshot normal tracked hook passed catalog, pinned formatting/workspace
+Clippy and served JavaScript syntax. Parser PR657 remains unlanded; no fleet
+receipt or combined-feature promotion is inferred. Exact M1 integration all-target check passed on Rust 1.97.1; core playback
+90/90 with `hiqlite-store`, decoder selection 59/59, Developer settings 35/35,
+strict protocol conformance 15/15 and docs index 4/4 passed. Normal integration
+commit hook remains pending; older M1 results do not substitute for this tree.

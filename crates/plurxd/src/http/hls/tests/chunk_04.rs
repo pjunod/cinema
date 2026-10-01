@@ -377,6 +377,7 @@
             recipe_json: serde_json::to_string(&RemoteStartRequest {
                 candidate_id: None,
                 presentation_target: None,
+                decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id.to_owned(),
                 user_id: route.user_id,
@@ -451,6 +452,7 @@
         let recipe = RemoteStartRequest {
             candidate_id: None,
             presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: predecessor.user_id,
@@ -1632,6 +1634,7 @@
         request.observed_download_bps = Some(100_000_000);
         request.capabilities = Some(crate::playback_control::DynamicCapabilities {
             presentation_target: None,
+            decoder_caps: None,
             platform: crate::playback_control::ClientPlatform::Apple,
             max_height: 2160,
             codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1733,6 +1736,7 @@
         RemoteStartRequest {
             candidate_id: None,
             presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: route.incarnation_id.clone(),
             user_id: route.user_id,

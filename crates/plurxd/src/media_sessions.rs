@@ -1185,6 +1185,8 @@ pub(crate) struct RemoteStartRequest {
     pub candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
     pub protocol_version: i64,
     pub incarnation_id: String,
     pub user_id: i64,
@@ -1216,6 +1218,7 @@ impl RemoteStartRequest {
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
     request.candidate_id.is_none()
+        && request.decoder_caps.is_none()
         && request.protocol_version == crate::media_pool::PROTOCOL_VERSION
         && uuid::Uuid::parse_str(&request.incarnation_id).is_ok()
         && request.user_id > 0
@@ -5843,6 +5846,7 @@ mod tests {
         RemoteStartRequest {
             candidate_id: None,
             presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: 7,
@@ -6539,6 +6543,7 @@ mod tests {
                 },
                 capabilities: Some(crate::playback_control::DynamicCapabilities {
                     presentation_target: None,
+                    decoder_caps: None,
                     platform: crate::playback_control::ClientPlatform::Web,
                     max_height: 2160,
                     codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -6602,6 +6607,15 @@ mod tests {
     fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
         let mut request = valid_start_request();
         assert!(request.is_valid());
+        request.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+            revision: 4,
+            video: vec![],
+        });
+        assert!(
+            !request.is_valid(),
+            "explicit decoder loss must not be ignored without a candidate"
+        );
+        assert!(!takeover_recipe_is_valid(&request));
         request.candidate_id = Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
         request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
             width_px: 2400,
@@ -6627,6 +6641,7 @@ mod tests {
             serde_json::to_value(valid_start_request()).expect("valid parser-floor test fixture");
         assert!(legacy.get("candidate_id").is_none());
         assert!(legacy.get("presentation_target").is_none());
+        assert!(legacy.get("decoder_caps").is_none());
     }
 
     /// ffmpeg's HLS muxer carries the segment number through a C `int`. A

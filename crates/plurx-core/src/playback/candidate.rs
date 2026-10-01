@@ -15,7 +15,21 @@ use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
 pub struct PresentationTarget {
     pub width_px: i64,
     pub height_px: i64,
+    #[serde(deserialize_with = "deserialize_wire_revision")]
     pub revision: u64,
+}
+
+/// Revisions must survive native JSON and JavaScript without rounding.
+pub fn deserialize_wire_revision<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let value = u64::deserialize(deserializer)?;
+    if !(1..=9_007_199_254_740_991).contains(&value) {
+        return Err(D::Error::custom(
+            "revision must be a positive JSON-safe integer",
+        ));
+    }
+    Ok(value)
 }
 
 impl PresentationTarget {
@@ -120,6 +134,20 @@ mod tests {
             revision: 3,
         };
         assert_eq!(target.rectangle(), Some((2400, 1600)));
+        for revision in [0, 9_007_199_254_740_992u64] {
+            assert!(
+                serde_json::from_value::<PresentationTarget>(serde_json::json!({
+                    "width_px": 2400, "height_px": 1600, "revision": revision
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<PresentationTarget>(serde_json::json!({
+                "width_px": 2400, "height_px": 1600, "revision": 9_007_199_254_740_991u64
+            }))
+            .is_ok()
+        );
         for width_px in [-1, 0, 16_385, i64::MAX] {
             assert_eq!(PresentationTarget { width_px, ..target }.rectangle(), None);
         }

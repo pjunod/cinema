@@ -344,9 +344,11 @@ use crate::queue_fixture::QueueFixture;
         let (manager, _work, _cache) = cached_manager(&store);
         // Model a different heavy worker that needs no software threads.
         let heavy = Arc::clone(&manager.background_heavy).try_acquire_owned().expect("heavy slot");
+        assert!(manager.background_worker_in_use());
         assert_eq!(manager.admissions.software_in_use(), 0);
         assert!(manager.admit_fragment().await.is_none());
         drop(heavy);
+        assert!(!manager.background_worker_in_use());
         let first = manager.admit_fragment().await.expect("index admission");
         assert!(Arc::clone(&manager.background_heavy).try_acquire_owned().is_err());
         assert!(manager.admit_fragment().await.is_none());

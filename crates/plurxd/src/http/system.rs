@@ -4002,6 +4002,24 @@ fn activity_nodes(local_node_id: &str, peers: &PeerActivityRead) -> Vec<Activity
     nodes
 }
 
+fn clustered_workers(
+    local_node_id: &str,
+    local: super::internal_activity::ActivityWorkers,
+    peers: &PeerActivityRead,
+) -> BTreeMap<String, super::internal_activity::ActivityWorkers> {
+    let mut workers = BTreeMap::from([(local_node_id.to_owned(), local)]);
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (node_id, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                if let Some(observation) = &snapshot.workers {
+                    workers.insert(node_id.clone(), observation.as_ref().clone());
+                }
+            }
+        }
+    }
+    workers
+}
+
 fn clustered_deliveries(
     local_node_id: &str,
     local: Vec<Delivery>,
@@ -4777,6 +4795,12 @@ pub async fn activity_detail(
     if user.0.is_admin {
         response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
             .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["workers"] = serde_json::to_value(clustered_workers(
+            &state.node_id,
+            super::internal_activity::local_workers(&state).await,
+            &peers,
+        ))
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     Ok(Json(response))
 }
@@ -5645,6 +5669,7 @@ mod tests {
                     "node-b".to_owned(),
                     PeerActivityOutcome::Answered(
                         crate::http::internal_activity::ActivitySnapshot {
+                            workers: None,
                             node_id: "node-b".to_owned(),
                             deliveries: vec![ActivityDelivery {
                                 method: "direct".to_owned(),

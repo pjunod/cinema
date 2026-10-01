@@ -914,6 +914,7 @@
         let recipe = RemoteStartRequest {
             candidate_id: None,
             presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: generation.clone(),
             user_id: 7,
@@ -1015,6 +1016,7 @@
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1753,6 +1755,7 @@
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1898,43 +1901,60 @@
         // A newer ingress may transparently forward the bounded extension to
         // this parser-floor owner. Refuse only at this local semantic boundary,
         // preserving the active predecessor and its sequence/admission state.
-        let mut unsupported = drain_control_request(generation.clone(), 1);
-        unsupported.selection.quality = crate::playback_control::QualitySelection::Auto {
-            height: Some(720),
-            candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
-        };
-        let response = crate::http::internal_media_sessions::control_authorized(
-            fixture.state.clone(),
-            crate::playback_control::ControlRelayRequest {
-                session_id: session_id.clone(),
-                generation: generation.clone(),
-                expected_owner_node_id: fixture.state.node_id.clone(),
-                expected_owner_epoch: 1,
-                deadline_unix_ms: unix_ms().saturating_add(4_000),
-                control: unsupported,
-            },
-        )
-        .await;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
-            .await
-            .expect("valid parser-floor test fixture");
-        let refusal: crate::playback_control::ControlErrorBody =
-            serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
-        assert_eq!(
-            refusal.invalid_field.as_deref(),
-            Some("selection.quality.candidate_id_unsupported")
-        );
-        assert!(refusal.is_valid_for_status(400));
-        let preserved = fixture
-            .store
-            .media_session_route(&session_id)
-            .await
-            .expect("valid parser-floor test fixture")
-            .expect("valid parser-floor test fixture");
-        assert_eq!(preserved.state, "active");
-        assert_eq!(preserved.incarnation_id, draining.incarnation_id);
-        assert_eq!(preserved.drain_deadline_ms, draining.drain_deadline_ms);
+        for decoder_loss in [false, true] {
+            let mut unsupported = drain_control_request(generation.clone(), 1);
+            unsupported.selection.quality = crate::playback_control::QualitySelection::Auto {
+                height: Some(720),
+                candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
+            };
+            if decoder_loss {
+                unsupported.selection.quality = crate::playback_control::QualitySelection::Original;
+                unsupported
+                    .capabilities
+                    .as_mut()
+                    .expect("fixture capabilities")
+                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                    revision: 4,
+                    video: vec![],
+                });
+            }
+            let response = crate::http::internal_media_sessions::control_authorized(
+                fixture.state.clone(),
+                crate::playback_control::ControlRelayRequest {
+                    session_id: session_id.clone(),
+                    generation: generation.clone(),
+                    expected_owner_node_id: fixture.state.node_id.clone(),
+                    expected_owner_epoch: 1,
+                    deadline_unix_ms: unix_ms().saturating_add(4_000),
+                    control: unsupported,
+                },
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("valid parser-floor test fixture");
+            let refusal: crate::playback_control::ControlErrorBody =
+                serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
+            assert_eq!(
+                refusal.invalid_field.as_deref(),
+                Some(if decoder_loss {
+                    "capabilities.decoder_caps_unsupported"
+                } else {
+                    "selection.quality.candidate_id_unsupported"
+                })
+            );
+            assert!(refusal.is_valid_for_status(400));
+            let preserved = fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("valid parser-floor test fixture")
+                .expect("valid parser-floor test fixture");
+            assert_eq!(preserved.state, "active");
+            assert_eq!(preserved.incarnation_id, draining.incarnation_id);
+            assert_eq!(preserved.drain_deadline_ms, draining.drain_deadline_ms);
+        }
 
         let switched = || crate::playback_control::ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
@@ -1973,7 +1993,7 @@
                 .map(|route| route.state),
             Some("active".to_owned()),
             "a refused exchange proves nothing about what reached a screen, \
-             and must not end the stream the client is still watching",
+         and must not end the stream the client is still watching",
         );
 
         // An accepted exchange carrying no acknowledgement is ordinary
@@ -2025,7 +2045,7 @@
             response.status(),
             StatusCode::OK,
             "the packet that reports the switch is answered; ending the row \
-             ahead of it is what answered it 410",
+         ahead of it is what answered it 410",
         );
         let released = fixture
             .store
@@ -2051,6 +2071,7 @@
         let recipe = RemoteStartRequest {
             candidate_id: None,
             presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: generation.clone(),
             user_id: user.id,
@@ -2153,6 +2174,7 @@
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Apple,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -2309,6 +2331,7 @@
             let recipe = RemoteStartRequest {
                 candidate_id: None,
                 presentation_target: None,
+                decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: generation.clone(),
                 user_id: user.id,
@@ -2394,6 +2417,13 @@
                     height: None,
                     candidate_id,
                 };
+                ask.capabilities
+                    .as_mut()
+                    .expect("fixture capabilities")
+                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                    revision: 4,
+                    video: vec![],
+                });
                 let response = control_inner(
                     fixture.state.clone(),
                     session_id.clone(),
@@ -2452,9 +2482,19 @@
                     codec: crate::playback_control::CodecPolicy::Auto,
                     dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
                 },
-                // Sequence > 1 retries may omit capabilities; replay
-                // telemetry must come from the retained accepted result.
-                capabilities: None,
+                // Legacy retries may omit capabilities. A newer retry can
+                // report decoder loss; terminal replay must still precede
+                // unsupported owner dispatch and retain accepted telemetry.
+                capabilities: candidate_id.map(|_| {
+                    let mut caps = drain_control_request(generation.clone(), 1)
+                        .capabilities
+                        .expect("fixture capabilities");
+                    caps.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                        revision: 4,
+                        video: vec![],
+                    });
+                    caps
+                }),
                 observation: None,
                 acknowledgement: None,
                 supported_actions: None,

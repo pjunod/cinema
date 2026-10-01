@@ -1797,6 +1797,7 @@ assert.equal(context.ACT_TIMER, null);
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         self.assertIn("timeout-minutes: 10", fast_jobs["preflight"])
+        self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")

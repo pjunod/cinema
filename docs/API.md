@@ -579,6 +579,31 @@ program, the requested and kernel-reported `nice` / I/O / `oom_score_adj`,
 whether the class was applied, and whether it can be stopped. It lists this
 node's children only, not its peers'.
 
+Analysis progress may include paired `durable_job_id` and `durable_fence`
+fields for an explicitly correlated execution attempt. Job summaries include
+`fence`, the monotonic attempt number, without claim or boot tokens. A stage
+belongs to the job only while ID, fence and owner match, the lease is still
+live, and the observation is fresh. Old peers omit the correlation fields.
+Media probes report stage and elapsed time; they do not measure byte progress
+or ETA.
+
+The admin-only `workers` map is keyed by node id. Each observation contains
+`observed_at_ms`, `heavy_limit`, `heavy_in_use`, `heavy_available`,
+optional `probe_batch_limit` (one or two probes within one heavy admission),
+`accepting_work`, `hardware_used`, `hardware_limit`, `software_used`,
+`software_limit`, `child_count` and up to 32 bounded child-purpose strings in
+`children`. Software counts are reserved threads. Availability is an
+instantaneous admission observation, not a guarantee for a particular job.
+Older or unavailable peers have no entry. The signed internal Activity
+snapshot carries this optional projection within its existing byte bound;
+ordinary household responses do not expose it.
+
+`GET /api/v1/cluster/jobs` additionally returns `active_jobs` independently of
+the selected queue filter: up to 100 running and 100 cancelling assignments,
+with the same labels and observation fields as `jobs`. `active_truncated`
+indicates more assignments exist. Lease expiration must still be checked;
+a durable running row does not prove a physical worker is alive.
+
 `DELETE /api/v1/activity/processes/{pid}` kills one listed child through the
 pidfd taken when it was started, so a pid the kernel has since reused for an
 unrelated process cannot be signalled: `404` for a pid the list does not
@@ -2157,6 +2182,10 @@ Runtime reads aggregate current observations from all workers and match the
 durable recording attempt. Stop preserves useful bytes through independently
 claimed finalization. Delete prevents publication; file cleanup remains pending
 until a worker with the recording's storage identity removes its artifacts.
+The worker then removes that recording's catalog file and empty item, clears
+`item_id`/`file_id`, and finally clears `path`. Deleted recording history is
+retained. Older already-purged rows with catalog links are repaired by the
+same worker; this explicit deletion does not consume the scan prune budget.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
@@ -2589,7 +2618,7 @@ Every route is admin unless the row says otherwise. `/cluster/status` and
 | POST | `/api/v1/cluster/learner-join-tokens` | admin | The same, wire-distinct, for a **learner** |
 | GET | `/api/v1/cluster/work/storage-domains` | admin | Library roots and persisted domain mappings; two shared readers per domain and two concurrent library workers per provider |
 | PUT | `/api/v1/cluster/work/storage-domains` | admin | Array of `{library_id, root_path, domain_id}` replaces the mapping, at most 256 roots / 64 KiB. Empty IDs are omitted for the global fallback. Returns 409 while live work owns reservations or a root no longer exists; feature enable settings are independent |
-| GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, and `cursor` query parameters; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
+| GET | `/api/v1/cluster/jobs` | admin | Optional `state`, `kind`, `node_id`, `limit` (1–100; default 100), and `cursor` query parameters; owner/destination filtering precedes pagination; at most 100 durable job summaries, bounded counts, next cursor and up to 64 recent repair plans; payloads, paths and ownership tokens omitted |
 | GET | `/api/v1/cluster/jobs/{id}` | admin | Durable summary, latest 16 attempts and first 100 interests; `more_waiters` identifies truncation |
 | POST | `/api/v1/cluster/jobs/{id}/cancel` | admin | Idempotent cooperative cancellation; running children retain reservations until joined or expired |
 | POST | `/api/v1/cluster/jobs/{id}/retry` | admin | JSON `request_id` UUID identifies one deliberate retry; failed/cancelled core work creates a fresh admin interest or fragment analysis generation. Preserve the UUID across transport retries; active work returns conflict |

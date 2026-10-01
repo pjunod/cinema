@@ -1647,6 +1647,7 @@ async fn create_with_purpose(
     let remote_request = RemoteStartRequest {
         candidate_id: None,
         presentation_target: None,
+        decoder_caps: None,
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
