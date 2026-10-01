@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-rolling-grid-census",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_rolling_grid_census_review.py",
+  "test_file_sha256": "4b824687055b6d44b4fdcfea2be690f9279ac61b141ac28ea9226fa0ca86c200",
+  "test_ids": ["test_rolling_grid_census_review.RollingGridReviewTests.test_bounded_input_and_unsupported_init_context_refuse_before_parse"],
+  "command": "python3 -m unittest tests.operations.test_rolling_grid_census_review.RollingGridReviewTests.test_bounded_input_and_unsupported_init_context_refuse_before_parse",
+  "output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.011s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}
