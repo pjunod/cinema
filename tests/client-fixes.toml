@@ -3473,3 +3473,29 @@ source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlA
 source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "player.ten-and-thirty-second-controls"
+commits = ["270231322"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = 'id="pbforward30"'
+test = "tests/playback/seek-control.test.js"
+test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+[[fixes]]
+id = "player.seek-controls-fit-player-width"
+commits = ["589986d5c"]
+source = "crates/plurxd/src/web/app.css"
+source_anchor = "@container (max-width:780px){"
+test = "tests/web/test_seek_controls_layout.py"
+test_anchor = "test_seek_controls_fit_landscape_and_embedded_players"
+
+# Arrow artwork changes while the shared control order, labels, and seek
+# actions retain their existing regression coverage.
+[[fixes]]
+id = "player.directional-seek-arrow-controls"
+commits = ["c43a993ad"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = 'class="pseek-arrows"'
+test = "tests/playback/seek-control.test.js"
+test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"

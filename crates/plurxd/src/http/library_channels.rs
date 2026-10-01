@@ -27,6 +27,7 @@ use plurx_core::library_channels::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::Instrument;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
@@ -1460,11 +1461,14 @@ async fn matching_catalogue(
     // One bounded Store query is one coherent SQLite snapshot / Hiqlite
     // consistent read. Separate page calls can straddle catalogue mutations
     // and produce a rotation which never existed at any instant.
+    let fetch_started = Instant::now();
     let mut candidates = state
         .store
         .library_channel_catalog_snapshot((CHANNEL_CANDIDATE_ROWS_MAX + 1) as i64)
         .await
         .map_err(channel_store_error)?;
+    tracing::info!(node = %state.node_id, phase = "snapshot_fetch", rows = candidates.len(), elapsed_ms = fetch_started.elapsed().as_millis() as u64, "library-channel catalogue phase finished");
+    let evaluation_started = Instant::now();
     if candidates.len() > CHANNEL_CANDIDATE_ROWS_MAX {
         return Err(channel_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1497,6 +1501,7 @@ async fn matching_catalogue(
             invalid_recipe(error)
         }
     })?;
+    tracing::info!(node = %state.node_id, phase = "local_evaluation", rows = candidate_count, elapsed_ms = evaluation_started.elapsed().as_millis() as u64, "library-channel catalogue phase finished");
     Ok(CatalogueEvaluation {
         subject_claim: None,
         matches,
@@ -1781,7 +1786,7 @@ pub(crate) async fn reconcile_loop(state: AppState, shutdown: tokio_util::sync::
         _ = shutdown.cancelled() => return,
         _ = tokio::time::sleep(INITIAL_DEBOUNCE) => {}
     }
-    reconcile_once(&state).await;
+    reconcile_observed(&state, "startup").await;
     loop {
         let mutation = tokio::select! {
             _ = shutdown.cancelled() => return,
@@ -1794,7 +1799,7 @@ pub(crate) async fn reconcile_loop(state: AppState, shutdown: tokio_util::sync::
                 _ = tokio::time::sleep(INITIAL_DEBOUNCE) => {}
             }
         }
-        reconcile_once(&state).await;
+        reconcile_observed(&state, if mutation { "mutation" } else { "periodic" }).await;
     }
 }
 
@@ -1810,7 +1815,18 @@ pub(crate) fn notify_catalogue_mutation() {
     catalogue_mutations().notify_one();
 }
 
+async fn reconcile_observed(state: &AppState, trigger: &'static str) {
+    static RUN_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let run_sequence = RUN_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let started = std::time::Instant::now();
+    tracing::info!(node = %state.node_id, run_sequence, trigger, "library-channel reconcile started");
+    reconcile_once(state).instrument(tracing::info_span!("library_channel_reconcile", node = %state.node_id, run_sequence, trigger)).await;
+    tracing::info!(node = %state.node_id, run_sequence, trigger,
+        elapsed_ms = started.elapsed().as_millis() as u64, "library-channel reconcile finished");
+}
+
 async fn reconcile_once(state: &AppState) {
+    let prune_started = std::time::Instant::now();
     if let Err(error) = state
         .store
         .prune_library_channel_state(
@@ -1822,6 +1838,11 @@ async fn reconcile_once(state: &AppState) {
         tracing::warn!(error = ?error, "Library-channel state pruning failed");
     }
 
+    tracing::info!(
+        elapsed_ms = prune_started.elapsed().as_millis() as u64,
+        phase = "prune",
+        "library-channel reconcile phase finished"
+    );
     let mut after: Option<String> = None;
     loop {
         let channels = match state
@@ -1845,6 +1866,7 @@ async fn reconcile_once(state: &AppState) {
         let page_len = channels.len();
         after = channels.last().map(|channel| channel.id.clone());
         for channel in channels {
+            let channel_started = std::time::Instant::now();
             let user = match state.store.get_user(channel.owner_user_id).await {
                 Ok(Some(user)) => user,
                 Ok(None) => continue,
@@ -1874,6 +1896,8 @@ async fn reconcile_once(state: &AppState) {
                 .await
             }
             .await;
+            tracing::info!(channel_id = %channel.id, elapsed_ms = channel_started.elapsed().as_millis() as u64,
+                success = result.is_ok(), "library-channel reconcile channel finished");
             if let Err(error) = result {
                 tracing::warn!(channel_id = %channel.id, error = ?error, "Library-channel automatic rebuild retained the previous schedule");
             }
