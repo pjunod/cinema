@@ -4,7 +4,7 @@ const video = document.querySelector('video');
 const scenario = new URLSearchParams(location.search).get('case') || 'switch';
 const native = new URLSearchParams(location.search).has('native');
 const receipt = window.receipt = {
-  scenario, native, userAgent: navigator.userAgent, events: [], appends: [], frames: [],
+  scenario, native, userAgent: navigator.userAgent, events: [], appends: [], committedIntervals: [], frames: [],
   identity: { elements: 1, hls: 0, mediaSources: 0, audioBuffers: 0, removals: 0 },
   limits: { displayCapture: 'not measured', audioCapture: 'not measured',
     pixels: 'canvas diagnostic only; not proof of display output',
@@ -12,6 +12,7 @@ const receipt = window.receipt = {
 };
 const event = (type, detail = {}) => receipt.events.push({ type, wall: performance.now(), time: video.currentTime, ...detail });
 const ranges = (r) => Array.from({ length: r.length }, (_, i) => [r.start(i), r.end(i)]);
+let audioContext; const audioChunks = [];
 let videoBuffer, hls, intent = 0, targetAppended = false, switched = false;
 const originalSource = MediaSource.prototype.addSourceBuffer;
 MediaSource.prototype.addSourceBuffer = function(mime) {
@@ -20,14 +21,20 @@ MediaSource.prototype.addSourceBuffer = function(mime) {
   if (mime.startsWith('audio/')) receipt.identity.audioBuffers++;
   const append = sb.appendBuffer.bind(sb), remove = sb.remove.bind(sb);
   let pendingAppend;
+  const inspect = CQMP4.inspector();
   // Install before returning the SourceBuffer: hls.js completion listeners run later.
   sb.addEventListener('updateend', () => {
     if (!pendingAppend) return;
-    receipt.appends.push({ ...pendingAppend, after: ranges(sb.buffered), wall: performance.now() });
+    const completed = { ...pendingAppend, after: ranges(sb.buffered), wall: performance.now() };
+    receipt.appends.push(completed);
+    for (const sample of completed.sampleBounds || []) receipt.committedIntervals.push({ ...sample, intent: completed.intent, attachment: 1, bufferType: mime.split('/')[0], wall: completed.wall });
     pendingAppend = null;
   });
   sb.appendBuffer = (data) => {
-    pendingAppend = { mime, before: ranges(sb.buffered), intent };
+    let sampleBounds = [];
+    try { sampleBounds = inspect(data).map(sample => ({ ...sample, start: sample.start + sb.timestampOffset, end: sample.end + sb.timestampOffset, timestampOffset: sb.timestampOffset })); }
+    catch (e) { event('sample-inspection-error', { mime, message: e.message }); }
+    pendingAppend = { mime, before: ranges(sb.buffered), intent, sampleBounds };
     try { return append(data); } catch (e) { pendingAppend = null; throw e; }
   };
   sb.remove = (...args) => { receipt.identity.removals++; event('buffer-remove', { mime, args }); return remove(...args); };
@@ -50,7 +57,7 @@ if (video.requestVideoFrameCallback) {
 function request(level, reason) {
   intent++;
   const committed = videoBuffer ? ranges(videoBuffer.buffered) : ranges(video.buffered);
-  event('intent', { intent, level, reason, committed, frontier: committed.at(-1)?.[1] ?? 0 });
+  event('intent', { intent, level, reason, audioFrame: audioContext ? Math.round(audioContext.currentTime * audioContext.sampleRate) : null, committed, frontier: committed.at(-1)?.[1] ?? 0 });
   if (reason === 'denied') { event('retained-current', { intent, appended: false }); return; }
   // loadLevel sets the manual owner and future loading without currentLevel flushing.
   // nextLoadLevel alone leaves manualLevelIndex at its old value in 1.6.16.
@@ -58,10 +65,30 @@ function request(level, reason) {
   event('scheduled', { intent, level, abrEnabled: hls.autoLevelEnabled });
 }
 window.start = async () => {
+  if (scenario.startsWith('audio-')) {
+    audioContext = new AudioContext({ sampleRate: 48000 });
+    await audioContext.audioWorklet.addModule('/audio-capture.js');
+    const source = audioContext.createMediaElementSource(video);
+    const recorder = new AudioWorkletNode(audioContext, 'cq-audio-capture');
+    recorder.port.onmessage = e => { audioChunks.push(e.data); };
+    source.connect(recorder).connect(audioContext.destination);
+    video.muted = false; await audioContext.resume();
+    receipt.audioCapture = { sampleRate: audioContext.sampleRate, mechanism: 'test-only AudioWorklet decoded mono PCM; output zeroed', physicalOutput: 'not measured' };
+    receipt.limits.audioCapture = 'decoded test-graph PCM only; physical audible output not measured';
+  }
   if (native) {
     receipt.nativeExactControl = { videoTracks: typeof video.videoTracks, exactHeightAPI: false,
       constraint: 'HTMLMediaElement exposes no exact manual rendition selector; autonomous master only. No equivalence claimed for bitrate preference.' };
-    video.src = '/media/master.m3u8'; await video.play(); event('native-attached'); return;
+    video.src = '/media/master.m3u8'; await video.play(); event('native-attached');
+    const reporting = setInterval(() => {
+      receipt.nativeTracks = { hlsCanPlay: video.canPlayType('application/vnd.apple.mpegurl'), count: video.videoTracks?.length ?? null,
+        tracks: Array.from(video.videoTracks || [], t => ({ id: t.id, kind: t.kind, label: t.label, selected: t.selected })) };
+      const current = window.snapshot();
+      document.querySelector('p').textContent = `Native HLS: ${current.currentTime.toFixed(2)} s · ${current.width} × ${current.height} · ${current.frames.length} frame callbacks. Audio/display output remains unmeasured.`;
+      fetch('/receipt', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(current) }).catch(() => {});
+      if (video.currentTime > 20 || video.ended) clearInterval(reporting);
+    }, 2000);
+    return;
   }
   hls = new Hls({ autoStartLoad: false, startLevel: 0, maxBufferLength: scenario === 'long-buffer' ? 30 : 6, maxMaxBufferLength: scenario === 'long-buffer' ? 30 : 6, backBufferLength: 90 });
   receipt.hlsVersion = Hls.version; receipt.identity.hls++;
@@ -73,8 +100,9 @@ window.start = async () => {
     event('buffered', { track: frag.type, level: frag.level, sn: frag.sn, start: frag.start, end: frag.end, startPTS: frag.startPTS, endPTS: frag.endPTS, intent });
     if (frag.type === 'main' && frag.level === 1 && !targetAppended) {
       targetAppended = true;
-      const actualAppend = receipt.appends.findLast(a => a.mime.startsWith('video/') && a.after.at(-1)?.[1] > (a.before.at(-1)?.[1] || 0));
-      receipt.committedTarget = { start: actualAppend?.before.at(-1)?.[1] ?? actualAppend?.after[0]?.[0], end: actualAppend?.after.at(-1)?.[1], playlistStart: frag.start, fragmentPTS: frag.startPTS, intent, attachment: 1 };
+      const actualAppend = receipt.appends.findLast(a => a.mime.startsWith('video/') && a.sampleBounds.some(s => s.height === 1080));
+      const sample = actualAppend?.sampleBounds.find(s => s.height === 1080);
+      receipt.committedTarget = { start: sample?.start, end: sample?.end, sampleBoundEvidence: !!sample, playlistStart: frag.start, fragmentPTS: frag.startPTS, intent: actualAppend?.intent, attachment: 1 };
       event('target-append-provenance', receipt.committedTarget);
       if (scenario === 'cancel-after-append') {
         event('cancel-after-append', { state: 'appended', settlement: 'observation_pending', ...receipt.committedTarget });
@@ -88,11 +116,24 @@ window.start = async () => {
 video.addEventListener('timeupdate', () => {
   if (!native && !switched && video.currentTime >= 3) {
     switched = true;
-    if (scenario === 'baseline') { event('baseline-no-switch'); return; }
+    if ((scenario === 'baseline' || scenario === 'audio-baseline')) { event('baseline-no-switch'); return; }
     if (scenario === 'cancel-before-append') {
       hls.stopLoad(); request(1, 'request'); request(0, 'cancel-before-append'); hls.startLoad(-1); event('retained-current', { appended: false });
     } else request(1, scenario === 'denied' ? 'denied' : 'request');
   }
 });
-window.snapshot = () => ({ ...receipt, currentTime: video.currentTime, width: video.videoWidth, height: video.videoHeight, buffered: ranges(video.buffered), paused: video.paused, error: video.error?.message || null, quality: video.getVideoPlaybackQuality?.() });
+window.snapshot = () => {
+  let audioPCMBase64;
+  if (audioChunks.length) {
+    const pcm = new Float32Array(audioChunks.length * 4096);
+    let contiguous = true;
+    audioChunks.forEach((chunk, i) => { pcm.set(chunk.samples, i * 4096); if (i && chunk.frame !== audioChunks[i - 1].frame + 4096) contiguous = false; });
+    const bytes = new Uint8Array(pcm.buffer); let binary = '';
+    for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+    audioPCMBase64 = btoa(binary);
+    receipt.audioCapture.blocks = audioChunks.length; receipt.audioCapture.contiguousClock = contiguous;
+    receipt.audioCapture.firstContextFrame = audioChunks[0].frame;
+  }
+  return { ...receipt, audioPCMBase64, currentTime: video.currentTime, width: video.videoWidth, height: video.videoHeight, buffered: ranges(video.buffered), paused: video.paused, error: video.error?.message || null, quality: video.getVideoPlaybackQuality?.() };
+};
 document.querySelector('button').onclick = () => start().catch(e => event('start-error', { message: e.message }));

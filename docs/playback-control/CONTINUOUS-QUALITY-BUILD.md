@@ -889,8 +889,10 @@ node scripts/continuous-quality-lab.mjs verify-media
 node scripts/continuous-quality-lab.mjs verify-joins
 node scripts/continuous-quality-lab.mjs run chrome \
   baseline switch cancel-before-append cancel-after-append denied long-buffer
+# Run receipt/unit checks at the user-directed final test stage:
 CQ_RECEIPTS=target/continuous-quality \
   node --test tests/playback/continuous-quality/receipt.test.mjs
+node scripts/continuous-quality-lab.mjs run chrome audio-baseline audio-switch
 node scripts/continuous-quality-lab.mjs run safari native-autonomous
 # Manual local reproduction, including a native Safari attempt:
 node scripts/continuous-quality-lab.mjs serve
@@ -966,6 +968,29 @@ and 66.7 ms for post-append supersession. These are callback diagnostics,
 not display-gap qualification. The prototype never starts live producers;
 no claim is made about maximum live encoders or server cleanup.
 
+**Follow-up actual append-sample experiment:** the new test-only
+[MP4 inspector](../../tests/playback/continuous-quality/mp4-provenance.js)
+reads the init track clock and shape, `tfhd`, `tfdt` and `trun` sample
+metadata from the bytes actually passed to SourceBuffer. It includes signed
+composition offsets and the current SourceBuffer timestamp offset. Every
+completed media append records sample PTS coverage, shape, sample count,
+intent and attachment identity; unsupported metadata is reported explicitly
+rather than replaced by a successful range-growth inference.
+
+New Chrome `switch`, `cancel-after-append` and `long-buffer` experiments
+have zero sample-inspection errors. The first target's actual sample interval
+is `[10.093416667, 12.095416667)` s for the ordinary/cancel cases, matching
+the measured prior video frontier at 10.093416 s. Long-buffer actual target
+samples begin at 34.117416667 s. Those new rows improve synthetic fMP4
+append evidence, not device output or negotiated ownership. Historical
+six-case receipts remain under `range-growth-series/`, matched to
+`c16e515e1`; new receipts pin all runner/page/probe/inspector content hashes.
+The old range-growth limitation remains part of the historical review.
+The new parser supports only this inspected fMP4 shape: general trex-only
+sample duration defaults, edit-list rebasing, encryption and other media
+families remain outside its evidence. Added receipt assertions are written
+but have not been run after the user's final-stage-only test directive.
+
 **Follow-up encoded-join experiment:** `verify-joins` alternates all 24
 segments between 720p and 1080p, preserving each rung's immutable init.
 FFmpeg 9.0.1's HLS demuxer fails strict decoding when the playlist changes
@@ -981,20 +1006,45 @@ Burned frame recognition remains open. The earlier independent-segment and
 Chrome results retain their `c16e515e1` source identity; the follow-up runner
 has a separate `join-source-evidence.json` content/commit receipt.
 
-**Native Safari failed experiment:** actual `/usr/bin/safaridriver` starts,
-but `POST /session` times out after 15 seconds on this host. The blocked
-receipt records that operation; no preference or automation authorization
-was changed. A direct Safari UI attempt was also blocked: the Mac is locked
-and the computer-use tool could not unlock it. Native HLS media, autonomous rung reselection and runtime
-exact-quality selection are **not measured**. The native page intentionally
-exposes no invented exact-height API; its candidate limitation requires a
-real runtime/native adapter experiment before CQ7 design is accepted.
-Playwright WebKit would not fill this row.
+**Decoded browser audio experiment:** `audio-baseline` and `audio-switch`
+use a [test-only AudioWorklet](../../tests/playback/continuous-quality/audio-capture.js)
+to retain decoded mono 48 kHz float PCM while deliberately outputting zero
+samples to the destination. This changes the isolated fixture graph only;
+normal production audio is untouched. Both captures have a contiguous
+worklet clock and a maximum near-zero run of one sample after excluding
+startup. Maximum adjacent-sample delta is 0.016371137 in both cases, with
+RMS 0.0883437. The switched capture includes 819,071 steady samples and the
+matched baseline 811,904. Captured `.f32le` files and SHA-256 identities
+remain in the generated target directory. This is actual decoded PCM
+capture, not speaker/HDMI loopback or audible-output qualification. It does
+not detect every possible phase error and is limited to the synthetic
+997 Hz reference. The added receipt assertion is deferred to final testing.
+
+**Native Safari experiments:** `/usr/bin/safaridriver` starts, but
+`POST /session` still times out after 15 seconds, including after unlock.
+No automation preference or permission was changed. Direct computer-use
+initially failed because the Mac was locked; Paul then unlocked it.
+A new temporary Safari tab played the native master via a real Start click.
+The bounded local POST collector retained `safari-ui.json` at 20.018 s,
+with 476 video-frame callbacks, all 1920×1080, and no media error. Actual
+requests included both video playlists/init maps and one shared audio
+playlist. Native runtime reports one selected video track (`id=11`), with
+empty kind/label and no exposed per-rung selection information.
+
+Every observed frame in this run is 1080p. Fetching 720p does not prove
+720p was presented, so **a native presented quality switch is not measured**.
+An on-screen screenshot confirms a picture at the short tail, as a point
+sample only. Exact manual rendition control, pressured reselection,
+autonomous capacity reservation, native audible output and physical-device
+qualification remain open. The temporary tab and fixture server were closed;
+existing Safari tabs were preserved and the original selected tab restored.
+The UI collector is a bounded local investigative receipt sink, not a new
+production acceptance harness. Playwright WebKit fills none of these rows.
 
 **How to read the results:** moving canvas pixels, callback PTS and rendition
 size diagnose decoder progress; browser screenshots are point samples, not
-external display capture. Browser output audio and display capture are
-**not measured**. These muted synthetic runs do not qualify unmuted audio,
+external display capture. Physical browser output audio and continuous display capture are
+**not measured**; decoded test-graph PCM is now captured separately. These muted synthetic runs do not qualify unmuted audio,
 fullscreen, subtitles, pause/seek collisions, other rates, backgrounding,
 real high-bitrate titles or low-end devices. Nonzero source origin, VFR,
 HDR/HEVC, device selection and production JIT/admission remain unqualified.

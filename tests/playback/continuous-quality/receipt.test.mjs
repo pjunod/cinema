@@ -4,7 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { summarize } from '../../../scripts/continuous-quality-lab.mjs';
 const directory = process.env.CQ_RECEIPTS;
-function receipt(name) { return JSON.parse(fs.readFileSync(path.join(directory, name + '.json'), 'utf8')); }
+function receipt(name) {
+  const current = path.join(directory, name + '.json');
+  const historical = path.join(directory, 'range-growth-series', name + '.json');
+  return JSON.parse(fs.readFileSync(fs.existsSync(current) ? current : historical, 'utf8'));
+}
 const base = { events: [], frames: [], identity: {}, limits: { audioCapture: 'not measured' } };
 test('missing target append remains unknown rather than passing a frontier check', () => {
   const result = summarize(base);
@@ -35,6 +39,9 @@ test('real same-player switch appends beyond the measured video frontier', { ski
   const summary = summarize(r);
   assert.equal(summary.appendFrontierRespected, true);
   assert.ok(summary.firstTarget);
+  assert.equal(r.committedTarget.sampleBoundEvidence, true);
+  assert.equal(r.events.some(e => e.type === 'sample-inspection-error'), false);
+  assert.ok(r.committedIntervals.some(i => i.height === 1080 && i.samples === 48));
   assert.ok(summary.movingTargetFrames > 50);
   assert.equal(r.events.filter(e => e.type === 'scheduled').every(e => !e.abrEnabled), true);
 });
@@ -70,4 +77,15 @@ test('real fixture decodes independent segments on one rational grid with no enc
   assert.equal(r.aligned, true);
   assert.equal(r.rows.length, 48);
   assert.equal(r.audio.timestampGaps, 0);
+});
+
+test('real decoded PCM switch matches its no-switch baseline without a silent run', { skip: !directory }, () => {
+  const baseline = receipt('chrome-audio-baseline').audioCapture;
+  const switched = receipt('chrome-audio-switch').audioCapture;
+  assert.equal(switched.contiguousClock, true);
+  assert.equal(switched.sampleRate, 48000);
+  assert.ok(switched.analysis.measuredSamples > 700000);
+  assert.ok(switched.analysis.maximumNearZeroRunSamples <= baseline.analysis.maximumNearZeroRunSamples);
+  assert.ok(switched.analysis.maximumAdjacentSampleDelta <= baseline.analysis.maximumAdjacentSampleDelta + 0.0001);
+  assert.equal(switched.physicalOutput, 'not measured');
 });

@@ -130,7 +130,21 @@ async function server() {
   const requests = [];
   const srv = http.createServer(async (req, res) => {
     const pathname = new URL(req.url, 'http://localhost').pathname;
-    const map = { '/': 'tests/playback/continuous-quality/probe.html', '/probe.js': 'tests/playback/continuous-quality/probe.js', '/hls.min.js': 'crates/plurxd/src/web/hls.min.js' };
+    if (pathname === '/receipt' && req.method === 'POST') {
+      let size = 0; const chunks = [];
+      try {
+        for await (const chunk of req) { size += chunk.length; if (size > 3*1024*1024) throw new Error('receipt exceeds limit'); chunks.push(chunk); }
+        const record = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (record.native !== true) throw new Error('native UI receipt expected');
+        record.requests = requests; record.fixture = JSON.parse(await fs.readFile(path.join(OUT,'fixture.json'),'utf8'));
+        record.sourceSha256 = {};
+        for (const source of ['scripts/continuous-quality-lab.mjs','tests/playback/continuous-quality/probe.js','tests/playback/continuous-quality/probe.html']) record.sourceSha256[source] = createHash('sha256').update(await fs.readFile(path.join(ROOT,source))).digest('hex');
+        await fs.writeFile(path.join(OUT,'safari-ui.json'),JSON.stringify(record,null,2));
+        res.writeHead(204);res.end();
+      } catch { res.writeHead(400);res.end(); }
+      return;
+    }
+    const map = { '/': 'tests/playback/continuous-quality/probe.html', '/probe.js': 'tests/playback/continuous-quality/probe.js', '/mp4-provenance.js': 'tests/playback/continuous-quality/mp4-provenance.js', '/audio-capture.js': 'tests/playback/continuous-quality/audio-capture.js', '/hls.min.js': 'crates/plurxd/src/web/hls.min.js' };
     const file = map[pathname] ? path.join(ROOT, map[pathname]) : pathname.startsWith('/media/') ? path.resolve(MEDIA, '.' + pathname.slice(6)) : null;
     if (!file || (!map[pathname] && !file.startsWith(MEDIA + path.sep))) { res.writeHead(404); res.end(); return; }
     try {
@@ -211,7 +225,23 @@ async function run(browser, cases) {
         if(browser!=='safari') await driver.evaluate('window.start().then(()=>true)');
         await waitFor(async()=> (await driver.evaluate('video.currentTime')) > (scenario==='long-buffer'?38:18),55000);
         const r=await driver.evaluate('window.snapshot()'); r.requests=s.requests.slice(begin);
-        const name=`${browser}-${scenario}`; r.sourceTree = command('git',['-C',ROOT,'rev-parse','HEAD']).trim(); r.fixture = JSON.parse(await fs.readFile(path.join(OUT,'fixture.json'),'utf8')); r.probeSha256 = createHash('sha256').update(await fs.readFile(path.join(ROOT,'tests/playback/continuous-quality/probe.js'))).digest('hex');
+        const name=`${browser}-${scenario}`;
+        if (r.audioPCMBase64) {
+          const pcm = Buffer.from(r.audioPCMBase64, 'base64'); delete r.audioPCMBase64;
+          await fs.writeFile(path.join(OUT,`${name}-decoded.f32le`), pcm);
+          r.audioCapture.pcmSha256 = createHash('sha256').update(pcm).digest('hex');
+          const samples = new Float32Array(pcm.buffer,pcm.byteOffset,pcm.byteLength/4);
+          const first = samples.findIndex(x=>Math.abs(x)>0.01);
+          let maxZeros=0,zeros=0,maxDelta=0,power=0,count=0;
+          // Exclude capture startup; include the requested video switch and steady playback.
+          for(let i=first+48000;i<samples.length;i++) {
+            zeros=Math.abs(samples[i])<0.00001?zeros+1:0;maxZeros=Math.max(maxZeros,zeros);
+            maxDelta=Math.max(maxDelta,Math.abs(samples[i]-samples[i-1]));power+=samples[i]*samples[i];count++;
+          }
+          r.audioCapture.analysis={firstAudibleSample:first,measuredSamples:count,maximumNearZeroRunSamples:maxZeros,maximumAdjacentSampleDelta:maxDelta,rms:count?Math.sqrt(power/count):null,scope:'decoded test graph only; no audible or HDMI/display output acceptance'};
+        }
+ r.sourceTree = command('git',['-C',ROOT,'rev-parse','HEAD']).trim(); r.fixture = JSON.parse(await fs.readFile(path.join(OUT,'fixture.json'),'utf8')); r.probeSha256 = createHash('sha256').update(await fs.readFile(path.join(ROOT,'tests/playback/continuous-quality/probe.js'))).digest('hex');
+        r.sourceSha256 = {}; for (const source of ['scripts/continuous-quality-lab.mjs','tests/playback/continuous-quality/probe.js','tests/playback/continuous-quality/probe.html','tests/playback/continuous-quality/mp4-provenance.js','tests/playback/continuous-quality/audio-capture.js']) r.sourceSha256[source]=createHash('sha256').update(await fs.readFile(path.join(ROOT,source))).digest('hex');
         await fs.writeFile(path.join(OUT,`${name}.json`),JSON.stringify(r,null,2));
         await fs.writeFile(path.join(OUT,`${name}.png`),await driver.screenshot());
         const summary=summarize(r); await fs.writeFile(path.join(OUT,`${name}-summary.json`),JSON.stringify(summary,null,2)); console.log(JSON.stringify(summary));
@@ -219,7 +249,7 @@ async function run(browser, cases) {
         await fs.writeFile(path.join(OUT,`${browser}-${scenario}-blocked.json`),JSON.stringify({browser,scenario,error:e.message,acceptance:'not measured'},null,2)); throw e;
       } finally { if(driver) await driver.close(); }
     }
-  } finally { await new Promise(r=>s.srv.close(r)); }
+  } finally { s.srv.closeAllConnections(); await new Promise(r=>s.srv.close(r)); }
 }
 async function main() {
   await fs.mkdir(OUT,{recursive:true}); const [cmd='help',browser='chrome',...cases]=process.argv.slice(2);
@@ -227,7 +257,7 @@ async function main() {
   else if(cmd==='verify-media') await verifyMedia();
   else if(cmd==='verify-joins') await verifyJoins();
   else if(cmd==='run') await run(browser,cases.length?cases:['baseline','switch','cancel-before-append','cancel-after-append','denied','long-buffer']);
-  else if(cmd==='serve') { const s=await server(); console.log(s.url); }
+  else if(cmd==='serve') { const s=await server(); console.log(`${s.url} pid=${process.pid}`); }
   else console.log('node scripts/continuous-quality-lab.mjs fixture | verify-media | verify-joins | serve | run chrome|safari [case ...]');
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) main().catch(e=>{console.error(e.message);process.exitCode=1;});
