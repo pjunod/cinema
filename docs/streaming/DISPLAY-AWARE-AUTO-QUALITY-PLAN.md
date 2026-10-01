@@ -1406,6 +1406,8 @@ Only an actually accepted local actor exchange can mint a private observational
 origin. Same-intent later polls retain that origin; desired-lifetime, owner or
 attachment changes invalidate it. The actual stage writer alone mints a separate
 stage-lifetime token, invalidated on abort, commit, replacement or retirement.
+VOD tombstone and locked registry-removal seams explicitly invalidate both
+observational lifetimes, even while an old incarnation snapshot remains held.
 Read-only queries neither reserve commit nor renew either lifetime. Registration
 follows successful local owner prime; final intake rechecks both tokens, physical
 source, serving route and original monotonic EOF after its last awaited read.

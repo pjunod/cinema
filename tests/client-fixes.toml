@@ -3389,3 +3389,41 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func autoDownsideCostBps("
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence"
+
+# A05 prepared HTTP observations: these are source-to-current-contract
+# bridges to the new once-passed web regressions, not claims that native unit
+# methods executed. Exact-source Apple/Android compilation is separate evidence.
+[[fixes]]
+id = "apple.prepared-explicit-observation-header"
+commits = ["0b7318b9"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "urlRequest.setValue(linkReceipt, forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "android.prepared-explicit-observation-header"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlSession.kt"
+source_anchor = "builder.header(\"X-Plurx-Link-Receipt\", linkReceipt)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 prepared control sends only its explicit per-call nonce"
+
+[[fixes]]
+id = "apple.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func reportStagedLinkSample("
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+[[fixes]]
+id = "android.prepared-own-completed-body-observation"
+commits = []
+supplements = "apple.prepared-explicit-observation-header"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "message = \"Completed staged candidate body\""
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 staged completed body reports only its own attachment nonce"

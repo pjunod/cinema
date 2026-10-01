@@ -637,6 +637,12 @@ pub(super) struct Session {
 }
 
 impl Session {
+    pub(super) fn invalidate_observational_attachment(&self) {
+        self.control
+            .lock()
+            .expect("control lock")
+            .invalidate_observational_attachment();
+    }
     /// Release this session's rendition from any handoff its preparation no
     /// longer backs (abort, rejection, settlement, tombstone, or a newer
     /// successor staged in its place).
@@ -669,6 +675,7 @@ impl Session {
     pub(super) fn abort_staged_preparation(&self) {
         {
             let mut control = self.control.lock().expect("control lock");
+            control.invalidate_observational_attachment();
             if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
                 control.abort_preparation(&staged);
             }

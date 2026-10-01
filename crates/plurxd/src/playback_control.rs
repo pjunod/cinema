@@ -3826,6 +3826,9 @@ pub(crate) fn accept_step(
 }
 
 impl ControlState {
+    pub(crate) fn invalidate_observational_attachment(&mut self) {
+        self.advance_observational_lifetime();
+    }
     pub(crate) fn staged_observation_token(
         &self,
         fence: &AcceptedControlFence,
