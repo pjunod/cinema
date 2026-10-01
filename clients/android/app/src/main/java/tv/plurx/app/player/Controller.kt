@@ -3032,6 +3032,9 @@ class Controller internal constructor(
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
+            transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0)
             transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
@@ -3094,6 +3097,9 @@ class Controller internal constructor(
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
+            transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0) {
             (transfer.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
         } else null

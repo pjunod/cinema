@@ -621,6 +621,7 @@ async function refreshQualityCandidates(p){
 function candidateTransferEvidence(p,now){
   const transfer=p.abr&&p.abr.qualityTransfer;
   return transfer&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     ? {...transfer,age_ms:now-transfer.atMs}:null;
 }
 function measuredCandidateOutput(p,candidate){
@@ -646,7 +647,9 @@ function measuredCandidateCatalog(p,candidates){
 }
 function candidatePositiveMargin(p,candidate,transfer){
   const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
-  return !!output&&link>0&&link>=output.peak_bps*1.8;
+  return !!(output&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
+    &&link>0&&link>=output.peak_bps*1.8);
 }
 function candidateAdmissionCatalog(p,candidates,current,transfer){
   return measuredCandidateCatalog(p,candidates).filter(candidate=>candidate.id===current.id

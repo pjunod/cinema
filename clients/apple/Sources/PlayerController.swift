@@ -10146,6 +10146,8 @@ extension PlayerController {
         let link: Double? = {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
+                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
+                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
                   transfer.ageMs(nowMs: now) <= 10_000, let duration = transfer.bodyDurationSeconds,
                   duration > 0, transfer.bodyBytes > 0 else { return nil }
             return Double(transfer.bodyBytes) * 8 / duration
@@ -10245,6 +10247,8 @@ extension PlayerController {
         let link: Double? = {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
+                  transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
+                  transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
                   transfer.ageMs(nowMs: now) <= 10_000,
                   let duration = transfer.bodyDurationSeconds, duration > 0,
                   transfer.bodyBytes > 0 else { return nil }
@@ -10822,6 +10826,9 @@ extension PlayerController: PreparedSuccessorHost {
         if let requested = autoDesiredCandidate, action.effectiveSelection.candidateId == requested.id {
             let now = PlaybackControlSession.monotonicMs()
             autoActiveCandidateId = requested.id
+            // Observation is reinstalled only after the existing owner accepted
+            // the successor's actual candidate identity and picture.
+            installAutoTransferMetrics(for: item)
             autoLastSwitchMs = now
             if autoVoluntary { autoSwitchTimes.append(now) }
             autoPreparing = false

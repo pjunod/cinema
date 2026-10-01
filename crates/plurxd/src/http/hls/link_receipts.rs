@@ -127,12 +127,22 @@ pub(crate) struct ClientLinkSample {
     pub runway_ms: u32,
 }
 
-pub(crate) fn binding(
+pub(crate) async fn binding(
     network: &NetworkIdentity,
     file: &MediaFile,
     recipe_digest: [u8; 32],
     route: CandidateRoute,
 ) -> Option<CandidateLinkBinding> {
+    let fence = tokio::time::timeout(
+        Duration::from_millis(100),
+        crate::fragment_index_cluster::open_source_fence(file, None),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !fence.unchanged() {
+        return None;
+    }
     Some(CandidateLinkBinding {
         user_id: network.user_id?,
         credential_generation: network.credential_generation.as_ref()?.as_str().to_owned(),
@@ -141,6 +151,7 @@ pub(crate) fn binding(
         file_id: file.id,
         source_size: file.size,
         source_mtime: file.mtime,
+        source_object_version: fence.object_version().to_owned(),
         recipe_digest,
         route,
     })
@@ -315,6 +326,16 @@ impl LinkReceipts {
         if file.size != captured.source.source_size || file.mtime != captured.source.source_mtime {
             return None;
         }
+        let fence = tokio::time::timeout(
+            Duration::from_millis(100),
+            crate::fragment_index_cluster::open_source_fence(&file, None),
+        )
+        .await
+        .ok()?
+        .ok()?;
+        if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
+            return None;
+        }
         let mut rows = self.0.lock().ok()?;
         let now = Instant::now();
         Self::prune(&mut rows, now);
@@ -343,8 +364,10 @@ pub(crate) async fn admissible(
     file: &MediaFile,
     candidate: &plurx_core::playback::candidate::QualityCandidate,
 ) -> bool {
-    let Some(binding) = network
-        .and_then(|network| binding(network, file, candidate.recipe_digest, candidate.route))
+    let Some(network) = network else {
+        return true;
+    };
+    let Some(binding) = binding(network, file, candidate.recipe_digest, candidate.route).await
     else {
         return true;
     };
@@ -400,6 +423,7 @@ mod tests {
                 file_id: 2,
                 source_size: 4096,
                 source_mtime: 3,
+                source_object_version: "object:v1".into(),
                 recipe_digest: [4; 32],
                 route: CandidateRoute::Encode,
             },

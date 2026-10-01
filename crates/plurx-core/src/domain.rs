@@ -1935,6 +1935,7 @@ pub struct CandidateLinkBinding {
     pub file_id: i64,
     pub source_size: i64,
     pub source_mtime: i64,
+    pub source_object_version: String,
     pub recipe_digest: [u8; 32],
     pub route: crate::playback::candidate::CandidateRoute,
 }
@@ -1951,6 +1952,8 @@ impl CandidateLinkObservation {
     pub fn valid_at(&self, now: i64) -> bool {
         self.binding.user_id > 0
             && self.binding.file_id > 0
+            && !self.binding.source_object_version.is_empty()
+            && self.binding.source_object_version.len() <= 256
             && self.binding.credential_generation.len() == 64
             && !self.binding.client_class.is_empty()
             && self.binding.client_class.len() <= 16
