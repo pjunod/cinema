@@ -1052,9 +1052,10 @@ CQ0 is runnable and retainable, with those evidence rows incomplete; it is
 not a second acceptance oracle. Port the measurements into the existing
 playback lab after §1.2 is satisfied.
 
-A narrow read-only check on 2026-09-30 found the named upstream chat still
-`active`, with its current turn `inProgress` and shared production edits in
-progress. Its surfaces are not released. CQ2a/CQ1 and every shared
+The latest compact read-only check on 2026-09-30 found the named upstream
+chat still `active`, with its current turn `inProgress`. Its server/web batch
+is committed, but cluster worker routing remains, followed by current-main
+integration, final adversarial review and the fast lane. Its surfaces are not released. CQ2a/CQ1 and every shared
 production edit remain blocked until upstream landing, authoritative-main
 integration and ownership reconciliation. Adversarial review follows the
 user-directed main-readiness timing recorded below.

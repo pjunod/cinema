@@ -12,9 +12,10 @@
 <tr><td>Checks already retained</td><td>Nine receipt checks; pinned Rust formatting/Clippy; docs and web checks passed. No unit reruns during building. Normal commit <code>c16e515e1</code> retained the initial prototype.</td></tr>
 <tr><td>Safari</td><td>Direct native playback recorded 476 frame callbacks at 1080p. Both playlists were fetched, but no presented rung switch was observed. One selected video track; exact manual control remains unqualified. WebDriver session still times out.</td></tr>
 <tr><td>Audio/display capture</td><td>Decoded 48 kHz test PCM captured; no near-zero run longer than one sample, matching baseline. Physical audible output and continuous display capture remain unmeasured.</td></tr>
-<tr><td>Upstream</td><td>“Check Cinema transcoding resolutions” remains active. Native integration and final review/test/merge are outstanding; shared surfaces are not released.</td></tr>
+<tr><td>Upstream</td><td>“Check Cinema transcoding resolutions” remains active. The server/web batch is committed. Cluster worker routing remains, followed by current-main integration, final adversarial review and fast lane. Shared surfaces are not released.</td></tr>
 <tr><td>CQ2a–CQ8</td><td>Not started. Landing and ownership reconciliation precede shared production edits.</td></tr>
 </table>
+<p class="muted">Latest substantive CQ0 commit: <code>9d50400cb</code>. The independent branch is backed up on Forgejo; it has not been merged or deployed.</p>
 <h2>Delivery decisions</h2><p>Normal commits, batched into one larger PR. Adversarial review at main readiness, then the fast lane. The single new script is registered under the existing playback catalog owner. No feature readiness gates. No fleet deployment.</p>
 <h2>Current limits</h2><p>The Mac was unlocked and direct Safari playback was measured. Native Safari automation session creation still times out; exact manual selection and a presented native rung switch remain unmeasured. Shared production surfaces still belong to the active upstream task; no takeover or fleet deployment is authorized.</p>
 <h2>Read the evidence</h2><p><a href="CONTINUOUS-QUALITY-BUILD.md">Build contract and experiment ledger</a> · <a href="CONTINUOUS-QUALITY-REVIEW.md">Retained review</a></p>
