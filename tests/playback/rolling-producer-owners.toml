@@ -241,7 +241,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # unchanged. All six reap a fixture child the same regressions created, through
 # the supervised kill path that waits for the reap. They own those fixture
 # processes only; no production termination site moved or was added.
-expected_occurrences = 10
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 11
 kind = "process_action"
 replacement = "the awaited compatibility supervisor command path; prepublication replyless termination is inventoried separately"
 
@@ -2370,7 +2373,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # clock observer with the existing background_shutdown token; it has no
 # producer/process/recovery authority. peer_transport's loopback timing
 # fixture owns its test server and aborts it when its proof completes.
-expected_occurrences = 687
+# S09 current-effort composition: shared local-media pump regression retains
+# one additional joined task; measured 688 on the merged source.
+expected_occurrences = 688
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2544,7 +2549,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # C06 #639: +1 the isolated actual-handler test's exact test-binary child.
 # OwnedChild Drop kills/reaps on its 35-second bound or assertion failure;
 # process-free HLS fixture starts no idle sleep or encoder descendant.
-expected_occurrences = 53
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 54
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3518,7 +3526,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # adds one wrapper deadline around response verification and one finite
 # 60-ms test delay proving t4 precedes verification. Existing chunk and
 # signature deadlines are retained, not duplicated. No playback timer added.
-expected_occurrences = 1134
+# S09 current-effort composition: shared local-media pump replaces duplicated
+# remote pump deadlines; merged structural source measures 1127, not 1134.
+expected_occurrences = 1127
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3848,7 +3858,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 cluster probe-batch regression in source_probe.rs: test-only /bin/kill
 # -0 checks that the already-cancelled child PID is gone. The finite liveness
 # command is synchronously waited; bounded::output owns/reaps probe children.
-expected_occurrences = 202
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 203
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4312,10 +4325,18 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # http/browse.rs::a_detail_render_unpacks_no_index. The authenticated in-process
 # oneshot response is inspected before its body is collected. This adds no
 # process launch, asynchronous task, timer or producer owner.
+# +2 B-R1: Axum Response::status() reads in the authenticated local-refusal
+# and public-ingress remote-owner fixtures. Both assert HTTP response codes;
+# neither creates a process/task or changes producer lifecycle ownership.
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
 # Current-effort composition measured 414: C-05's 411 retained, plus the
 # three K-06 status shapes above. Initial 411 expectation failed at 414;
 # every other structural row retained its reviewed count.
-expected_occurrences = 414
+# S09 composition retains all of the above: effort414 plus B-R1's two
+# non-process response reads and the one bounded queued-publication child.
+expected_occurrences = 417
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4546,7 +4567,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # C06 #639: +3, OwnedChild Drop kill/wait and child try_wait; timeout panic
 # invokes that guard. Normal completion takes wait_with_output ownership and
 # requires success plus the exact child completion marker. No descendants.
-expected_occurrences = 248
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 250
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4711,7 +4735,10 @@ pattern = "kill_on_drop\\s*\\("
 # the same test-only fake producer is `kill_on_drop(true)`.
 # 91 -> 92 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only stand-in producer is `kill_on_drop(true)`.
-expected_occurrences = 92
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 93
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

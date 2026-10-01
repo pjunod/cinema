@@ -1687,8 +1687,9 @@
                 Recipe {
                     file,
                     audio_index: None,
-                    aac: true,
-                    video: CopyVideoOptions::new(false, false),
+                   aac: true,
+                    audio_delivery: None,
+                   video: CopyVideoOptions::new(false, false),
                     source_object_version: Some(encoding.source_object_version.clone()),
                     cluster_cache_key: None,
                     encoding: Some(Arc::clone(&encoding)),
@@ -2949,8 +2950,9 @@
         let recipe = Recipe {
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,

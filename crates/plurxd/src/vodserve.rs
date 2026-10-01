@@ -46,8 +46,8 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::Store;
 use plurx_core::transcode::{
-    copy_pipe_args_with_dolby_vision, CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS,
-    COPY_SEGMENT_MAX_BYTES, COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
+    CopyVideoOptions, Pacing, COPY_FIRST_SEGMENT_SECONDS, COPY_SEGMENT_MAX_BYTES,
+    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -280,6 +280,7 @@ pub struct VodHlsFacts {
     pub file: MediaFile,
     pub audio_index: Option<i64>,
     pub aac: bool,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub preserve_dolby_vision: bool,
     /// Whether this session's copy rewrites Profile 7 RPUs to 8.1. Carried
     /// beside the preservation because the playlist has to describe what the

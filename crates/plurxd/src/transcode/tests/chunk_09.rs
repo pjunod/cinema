@@ -1862,6 +1862,7 @@
         let user = store.create_user("paul", "hash", true).await.expect("user");
         let package_id = "offline-shipped-shape";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-shipped-shape-request".to_owned(),
             user_id: user.id,
@@ -1896,6 +1897,7 @@
             .expect("claim")
             .expect("queued package");
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -1915,7 +1917,7 @@
         .expect("the offline pass answers")
         .expect("offline pass");
         assert!(
-            matches!(produced, OfflineProduceOutcome::Yielded),
+            matches!(produced, OfflineProduceOutcome::Yielded(_)),
             "an unscripted production reaches the real producer and yields at its deadline"
         );
         assert!(
@@ -2035,5 +2037,252 @@
                 hook.as_mut().poll(&mut context).is_ready(),
                 "the production {point} point is ready at its first poll"
             );
+        }
+    }
+    #[test]
+    fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
+        use plurx_core::playback::audio::{AudioAction, AudioDelivery};
+        let mut audio = AudioDelivery {
+            action: AudioAction::Encode { codec: "eac3".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 640, sample_rate: 48_000 },
+            downmix: None,
+            reason: "actual producer audio".into(),
+        };
+        assert_eq!(super::ladder::audio_delivery_hls_codecs("avc1.640028,mp4a.40.2".into(), Some(&audio)), "avc1.640028,ec-3");
+        let legacy = super::ladder::advertised_ladder(Some(1080), 1080);
+        let rungs = super::ladder::advertised_ladder_with_audio(Some(1080), 1080, Some(&audio));
+        for (old, new) in legacy.iter().zip(&rungs) {
+            assert_eq!(new.total_kbps, old.total_kbps + 480);
+            assert_eq!(new.peak_kbps, old.peak_kbps + 480);
+        }
+        assert_eq!(super::ladder::advertised_ladder_with_audio(Some(1080), 1080, None), legacy);
+        audio.action = AudioAction::None;
+        assert_eq!(super::ladder::audio_delivery_hls_codecs("avc1.640028,mp4a.40.2".into(), Some(&audio)), "avc1.640028");
+    }
+
+    #[test]
+    fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let mut request = SessionRequest {
+            control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
+            automatic: false, previous_session_id: None, reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
+            audio_index: None, audio_delivery: None, audio_claim: None,
+            subtitle_burn: None, audio_offset_ms: 0, hdr10: false,
+            presentation: Default::default(), block_budget_secs: None, transport: None,
+        };
+        let legacy = request.intent_fingerprint("paul");
+        assert_eq!(legacy, r#"["paul",1,"player",0,"t720","0.000",null,null,0,null,null]"#);
+        request.audio_delivery = Some(AudioDelivery { action: AudioAction::None, downmix: None, reason: "server source refresh".into() });
+        assert_eq!(request.intent_fingerprint("paul"), legacy);
+        request.audio_claim = Some(AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink { codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] });
+        let claimed = request.intent_fingerprint("paul");
+        assert_ne!(claimed, legacy);
+        request.audio_delivery.as_mut().expect("audio answer").reason = "new explanation".into();
+        assert_eq!(request.intent_fingerprint("paul"), claimed);
+        request.audio_claim.as_mut().expect("sink claim").sinks[0].max_channels = 2;
+        assert_ne!(request.intent_fingerprint("paul"), claimed);
+    }
+
+    async fn retained_audio_consumer_case(encoded: bool) {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mut file = profile5_file();
+        file.hdr = None;
+        file.hdr_format = None;
+        file.video_codec = Some("h264".into());
+        file.video_profile = None;
+        file.bit_depth = Some(8);
+        file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 0, codec: "truehd".into(), channels: Some(2), sample_rate: Some(48_000),
+            channel_layout: Some("stereo".into()), language: None, title: None, default: true,
+        }];
+        let claim = AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink {
+            codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000],
+        }] };
+        let retained = AudioDelivery { action: AudioAction::Encode {
+            codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000,
+        }, downmix: None, reason: "retained actual producer".into() };
+        let mut request = SessionRequest {
+            control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,
+            automatic: false, previous_session_id: None, reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
+            audio_index: Some(0), audio_delivery: Some(retained.clone()), audio_claim: Some(claim.clone()),
+            subtitle_burn: None, audio_offset_ms: 0, hdr10: false,
+            presentation: Default::default(), block_budget_secs: None, transport: None,
+        };
+        let base = mgr.live_lookup_options(mgr.rate_control_snapshot(), Encoder::Software, &file,
+            720, 0.0, Some(0), None, None, OutputGrade::Sdr);
+        let actual = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("AAC lattice")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), request.audio_claim.as_ref(), request.audio_delivery.as_ref())
+        };
+        assert_eq!(actual.audio.as_ref().expect("producer audio").byte_identity(), retained.byte_identity());
+        let plan = mgr.resolve_movie_plan(&file, &actual, Encoder::Software).await.expect("actual plan");
+        let execution = TranscodeExecution::from_options(&file, &actual, Pacing::unpaced(), "/tmp/retained-audio").expect("execution");
+        let argv = if encoded {
+            transcode::vod_pipe_args(&file, &plan, &execution,
+                transcode::VodFrameGrid::new(24_000, 1_001).expect("film cadence"), 1.0)
+        } else {
+            transcode::hls_args(&plan, &execution)
+        };
+        for pair in [["-c:a", "aac"], ["-ac", "6"], ["-b:a", "320k"], ["-ar", "48000"], ["-channel_layout:a", "5.1"]] {
+            assert!(argv.windows(2).any(|args| args[0] == pair[0] && args[1] == pair[1]), "missing {pair:?}: {argv:?}");
+        }
+        request.audio_delivery = None;
+        let current = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("initial encoded")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), Some(&claim), None)
+        };
+        assert_eq!(current.audio_channels, 2);
+        let current_plan = mgr.resolve_movie_plan(&file, &current, Encoder::Software).await.expect("current plan");
+        assert_ne!(plan.plan_digest(), current_plan.plan_digest(), "retained six channels must key different bytes from current stereo");
+        assert_ne!(recipe_hash_for_options(&mgr, &file, &actual, Encoder::Software).await,
+            recipe_hash_for_options(&mgr, &file, &current, Encoder::Software).await);
+        request.audio_claim = None;
+        let legacy = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("legacy encoded")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), None, None)
+        };
+        assert_eq!(legacy, base, "absent legacy claim retains the original options");
+        file.audio_streams[0].channels = Some(6);
+        request.audio_claim = Some(AudioClaim { decoders: vec!["aac".into(), "eac3".into()], sinks: vec![claim.sinks[0].clone(), AudioSink {
+            codec: "eac3".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000],
+        }] });
+        let initial = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("initial VOD AAC")
+        } else {
+            mgr.rolling_start_audio_options(&file, base, request.audio_claim.as_ref(), None)
+        };
+        assert!(matches!(&initial.audio.expect("route audio").action,
+            AudioAction::Encode { codec, channels: 6, .. } if codec == if encoded { "aac" } else { "eac3" }));
+        if encoded {
+            request.audio_delivery = Some(AudioDelivery { action: AudioAction::Encode {
+                codec: "eac3".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 640, sample_rate: 48_000,
+            }, downmix: None, reason: "retained rolling producer".into() });
+            assert!(mgr.encoded_start_audio_options(&request, &file, TranscodeOptions::default()).is_err(), "incompatible retained audio must refuse rather than re-resolve");
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_producer_retains_audio_despite_refreshed_source_and_unchanged_claim() {
+        retained_audio_consumer_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn encoded_producer_retains_audio_despite_refreshed_source_and_unchanged_claim() {
+        retained_audio_consumer_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn queued_transcode_publishes_while_holding_its_own_admission() {
+        super::require_ffmpeg();
+        use plurx_core::cluster::coordination::UnclusteredJobAuthority;
+        use plurx_core::domain::{NewPretranscodeJob, PretranscodeRequirements};
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind, JobState};
+        use plurx_core::store::background_jobs_pretranscode::{enqueue_request, projection};
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let path = media.path().join("Queued.mkv");
+        write_real_video(&path, 6);
+        std::fs::File::open(&path).expect("source").set_times(
+            std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+        ).expect("fixture source generation");
+        let id = seed_real_file(&store, &path).await;
+        let file = store.get_file(id).await.expect("get").expect("file");
+        let (mgr, _work, cache) = cached_manager(&store);
+        let policy = mgr.try_pretranscode_policy_snapshot().await.expect("policy");
+        let now = unix_ms();
+        let request = enqueue_request(&NewPretranscodeJob {
+            id: uuid::Uuid::new_v4().to_string(), dedupe_key: "publication-own-admission".into(),
+            file_id: id, source_size: file.size, source_mtime: file.mtime,
+            target_height: 240, policy_generation: policy.generation,
+            requirements_json: serde_json::to_string(&PretranscodeRequirements {
+                version: 1, decoder: file.video_codec.clone().expect("codec"),
+                acceptable_encoder_families: vec!["software".into()],
+                output_contract: "hls-mpegts-v1".into(), tone_map: false,
+                output_grade: "sdr".into(), scratch_bytes: 1,
+            }).expect("requirements"),
+            reason: "recent".into(), priority: 1, not_before_ms: now, created_at_ms: now,
+        }).expect("request");
+        store.enqueue_job(request.clone()).await.expect("enqueue");
+        let admission = mgr.admit_pretranscode(&file, 240).await.expect("admission").expect("idle");
+        assert!(!mgr.pretranscode_worker_idle(), "the job owns the slot until settlement");
+        let claimed = match store.claim_job(ClaimJob {
+            job_id: request.id.clone(), expected_revision: 0, node_id: NODE.into(),
+            boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::TranscodePrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
+        }).await.expect("claim") { ClaimOutcome::Claimed {job} => *job, other => panic!("{other:?}") };
+        let job = projection(&claimed).expect("projection");
+        let active = crate::background_jobs::ActiveBackgroundJob::start(
+            Arc::clone(&store), Arc::new(UnclusteredJobAuthority), claimed.token.expect("token"),
+            tokio::time::Instant::now() + Duration::from_secs(30), JobKind::TranscodePrepare,
+        ).expect("active job");
+        let fence = PretranscodeFence::new(job, active.fence(), admission);
+        let source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()]).await.expect("source");
+        let outcome = mgr.produce_pretranscode_job(&file, 240, Instant::now() + Duration::from_secs(120),
+            &active.fence().loss_token(), source, fence).await.expect("produce");
+        let PretranscodeProduceOutcome::Ready(produced) = outcome else { panic!("{outcome:?}") };
+        let row = store.background_job(&request.id).await.expect("read").expect("job");
+        assert_eq!(row.state, JobState::Succeeded);
+        assert_eq!(row.yield_count, 0);
+        assert_eq!(row.failed_attempts, 0);
+        let location = store.cache_hit(&produced.recipe, NODE).await.expect("cache lookup").expect("published");
+        assert!(location.manifest_digest.is_some());
+        assert!(cache.path().join(location.relative_dir).join(plurx_core::transcode::manifest::MANIFEST_FILE).exists());
+        active.finish().await;
+        assert!(mgr.pretranscode_worker_idle());
+    }
+
+    #[tokio::test]
+    async fn admitted_publication_still_yields_to_viewers_and_downloads() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: true, cpu_threads: 2, decoder_threads: None,
+        };
+        let permit = mgr.admissions.try_admit_bundle(2, 8, &estimate, crate::admission::Priority::Background).expect("permit");
+        assert!(!mgr.pretranscode_publication_yield_reason().is_some());
+        let viewer = mgr.admissions.wait_for_slot();
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        drop(viewer);
+        mgr.offline_waiting.store(true, std::sync::atomic::Ordering::Release);
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        mgr.offline_waiting.store(false, std::sync::atomic::Ordering::Release);
+        assert!(!mgr.pretranscode_publication_yield_reason().is_some());
+        drop(permit);
+        let live = mgr.admissions.try_admit_bundle(2, 8, &estimate, crate::admission::Priority::Live).expect("live permit");
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        drop(live);
+        let handoff = mgr.admissions.reserve_for_handoff(&estimate, Duration::from_secs(30));
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        mgr.admissions.release_reservation(handoff);
+        assert!(mgr.pretranscode_publication_yield_reason().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn producer_interruptions_distinguish_foreground_download_and_deadline() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        for expected in ["foreground_demand", "offline_waiting", "ownership_lost", "production_deadline"] {
+            let cancelled = tokio_util::sync::CancellationToken::new();
+            let viewer = (expected == "foreground_demand").then(|| mgr.admissions.wait_for_slot());
+            mgr.offline_waiting.store(expected == "offline_waiting", std::sync::atomic::Ordering::Release);
+            if expected == "ownership_lost" { cancelled.cancel(); }
+            let deadline = if expected == "production_deadline" { Instant::now() } else { Instant::now() + Duration::from_secs(30) };
+            let mut child = tokio::process::Command::new("sh").args(["-c", "exec sleep 30"]).kill_on_drop(true).spawn().expect("child");
+            let ended = mgr.run_part(&mut child, deadline, true, Some(&cancelled)).await;
+            let observed = match ended { PartEnd::Preempted(reason) => reason, PartEnd::Deadline => "production_deadline", other => panic!("{other:?}") };
+            assert_eq!(observed, expected);
+            assert!(child.try_wait().expect("reaped").is_some());
+            drop(viewer);
         }
     }

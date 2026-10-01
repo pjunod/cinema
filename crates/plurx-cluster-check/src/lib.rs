@@ -10234,6 +10234,7 @@ async fn handle_request(
             let store = store_ref(store)?;
             let now = unix_now()?;
             let package = NewOfflinePackage {
+                audio_recipe: None,
                 id: format!("tombstone-fence-{node_id}"),
                 request_id: format!("fence-{node_id}-{now}"),
                 user_id: 1,
@@ -11882,6 +11883,7 @@ async fn seed_offline_removal_work(
             )
             .await?;
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: format!("{package_id}-{node_id}"),
             request_id: format!("{package_id}-request-{node_id}"),
             user_id: user.id,
@@ -12033,6 +12035,7 @@ async fn seed_offline_work_during_removal(
         )
         .await?;
     let package = NewOfflinePackage {
+        audio_recipe: None,
         id: format!("{LATE_PACKAGE}-{node_id}"),
         request_id: format!("{LATE_PACKAGE}-request-{node_id}"),
         user_id,
@@ -12649,6 +12652,7 @@ async fn exercise(store: &HiqliteAuthStore, ordinal: u64) -> Result<()> {
         .create_user(&format!("offline-outsider-{suffix}"), "hash", false)
         .await?;
     let offline = NewOfflinePackage {
+        audio_recipe: None,
         id: format!("offline-{suffix}"),
         request_id: format!("offline-request-{suffix}"),
         user_id: user.id,

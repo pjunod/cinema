@@ -1,6 +1,38 @@
 use super::*;
 
 impl TranscodeManager {
+    /// The rolling producer owns route-specific initial negotiation. A retained
+    /// producer answer is already authoritative, even if catalog facts changed.
+    pub(super) fn rolling_start_audio_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        mut options: TranscodeOptions,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
+    ) -> TranscodeOptions {
+        let audio = retained.cloned().or_else(|| {
+            claim.map(|claim| {
+                plurx_core::playback::audio::resolve_audio(
+                    options
+                        .audio_index
+                        .and_then(|index| {
+                            file.audio_streams
+                                .iter()
+                                .find(|stream| stream.index == index)
+                        })
+                        .or_else(|| file.audio_streams.first()),
+                    &claim.profile(),
+                    plurx_core::playback::audio::AudioRoute::RollingHls,
+                    file.audio_offset_ms,
+                )
+            })
+        });
+        if let Some(audio) = audio {
+            options.set_audio_delivery(audio);
+        }
+        options
+    }
+
     /// Start a transcode session for a file, superseding this viewer's previous
     /// session on the same file (see [`Self::reap_superseded_before`]).
     #[cfg(test)]
@@ -39,6 +71,8 @@ impl TranscodeManager {
             false,
             false,
             Priority::Live,
+            None,
+            None,
         )
         .await
     }
@@ -421,6 +455,8 @@ impl TranscodeManager {
         automatic: bool,
         hdr10: bool,
         priority: Priority,
+        audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
@@ -494,6 +530,8 @@ impl TranscodeManager {
             None,
             grade,
         );
+        opts = self.rolling_start_audio_options(&file, opts, audio_claim, retained_audio);
+        let audio_delivery = opts.audio.clone();
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
@@ -614,6 +652,9 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
+        if let Some(audio) = &audio_delivery {
+            opts.set_audio_delivery(audio.clone());
+        }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
@@ -688,7 +729,10 @@ impl TranscodeManager {
         let session_kind = SessionKind::Transcode {
             height: target_height,
         };
-        let hls_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let hls_codecs = audio_delivery_hls_codecs(
+            transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
+            opts.audio.as_ref(),
+        );
         let probe_json = match self.store.get_file_probe_json(file_id).await {
             Ok(probe_json) => probe_json,
             Err(error) => {
@@ -986,6 +1030,7 @@ impl TranscodeManager {
             recovery: Some(recovery.clone()),
             automatic,
             kind: session_kind,
+            audio_delivery: opts.audio.clone(),
             method: crate::delivery::Method::Transcode,
             start_seconds,
             // A transcode seeks accurately, so its media begins exactly where
@@ -1155,6 +1200,7 @@ impl TranscodeManager {
         );
 
         Ok(StartInfo {
+            audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: file.duration_ms,
@@ -1208,6 +1254,7 @@ impl TranscodeManager {
             None,
             playback_id,
             false,
+            None,
         )
         .await
     }
@@ -1227,6 +1274,7 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         playback_id: &str,
         automatic: bool,
+        audio_delivery: Option<&plurx_core::playback::audio::AudioDelivery>,
     ) -> Result<StartInfo, String> {
         let mut file = self
             .store
@@ -1391,7 +1439,7 @@ impl TranscodeManager {
         }
         let pacing = self.pacing(true).await;
         let legacy_args = |output: &str| match takeover.as_ref() {
-            Some(takeover) => transcode::hls_copy_args_with_sequence(
+            Some(takeover) => transcode::hls_copy_args_with_audio_delivery(
                 &file,
                 start_seconds,
                 audio_index,
@@ -1401,15 +1449,19 @@ impl TranscodeManager {
                 takeover.media_sequence,
                 &init_object_name(Some(takeover.owner_epoch)),
                 output,
+                audio_delivery,
             ),
-            None => transcode::hls_copy_args_with_dolby_vision(
+            None => transcode::hls_copy_args_with_audio_delivery(
                 &file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
                 pacing,
                 video_options,
+                0,
+                "init.mp4",
                 output,
+                audio_delivery,
             ),
         };
         // Take over the cutting when the source is one whose keyframes can be
@@ -1420,13 +1472,14 @@ impl TranscodeManager {
         // actor for the one frozen legacy retry; the reader never performs the
         // replacement itself.
         let initial_args = if segmenting {
-            transcode::copy_pipe_args_with_dolby_vision(
+            transcode::copy_pipe_args_with_audio_delivery(
                 &file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
                 pacing,
                 video_options,
+                audio_delivery,
             )
         } else {
             legacy_args(&upload.base_url(0))
@@ -1452,6 +1505,7 @@ impl TranscodeManager {
         // claim a conversion that did not happen.
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, served, probe_json.as_deref());
+        let hls_codecs = audio_delivery_hls_codecs(hls_codecs, audio_delivery);
         let copy_kind = SessionKind::Copy {
             aac: served.transcode_audio,
             preserve_dolby_vision: served.preserve_dolby_vision,
@@ -1564,6 +1618,7 @@ impl TranscodeManager {
             recovery: Some(recovery.clone()),
             automatic,
             kind: copy_kind,
+            audio_delivery: audio_delivery.cloned(),
             method: crate::delivery::Method::HlsCopy,
             start_seconds,
             media_origin_seconds,
@@ -1777,6 +1832,7 @@ impl TranscodeManager {
         .await;
 
         Ok(StartInfo {
+            audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: file.duration_ms,

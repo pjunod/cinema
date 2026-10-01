@@ -1575,6 +1575,8 @@ pub struct OfflinePackage {
     /// A queued package may yield and resume after the global setting changes,
     /// so its recipe must never be rebuilt from mutable policy.
     pub effective_rate_control: String,
+    /// Canonical server-resolved audio snapshot; None preserves pre-S09 jobs.
+    pub audio_recipe: Option<String>,
     pub target_height: i64,
     /// Exact even-sized output frame computed with the transcoder's scaler
     /// arithmetic. Optional only for legacy/unprobed sources.
@@ -1684,6 +1686,7 @@ pub struct NewOfflinePackage {
     pub source_mtime: i64,
     /// Canonical [`crate::transcode::EffectiveRateControl::snapshot_value`].
     pub effective_rate_control: String,
+    pub audio_recipe: Option<String>,
     pub target_height: i64,
     pub output_width: Option<i64>,
     pub output_height: Option<i64>,

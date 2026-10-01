@@ -7,6 +7,7 @@ pub(super) struct Recipe {
     pub(super) file: MediaFile,
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub(super) video: CopyVideoOptions,
     /// Exact object version whose complete digest selected the cluster blob.
     /// None on the legacy node-local index path.

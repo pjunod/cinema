@@ -734,3 +734,24 @@ process.on("beforeExit", () => {
   }
   if (failures) process.exitCode = 1;
 });
+
+
+test("yield history explains recorded reasons and missing legacy reasons", () => {
+  const now=Date.now();
+  const job={id:"yield-history",kind:"transcode_prepare",state:"queued",yield_count:739,failed_attempts:0,observed_at_ms:now};
+  Object.assign(painter.durable,{observed:now,rows:[job],detail:{job,waiters:[],attempts:[
+    {node_id:"node",started_at_ms:now-2000,finished_at_ms:now-1000,outcome:"yielded",error_code:"manifest_interrupted"},
+    {node_id:"node",started_at_ms:now-4000,finished_at_ms:now-3000,outcome:"yielded",error_code:null},
+    {node_id:"node",started_at_ms:now-6000,finished_at_ms:now-5000,outcome:"yielded",error_code:"<hostile_reason>"}
+  ]}});
+  painter.view.inspector={kind:"job",id:job.id};painter.view.detailTab="history";
+  const html=painter.inspect();
+  assert.match(html,/0 charged failures · 739 yields/);
+  assert.match(html,/manifest interrupted/);
+  assert.match(html,/Reason not recorded by this worker/);
+  assert.match(html,/without charging a failure/);
+  assert.match(html,/&lt;hostile reason&gt;/);
+  assert.doesNotMatch(html,/<hostile/);
+  painter.view.inspector=null;
+  Object.assign(painter.durable,{rows:[],detail:null});
+});

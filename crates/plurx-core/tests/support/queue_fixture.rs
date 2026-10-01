@@ -198,6 +198,7 @@ pub(crate) trait QueueFixture: Store {
         self.settle_job(SettleJob {
             token,
             settlement: JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms,
             },
@@ -432,6 +433,7 @@ pub(crate) trait QueueFixture: Store {
         self.settle_job(SettleJob {
             token,
             settlement: JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms: retry_at_ms,
             },

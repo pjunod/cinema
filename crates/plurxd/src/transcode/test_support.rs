@@ -721,6 +721,7 @@ fn test_session_with_optional_child(
         AttemptChild::new(0, child, control.clone(), None)
     });
     Session {
+        audio_delivery: None,
         dir,
         recovery: None,
         response_incarnation: uuid::Uuid::new_v4(),

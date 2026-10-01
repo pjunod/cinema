@@ -102,6 +102,52 @@ pub(super) fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> S
     }
 }
 
+/// The audio sample type follows the producer's immutable audio decision.
+pub(super) fn audio_delivery_hls_codecs(
+    mut codecs: String,
+    audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+) -> String {
+    let Some(audio) = audio else {
+        return codecs;
+    };
+    codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
+    let audio_codec = match audio.codec() {
+        Some("aac") => Some("mp4a.40.2"),
+        Some("ac3" | "ac-3") => Some("ac-3"),
+        Some("eac3" | "eac-3" | "ec-3") => Some("ec-3"),
+        Some("mp3") => Some("mp4a.40.34"),
+        Some("alac") => Some("alac"),
+        Some("flac") => Some("fLaC"),
+        _ => None,
+    };
+    if let Some(audio_codec) = audio_codec {
+        codecs.push(',');
+        codecs.push_str(audio_codec);
+    }
+    codecs
+}
+
+pub fn advertised_ladder_with_audio(
+    source_height: Option<i64>,
+    ceiling: i64,
+    audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+) -> Vec<Rung> {
+    let mut rungs = advertised_ladder(source_height, ceiling);
+    if let Some(rate) = audio.map(|audio| audio.budget_kbps()) {
+        for rung in &mut rungs {
+            rung.total_kbps = rung
+                .total_kbps
+                .saturating_sub(plurx_core::transcode::AUDIO_BITRATE_KBPS_DEFAULT)
+                .saturating_add(rate);
+            rung.peak_kbps = rung
+                .peak_kbps
+                .saturating_sub(plurx_core::transcode::AUDIO_BITRATE_KBPS_DEFAULT)
+                .saturating_add(rate);
+        }
+    }
+    rungs
+}
+
 /// Does this source/encoder pair fit one of the measured HDR10 points?
 pub(super) fn hdr10_rung_fits(
     file: &plurx_core::domain::MediaFile,

@@ -410,7 +410,13 @@ impl ClientSelection {
         };
         DesiredSelection {
             quality: match self.quality {
-                QualitySelection::Auto { height } => DesiredQuality::Auto { height },
+                QualitySelection::Auto {
+                    height,
+                    candidate_id,
+                } => DesiredQuality::Auto {
+                    height,
+                    candidate_id,
+                },
                 QualitySelection::Original => DesiredQuality::Original,
                 QualitySelection::Manual { height } => DesiredQuality::Manual { height },
             },
@@ -448,7 +454,7 @@ impl ClientSelection {
         // accepted, because every client shipped before D3-a sends it.
         let named = match self.quality {
             QualitySelection::Manual { height } => Some(height),
-            QualitySelection::Auto { height } => height,
+            QualitySelection::Auto { height, .. } => height,
             QualitySelection::Original => None,
         };
         if let Some(height) = named {
@@ -470,7 +476,7 @@ impl ClientSelection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum QualitySelection {
     /// `height` is the client's automatic controller naming the rung it wants
@@ -480,6 +486,10 @@ pub(crate) enum QualitySelection {
     Auto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<i64>,
+        /// Negotiated route lookup key. Parser compatibility does not grant
+        /// semantic support; owners must refuse this until route support exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     },
     /// Preserve the source representation and never grant the server
     /// automatic rung authority. Kept distinct from a manual height because
@@ -488,6 +498,38 @@ pub(crate) enum QualitySelection {
     Manual {
         height: i64,
     },
+}
+
+// A unit variant of an internally tagged enum does not reject extra keys
+// under serde's derive. A braced wire variant keeps Original strict too.
+impl<'de> serde::Deserialize<'de> for QualitySelection {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Auto {
+                #[serde(default)]
+                height: Option<i64>,
+                #[serde(default)]
+                candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+            },
+            Original {},
+            Manual {
+                height: i64,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Auto {
+                height,
+                candidate_id,
+            } => Self::Auto {
+                height,
+                candidate_id,
+            },
+            Wire::Original {} => Self::Original,
+            Wire::Manual { height } => Self::Manual { height },
+        })
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -543,9 +585,113 @@ pub(crate) enum DynamicRangePolicy {
     Sdr,
 }
 
+/// Full runtime decoder snapshot. Absence is unknown; an empty video list is
+/// an explicit loss of every decoder. Entries remain profile-specific.
+/// Codec tokens include decode-only codecs such as VP9. Unknown canonical
+/// tokens are retained for forwarding, never treated as a capability grant.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "DecoderCapsSnapshotWire")]
+pub(crate) struct DecoderCapsSnapshot {
+    pub revision: u64,
+    pub video: Vec<RuntimeVideoConstraint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecoderCapsSnapshotWire {
+    revision: u64,
+    video: Vec<RuntimeVideoConstraint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeVideoConstraint {
+    pub codec: String,
+    pub profiles: Vec<String>,
+    pub available: bool,
+    pub dynamic_ranges: Vec<DynamicRangePolicy>,
+    pub dv_profiles: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_rate: Option<RuntimeFrameRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bitrate_bps: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeFrameRate {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl TryFrom<DecoderCapsSnapshotWire> for DecoderCapsSnapshot {
+    type Error = &'static str;
+
+    fn try_from(wire: DecoderCapsSnapshotWire) -> Result<Self, Self::Error> {
+        if !(1..=9_007_199_254_740_991).contains(&wire.revision) || wire.video.len() > 16 {
+            return Err("invalid decoder snapshot revision or entry count");
+        }
+        for entry in &wire.video {
+            if entry.codec.is_empty()
+                || entry.codec.len() > 32
+                || entry.codec == "auto"
+                || !entry.codec.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || entry.profiles.len() > 8
+                || entry.profiles.iter().any(|profile| {
+                    profile.is_empty()
+                        || profile.len() > 32
+                        || !profile.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'_' | b'-')
+                        })
+                })
+                || entry.dynamic_ranges.len() > 4
+                || entry.dynamic_ranges.contains(&DynamicRangePolicy::Auto)
+                || entry.dv_profiles.len() > 8
+                || entry
+                    .dv_profiles
+                    .iter()
+                    .any(|profile| !(1..=10).contains(profile))
+                || [entry.max_width, entry.max_height]
+                    .into_iter()
+                    .flatten()
+                    .any(|axis| !(1..=16_384).contains(&axis))
+                || entry
+                    .max_bitrate_bps
+                    .is_some_and(|rate| !(1..=1_000_000_000_000).contains(&rate))
+                || entry.max_frame_rate.is_some_and(|rate| {
+                    !(1..=1_000_000).contains(&rate.numerator)
+                        || !(1..=1_000_000).contains(&rate.denominator)
+                        || u64::from(rate.numerator) > 1_000 * u64::from(rate.denominator)
+                })
+            {
+                return Err("invalid runtime decoder constraint");
+            }
+        }
+        Ok(Self {
+            revision: wire.revision,
+            video: wire.video,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DynamicCapabilities {
+    /// Tolerated and preserved by the parser floor; no policy consumes it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_caps: Option<DecoderCapsSnapshot>,
     pub platform: ClientPlatform,
     pub max_height: i64,
     pub codecs: Vec<CodecPolicy>,
@@ -1200,6 +1346,10 @@ impl DeliveryView {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct EffectiveSelection {
+    /// Preserved through response relay and durable terminal replay. The
+    /// parser-only prerequisite never produces an identity of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     pub quality_auto: bool,
     pub height: i64,
     pub audio_track: Option<i64>,
@@ -1256,6 +1406,7 @@ impl EffectiveSelection {
             SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
+            candidate_id: None,
             quality_auto: request.automatic,
             height: delivered_height,
             audio_track: request.audio_index,
@@ -2776,6 +2927,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             owner_epoch: 1,
         },
         effective_selection: EffectiveSelection {
+            candidate_id: None,
             quality_auto: true,
             height: 720,
             audio_track: None,
@@ -2880,7 +3032,7 @@ pub(crate) enum PreparedSuccessorObservation {
     /// advancing until authority can be established again.
     Unavailable,
     Absent,
-    Ready(PreparedSuccessorAction),
+    Ready(Box<PreparedSuccessorAction>),
 }
 
 /// The bounded client facts accepted with one control sequence.
@@ -3065,7 +3217,10 @@ impl PlaybackDemandSnapshot {
             seek_target_ms: None,
             observed_download_bps: Some(8_000_000),
             selection: ClientSelection {
-                quality: QualitySelection::Auto { height: None },
+                quality: QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: Some(0),
                 subtitle: SubtitleSelection {
                     mode: SubtitleMode::Off,
@@ -3076,6 +3231,8 @@ impl PlaybackDemandSnapshot {
                 dynamic_range: DynamicRangePolicy::Auto,
             },
             capabilities: Some(DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform,
                 max_height: 2160,
                 codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
@@ -3298,7 +3455,7 @@ impl ControlAcceptance {
             platform,
             prepared_successor: prepared_successor
                 .map_or(PreparedSuccessorObservation::NotRequested, |successor| {
-                    PreparedSuccessorObservation::Ready(successor.clone())
+                    PreparedSuccessorObservation::Ready(Box::new(successor.clone()))
                 }),
             acknowledgement: None,
             now_unix_ms: None,
@@ -3722,7 +3879,7 @@ impl ControlState {
                     ) =>
                 {
                     let action = match &self.prepared_action {
-                        Some(binding) if binding.successor == *successor => binding.action.clone(),
+                        Some(binding) if binding.successor == **successor => binding.action.clone(),
                         Some(binding)
                             if binding.successor.staged_incarnation_id
                                 == successor.staged_incarnation_id =>
@@ -3734,9 +3891,9 @@ impl ControlState {
                         }
                         Some(_) => return Err(ControlStateError::Unavailable),
                         None => {
-                            let action = successor.clone().into_action();
+                            let action = successor.as_ref().clone().into_action();
                             self.prepared_action = Some(PreparedActionBinding {
-                                successor: successor.clone(),
+                                successor: successor.as_ref().clone(),
                                 action: action.clone(),
                                 acknowledgement: None,
                             });
@@ -15049,6 +15206,7 @@ mod tests {
                     owner_epoch: 1,
                 },
                 effective_selection: EffectiveSelection {
+                    candidate_id: None,
                     quality_auto: true,
                     height: 720,
                     audio_track: None,
@@ -15230,6 +15388,7 @@ mod tests {
         let action_id = uuid::Uuid::new_v4().to_string();
         let staged = uuid::Uuid::new_v4().to_string();
         let selection = EffectiveSelection {
+            candidate_id: None,
             quality_auto: true,
             height: 1080,
             audio_track: None,
@@ -15310,6 +15469,146 @@ mod tests {
         assert!(matches!(after_commit.preparation, PreparationSlot::Empty));
     }
 
+    #[test]
+    fn decoder_snapshot_parser_preserves_loss_and_refuses_unbounded_claims() {
+        let empty = serde_json::json!({"revision": 1, "video": []});
+        let parsed: DecoderCapsSnapshot =
+            serde_json::from_value(empty.clone()).expect("valid decoder snapshot fixture");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("valid decoder snapshot fixture"),
+            empty
+        );
+        for revision in [0, 9_007_199_254_740_992u64] {
+            assert!(serde_json::from_value::<DecoderCapsSnapshot>(
+                serde_json::json!({"revision": revision, "video": []})
+            )
+            .is_err());
+        }
+        let valid = serde_json::json!({"revision": 2, "video": [{
+            "codec": "vp9", "profiles": ["main10"], "available": false,
+            "dynamic_ranges": [], "dv_profiles": []
+        }]});
+        let parsed: DecoderCapsSnapshot =
+            serde_json::from_value(valid.clone()).expect("valid decoder snapshot fixture");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("valid decoder snapshot fixture"),
+            valid
+        );
+        for (field, value) in [
+            ("codec", serde_json::json!("auto")),
+            ("profiles", serde_json::json!(["Main10"])),
+            ("max_width", serde_json::json!(0)),
+            (
+                "max_frame_rate",
+                serde_json::json!({"numerator": 30, "denominator": 0}),
+            ),
+            ("unrecognized", serde_json::json!(true)),
+        ] {
+            let mut bad = valid.clone();
+            bad["video"][0][field] = value;
+            assert!(
+                serde_json::from_value::<DecoderCapsSnapshot>(bad).is_err(),
+                "{field}"
+            );
+        }
+        let mut bad = valid.clone();
+        bad["video"] = serde_json::json!(vec![valid["video"][0].clone(); 17]);
+        assert!(serde_json::from_value::<DecoderCapsSnapshot>(bad).is_err());
+    }
+
+    #[test]
+    fn auto_candidate_parser_floor_retains_nested_route_for_owner_dispatch() {
+        let mut wire =
+            serde_json::to_value(relay_request()).expect("valid parser-floor test fixture");
+        let id = "0123456789abcdef0123456789abcdef";
+        wire["control"]["selection"]["quality"]["candidate_id"] = id.into();
+        wire["control"]["capabilities"]["presentation_target"] = serde_json::json!({
+            "width_px": 2400, "height_px": 1600, "revision": 3
+        });
+        wire["control"]["capabilities"]["decoder_caps"] = serde_json::json!({
+            "revision": 4,
+            "video": [{"codec": "h264", "profiles": ["high"], "available": false,
+                "dynamic_ranges": ["sdr"], "dv_profiles": [], "max_width": 1920,
+                "max_height": 1080, "max_frame_rate": {"numerator": 30000, "denominator": 1001}}]
+        });
+        let parsed: ControlRelayRequest =
+            serde_json::from_value(wire.clone()).expect("valid parser-floor test fixture");
+        wire["control"]["intent"] =
+            serde_json::to_value(plurx_core::playback::MediaIntentEnvelope {
+                lifetime_id: "candidate-parser-floor".to_owned(),
+                recipe_revision: 1,
+                destination_revision: 1,
+                transport_revision: 1,
+                selection: parsed.control.selection.desired(),
+            })
+            .expect("valid parser-floor test fixture");
+        let parsed: ControlRelayRequest =
+            serde_json::from_value(wire.clone()).expect("valid parser-floor test fixture");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("valid parser-floor test fixture"),
+            wire
+        );
+        assert!(parsed
+            .control
+            .intent
+            .as_ref()
+            .expect("valid parser-floor test fixture")
+            .validate()
+            .is_ok());
+        assert!(parsed.control.selection.validate().is_ok());
+        assert!(
+            parsed.is_valid(),
+            "a tolerant ingress must preserve and forward the bounded ask"
+        );
+        assert_eq!(
+            parsed.control.selection.desired().quality,
+            plurx_core::playback::DesiredQuality::Auto {
+                height: None,
+                candidate_id: Some(
+                    plurx_core::playback::candidate::CandidateId::from_hex(id)
+                        .expect("valid parser-floor test fixture")
+                ),
+            }
+        );
+        for path in ["control", "selection", "quality"] {
+            let mut bad = wire.clone();
+            match path {
+                "control" => bad["control"]["unexpected"] = true.into(),
+                "selection" => bad["control"]["selection"]["unexpected"] = true.into(),
+                _ => bad["control"]["selection"]["quality"]["unexpected"] = true.into(),
+            }
+            assert!(serde_json::from_value::<ControlRelayRequest>(bad).is_err());
+        }
+        let legacy =
+            serde_json::to_value(relay_request()).expect("valid parser-floor test fixture");
+        assert!(legacy["control"]["selection"]["quality"]
+            .get("candidate_id")
+            .is_none());
+        assert!(legacy["control"]["capabilities"]
+            .get("presentation_target")
+            .is_none());
+        assert!(legacy["control"]["capabilities"]
+            .get("decoder_caps")
+            .is_none());
+    }
+
+    #[test]
+    fn auto_candidate_parser_floor_refuses_bad_ids_and_non_auto_extension() {
+        for quality in [
+            serde_json::json!({"mode":"auto", "candidate_id":"NOT-A-CANDIDATE"}),
+            serde_json::json!({"mode":"manual", "height":1080,
+                "candidate_id":"0123456789abcdef0123456789abcdef"}),
+            serde_json::json!({"mode":"original",
+                "candidate_id":"0123456789abcdef0123456789abcdef"}),
+            serde_json::json!({"mode":"future"}),
+        ] {
+            let mut wire =
+                serde_json::to_value(request()).expect("valid parser-floor test fixture");
+            wire["selection"]["quality"] = quality;
+            assert!(serde_json::from_value::<ControlRequestV1>(wire).is_err());
+        }
+    }
+
     fn request() -> ControlRequestV1 {
         ControlRequestV1 {
             intent: None,
@@ -15327,7 +15626,10 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: Some(8_000_000),
             selection: ClientSelection {
-                quality: QualitySelection::Auto { height: None },
+                quality: QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: Some(0),
                 subtitle: SubtitleSelection {
                     mode: SubtitleMode::Off,
@@ -15338,6 +15640,8 @@ mod tests {
                 dynamic_range: DynamicRangePolicy::Auto,
             },
             capabilities: Some(DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: ClientPlatform::Web,
                 max_height: 2160,
                 codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
@@ -16250,6 +16554,7 @@ mod tests {
             },
             delivery: delivery_with_hold(Some("demand")),
             effective_selection: EffectiveSelection {
+                candidate_id: None,
                 quality_auto: true,
                 height: 720,
                 audio_track: None,
@@ -16946,6 +17251,7 @@ mod tests {
                         playlist_url: "/hls/session/index.m3u8".to_owned(),
                         media_origin_ms: offered_origin_ms,
                         effective_selection: EffectiveSelection {
+                            candidate_id: None,
                             quality_auto: true,
                             height: 1080,
                             audio_track: None,
@@ -16962,6 +17268,7 @@ mod tests {
                         playlist_url: "/hls/session/index.m3u8".to_owned(),
                         media_origin_ms: offered_origin_ms,
                         effective_selection: EffectiveSelection {
+                            candidate_id: None,
                             quality_auto: true,
                             height: 1080,
                             audio_track: None,
@@ -17644,7 +17951,10 @@ mod tests {
     #[test]
     fn an_ask_is_offered_for_persistence_until_the_write_has_landed() {
         let mut state = ControlState::default();
-        let first = selection_at(QualitySelection::Auto { height: None });
+        let first = selection_at(QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        });
         let second = selection_at(QualitySelection::Manual { height: 720 });
 
         // A session's opening ask has to be written too: without it the store
@@ -17708,7 +18018,10 @@ mod tests {
     #[test]
     fn an_ask_arriving_while_the_slot_is_busy_is_dispatched_once_it_frees() {
         let mut state = ControlState::default();
-        let first = selection_at(QualitySelection::Auto { height: None });
+        let first = selection_at(QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        });
         let second = selection_at(QualitySelection::Manual { height: 720 });
         let third = selection_at(QualitySelection::Manual { height: 1080 });
 
@@ -17931,8 +18244,12 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
-                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
-                    .asking(&selection_at(QualitySelection::Auto { height: None })),
+                ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor)).asking(
+                    &selection_at(QualitySelection::Auto {
+                        height: None,
+                        candidate_id: None,
+                    }),
+                ),
             )
             .expect("announced");
         let ControlAction::Prepare {
@@ -17976,6 +18293,7 @@ mod tests {
 
     fn prepared_selection() -> EffectiveSelection {
         EffectiveSelection {
+            candidate_id: None,
             quality_auto: false,
             height: 1080,
             audio_track: None,
@@ -19272,6 +19590,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: EffectiveSelection {
+                candidate_id: None,
                 quality_auto: true,
                 height: 1080,
                 audio_track: Some(0),
@@ -19791,7 +20110,7 @@ mod tests {
                 client_instance_id: &request.client_instance_id,
                 sequence: request.sequence,
                 snapshot: PlaybackDemandSnapshot::from(&request),
-                prepared_successor: PreparedSuccessorObservation::Ready(successor),
+                prepared_successor: PreparedSuccessorObservation::Ready(Box::new(successor)),
             })
             .await
             .expect("rolling actor accepts the preparation");
@@ -19879,7 +20198,7 @@ mod tests {
                     client_instance_id: &request.client_instance_id,
                     sequence: 1,
                     snapshot: PlaybackDemandSnapshot::from(&request),
-                    prepared_successor: PreparedSuccessorObservation::Ready(successor),
+                    prepared_successor: PreparedSuccessorObservation::Ready(Box::new(successor)),
                 },
                 i64::MAX,
                 None,
@@ -23543,6 +23862,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: EffectiveSelection {
+                candidate_id: None,
                 quality_auto: true,
                 height: 1080,
                 audio_track: Some(0),
@@ -24195,6 +24515,7 @@ mod tests {
 
     fn playing(height: i64) -> EffectiveSelection {
         EffectiveSelection {
+            candidate_id: None,
             quality_auto: false,
             height,
             audio_track: Some(0),
@@ -24236,6 +24557,8 @@ mod tests {
 
     fn can_prepare(dual_player_preparation: bool) -> DynamicCapabilities {
         DynamicCapabilities {
+            presentation_target: None,
+            decoder_caps: None,
             platform: ClientPlatform::Apple,
             max_height: 2160,
             codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
@@ -24541,6 +24864,8 @@ mod tests {
             kind,
             start_seconds: 12.5,
             audio_index: Some(0),
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -24579,7 +24904,10 @@ mod tests {
     #[test]
     fn the_normalized_selection_distinguishes_every_ask_the_wire_does() {
         let qualities = [
-            QualitySelection::Auto { height: None },
+            QualitySelection::Auto {
+                height: None,
+                candidate_id: None,
+            },
             QualitySelection::Original,
             QualitySelection::Manual { height: 720 },
         ];
@@ -24852,7 +25180,10 @@ mod tests {
         let current = converting_copy();
         let candidate = candidate_request(
             &current,
-            &selection_at(QualitySelection::Auto { height: None }),
+            &selection_at(QualitySelection::Auto {
+                height: None,
+                candidate_id: None,
+            }),
             1080,
             Some(2160),
         );
@@ -24872,16 +25203,28 @@ mod tests {
     fn quality_selection_auto_carries_an_optional_rung() {
         use plurx_core::playback::DesiredQuality;
 
-        let plain = selection_at(QualitySelection::Auto { height: None });
-        let named = selection_at(QualitySelection::Auto { height: Some(1080) });
+        let plain = selection_at(QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        });
+        let named = selection_at(QualitySelection::Auto {
+            height: Some(1080),
+            candidate_id: None,
+        });
 
         assert_eq!(
             plain.desired().quality,
-            DesiredQuality::Auto { height: None },
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None
+            },
         );
         assert_eq!(
             named.desired().quality,
-            DesiredQuality::Auto { height: Some(1080) },
+            DesiredQuality::Auto {
+                height: Some(1080),
+                candidate_id: None
+            },
             "the rung has to reach the desired selection, or it cannot reach the digest",
         );
 
@@ -24896,9 +25239,12 @@ mod tests {
         );
         assert_eq!(
             plain.desired().digest(),
-            selection_at(QualitySelection::Auto { height: None })
-                .desired()
-                .digest(),
+            selection_at(QualitySelection::Auto {
+                height: None,
+                candidate_id: None
+            })
+            .desired()
+            .digest(),
         );
         assert_ne!(
             plain.desired().digest(),
@@ -24907,9 +25253,12 @@ mod tests {
         );
         assert_ne!(
             named.desired().digest(),
-            selection_at(QualitySelection::Auto { height: Some(720) })
-                .desired()
-                .digest(),
+            selection_at(QualitySelection::Auto {
+                height: Some(720),
+                candidate_id: None
+            })
+            .desired()
+            .digest(),
         );
         // And a named Auto rung is still not the same ask as naming it by hand.
         assert_ne!(
@@ -24928,7 +25277,13 @@ mod tests {
     fn quality_selection_auto_height_round_trips_and_stays_optional() {
         let plain: QualitySelection =
             serde_json::from_str(r#"{"mode":"auto"}"#).expect("plain Auto still parses");
-        assert_eq!(plain, QualitySelection::Auto { height: None });
+        assert_eq!(
+            plain,
+            QualitySelection::Auto {
+                height: None,
+                candidate_id: None
+            }
+        );
         assert_eq!(
             serde_json::to_string(&plain).expect("plain Auto serializes"),
             r#"{"mode":"auto"}"#,
@@ -24937,23 +25292,36 @@ mod tests {
 
         let named: QualitySelection =
             serde_json::from_str(r#"{"mode":"auto","height":1080}"#).expect("a named rung parses");
-        assert_eq!(named, QualitySelection::Auto { height: Some(1080) });
+        assert_eq!(
+            named,
+            QualitySelection::Auto {
+                height: Some(1080),
+                candidate_id: None
+            }
+        );
         assert_eq!(
             serde_json::to_string(&named).expect("a named rung serializes"),
             r#"{"mode":"auto","height":1080}"#,
         );
 
         // Bounded exactly as `manual` is, and absent is always accepted.
-        assert!(selection_at(QualitySelection::Auto { height: None })
-            .validate()
-            .is_ok());
-        assert!(selection_at(QualitySelection::Auto { height: Some(1080) })
-            .validate()
-            .is_ok());
+        assert!(selection_at(QualitySelection::Auto {
+            height: None,
+            candidate_id: None
+        })
+        .validate()
+        .is_ok());
+        assert!(selection_at(QualitySelection::Auto {
+            height: Some(1080),
+            candidate_id: None
+        })
+        .validate()
+        .is_ok());
         for out_of_range in [143, 2161, 0, -1] {
             assert_eq!(
                 selection_at(QualitySelection::Auto {
-                    height: Some(out_of_range)
+                    height: Some(out_of_range),
+                    candidate_id: None
                 })
                 .validate(),
                 Err("selection.quality.height"),
@@ -24974,7 +25342,10 @@ mod tests {
         let current = session_request(SessionKind::Transcode { height: 720 });
         let candidate = candidate_request(
             &current,
-            &selection_at(QualitySelection::Auto { height: Some(1080) }),
+            &selection_at(QualitySelection::Auto {
+                height: Some(1080),
+                candidate_id: None,
+            }),
             1080,
             Some(2160),
         );
@@ -24991,7 +25362,10 @@ mod tests {
         // Unnamed Auto is unchanged in every respect.
         let plain = candidate_request(
             &current,
-            &selection_at(QualitySelection::Auto { height: None }),
+            &selection_at(QualitySelection::Auto {
+                height: None,
+                candidate_id: None,
+            }),
             720,
             Some(2160),
         );
@@ -25003,7 +25377,10 @@ mod tests {
         assert_eq!(
             candidate_request(
                 &copying,
-                &selection_at(QualitySelection::Auto { height: Some(1080) }),
+                &selection_at(QualitySelection::Auto {
+                    height: Some(1080),
+                    candidate_id: None
+                }),
                 1080,
                 Some(2160),
             )
@@ -25058,7 +25435,10 @@ mod tests {
     fn a_selection_cannot_rewrite_the_servers_plan_answers() {
         let mut current = converting_copy();
         current.hdr10 = true;
-        let mut selection = selection_at(QualitySelection::Auto { height: None });
+        let mut selection = selection_at(QualitySelection::Auto {
+            height: None,
+            candidate_id: None,
+        });
         selection.codec = CodecPolicy::Av1;
         selection.dynamic_range = DynamicRangePolicy::Sdr;
 
@@ -25093,6 +25473,8 @@ mod tests {
                 kind,
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10,
