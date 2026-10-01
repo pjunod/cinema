@@ -1264,7 +1264,10 @@ pattern = "publication_ready_at_ms"
 # S11 #690: +2 in feature-only tests/rolling_grid_campaign.rs: the owned
 # MemoryStore activation starts blocked, then the existing Confirm settlement
 # publishes it at zero. No shipped activation/publication policy changes.
-expected_occurrences = 102
+# A05 unknown-original actual prepared consumer: +1 blocked activation fixture
+# in http/hls/tests/chunk_06.rs; existing activation owns the write. No new
+# shipped publication path or observational authority is introduced.
+expected_occurrences = 103
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1306,7 +1309,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # one blocked activation fixture. Existing publication ownership is unchanged.
 # S11 #690: +1 for that same feature-only MemoryStore blocked activation in
 # tests/rolling_grid_campaign.rs, settled by the existing activation API.
-expected_occurrences = 34
+# Same A05 consumer fixture; test-only blocked initial activation, not a new
+# writer/settlement/producer lifecycle owner.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -1463,7 +1468,12 @@ pattern = "terminal_reason"
 # +1 browse reporting reads the terminal reason for a failed analysis badge.
 # +1: the capacity refusal carries a durable terminal reason of its own, so a
 # 503 is distinguishable from an anonymous producer fault.
-expected_occurrences = 33
+# +13 playback stall repair: six references project the existing winning cause
+# into the HLS 410 response (including one empty common DTO initializer).
+# Three define/validate/map its optional ControlErrorBody field; four existing
+# control fixtures explicitly initialize it to None. None writes durable state
+# or chooses a cause: retirement and the playback actor retain ownership.
+expected_occurrences = 46
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -3605,7 +3615,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # S11 #690: +1 for the same awaited 250 ms stop-file sleep in feature-only
 # tests/rolling_grid_campaign.rs, reviewed under all-async-sleeps above. Its
 # enclosing test owns/stops the actual session; no independent timer owner.
-expected_occurrences = 1154
+# +1 playback stall repair: the existing VOD inventory regression awaits a
+# 100-ms timeout while holding the manifest lock, proving Activity does not
+# acquire that lock or renew idle life. This is a test-only assertion bound,
+# owned by the fixture; no production timer or recovery owner is added.
+expected_occurrences = 1155
 
 [[module_structures]]
 id = "bare-time-constructor"

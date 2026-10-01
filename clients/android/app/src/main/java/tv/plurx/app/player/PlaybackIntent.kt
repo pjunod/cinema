@@ -613,6 +613,14 @@ internal class PlaybackTargetDeadline(private val timeoutMs: Long = 8_000) {
         return (timeoutMs - elapsedActiveMs - elapsedSinceSample).coerceIn(1, 1_000)
     }
 
+    /** Optional observation borrows this exact owner's remaining budget. */
+    fun remainingActiveMs(nowMs: Long, expectedSequence: Long, expectedOwner: Long): Long? {
+        if (generation != expectedSequence || owner != expectedOwner || fired || recovered || nowMs < observedAtMs)
+            return null
+        val projected = if (wasActive) (nowMs - observedAtMs).coerceAtMost(timeoutMs) else 0L
+        return (timeoutMs - elapsedActiveMs - projected).coerceIn(0L, timeoutMs)
+    }
+
     fun reset() {
         generation = null
         wasActive = false

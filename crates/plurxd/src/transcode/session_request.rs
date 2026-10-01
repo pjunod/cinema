@@ -3,6 +3,8 @@ use super::*;
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub id: String,
     /// `vod` for the immutable presentation; `live-recovery` for the
     /// temporary growing-HLS compatibility engine.

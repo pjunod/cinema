@@ -352,6 +352,7 @@ impl LinkReceipts {
         rows.staged.retain(|_, proof| {
             !proof.cancelled.is_cancelled()
                 && proof.deadline_unix_ms > crate::media_sessions::unix_ms()
+                && proof.trial_deadline.is_none_or(|deadline| now < deadline)
         });
         rows.receipts
             .retain(|_, row| now.saturating_duration_since(row.born) <= NONCE_TTL);
@@ -387,6 +388,9 @@ impl LinkReceipts {
         if proof.cancelled.is_cancelled()
             || !proof.stage.still_live()
             || proof.deadline_unix_ms <= crate::media_sessions::unix_ms()
+            || proof
+                .trial_deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
             || rows.sessions.len() >= SESSIONS && !rows.sessions.contains_key(&binding.session)
         {
             return;
@@ -460,6 +464,7 @@ impl LinkReceipts {
                 || !proof.fence.still_live()
                 || !proof.stage.still_live()
                 || proof.deadline_unix_ms <= crate::media_sessions::unix_ms()
+                || proof.trial_deadline.is_some_and(|deadline| now >= deadline)
         }) {
             return None;
         }
@@ -646,6 +651,9 @@ impl LinkReceipts {
             && proof.fence.still_live()
             && proof.stage.still_live()
             && proof.deadline_unix_ms > crate::media_sessions::unix_ms()
+            && proof
+                .trial_deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
             && route.session_id == binding.session
             && route.incarnation_id == binding.incarnation
             && route.owner_epoch == binding.owner_epoch
@@ -810,6 +818,7 @@ pub(crate) async fn positive_catalog(
                     && !(route == CandidateRoute::Encode
                         && candidate.route != CandidateRoute::Encode)
                 || measured_margin(candidate, link, measured.unwrap_or_default())
+                || unknown_stageable_original(candidate, measured.unwrap_or_default())
         })
         .cloned()
         .collect();
@@ -818,6 +827,27 @@ pub(crate) async fn positive_catalog(
     } else {
         permitted
     }
+}
+
+/// Exposes compatible source-copy choices for a bounded trial, without claiming
+/// a warm recommendation or full-output cost. Original file routes cannot be
+/// staged by the current HLS resolver; its source-copy contract is Remux.
+pub(super) fn unknown_stageable_original(
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+    outputs: &[crate::vodserve::retained::MeasuredCandidateOutput],
+) -> bool {
+    candidate.identity_matches()
+        && candidate.route == CandidateRoute::Remux
+        && candidate.decoder_compatible
+        && candidate.width > 0
+        && candidate.height > 0
+        && candidate.peak_bps.is_none()
+        && outputs.len() <= 64
+        && !outputs.iter().any(|output| {
+            output.candidate_id == candidate.id
+                && output.recipe_digest == candidate.recipe_digest
+                && output.route == candidate.route
+        })
 }
 
 fn measured_margin(
@@ -1214,6 +1244,77 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn a05_unknown_original_catalog_exposure_preserves_exact_cost_distinction() {
+        use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
+        let digest = [12; 32];
+        let original = QualityCandidate {
+            id: CandidateId::for_recipe_digest(digest),
+            recipe_digest: digest,
+            route: CandidateRoute::Remux,
+            normalized_geometry: true,
+            width: 3840,
+            height: 2160,
+            target_height: 2160,
+            average_bps: Some(90_000_000),
+            peak_bps: None,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: false,
+            sustainable: true,
+        };
+        let output = crate::vodserve::retained::MeasuredCandidateOutput {
+            candidate_id: original.id,
+            recipe_digest: digest,
+            route: original.route,
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "a".repeat(64),
+            qualification: "complete_full_mux_rfc8216_v1",
+            average_bps: 12_000_000,
+            peak_bps: 20_000_000,
+        };
+        assert!(
+            unknown_stageable_original(&original, &[]),
+            "source average is not whole-output peak"
+        );
+        assert!(
+            !measured_margin(&original, 30_000_000, &[]),
+            "trial exposure is not a recommendation"
+        );
+        for change in 0..5 {
+            let mut candidate = original.clone();
+            match change {
+                0 => candidate.route = CandidateRoute::Encode,
+                1 => candidate.route = CandidateRoute::Original,
+                2 => candidate.decoder_compatible = false,
+                3 => candidate.peak_bps = Some(20_000_000),
+                _ => candidate.recipe_digest[31] ^= 1,
+            }
+            assert!(
+                !unknown_stageable_original(&candidate, &[]),
+                "case {change}"
+            );
+        }
+        assert!(!unknown_stageable_original(
+            &original,
+            std::slice::from_ref(&output)
+        ));
+        assert!(!measured_margin(
+            &original,
+            30_000_000,
+            std::slice::from_ref(&output)
+        ));
+        let mut other = output.clone();
+        other.recipe_digest[31] ^= 1;
+        assert!(
+            unknown_stageable_original(&original, &[other]),
+            "full digest, not shortened ID, identifies cost"
+        );
+        let mut fitting = output;
+        fitting.peak_bps = 14_000_000;
+        assert!(measured_margin(&original, 30_000_000, &[fitting]));
+    }
+
     #[test]
     fn a05_warm_server_margin_uses_qualified_full_output_not_planned_candidate_rates() {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};
