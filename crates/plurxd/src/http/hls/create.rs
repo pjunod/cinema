@@ -1037,6 +1037,8 @@ pub(crate) async fn resolve_height(
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
     pub request: crate::transcode::SessionRequest,
+    /// Actual Auto policy after geometry/copy normalization, not wire intent.
+    pub candidate_auto_policy: bool,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
     pub height: i64,
@@ -1281,6 +1283,7 @@ pub(crate) async fn resolve_plan(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
+    let candidate_auto_policy = body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -1358,6 +1361,7 @@ pub(crate) async fn resolve_plan(
     }
     Ok(ResolvedPlan {
         request,
+        candidate_auto_policy,
         height,
         intent_fingerprint: fingerprint,
         plan_notes,
@@ -1642,7 +1646,6 @@ async fn create_with_purpose(
             .map_err(|error| {
                 ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
             })?;
-    let candidate_auto_policy = req.candidate_auto_policy();
     let resolved = resolve_plan(
         PlanInputs {
             state: &state,
@@ -1655,6 +1658,7 @@ async fn create_with_purpose(
         req,
     )
     .await?;
+    let candidate_auto_policy = resolved.candidate_auto_policy;
     let request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
