@@ -1603,3 +1603,15 @@ changed worker duration, so older shorter media cannot inherit its cache key.
 The worker receives source duration to avoid rounding an already aligned tail
 onto another video frame. Regressions cover rational/integer cadences and the
 planner/worker duration agreement. Unit execution remains deferred.
+
+### 10.30 Atomic bounded producer-group admission
+
+The existing node admission pool now supports a group of up to three producer
+permits in one CPU/GPU counter transition. A group fits its total allowance
+without the single-job idle oversize exception. Capacity, priority or arithmetic
+refusal changes no counters; each successful child permit remains independently
+owned until retirement. The normal single-producer API uses the same engine
+and preserves its established policy. The regression covers a two-video plus
+AAC group, partial release, waiting-viewer priority, overflow and refusal.
+Encoder permits now support shared ownership so a parent can retain its reservation while a worker clone remains held through reap. Ordinary producers still release with their exact process. Parent ownership still needs to retain these permits for its advertised family;
+this allocator alone does not grant child serving. Unit execution is deferred.

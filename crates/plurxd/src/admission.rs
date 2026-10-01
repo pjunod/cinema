@@ -631,6 +631,41 @@ impl Admissions {
         priority: Priority,
         claim: Option<u64>,
     ) -> Option<TranscodePermit> {
+        self.try_admit_bundles_claiming(
+            hardware_max,
+            software_budget,
+            std::slice::from_ref(estimate),
+            priority,
+            claim,
+        )?
+        .pop()
+    }
+
+    /// Reserve a bounded producer group in one pool transition. The caller
+    /// owns every returned permit before any child may start. Unlike a single
+    /// job, a group cannot use the idle-pool oversize exception: its promised
+    /// future parallel work must fit the whole current resource allowance.
+    pub fn try_admit_bundles_claiming(
+        &self,
+        hardware_max: usize,
+        software_budget: usize,
+        estimates: &[TranscodeResourceEstimate],
+        priority: Priority,
+        claim: Option<u64>,
+    ) -> Option<Vec<TranscodePermit>> {
+        if estimates.is_empty() || estimates.len() > 3 {
+            return None;
+        }
+        let hardware_needed = estimates
+            .iter()
+            .filter(|estimate| estimate.hardware_slot)
+            .count();
+        let software_needed = estimates.iter().try_fold(0_usize, |sum, estimate| {
+            sum.checked_add(estimate.cpu_threads)
+        })?;
+        if estimates.len() > 1 && software_needed > software_budget {
+            return None;
+        }
         let mut permits = self
             .permits
             .lock()
@@ -639,9 +674,7 @@ impl Admissions {
         let claim = claim.filter(|token| permits.holds_reservation(*token));
         match priority {
             Priority::Live if permits.background_active() => return None,
-            Priority::Background if permits.background_blocked() => {
-                return None;
-            }
+            Priority::Background if permits.background_blocked() => return None,
             Priority::Speculative
                 if (permits.live_waiting > 0 && claim.is_none()) || permits.background_active() =>
             {
@@ -649,12 +682,19 @@ impl Admissions {
             }
             _ => {}
         }
-        if estimate.hardware_slot && permits.hardware_used_except(claim) >= hardware_max {
+        if hardware_needed > 0
+            && permits
+                .hardware_used_except(claim)
+                .checked_add(hardware_needed)?
+                > hardware_max
+        {
             return None;
         }
-        if estimate.cpu_threads > 0 {
+        if software_needed > 0 {
             let used = permits.software_used_except(claim);
-            if used > 0 && used + estimate.cpu_threads > software_budget {
+            if (used > 0 || estimates.len() > 1)
+                && used.checked_add(software_needed)? > software_budget
+            {
                 return None;
             }
         }
@@ -663,38 +703,45 @@ impl Admissions {
                 .reservations
                 .retain(|reservation| reservation.token != token);
         }
-        // Past every refusal: from here the whole bundle is granted, so no
-        // caller can observe one half without the other.
-        if estimate.hardware_slot {
-            match priority {
-                Priority::Live | Priority::Speculative => permits.hardware_live += 1,
-                Priority::Background => permits.hardware_background += 1,
-            }
-        }
-        if estimate.cpu_threads > 0 {
-            match priority {
-                Priority::Live | Priority::Speculative => {
-                    permits.software_live_permits += 1;
-                    permits.software_live_used += estimate.cpu_threads;
+        // All refusals precede the first counter mutation. Another start sees
+        // either the whole group or none of it, including mixed CPU/GPU roles.
+        for estimate in estimates {
+            if estimate.hardware_slot {
+                match priority {
+                    Priority::Live | Priority::Speculative => permits.hardware_live += 1,
+                    Priority::Background => permits.hardware_background += 1,
                 }
-                Priority::Background => {
-                    permits.software_background_permits += 1;
-                    permits.software_background_used += estimate.cpu_threads;
+            }
+            if estimate.cpu_threads > 0 {
+                match priority {
+                    Priority::Live | Priority::Speculative => {
+                        permits.software_live_permits += 1;
+                        permits.software_live_used += estimate.cpu_threads;
+                    }
+                    Priority::Background => {
+                        permits.software_background_permits += 1;
+                        permits.software_background_used += estimate.cpu_threads;
+                    }
                 }
             }
         }
         drop(permits);
-        Some(TranscodePermit {
-            hardware: estimate.hardware_slot.then(|| HwSlot {
-                permits: Arc::clone(&self.permits),
-                owner: priority.into(),
-            }),
-            software: (estimate.cpu_threads > 0).then(|| SwPermit {
-                permits: Arc::clone(&self.permits),
-                owner: priority.into(),
-                weight: estimate.cpu_threads,
-            }),
-        })
+        Some(
+            estimates
+                .iter()
+                .map(|estimate| TranscodePermit {
+                    hardware: estimate.hardware_slot.then(|| HwSlot {
+                        permits: Arc::clone(&self.permits),
+                        owner: priority.into(),
+                    }),
+                    software: (estimate.cpu_threads > 0).then(|| SwPermit {
+                        permits: Arc::clone(&self.permits),
+                        owner: priority.into(),
+                        weight: estimate.cpu_threads,
+                    }),
+                })
+                .collect(),
+        )
     }
 
     /// Announce that a live start is queuing. Hold the guard for as long as the
@@ -1227,6 +1274,77 @@ mod tests {
             cpu_threads,
             decoder_threads: None,
         }
+    }
+
+    #[test]
+    fn bounded_producer_groups_reserve_all_roles_or_nothing() {
+        let admissions = Admissions::new();
+        let audio = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: 3,
+            decoder_threads: Some(1),
+        };
+        let group = [mixed(2), mixed(2), audio];
+        let before = admissions.snapshot();
+        assert!(admissions
+            .try_admit_bundles_claiming(1, 7, &group, Priority::Live, None)
+            .is_none());
+        assert_eq!(admissions.snapshot(), before, "GPU refusal reserves no CPU");
+        assert!(admissions
+            .try_admit_bundles_claiming(2, 6, &group, Priority::Live, None)
+            .is_none());
+        assert_eq!(
+            admissions.snapshot(),
+            before,
+            "a group has no idle-pool oversize exception"
+        );
+        let mut permits = admissions
+            .try_admit_bundles_claiming(2, 7, &group, Priority::Live, None)
+            .expect("two video roles and shared AAC fit together");
+        assert_eq!(permits.len(), 3);
+        assert_eq!(admissions.snapshot().hardware_used, 2);
+        assert_eq!(admissions.software_in_use(), 7);
+        assert!(admissions
+            .try_admit_bundle(2, 7, &audio, Priority::Speculative)
+            .is_none());
+        drop(permits.pop());
+        assert_eq!(admissions.software_in_use(), 4);
+        assert_eq!(admissions.snapshot().hardware_used, 2);
+        let parent = crate::vodencode::EncodePermit::from(permits.remove(0));
+        let retiring_worker = parent.clone();
+        drop(parent);
+        drop(permits);
+        assert_eq!(
+            admissions.snapshot().hardware_used,
+            1,
+            "ending the parent must not release an unreaped worker's GPU"
+        );
+        assert_eq!(admissions.software_in_use(), 2);
+        drop(retiring_worker);
+        assert_eq!(admissions.snapshot(), before);
+        assert!(admissions
+            .try_admit_bundles_claiming(2, 7, &[], Priority::Live, None)
+            .is_none());
+        assert!(admissions
+            .try_admit_bundles_claiming(4, 100, &[audio; 4], Priority::Live, None)
+            .is_none());
+        let overflow = [
+            TranscodeResourceEstimate {
+                cpu_threads: usize::MAX,
+                ..audio
+            },
+            audio,
+        ];
+        assert!(admissions
+            .try_admit_bundles_claiming(2, usize::MAX, &overflow, Priority::Live, None)
+            .is_none());
+        assert_eq!(admissions.snapshot(), before);
+        let waiter = admissions.wait_for_slot();
+        assert!(admissions
+            .try_admit_bundles_claiming(2, 7, &group, Priority::Speculative, None)
+            .is_none());
+        drop(waiter);
+        assert_eq!(admissions.snapshot(), before);
     }
 
     /// The reason the bundle exists. Taking the hardware slot and then waiting

@@ -253,12 +253,31 @@ pub(crate) struct PermitRefusal {
     pub pool: PoolSnapshot,
 }
 
-/// Kept by the pipe owner until the exact process has been reaped. The permit
-/// is not kept by a dormant rendition, an HTTP waiter, or a cache hit.
-#[derive(Debug)]
+/// Ordinary producers retain this until their exact process is reaped.
+/// A bounded family may additionally retain the same reservation for its
+/// attachment lifetime; a retiring worker's clone keeps capacity owned even
+/// when its parent has already ended.
+#[derive(Debug, Clone)]
 pub(crate) struct EncodePermit {
+    _reservation: Arc<EncodeReservation>,
+}
+
+#[derive(Debug)]
+struct EncodeReservation {
     _hardware: Option<HwSlot>,
     _software: Option<SwPermit>,
+}
+
+impl From<crate::admission::TranscodePermit> for EncodePermit {
+    fn from(bundle: crate::admission::TranscodePermit) -> Self {
+        let (hardware, software) = bundle.into_parts();
+        Self {
+            _reservation: Arc::new(EncodeReservation {
+                _hardware: hardware,
+                _software: software,
+            }),
+        }
+    }
 }
 
 impl Encoding {
@@ -442,11 +461,7 @@ impl Encoding {
         ) else {
             return refuse(false);
         };
-        let (hardware, software) = bundle.into_parts();
-        let permit = EncodePermit {
-            _hardware: hardware,
-            _software: software,
-        };
+        let permit = EncodePermit::from(bundle);
         queued.take();
         self.handoff_claim.lock().expect("VOD handoff claim").take();
         self.handoff_wait
