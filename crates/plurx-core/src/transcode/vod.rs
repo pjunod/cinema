@@ -107,6 +107,104 @@ impl VodFrameGrid {
     }
 }
 
+/// AAC correction shared by muxed VOD and the single family soundtrack.
+/// Seek and trim on the global sample lattice rather than restarting its phase.
+struct AudioClock {
+    target: f64,
+    seek: f64,
+    relative_target_samples: i64,
+}
+
+impl AudioClock {
+    fn new(start_seconds: f64, offset_ms: i64) -> Self {
+        let anchor = vod_audio_anchor(start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
+        let target = anchor - offset_ms as f64 / 1_000.0;
+        let target_samples = (target * f64::from(VOD_AUDIO_RATE)).round() as i64;
+        let seek_samples = target_samples
+            .saturating_sub(i64::from(VOD_AUDIO_RATE) * 2)
+            .max(0) as u64
+            / VOD_AAC_FRAME_SAMPLES
+            * VOD_AAC_FRAME_SAMPLES;
+        Self {
+            target,
+            seek: seek_samples as f64 / f64::from(VOD_AUDIO_RATE),
+            relative_target_samples: target_samples
+                .saturating_sub(i64::try_from(seek_samples).unwrap_or(i64::MAX)),
+        }
+    }
+
+    fn filter(&self) -> String {
+        format!(
+            "asetpts=PTS-{:.9}/TB,aresample=48000:async=1:first_pts=0,atrim=start_sample={},asetpts=PTS-({}),aresample=48000:async=1:first_pts=0,apad",
+            self.seek, self.relative_target_samples.max(0), self.relative_target_samples
+        )
+    }
+}
+
+/// Audio-only fMP4 producer for a continuous presentation family. Its recipe
+/// must be resolved with the selected source audio present. Video-only rung
+/// plans use `input_has_audio = false` before resolution instead of stripping
+/// audio from a validated muxed plan after its identity has been computed.
+/// The publisher still owns priming removal and film-global timestamp restore,
+/// exactly as for the existing muxed VOD runner.
+pub fn vod_shared_audio_args(
+    plan: &ResolvedTranscode,
+    execution: &TranscodeExecution,
+    duration_seconds: f64,
+) -> Option<Vec<String>> {
+    let media = plan.options();
+    if !media.input_has_audio
+        || !duration_seconds.is_finite()
+        || duration_seconds <= execution.start_seconds
+        || !execution.start_seconds.is_finite()
+        || execution.start_seconds < 0.0
+    {
+        return None;
+    }
+    let clock = AudioClock::new(execution.start_seconds, media.audio_offset_ms);
+    let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
+    Some(vec![
+        "-copyts".into(),
+        "-noaccurate_seek".into(),
+        "-ss".into(),
+        format!("{:.9}", clock.seek),
+        "-i".into(),
+        execution.source_path.to_string_lossy().into_owned(),
+        "-map".into(),
+        format!("0:a:{}", media.audio_index.unwrap_or(0)),
+        "-vn".into(),
+        "-sn".into(),
+        "-dn".into(),
+        "-map_chapters".into(),
+        "-1".into(),
+        "-af".into(),
+        clock.filter(),
+        "-c:a".into(),
+        "aac".into(),
+        "-profile:a".into(),
+        "aac_low".into(),
+        "-ac".into(),
+        media.audio_channels.to_string(),
+        "-b:a".into(),
+        format!("{}k", media.audio_bitrate_kbps),
+        "-ar".into(),
+        VOD_AUDIO_RATE.to_string(),
+        "-t".into(),
+        format!("{:.9}", duration_seconds - anchor),
+        "-avoid_negative_ts".into(),
+        "disabled".into(),
+        "-use_editlist".into(),
+        "0".into(),
+        "-movflags".into(),
+        "+empty_moov+delay_moov+default_base_moof".into(),
+        "-frag_duration".into(),
+        "2000000".into(),
+        "-f".into(),
+        "mp4".into(),
+        "pipe:1".into(),
+    ])
+}
+
 /// The production encoded fMP4 pipe. Source-clock filters run before the
 /// final rebase, so libass and manual A/V correction retain film time after
 /// seeking. The output frame grid and IDRs are identical on every restart.
@@ -120,20 +218,9 @@ pub fn vod_pipe_args(
     let media = plan.options();
     let target = execution.start_seconds.max(0.0);
     let audio_anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
-    let audio_target = audio_anchor - media.audio_offset_ms as f64 / 1_000.0;
-    let audio_target_samples = (audio_target * f64::from(VOD_AUDIO_RATE)).round() as i64;
-    // A second input opened at film zero made every seek decode the whole
-    // preceding soundtrack before ffmpeg could emit its init. On slower
-    // hosts a resume twenty minutes into a feature therefore exhausted the
-    // materialization deadline without producing one byte. Seek close to the
-    // wanted AAC anchor, on the film-global AAC lattice, while retaining two
-    // seconds for demux, resample, and encoder preroll.
-    let audio_seek_samples = audio_target_samples
-        .saturating_sub(i64::from(VOD_AUDIO_RATE) * 2)
-        .max(0) as u64
-        / VOD_AAC_FRAME_SAMPLES
-        * VOD_AAC_FRAME_SAMPLES;
-    let audio_seek = audio_seek_samples as f64 / f64::from(VOD_AUDIO_RATE);
+    let audio = AudioClock::new(target, media.audio_offset_ms);
+    let audio_target = audio.target;
+    let audio_seek = audio.seek;
     let mut input = execution.clone();
     // Decode a short preroll. Positive correction needs earlier audio;
     // negative correction is an absolute trim, not repeated per-seek silence.
@@ -247,14 +334,12 @@ pub fn vod_pipe_args(
         args[index + 1] = format!("{graph}{last}{BURNED_VIDEO_LABEL}");
     }
     if has_audio {
-        let relative_audio_target_samples =
-            audio_target_samples - i64::try_from(audio_seek_samples).unwrap_or(i64::MAX);
+        args.extend(["-af".to_owned(), audio.filter()]);
         args.extend([
-            "-af".to_owned(),
-            format!(
-                "asetpts=PTS-{audio_seek:.9}/TB,aresample=48000:async=1:first_pts=0,atrim=start_sample={},asetpts=PTS-({relative_audio_target_samples}),aresample=48000:async=1:first_pts=0,apad",
-                relative_audio_target_samples.max(0)
-            ),
+            "-ar".to_owned(),
+            VOD_AUDIO_RATE.to_string(),
+            "-profile:a".to_owned(),
+            "aac_low".to_owned(),
         ]);
     }
     if let Some(index) = args.iter().position(|arg| arg == "-force_key_frames") {
@@ -271,10 +356,6 @@ pub fn vod_pipe_args(
         "-1".to_owned(),
         "-t".to_owned(),
         format!("{:.9}", (duration_seconds - audio_anchor).max(0.0)),
-        "-ar".to_owned(),
-        VOD_AUDIO_RATE.to_string(),
-        "-profile:a".to_owned(),
-        "aac_low".to_owned(),
         // No reorder delay: the plan addresses presented frame boundaries,
         // not a decoder preroll hidden before the URI's declared start.
         "-bf".to_owned(),
@@ -403,6 +484,43 @@ mod tests {
             VodFrameGrid::new(24, 1).expect("grid"),
             12.0,
         );
+        assert!(args.iter().any(|arg| arg == "-an"));
+        assert!(!args.iter().any(|arg| arg.starts_with("0:a:")));
+        assert!(!args.iter().any(|arg| arg == "-c:a" || arg == "-profile:a"));
+        assert!(vod_shared_audio_args(&plan, &execution, 12.0).is_none());
+
+        let mut audio_options = plan.options().clone();
+        audio_options.input_has_audio = true;
+        audio_options.audio_index = Some(2);
+        audio_options.audio_offset_ms = -175;
+        let audio_plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(
+                crate::transcode::Encoder::Software,
+                audio_options,
+            ),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("audio plan");
+        assert_ne!(audio_plan.plan_digest(), plan.plan_digest());
+        let mut restart = execution.clone();
+        restart.start_seconds = 10.01;
+        let audio_args =
+            vod_shared_audio_args(&audio_plan, &restart, 12.0).expect("selected audio producer");
+        assert!(audio_args.windows(2).any(|pair| pair == ["-map", "0:a:2"]));
+        assert!(!audio_args.iter().any(|arg| arg == "-vf" || arg == "-c:v"));
+        assert!(audio_args.iter().any(|arg| arg == "-vn"));
+        let clock = AudioClock::new(restart.start_seconds, -175);
+        assert!(audio_args
+            .windows(2)
+            .any(|pair| pair[0] == "-af" && pair[1] == clock.filter()));
+        restart.start_seconds = 12.0;
+        assert!(vod_shared_audio_args(&audio_plan, &restart, 12.0).is_none());
         let chapter_options = args
             .windows(2)
             .filter(|pair| pair[0] == "-map_chapters")

@@ -1150,3 +1150,24 @@ After disposal, bounded per-interval metadata may be removed, while the
 The ledger records dependency reservations; physical cache-pin renewal and
 producer serving are the next integration work, not evidence already supplied
 by this storage model. All newly authored behavioral regressions remain unrun.
+
+### 10.4 Shared soundtrack command construction
+
+The encoder argument builder now honors a resolved video-only output: it
+uses `-an`, omits the audio map and omits AAC encoder options. Continuous
+rung planning must set `input_has_audio = false` before resolution so the
+validated plan digest describes the actual artifact. Legacy argument
+construction retains its existing optional audio mapping.
+
+`vod_shared_audio_args` constructs the independent AAC-only fMP4 producer
+from the selected audio recipe. It shares the existing film-global sample
+lattice, seek preroll and offset correction with muxed VOD, uses an exact
+selected audio map, and refuses silent sources or invalid execution bounds.
+Video encoders cannot restart this producer during a rung change. The
+existing publisher's AAC priming removal and timestamp restoration must
+be integrated before these bytes can be served as the family soundtrack;
+command construction alone is not publication or join qualification.
+
+The encoder regression is authored in the existing VOD recipe test and
+compiled without execution. Playback actor integration and decoded media
+qualification remain outstanding.

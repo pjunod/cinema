@@ -45,7 +45,8 @@ pub use encoder::{
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    vod_audio_anchor, vod_pipe_args, vod_shared_audio_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES,
+    VOD_AUDIO_RATE,
 };
 
 use crate::domain::MediaFile;
@@ -1774,10 +1775,15 @@ fn hls_args_inner(
         Some(_) => BURNED_VIDEO_LABEL.to_owned(),
         None => selected_video.clone(),
     });
-    args.push("-map".into());
-    match opts.audio_index {
-        Some(i) => args.push(format!("0:a:{i}?")),
-        None => args.push("0:a:0?".to_owned()),
+    let encode_audio = plan.is_none_or(|plan| plan.options().input_has_audio);
+    if encode_audio {
+        args.push("-map".into());
+        match opts.audio_index {
+            Some(i) => args.push(format!("0:a:{i}?")),
+            None => args.push("0:a:0?".to_owned()),
+        }
+    } else {
+        args.push("-an".into());
     }
 
     match overlay {
@@ -1854,18 +1860,20 @@ fn hls_args_inner(
 
     // Audio: downmix + AAC (browser-universal), with the A/V correction as
     // a filter on the same input rather than a second read of the source.
-    if let Some(af) = audio_offset {
-        args.push("-af".into());
-        args.push(af);
+    if encode_audio {
+        if let Some(af) = audio_offset {
+            args.push("-af".into());
+            args.push(af);
+        }
+        args.push("-c:a".into());
+        args.push("aac".into());
+        args.push("-ac".into());
+        args.push(opts.audio_channels.to_string());
+        args.push("-b:a".into());
+        args.push(format!("{}k", opts.audio_bitrate_kbps));
+        args.push("-ar".into());
+        args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
     }
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-ac".into());
-    args.push(opts.audio_channels.to_string());
-    args.push("-b:a".into());
-    args.push(format!("{}k", opts.audio_bitrate_kbps));
-    args.push("-ar".into());
-    args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
 
     // Start the MPEG-TS timeline at zero.
     //
