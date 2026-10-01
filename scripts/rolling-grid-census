@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+"""Offline census of copied owned rolling outputs; never opens a server URL."""
+import argparse
+from fractions import Fraction
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+import statistics
+import subprocess
+import time
+
+MAX_SEGMENTS = 256
+MAX_BYTES = 512 * 1024 * 1024
+HASH = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def require(value, message):
+    if not value:
+        raise ValueError(message)
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open("rb") as source:
+        total = 0
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            total += len(block)
+            require(total <= MAX_BYTES, "hash input bound")
+            h.update(block)
+    return h.hexdigest()
+
+
+def owned_file(root, name):
+    require(isinstance(name, str) and Path(name).name == name, "not a flat private object")
+    path = root / name
+    require(not path.is_symlink() and path.is_file(), "missing/symlink object")
+    require(path.stat().st_uid == os.getuid(), "foreign object owner")
+    return path
+
+
+def owned_root(root):
+    require(root.is_absolute() and root.resolve() == root, "root must be exact absolute path")
+    require(root.is_dir() and not root.is_symlink(), "invalid private root")
+    require(root.stat().st_uid == os.getuid() and root.stat().st_mode & 0o077 == 0,
+            "root must be owned mode700")
+
+
+def bounded_copy(source, target, remaining):
+    """Never let a concurrently growing source defeat the preflight size cap."""
+    with source.open("rb") as origin, target.open("xb") as destination:
+        total = 0
+        for block in iter(lambda: origin.read(1024 * 1024), b""):
+            total += len(block)
+            require(total <= remaining, "copy input grew beyond bound")
+            destination.write(block)
+
+
+def playlist_entries(data):
+    require(len(data) <= 1024 * 1024, "playlist bound")
+    lines = data.splitlines()
+    require(lines and lines[0] == "#EXTM3U", "not a media playlist")
+    pending = None
+    result = []
+    for line in lines[1:]:
+        if line.startswith("#EXTINF:"):
+            require(pending is None, "unpaired EXTINF")
+            try:
+                pending = Fraction(line[8:].split(",", 1)[0])
+            except (ValueError, ZeroDivisionError) as error:
+                raise ValueError("invalid EXTINF") from error
+            require(0 < pending <= 10, "invalid EXTINF range")
+        elif line and not line.startswith("#"):
+            require(pending is not None, "URI without EXTINF")
+            require(re.fullmatch(r"seg[0-9]+\.(?:ts|m4s)", line), "foreign/URL segment")
+            require(line not in {name for name, _ in result}, "duplicate segment")
+            result.append((line, pending))
+            pending = None
+    require(pending is None and 30 <= len(result) <= MAX_SEGMENTS, "incomplete segment coverage")
+    numbers = [int(re.search(r"[0-9]+", name)[0]) for name, _ in result]
+    require(numbers == list(range(numbers[0], numbers[0] + len(numbers))), "segment gap/order")
+    return result
+
+
+def provenance(value):
+    require(value.get("route") == "rolling-transcode", "not an actual rolling transcode route")
+    for field in ("source_sha256", "graph_argv_sha256", "daemon_sha256", "tool_sha256"):
+        require(isinstance(value.get(field), str) and HASH.fullmatch(value[field]), "missing exact " + field)
+    require(re.fullmatch(r"[0-9a-f]{40}", value.get("source_commit", "")), "missing source commit")
+    for field in ("session_id", "family", "pipeline", "fixture", "tool_version"):
+        require(isinstance(value.get(field), str) and 0 < len(value[field]) <= 256, "missing " + field)
+    require(value.get("rung") in (360, 480, 720, 1080), "unknown rung")
+    require(isinstance(value.get("output_geometry"), list) and len(value["output_geometry"]) == 2
+            and all(type(n) is int and 0 < n <= 8192 for n in value["output_geometry"]),
+            "unknown output geometry")
+    rate = value.get("output_cadence")
+    require(isinstance(rate, list) and len(rate) == 2 and all(type(n) is int for n in rate), "unknown output cadence")
+    require(all(0 < n <= 1000000 for n in rate), "invalid output cadence")
+    cadence = Fraction(*rate)
+    require(1 <= cadence <= 240, "unbounded output cadence")
+    return cadence
+
+
+def evaluate(root, receipt):
+    """Consume immutable copied media and raw tool output, not fixture assertions."""
+    owned_root(root)
+    require(receipt.get("version") == 1, "unknown receipt version")
+    cadence = provenance(receipt["provenance"])
+    if receipt.get("capture_kind") == "owned-copy":
+        version_receipt = receipt["tool_version_receipt"]
+        version = owned_file(root, version_receipt["name"])
+        require(digest(version) == version_receipt["sha256"]
+                and version.read_text().splitlines()[0] == receipt["provenance"]["tool_version"],
+                "tool version receipt changed")
+    playlist = owned_file(root, receipt["playlist"]["name"])
+    require(digest(playlist) == receipt["playlist"]["sha256"], "playlist changed")
+    entries = playlist_entries(playlist.read_text())
+    rows = receipt.get("segments", [])
+    require(len(rows) == len(entries), "missing segment/probe evidence")
+    total = 0
+    starts = []
+    keys = 0
+    durations = []
+    extra_keys = 0
+    for (name, extinf), row in zip(entries, rows):
+        require(row.get("name") == name, "segment evidence order mismatch")
+        media = owned_file(root, name)
+        raw = owned_file(root, row["probe_name"])
+        total += media.stat().st_size + raw.stat().st_size
+        require(media.stat().st_size > 0 and total <= MAX_BYTES, "media bound/empty segment")
+        require(raw.stat().st_size <= 16 * 1024 * 1024, "probe output bound")
+        require(digest(media) == row["sha256"] and digest(raw) == row["probe_sha256"], "media/probe changed")
+        probe = json.loads(raw.read_text())
+        streams = probe.get("streams", [])
+        require(len(streams) == 1 and Fraction(streams[0]["avg_frame_rate"]) == cadence,
+                "probe cadence differs from output contract")
+        require([streams[0].get("width"), streams[0].get("height")] == receipt["provenance"]["output_geometry"],
+                "probe geometry differs from output contract")
+        require(0 < Fraction(streams[0]["time_base"]) <= 1, "unknown video timebase")
+        packets = probe.get("packets", [])
+        require(packets and len(packets) <= 2500, "missing/unbounded packet timeline")
+        times = [Fraction(p["pts_time"]) for p in packets]
+        require(all(math.isfinite(float(t)) for t in times), "invalid packet clock")
+        ordered = sorted(times)
+        tick = Fraction(streams[0]["time_base"])
+        require(tick <= 1 / cadence and len(ordered) >= math.ceil(2 * cadence) - 1,
+                "coarse clock or incomplete completed-segment packet evidence")
+        require(all(abs((b - a) - 1 / cadence) <= 2 * tick
+                    for a, b in zip(ordered, ordered[1:])), "packet clock does not prove claimed cadence")
+        # PTS can be reordered by B frames: use presentation start, not demux order.
+        first = min(range(len(times)), key=times.__getitem__)
+        starts.append(times[first])
+        keys += "K" in packets[first].get("flags", "")
+        extra_keys += sum("K" in p.get("flags", "") for p in packets) - ("K" in packets[first].get("flags", ""))
+        durations.append(extinf)
+    require(all(b > a for a, b in zip(starts, starts[1:])), "nonincreasing segment presentation starts")
+    frame = 1 / cadence
+    deviations = [abs(duration - 2) for duration in durations]
+    # ENDLIST may contain a genuinely short terminal segment; it remains recorded
+    # but cannot masquerade as a completed two-second measurement segment.
+    require(all(duration >= 2 - frame for duration in durations), "short/truncated census segment")
+    clock_deviations = [abs((b - a) - 2) for a, b in zip(starts, starts[1:])]
+    max_error = max(deviations + clock_deviations)
+    return {"segments": len(rows), "extinf_min": float(min(durations)),
+            "extinf_median": float(statistics.median(durations)), "extinf_max": float(max(durations)),
+            "keyframe_at_start_count": keys, "internal_extra_keys": extra_keys,
+            "max_grid_error_ms": float(max_error * 1000), "max_grid_error_frames": float(max_error / frame),
+            "verdict": "no-drift" if max_error <= frame and keys == len(rows) else "drift",
+            "limits": "keyframe flags are not an independent IDR/CRA proof; provenance is supplied, not server-authenticated; one cell is not full M3 acceptance"}
+
+
+def probe_tool(tool, media, target):
+    argv = [str(tool), "-version"] if media is None else [str(tool), "-v", "error", "-select_streams", "v:0", "-show_streams",
+            "-show_packets", "-show_entries", "stream=avg_frame_rate,time_base,width,height:packet=pts_time,flags",
+            "-of", "json", str(media)]
+    errors = target.with_suffix(".stderr")
+    with target.open("xb") as output, errors.open("xb") as error_output:
+        child = subprocess.Popen(argv, stdout=output, stderr=error_output)
+        deadline = time.monotonic() + 20
+        try:
+            while child.poll() is None:
+                require(time.monotonic() < deadline and target.stat().st_size <= 16 * 1024 * 1024
+                        and errors.stat().st_size <= 1024 * 1024,
+                        "probe deadline/output bound")
+                time.sleep(.02)
+            require(child.returncode == 0, "ffprobe refused copied segment")
+            require(target.stat().st_size <= 16 * 1024 * 1024 and errors.stat().st_size <= 1024 * 1024,
+                    "completed probe output bound")
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+    return argv
+
+
+def capture(source, output, tool, facts):
+    owned_root(source)
+    require(not output.exists() and output.is_absolute() and output.parent.resolve() == output.parent,
+            "output must be a fresh exact private path")
+    owned_root(output.parent)
+    provenance(facts)
+    require(tool.is_absolute() and tool.is_file() and digest(tool) == facts["tool_sha256"], "tool identity mismatch")
+    playlist = owned_file(source, "index.m3u8")
+    entries = playlist_entries(playlist.read_text())
+    # Preflight all objects before creating any copied campaign.
+    require(sum(owned_file(source, name).stat().st_size for name, _ in entries) <= MAX_BYTES,
+            "source media exceeds copy bound")
+    output.mkdir(mode=0o700)
+    receipt = {"version": 1, "capture_kind": "owned-copy", "provenance": facts,
+               "segments": [], "started": time.time()}
+    (output / "capture-intent.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    version = output / "tool-version.txt"
+    probe_tool(tool, None, version)
+    require(version.read_text().splitlines()[0] == facts["tool_version"], "actual tool version mismatch")
+    receipt["tool_version_receipt"] = {"name": version.name, "sha256": digest(version)}
+    bounded_copy(playlist, output / "index.m3u8", 1024 * 1024)
+    receipt["playlist"] = {"name": "index.m3u8", "sha256": digest(output / "index.m3u8")}
+    deadline = time.monotonic() + 600
+    for name, _ in entries:
+        require(time.monotonic() < deadline, "aggregate capture deadline")
+        require(sum(p.stat().st_size for p in output.iterdir()) <= MAX_BYTES, "aggregate copy/probe bound")
+        original = owned_file(source, name)
+        before = digest(original)
+        bounded_copy(original, output / name,
+                     MAX_BYTES - sum(p.stat().st_size for p in output.iterdir()))
+        require(digest(original) == before == digest(output / name), "source changed during copy")
+        raw = output / (name + ".probe.json")
+        argv = probe_tool(tool, output / name, raw)
+        require(sum(p.stat().st_size for p in output.iterdir()) <= MAX_BYTES, "aggregate completed probe bound")
+        receipt["segments"].append({"name": name, "sha256": before, "probe_name": raw.name,
+                                    "probe_sha256": digest(raw), "probe_argv": argv})
+    require(digest(playlist) == receipt["playlist"]["sha256"], "playlist changed during capture")
+    receipt["finished"] = time.time()
+    receipt["result"] = evaluate(output, receipt)
+    (output / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
+    for path in output.iterdir():
+        path.chmod(0o400)
+    return receipt["result"]
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("mode", choices=("validate", "capture"))
+    parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--ffprobe", type=Path)
+    parser.add_argument("--provenance", type=Path)
+    args = parser.parse_args()
+    if args.mode == "validate":
+        result = evaluate(args.root, json.loads(owned_file(args.root, "receipt.json").read_text()))
+    else:
+        require(args.output and args.ffprobe and args.provenance, "capture parameters missing")
+        result = capture(args.root, args.output, args.ffprobe, json.loads(args.provenance.read_text()))
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
