@@ -87,7 +87,10 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 10;
+const SIDECAR_SCHEMA_VERSION: i64 = 11;
+pub(crate) const NETWORK_PRIOR_LINK_COLUMNS: &str = "
+ALTER TABLE network_priors ADD COLUMN link_worst_rung_height INTEGER;
+ALTER TABLE network_priors ADD COLUMN link_starved_at_ms INTEGER;";
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -243,6 +246,8 @@ fn prior_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<NetworkPrior> {
         starved_at_ms: row.get(5)?,
         sample_count,
         updated_at_ms: row.get(7)?,
+        link_worst_rung_height: row.get(8)?,
+        link_starved_at_ms: row.get(9)?,
     })
 }
 
@@ -279,6 +284,12 @@ fn fold_prior(
     observation: &NetworkPriorObservation,
 ) -> Result<NetworkPrior, StoreError> {
     let transaction = conn;
+    let link = observation.measured_link.as_ref().filter(|proof| {
+        proof.fresh_at(observation.observed_at_ms)
+            && observation
+                .starved_rung_height
+                .is_some_and(|height| height > 0)
+    });
     // The starvation verdict is still the stronger signal while it is fresh —
     // a `min` that a later stall can only lower — but it now expires. Past
     // `NETWORK_PRIOR_STARVED_TTL_MS` from the starvation that set it, the next
@@ -290,12 +301,13 @@ fn fold_prior(
     transaction.execute(
         "INSERT INTO network_priors (
              user_id, credential_generation, client_class, network_fingerprint, sustained_kbps,
-             worst_rung_height, starved_at_ms, sample_count, updated_at_ms
+             worst_rung_height, starved_at_ms, sample_count, updated_at_ms,
+             link_worst_rung_height, link_starved_at_ms
          ) VALUES (
              ?1, ?2, ?3, ?4, ?5, ?6,
              CASE WHEN ?6 IS NULL THEN NULL ELSE ?7 END,
              CASE WHEN ?5 IS NULL THEN 0 ELSE 1 END,
-             ?7
+             ?7, ?9, ?10
          )
          ON CONFLICT(credential_generation, client_class, network_fingerprint) DO UPDATE SET
              sustained_kbps = CASE
@@ -322,6 +334,25 @@ fn fold_prior(
                      + CASE WHEN excluded.sustained_kbps IS NULL THEN 0 ELSE 1 END,
                  4294967295
              ),
+             link_worst_rung_height = CASE
+                 WHEN excluded.link_starved_at_ms IS NOT NULL
+                      AND (network_priors.link_starved_at_ms IS NULL
+                           OR excluded.link_starved_at_ms >= network_priors.link_starved_at_ms)
+                     THEN CASE
+                         WHEN network_priors.link_starved_at_ms IS NULL
+                              OR excluded.link_starved_at_ms - network_priors.link_starved_at_ms > ?8
+                             THEN excluded.link_worst_rung_height
+                         ELSE min(network_priors.link_worst_rung_height, excluded.link_worst_rung_height)
+                     END
+                 ELSE network_priors.link_worst_rung_height
+             END,
+             link_starved_at_ms = CASE
+                 WHEN excluded.link_starved_at_ms IS NOT NULL
+                      AND (network_priors.link_starved_at_ms IS NULL
+                           OR excluded.link_starved_at_ms >= network_priors.link_starved_at_ms)
+                     THEN excluded.link_starved_at_ms
+                 ELSE network_priors.link_starved_at_ms
+             END,
              updated_at_ms = excluded.updated_at_ms
          WHERE excluded.updated_at_ms >= network_priors.updated_at_ms",
         params![
@@ -333,6 +364,8 @@ fn fold_prior(
             observation.starved_rung_height,
             observation.observed_at_ms,
             NETWORK_PRIOR_STARVED_TTL_MS,
+            link.and(observation.starved_rung_height),
+            link.map(|proof| proof.completed_at_ms()),
         ],
     )?;
     transaction.execute(
@@ -351,7 +384,8 @@ fn fold_prior(
     )?;
     let prior = transaction.query_row(
         "SELECT credential_generation, client_class, network_fingerprint, sustained_kbps,
-                worst_rung_height, starved_at_ms, sample_count, updated_at_ms
+                worst_rung_height, starved_at_ms, sample_count, updated_at_ms,
+                link_worst_rung_height, link_starved_at_ms
          FROM network_priors
          WHERE credential_generation = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
         params![
@@ -374,7 +408,8 @@ pub(crate) fn get_prior(
 
     conn.query_row(
         "SELECT credential_generation, client_class, network_fingerprint, sustained_kbps,
-                worst_rung_height, starved_at_ms, sample_count, updated_at_ms
+                worst_rung_height, starved_at_ms, sample_count, updated_at_ms,
+                link_worst_rung_height, link_starved_at_ms
          FROM network_priors
          WHERE credential_generation = ?1 AND client_class = ?2 AND network_fingerprint = ?3",
         params![credential_generation, client_class, network_fingerprint],
@@ -574,6 +609,12 @@ impl NodeLocalTelemetry {
             if creating_indexes || !column_exists(&conn, "fragment_indexes", "validated_revision")?
             {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN);
+                migration.push('\n');
+            }
+            // v11: old negatives remain unattributed. Both fresh and upgraded
+            // sidecars start the measured Link pair at NULL.
+            if current < 11 {
+                migration.push_str(NETWORK_PRIOR_LINK_COLUMNS);
                 migration.push('\n');
             }
             migration.push_str(&format!(
@@ -879,7 +920,196 @@ mod tests {
             throughput_kbps,
             starved_rung_height,
             observed_at_ms: at_ms,
+            measured_link: None,
         }
+    }
+
+    #[tokio::test]
+    async fn a05_measured_link_fold_preserves_legacy_isolation_and_completion_age() {
+        use crate::domain::{CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorCause};
+        let root = tempfile::tempdir().expect("root");
+        let sidecar =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("open sidecar");
+        let mut sample = observation("network", Some(8_000), Some(720), 100_000);
+        let legacy = sidecar
+            .observe_prior(sample.clone())
+            .await
+            .expect("fold legacy");
+        assert_eq!(legacy.active_starved_rung(100_000), Some(720));
+        assert_eq!(legacy.active_link_starved_rung(100_000), None);
+        sample.observed_at_ms = 110_000;
+        sample.starved_rung_height = Some(1080);
+        sample.measured_link = MeasuredLinkObservation::from_completed_transfer(
+            NetworkPriorCause::Link,
+            CompletedNetworkTransfer {
+                body_bytes: 1_000_000,
+                body_duration_ms: 1_000,
+                completed_at_ms: 105_000,
+                network_load: Some(true),
+                from_local_cache: Some(false),
+                producer_paced: Some(false),
+            },
+            sample.observed_at_ms,
+        );
+        let measured = sidecar
+            .observe_prior(sample.clone())
+            .await
+            .expect("fold measured Link");
+        assert_eq!(measured.worst_rung_height, Some(720));
+        assert_eq!(measured.active_link_starved_rung(110_000), Some(1080));
+        assert_eq!(measured.link_starved_at_ms, Some(105_000));
+        // Reusing the same proof after its transfer freshness expires cannot
+        // refresh the measured pair, even though legacy telemetry still folds.
+        sample.observed_at_ms = 121_000;
+        sample.starved_rung_height = Some(480);
+        let stale = sidecar
+            .observe_prior(sample.clone())
+            .await
+            .expect("fold stale proof");
+        assert_eq!(stale.worst_rung_height, Some(480));
+        assert_eq!(stale.link_worst_rung_height, Some(1080));
+        assert_eq!(stale.link_starved_at_ms, Some(105_000));
+        let mut out_of_order = sample.clone();
+        out_of_order.observed_at_ms = 115_000;
+        out_of_order.starved_rung_height = Some(240);
+        assert_eq!(
+            sidecar
+                .observe_prior(out_of_order)
+                .await
+                .expect("fold out of order"),
+            stale
+        );
+        sample.measured_link = None;
+        sample.observed_at_ms = 105_001 + NETWORK_PRIOR_STARVED_TTL_MS;
+        let expired = sidecar
+            .observe_prior(sample.clone())
+            .await
+            .expect("fold expired");
+        assert_eq!(
+            expired.active_link_starved_rung(sample.observed_at_ms),
+            None
+        );
+        assert_eq!(expired.link_starved_at_ms, Some(105_000));
+        let mut rearmed = sample.clone();
+        rearmed.starved_rung_height = Some(1440);
+        rearmed.measured_link = MeasuredLinkObservation::from_completed_transfer(
+            NetworkPriorCause::Link,
+            CompletedNetworkTransfer {
+                body_bytes: 1_000_000,
+                body_duration_ms: 1_000,
+                completed_at_ms: rearmed.observed_at_ms,
+                network_load: Some(true),
+                from_local_cache: Some(false),
+                producer_paced: Some(false),
+            },
+            rearmed.observed_at_ms,
+        );
+        let renewed = sidecar.observe_prior(rearmed).await.expect("rearm Link");
+        assert_eq!(
+            renewed.active_link_starved_rung(sample.observed_at_ms),
+            Some(1440)
+        );
+        assert_eq!(renewed.link_starved_at_ms, Some(sample.observed_at_ms));
+        sample.credential_generation = CredentialGeneration::from("other-generation".to_owned());
+        let other = sidecar
+            .observe_prior(sample)
+            .await
+            .expect("fold other generation");
+        assert_eq!(other.link_worst_rung_height, None);
+        drop(sidecar);
+        let reopened =
+            NodeLocalTelemetry::open(&root.path().join("telemetry.db")).expect("reopen sidecar");
+        let retained = reopened
+            .prior("test-gen".into(), "safari".into(), "network".into())
+            .await
+            .expect("read retained Link")
+            .expect("retained prior");
+        assert_eq!(retained, renewed);
+    }
+
+    #[test]
+    fn a05_completed_link_proof_refuses_other_causes_and_unknown_body_provenance() {
+        use crate::domain::{CompletedNetworkTransfer, MeasuredLinkObservation, NetworkPriorCause};
+        let transfer = CompletedNetworkTransfer {
+            body_bytes: 1_000_000,
+            body_duration_ms: 1_000,
+            completed_at_ms: 100_000,
+            network_load: Some(true),
+            from_local_cache: Some(false),
+            producer_paced: Some(false),
+        };
+        let proof = |cause, transfer, now| {
+            MeasuredLinkObservation::from_completed_transfer(cause, transfer, now)
+        };
+        assert!(proof(NetworkPriorCause::Link, transfer, 115_000).is_some());
+        for cause in [
+            NetworkPriorCause::Encode,
+            NetworkPriorCause::Decode,
+            NetworkPriorCause::Hold,
+            NetworkPriorCause::Authority,
+        ] {
+            assert!(proof(cause, transfer, 100_000).is_none());
+        }
+        for bad in [
+            CompletedNetworkTransfer {
+                body_bytes: 0,
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                body_duration_ms: 0,
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                network_load: None,
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                network_load: Some(false),
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                from_local_cache: None,
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                from_local_cache: Some(true),
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                producer_paced: None,
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                producer_paced: Some(true),
+                ..transfer
+            },
+            CompletedNetworkTransfer {
+                completed_at_ms: 100_001,
+                ..transfer
+            },
+        ] {
+            assert!(proof(NetworkPriorCause::Link, bad, 100_000).is_none());
+        }
+        assert!(proof(NetworkPriorCause::Link, transfer, 115_001).is_none());
+        assert!(proof(NetworkPriorCause::Link, transfer, i64::MAX).is_none());
+    }
+
+    #[test]
+    fn a05_v10_sidecar_upgrade_never_attributes_existing_supply_negatives() {
+        let conn = Connection::open_in_memory().expect("legacy sidecar");
+        conn.execute_batch(NETWORK_PRIORS_SCHEMA)
+            .expect("legacy schema");
+        conn.execute("INSERT INTO network_priors VALUES (42, 'test-gen', 'safari', 'network', 8000, 720, 100000, 1, 100000)", []).expect("seed legacy negative");
+        conn.pragma_update(None, "user_version", 10)
+            .expect("legacy version");
+        let sidecar = NodeLocalTelemetry::initialize(conn).expect("migrate sidecar");
+        let conn = sidecar.conn.lock().expect("sidecar mutex");
+        let prior = get_prior(&conn, "test-gen", "safari", "network")
+            .expect("read migrated prior")
+            .expect("preserved legacy prior");
+        assert_eq!(prior.active_starved_rung(100_000), Some(720));
+        assert_eq!(prior.active_link_starved_rung(100_000), None);
+        assert_eq!(prior.sustained_kbps, Some(8000));
     }
 
     #[tokio::test]
