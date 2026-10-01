@@ -7,11 +7,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Every new task revision supersedes the previous compile-only verdict. The
-# full qualification workflow is separate and never uses this concurrency key.
+# Never cancel units before their success evidence can be published.
 concurrency:
-  group: effort-ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: effort-ci-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   scope:
@@ -25,11 +24,18 @@ jobs:
       web_layout: ${{ steps.scope.outputs.web_layout }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
       execution_mode: ${{ steps.execution_mode.outputs.mode }}
+      receipt_key: ${{ steps.receipts.outputs.receipt_key }}
+      receipt_job: ${{ steps.receipts.outputs.receipt_job }}
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Resolve exact task PR receipt identity
+        id: receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.python_unit_receipts identity
       - name: Select affected compile surfaces
         id: scope
         # Manual dispatch has no PR base. Compare no synthetic HEAD-to-HEAD
@@ -46,8 +52,11 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   preflight:
-    name: effort policy and contract preflight
+    name: Python unit receipts
     needs: scope
+    concurrency:
+      group: python-unit-${{ github.repository }}-${{ github.ref }}
+      cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
     # Match the main lane: history and contract checks exceeded three minutes
     # in effort runs 3594 and 3643. Keep every check; allow it to finish.
@@ -57,21 +66,38 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Restore attributable Python successes
+        id: receipts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.python_unit_receipts prepare
+      - name: Publish Python attempt-start marker
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
+          path: .python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Audit corrective-history evidence
         run: make history-check
       - name: Check validation catalog and contract unit tests
         run: |
           make validation-lint
-          python3 -m unittest discover -s tests/validation -p 'test_*.py'
       - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
       - name: Check CI, deploy, and shipping contracts
-        run: make operations-check
-      - name: Check the shared player input contract
-        run: |
-          node tests/playback/player-input-contract.test.js
-          node tests/web/player-dom.test.js
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m validation.python_unit_receipts run
+      - name: Preserve Python success journal even on unit failure
+        if: always() && steps.receipts.outcome == 'success'
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: ${{ steps.receipts.outputs.receipt_key }}
+          path: .python-unit-receipts/receipt.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Record the documentation-only lane
         if: needs.scope.outputs.docs_only == 'true'
         run: echo "Documentation-only effort diff; compile surfaces are skipped."

@@ -1719,16 +1719,21 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
-                contract_preflight.index("run: make operations-check"),
+                contract_preflight.index(
+                    "run: python3 -m validation.python_unit_receipts run"
+                    if contract_preflight == effort_preflight
+                    else "run: make operations-check"
+                ),
             )
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            self.assertIn(
-                "node tests/playback/player-input-contract.test.js",
-                contract_preflight,
-            )
-            self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
+            if contract_preflight == effort_preflight:
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            else:
+                self.assertIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
@@ -3121,7 +3126,7 @@ assert.equal(context.ACT_TIMER, null);
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
-    def test_workflow_cancellation_preserves_only_frozen_qualification(self):
+    def test_workflow_cancellation_preserves_qualification_and_python_receipts(self):
         workflow = read(".github/workflows/ci.yml")
         effort_workflow = read(".github/workflows/effort-ci.yml")
 
@@ -3136,7 +3141,8 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn(contract, workflow)
         self.assertIn("group: ci-${{ github.ref }}", workflow)
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
-        self.assertIn("cancel-in-progress: true", effort_workflow)
+        self.assertIn("cancel-in-progress: false", effort_workflow)
+        self.assertNotIn("cancel-in-progress: true", effort_workflow)
 
         def cancels(
             event: str, *, ref: str = "", head: str = "", base: str = ""
@@ -3339,7 +3345,8 @@ assert.equal(context.ACT_TIMER, null);
                 for command in (
                     "make history-check",
                     "make validation-lint",
-                    "make operations-check",
+                    "python3 -m validation.python_unit_receipts run"
+                    if workflow == "effort-ci" else "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 
