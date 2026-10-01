@@ -841,6 +841,45 @@ mod tests {
             &crate::transcode::AttemptRestrictions::none(),
         )
         .expect("continuous video plan");
+        let mut continuous_options = options.clone();
+        continuous_options.video_sample_envelope =
+            super::super::VideoSampleEnvelope::ContinuousAvcHigh50;
+        let routed_plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(
+                crate::transcode::Encoder::Software,
+                crate::transcode::TranscodeMediaOptions::from_options(&source, &continuous_options),
+            ),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("normal option route resolves the same continuous recipe");
+        assert_eq!(routed_plan.plan_digest(), continuous_plan.plan_digest());
+        let mut audio_source = source.clone();
+        audio_source.audio_streams.push(crate::domain::AudioStream {
+            index: 0,
+            codec: "aac".into(),
+            channels: Some(2),
+            sample_rate: Some(48_000),
+            language: None,
+            title: None,
+            default: true,
+        });
+        assert!(
+            crate::transcode::TranscodeMediaOptions::from_options(&audio_source, &options)
+                .input_has_audio
+        );
+        assert!(
+            !crate::transcode::TranscodeMediaOptions::from_options(
+                &audio_source,
+                &continuous_options
+            )
+            .input_has_audio
+        );
         let continuous_args = vod_pipe_args(
             &source,
             &continuous_plan,
@@ -880,7 +919,8 @@ mod tests {
     fn continuous_avc_limits_use_exact_rational_macroblock_rate() {
         let accepts = super::super::decode::continuous_avc_envelope_accepts;
         assert!(accepts(1920, 1080, 60_000, 1001, 12_000));
-        assert!(accepts(3840, 2160, 24_000, 1001, 40_000));
+        assert!(accepts(2560, 1440, 30_000, 1001, 12_000));
+        assert!(!accepts(3840, 2160, 24_000, 1001, 40_000));
         assert!(!accepts(3840, 2160, 30, 1, 40_000));
         assert!(!accepts(4096, 2304, 24, 1, 40_000));
         assert!(!accepts(1921, 1080, 24, 1, 12_000));

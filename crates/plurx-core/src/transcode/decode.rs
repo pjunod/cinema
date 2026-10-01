@@ -2071,7 +2071,7 @@ impl TranscodeMediaOptions {
             |nits| (u32::try_from(nits).unwrap_or(1000), ToneMapPeakSource::Cll),
         );
         Self {
-            video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
+            video_sample_envelope: options.video_sample_envelope,
             target_height: options.target_height,
             video_bitrate_kbps: options.video_bitrate_kbps,
             effective_rate_control: options.effective_rate_control,
@@ -2079,7 +2079,8 @@ impl TranscodeMediaOptions {
             audio_bitrate_kbps: options.audio_bitrate_kbps,
             audio_index: options.audio_index,
             audio_offset_ms: source.audio_offset_ms,
-            input_has_audio: !source.audio_streams.is_empty(),
+            input_has_audio: !source.audio_streams.is_empty()
+                && options.video_sample_envelope != VideoSampleEnvelope::ContinuousAvcHigh50,
             tone_map: options.tone_map,
             tone_map_peak_nits,
             tone_map_peak_source,
@@ -2141,10 +2142,12 @@ pub struct TranscodeRequest {
 
 impl TranscodeRequest {
     pub fn new(encoder: Encoder, options: TranscodeMediaOptions) -> Self {
+        let normalized_geometry =
+            options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50;
         Self {
             encoder,
             options,
-            normalized_geometry: false,
+            normalized_geometry,
             rate_profile: None,
         }
     }

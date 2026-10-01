@@ -1366,3 +1366,23 @@ payload digest. Workspace/all-target compilation passed; tests remain
 deferred. The actor, HTTP/peer callers, durable family metadata and shared
 cache consumer pins still need integration before continuous delivery is
 advertised.
+
+### 10.14 Normal-path recipe propagation
+
+`TranscodeOptions` now carries the explicit video sample envelope into the
+existing source-bound planner and the resolved argv builder. Defaults retain
+ordinary encoder behavior. Selecting the continuous video recipe normalizes
+geometry and excludes source audio before resolution; it does not strip audio
+from an already named muxed artifact. The authored recipe regression verifies
+that this normal path and the explicit request builder resolve identical
+media identities, including for an audio-bearing source.
+
+The common High level 5.0 envelope supports its validated raster and rational
+rate bounds, including qualified 1440p shapes. It does not include 4K's
+macroblock frame size; that request needs a separately qualified family or
+prepared replacement. The boundary regression reflects that frame-size limit.
+Workspace/all-target compilation passed without unit execution.
+
+The family actor still needs its versioned stored request and attachment
+contract, creation/admission, audio pairing and routing. The normal options
+carry media semantics, not a user feature readiness gate.

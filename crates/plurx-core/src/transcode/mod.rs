@@ -801,6 +801,8 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Explicit immutable video sample recipe; ordinary encodes preserve defaults.
+    pub video_sample_envelope: VideoSampleEnvelope,
     /// Conditional candidate semantics; absent preserves the legacy recipe.
     pub auto_quality_rate_profile: Option<AutoQualityRateProfile>,
     pub normalized_geometry: bool,
@@ -989,6 +991,7 @@ pub const AUDIO_BITRATE_KBPS_DEFAULT: u32 = 160;
 impl Default for TranscodeOptions {
     fn default() -> Self {
         TranscodeOptions {
+            video_sample_envelope: VideoSampleEnvelope::EncoderDefault,
             auto_quality_rate_profile: None,
             normalized_geometry: false,
             target_height: 1080,
@@ -1513,6 +1516,7 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        video_sample_envelope: media.video_sample_envelope,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: media.target_height,

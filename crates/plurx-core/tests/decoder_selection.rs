@@ -304,6 +304,7 @@ fn execution_file(path: &str) -> MediaFile {
 
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
+        video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         auto_quality_rate_profile: None,
         normalized_geometry: false,
         target_height: 1080,
