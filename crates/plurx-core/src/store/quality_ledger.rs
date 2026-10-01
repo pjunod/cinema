@@ -101,3 +101,40 @@ pub(crate) fn decode_snapshot(
         updated_at_ms,
     })
 }
+
+/// Scheduled dependencies are read directly from the atomic ledger, including
+/// historical appends and takeover epochs. Disposal removes them in that same
+/// CAS write; receipt expiry and producer termination do not.
+pub(crate) const RESERVED_INTERVALS: &str = "SELECT DISTINCT interval.value AS interval_json
+    FROM continuous_quality_ledgers ledger,
+         json_each(ledger.ledger_json, '$.transactions') transaction_fact,
+         json_each(transaction_fact.value, '$.reserved') interval
+    WHERE json_extract(interval.value, '$.rendition_id') = $1
+    LIMIT 4097";
+
+pub(crate) fn decode_reserved_intervals(
+    json: Vec<String>,
+    rendition_id: &str,
+) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError> {
+    if json.len() > 4096 {
+        return Err(StoreError::Task(
+            "continuous dependency lookup exceeds its interval allowance".into(),
+        ));
+    }
+    json.into_iter()
+        .map(|value| {
+            if value.len() > 1024 {
+                return Err(StoreError::Task("oversized continuous dependency".into()));
+            }
+            let interval: crate::playback::continuous_quality::QualityInterval =
+                serde_json::from_str(&value)
+                    .map_err(|error| StoreError::Task(error.to_string()))?;
+            if !interval.valid() || interval.rendition_id != rendition_id {
+                return Err(StoreError::Task(
+                    "invalid continuous dependency projection".into(),
+                ));
+            }
+            Ok(interval)
+        })
+        .collect()
+}

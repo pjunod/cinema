@@ -55,7 +55,7 @@ pub struct QualityInterval {
     pub byte_length: u64,
 }
 impl QualityInterval {
-    fn valid(&self) -> bool {
+    pub fn valid(&self) -> bool {
         valid_artifact(&self.artifact_id)
             && valid_artifact(&self.rendition_id)
             && (1..=1_000_000).contains(&self.timescale)

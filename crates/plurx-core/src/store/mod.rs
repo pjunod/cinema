@@ -4970,6 +4970,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         generation: &str,
     ) -> Result<Option<QualityLedgerSnapshot>, StoreError>;
 
+    /// Exact scheduled/appended dependencies, retained independently of live
+    /// producer state. On lookup failure, callers must retain existing media.
+    async fn quality_reserved_intervals(
+        &self,
+        rendition_id: &str,
+    ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError>;
+
     /// Publish only under the exact active parent owner and observed revision.
     /// Takeover may advance epoch, but may not replace the attachment identity.
     async fn write_quality_ledger(

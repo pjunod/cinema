@@ -2774,6 +2774,21 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn quality_reserved_intervals(
+        &self,
+        rendition_id: &str,
+    ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError> {
+        let rendition = rendition_id.to_owned();
+        self.with_read(move |conn| {
+            let mut statement = conn.prepare(crate::store::quality_ledger::RESERVED_INTERVALS)?;
+            let values = statement
+                .query_map([&rendition], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::store::quality_ledger::decode_reserved_intervals(values, &rendition)
+        })
+        .await
+    }
+
     async fn write_quality_ledger(
         &self,
         ledger: &crate::playback::continuous_quality::QualityLedger,

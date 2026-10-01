@@ -17,6 +17,17 @@ use crate::domain::{
 };
 use crate::error::StoreError;
 
+struct QualityIntervalRow {
+    json: String,
+}
+impl From<&mut Row<'_>> for QualityIntervalRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            json: row.get("interval_json"),
+        }
+    }
+}
+
 struct QualityLedgerRow {
     owner: String,
     epoch: i64,
@@ -3465,6 +3476,21 @@ impl MediaSessionStore for HiqliteAuthStore {
                 )
             })
             .transpose()
+    }
+
+    async fn quality_reserved_intervals(
+        &self,
+        rendition_id: &str,
+    ) -> Result<Vec<crate::playback::continuous_quality::QualityInterval>, StoreError> {
+        let rows = timeout_store(self.client().query_consistent_map::<QualityIntervalRow, _>(
+            crate::store::quality_ledger::RESERVED_INTERVALS,
+            params!(rendition_id),
+        ))
+        .await?;
+        crate::store::quality_ledger::decode_reserved_intervals(
+            rows.into_iter().map(|row| row.json).collect(),
+            rendition_id,
+        )
     }
 
     async fn write_quality_ledger(

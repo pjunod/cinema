@@ -35873,6 +35873,22 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
                 .expect("persist append"),
             "{backend}"
         );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("reserved media projection"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&"f".repeat(64))
+                .await
+                .expect("unrelated rendition")
+                .is_empty(),
+            "{backend}"
+        );
         let persisted = store
             .quality_ledger(generation)
             .await
@@ -35940,10 +35956,44 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
         assert_eq!(adopted.owner_node_id, "replacement-node", "{backend}");
         assert_eq!(
             adopted.ledger.transactions[0].reserved,
-            vec![interval],
+            vec![interval.clone()],
             "{backend}"
         );
         assert!(adopted.ledger.transactions[0].ever_appended, "{backend}");
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("takeover retains physical dependency facts"),
+            vec![interval.clone()],
+            "{backend}"
+        );
+        let dispose = request(
+            &ledger,
+            1,
+            QualityOperation::Disposed {
+                artifacts: vec![interval.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose, takeover_at + 2)
+            .expect("exact disposal");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 3, takeover_at + 2)
+                .await
+                .expect("persist disposal"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&interval.rendition_id)
+                .await
+                .expect("disposed dependencies released")
+                .is_empty(),
+            "{backend}"
+        );
+
         assert_eq!(
             store
                 .media_session_route_for_playback(user.id, "continuous-ledger")

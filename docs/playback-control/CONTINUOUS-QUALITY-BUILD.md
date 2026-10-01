@@ -1194,3 +1194,19 @@ regressions are authored and compile. They have not been executed. Family
 creation, audio admission/resource accounting, durable media pins and
 playlist routing still need integration before this becomes a served
 continuous presentation.
+
+### 10.6 Durable dependency lookup
+
+Both stores expose a bounded projection of exact reserved media intervals
+from the atomic continuous ledger. Receipt pruning, producer retirement and
+owner takeover do not remove those dependencies. An exact disposal CAS does.
+The lookup rejects malformed projections or more than 4,096 intervals rather
+than returning an incomplete retention set. Store contract regressions cover
+takeover retention, an unrelated rendition and exact disposal release. They
+are authored and compiled, not executed.
+
+The GC bridge must serialize dependency installation against physical
+eviction on the owning rendition. A lookup followed by an unguarded unlink
+would race a newly scheduled interval, so the store projection alone is not
+a completed physical pin implementation. Directory cleanup and shared cache
+GC need the same rule before continuous delivery is advertised.
