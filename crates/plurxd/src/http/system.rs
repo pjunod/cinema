@@ -4893,6 +4893,7 @@ pub async fn stop_offline_package(
 /// the handler cannot reach `AppState::store` through this type.
 #[derive(Clone)]
 pub(crate) struct MetricsState {
+    clock: Arc<plurx_core::cluster::clock::ClusterClockGuard>,
     started_at: Instant,
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
@@ -4914,6 +4915,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
+            clock: state.membership.clock_guard(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -5092,6 +5094,19 @@ fn render_passive_raft_metrics(
 }
 
 fn render_snapshot_metrics(out: &mut String, snapshot: DbSnapshotMetricsSnapshot) {
+    if let Some(required) = snapshot.required_storage_bytes {
+        out.push_str(&format!(
+            "# HELP plurx_raft_snapshot_required_storage_bytes Last target-local snapshot storage floor.\n\
+             # TYPE plurx_raft_snapshot_required_storage_bytes gauge\n\
+             plurx_raft_snapshot_required_storage_bytes {required}\n"
+        ));
+    }
+    out.push_str(&format!(
+        "# HELP plurx_raft_snapshot_deferrals_total Snapshot storage admission retries.\n\
+         # TYPE plurx_raft_snapshot_deferrals_total counter\n\
+         plurx_raft_snapshot_deferrals_total{{reason=\"storage\"}} {}\n",
+        snapshot.storage_deferrals_total,
+    ));
     out.push_str(
         "# HELP plurx_raft_snapshot_seconds Database Raft snapshot build and install duration.\n\
          # TYPE plurx_raft_snapshot_seconds histogram\n",
@@ -5390,7 +5405,7 @@ pub(crate) async fn metrics(
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
         crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5742,6 +5757,35 @@ mod tests {
                 "5", "10", "30", "60", "120", "300",
             ]
         );
+    }
+
+    #[test]
+    fn snapshot_storage_metrics_are_passive_fixed_label_and_unknown_is_absent() {
+        let zero = plurx_core::cluster::migration::status::DbSnapshotHistogram {
+            count: 0,
+            sum_nanos: 0,
+            cumulative_buckets: [0; 16],
+        };
+        let mut sample = DbSnapshotMetricsSnapshot {
+            storage_deferrals_total: 7,
+            required_storage_bytes: Some(123456),
+            build_ok: zero,
+            build_error: zero,
+            install_ok: zero,
+            install_error: zero,
+            last_build: None,
+            last_install: None,
+        };
+        let mut output = String::new();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
+        assert!(output.contains("plurx_raft_snapshot_required_storage_bytes 123456\n"));
+        assert!(!output.contains("node_id="));
+        sample.required_storage_bytes = None;
+        output.clear();
+        render_snapshot_metrics(&mut output, sample);
+        assert!(!output.contains("plurx_raft_snapshot_required_storage_bytes"));
+        assert!(output.contains("plurx_raft_snapshot_deferrals_total{reason=\"storage\"} 7\n"));
     }
 
     /// Every route that reads the roster's machine names, enumerated.
@@ -6115,6 +6159,8 @@ mod tests {
             watermark_local_reads_supported: true,
             watermark_errors: 5,
             snapshot_metrics: Some(DbSnapshotMetricsSnapshot {
+                storage_deferrals_total: 0,
+                required_storage_bytes: None,
                 build_ok: DbSnapshotHistogram {
                     count: 2,
                     sum_nanos: 1_250_000_000,

@@ -122,7 +122,7 @@ const API_SECRET_FILENAME: &str = "secret_api";
 #[cfg(feature = "hiqlite-store")]
 const ACTIVITY_SIGNING_KEY_FILENAME: &str = "activity_http_signing_key";
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_DATABASE_FILENAME: &str = "plurx.db";
+pub(super) const HIQLITE_DATABASE_FILENAME: &str = "plurx.db";
 #[cfg(feature = "hiqlite-store")]
 const DAEMON_LOCK_FILENAME: &str = ".plurxd.lock";
 #[cfg(feature = "hiqlite-store")]
@@ -3389,6 +3389,8 @@ fn snapshot_timeout_duration(seconds: u64) -> Duration {
 #[cfg(feature = "hiqlite-store")]
 fn production_hiqlite_defaults(config: &Config) -> NodeConfig {
     let mut defaults = production_hiqlite_defaults_with_read_pool(config.cluster.read_pool_size);
+    defaults.raft_config.snapshot_policy =
+        hiqlite::SnapshotPolicy::LogsSinceLast(config.cluster.logs_until_snapshot);
     defaults.raft_config.install_snapshot_timeout =
         install_snapshot_timeout_ms(config.cluster.install_snapshot_timeout_secs);
     defaults.snapshot_chunk_timeout =
@@ -5293,6 +5295,27 @@ mod tests {
                 config.cluster.install_snapshot_timeout_secs,
             ),
             Duration::from_secs(1_245)
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn production_hiqlite_snapshot_cadence_preserves_default_and_retention() {
+        let mut config = Config::default();
+        for entries in [10_000, 1_000, 200_000] {
+            config.cluster.logs_until_snapshot = entries;
+            let defaults = production_hiqlite_defaults(&config);
+            assert_eq!(
+                defaults.raft_config.snapshot_policy,
+                hiqlite::SnapshotPolicy::LogsSinceLast(entries)
+            );
+            assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
+            assert_eq!(defaults.wal_size, HIQLITE_WAL_SIZE_BYTES);
+        }
+        let legacy = production_hiqlite_defaults_with_read_pool(4);
+        assert_eq!(
+            legacy.raft_config.snapshot_policy,
+            hiqlite::SnapshotPolicy::LogsSinceLast(10_000)
         );
     }
 
