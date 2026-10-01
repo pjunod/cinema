@@ -55,7 +55,27 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
-        self.assertEqual(len(ignored), 20)
+        # S11's operator-only capture is not a known-red product regression.
+        # It requires an owned manifest, real browser and an explicit ignored
+        # invocation; its module is feature/Unix-gated, absent in default lists.
+        capture_identity = (
+            "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs::"
+            "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell"
+        )
+        captures = tuple(item for item in ignored if item.identity == capture_identity)
+        self.assertEqual(len(captures), 1)
+        capture = captures[0]
+        self.assertEqual(capture.reason, "explicit owned rolling campaign only; requires validated manifest and real browser")
+        self.assertEqual(capture.cargo_name, "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell")
+        self.assertEqual(len(tuple(item for item in ignored if item.identity != capture_identity)), 20)
+        # Optional absence is exact-identity only, and feature-enabled presence
+        # must still resolve once. A similarly named unknown source refuses.
+        validate_listed_tests(captures, ())
+        validate_listed_tests(captures, (capture.cargo_name,))
+        foreign = IgnoredTest(capture.identity + "_foreign", capture.cargo_name + "_foreign",
+                              capture.reason, capture.path, capture.line)
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests((foreign,), ())
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))
