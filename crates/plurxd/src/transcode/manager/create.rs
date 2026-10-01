@@ -972,6 +972,18 @@ impl TranscodeManager {
         let plan = self
             .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
             .await?;
+        // The VOD builder still derives its raster from the retained file.
+        // Do not attach a held-facts experiment if these two rasters differ.
+        let output = plan.output_contract();
+        let same_raster = transcode::output_size(file, options.target_height)
+            == output
+                .effective_width()
+                .zip(output.effective_height())
+                .map(|(width, height)| (i64::from(width), i64::from(height)));
+        let cadence = same_raster
+            .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
+            .flatten();
+        let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(

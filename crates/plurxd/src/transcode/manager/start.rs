@@ -729,10 +729,8 @@ impl TranscodeManager {
         let session_kind = SessionKind::Transcode {
             height: target_height,
         };
-        let hls_codecs = audio_delivery_hls_codecs(
-            transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
-            opts.audio.as_ref(),
-        );
+        let hls_codecs =
+            audio_delivery_hls_codecs(transcoded_hls_codecs_for_plan(&plan), opts.audio.as_ref());
         let probe_json = match self.store.get_file_probe_json(file_id).await {
             Ok(probe_json) => probe_json,
             Err(error) => {

@@ -12,6 +12,7 @@
 //! graphs that keeps frames on the GPU. Which a node uses is decided by probe,
 //! not by version (PERF-PLAN §5).
 
+mod avc_qualification;
 mod decode;
 pub mod decoder_inventory;
 pub mod dvconvert;
@@ -24,6 +25,7 @@ pub mod progress;
 mod recipe;
 mod vod;
 
+pub use avc_qualification::QualifiedSdrAvc;
 pub use decode::{
     plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
     CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
@@ -1824,6 +1826,9 @@ fn hls_args_inner(
         opts.force_idr,
         opts.software_threads,
     ));
+    if let Some(proof) = plan.and_then(|plan| plan.output_contract().sdr_avc()) {
+        args.extend(proof.flags());
+    }
 
     // Segment-aligned keyframes so each segment is independently decodable.
     args.push("-force_key_frames".into());
@@ -2694,7 +2699,7 @@ mod tests {
     use super::*;
     use crate::domain::MediaFile;
 
-    fn file(hdr: Option<&str>) -> MediaFile {
+    pub(super) fn file(hdr: Option<&str>) -> MediaFile {
         MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,

@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** implementation blocked on fleet and device evidence · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** M1–M2 landed; M3 implementation in progress, fleet/device acceptance open · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -431,13 +431,14 @@ about `constraint_set*_flag` nobody has read.
 `bitrate_for_height` (`transcode.rs:27519-27526`) is the only other place
 the rung's identity turns into numbers; nothing in this plan changes it.
 
-**This changes recipe identity.** `encode_args_for`'s output is part of the
-argument list a recipe hashes, so adding `-profile:v` / `-level` to the
-hardware families invalidates every cached SDR transcode produced by those
-families. That is correct — the bytes genuinely differ — and it must be in
-the PR body, with the note that software-encoded entries are unaffected
-because `-profile:v high` was already there. The rung-derived `CODECS`
-string is playlist metadata and does not itself invalidate anything.
+**This changes recipe identity for measured cells only.** The resolved plan's
+digest conditionally includes the measured codec and rational output grid
+when a successful exact-family experiment admits profile/level flags.
+Qualified hardware entries change, and qualified software entries also change
+because their explicit level is new even though High profile was already
+present. Untested/refused cells keep the incumbent arguments and digest.
+Frozen codec metadata follows that same immutable plan; no universal triplet
+is inferred from a height.
 
 ### 3.4 Peak and average, separately, with the overhead named
 
@@ -688,7 +689,7 @@ Tests:
 | `every_sdr_family_forces_a_profile` | `encode_args_for(Sdr, ..)` contains `-profile:v high` for all five families |
 | `the_declared_level_covers_the_resolved_grid` | 360/480/720/1080/2160 at 59.94/60 map to §3.3; >60 stays unqualified |
 | `a_family_that_refused_the_probe_keeps_its_old_arguments` | caps with the new verdict false -> argv identical to `0f02b7ea`'s |
-| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | two hashes differ; a software recipe's hash does not |
+| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | qualified flags change the digest, including software when it gains an explicit level; unqualified argv and digest remain unchanged |
 
 Bitstream acceptance — the level in the argv must equal the level in the
 SPS. Per enabled family on a node that has it, for every rung at 23.976,
@@ -900,7 +901,8 @@ new `HlsContext` fields plus the `"version"` bump), which is per-session
 and invalidates nothing on disk; M2 moves fMP4 AVC masters from generation
 metadata to attempt media; **M3 changes recipe identity for the hardware
 families that gain `-profile:v`/`-level`, invalidating their cached SDR
-transcodes** — software-encoded entries are unaffected. No schema, no
+transcodes, including software cells that gain an explicit level**.
+Unqualified cells retain their old identity. No schema, no
 settings key and no metric changes.
 
 Rollback: each milestone reverts independently. M3's revert re-invalidates
@@ -954,6 +956,33 @@ fleet.
 
 ## Execution log
 
+**2026-10-01 M3 continuation:** the earlier M3–M6 evidence-only classification
+did not establish the encoder qualification code. This continuation owns
+bounded node-local profile/level/cadence experiments and frozen SDR identity,
+not SDR master emission (M4), bandwidth measurements (M5), or device/fleet
+acceptance. The selected node FFmpeg must complete a real encode whose SPS,
+`avcC` and every fMP4 sample duration agree. A proposed table cell is not a
+codec identity; untested/refused cells retain the incumbent arguments.
+
+The local matrix has a 30-second budget, with a three-second child deadline
+and bounded cleanup, 8 MiB encoded-output and 1 MiB trace ceilings. It covers
+the five proposed rung heights and four named cadences, with both 852- and
+854-wide 480p experiments because the shipping even-rounded raster is 852.
+Family, exact raster, rational cadence, target bitrate, effective rate-control
+value and forced-IDR mode must match a completed experiment. Non-matching
+cells, including rates above 60 fps, do not inherit another cell's evidence.
+The final VOD fps grid is bound before its recipe and presentation freeze.
+Legacy-rung qualification is restricted to `PreserveAspectEven` contracts;
+the newer upright/square candidate route retains its separately explicit
+profile/level and full candidate/recipe identity instead of inheriting this
+matrix's flags or triplet.
+
+Qualified software also gains a level flag: its recipe identity must change.
+The older software-cache-unchanged claim applied only to the profile flag and
+does not cover this implementation. Unqualified plans keep their old recipe
+digest and encoder arguments. Local Homebrew FFmpeg 9 development observations
+are not shipped FFmpeg 8 or fleet qualification evidence.
+
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -962,6 +991,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
