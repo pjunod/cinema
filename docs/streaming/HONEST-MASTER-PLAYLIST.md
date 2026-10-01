@@ -492,14 +492,16 @@ of every corpus fixture at every rung; if a 2 s segment bursts past
 `maxrate + audio + overhead`, the declared peak rises to the measurement and
 the plan says so in the PR body rather than quietly clamping.
 
-Copy/remux sessions do not use `file.bitrate` or ffprobe `max_bit_rate` as a
-peak. M5 reads the output fragment index's exact segment byte ranges and
-durations and computes both attributes from the same bytes the playlist names;
-that naturally includes remux/container overhead. A prepared copy successor
-uses its own frozen index facts. There is no scaled-average fallback: if the
-index cannot provide a complete bound before master publication, M5 remains
-blocked and the path is not claimed honest. This is the concrete decision for
-§7's former open question 2.
+Copy/remux sessions must not call `file.bitrate` or ffprobe `max_bit_rate` a
+measured peak. **2026-10-01 source correction:** the existing fragment index
+contains video-only pipe lengths, not full selected audio/container output.
+It cannot provide the formerly proposed exact full-wire bound. The phased
+M5 implementation therefore observes successful full-mux VOD materialization
+and complete retained coverage (§5.5). A prepared successor captures its own
+compatible complete artifact receipt; a shared source or video rung is not
+enough. Arbitrary cold-copy first-publication remains open rather than using
+a prefix maximum, scaled average or guessed overhead. Legacy publication is
+not thereby claimed honest.
 
 ### 3.5 Where the numbers live
 

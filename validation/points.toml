@@ -797,6 +797,7 @@ paths = [
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
+  "crates/plurx-core/src/output_measurement.rs",
   "crates/plurx-core/src/transcode/**",
   "crates/plurx-core/tests/decoder_selection.rs",
   "crates/plurx-pgs/**",
