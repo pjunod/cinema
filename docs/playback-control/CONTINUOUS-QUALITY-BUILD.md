@@ -1295,3 +1295,20 @@ The family actor still needs to construct this role, install shared audio
 and video attachments and route their playlists. This wrapper is integrated
 with generation and admission; it is not yet reachable as a continuous
 client presentation.
+
+### 10.11 Bounded continuous transport facts
+
+The continuous transition request now validates its exact wire identity and
+operation bounds independently of ledger state. Interval and artifact lists
+are bounded and reject duplicate artifact IDs; SHA-256 identifiers use one
+canonical lowercase representation. The reducer applies this validation
+before changing any fact.
+
+Receipts validate against the exact request sequence, owner, generation,
+attachment and transaction. A prepare receipt must bind its requested intent
+and target. Media facts must fit the ledger bounds, and a receipt cannot
+claim retained-current or superseded after an append. Stored replay receipts
+use the same check when decoding the ledger. Duplicate/oversized requests,
+wrong sequences and attachments and false retained-current receipts have an
+authored regression. HTTP/peer delivery and physical reservation verification
+still need integration; this validator alone does not expose the feature.

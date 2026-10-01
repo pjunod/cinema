@@ -20,7 +20,10 @@ fn valid_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok()
 }
 fn valid_artifact(value: &str) -> bool {
-    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +160,60 @@ pub struct QualityTransitionRequest {
     pub operation: QualityOperation,
 }
 
+impl QualityTransitionRequest {
+    /// Wire shape and bounds, independent of the current transaction state.
+    pub fn valid(&self) -> bool {
+        let intervals_valid = |intervals: &[QualityInterval], allow_empty: bool| {
+            let mut ids = std::collections::HashSet::new();
+            (allow_empty || !intervals.is_empty())
+                && intervals.len() <= MAX_QUALITY_INTERVALS
+                && intervals
+                    .iter()
+                    .all(|interval| interval.valid() && ids.insert(&interval.artifact_id))
+        };
+        let artifacts_valid = |artifacts: &[String]| {
+            let mut ids = std::collections::HashSet::new();
+            artifacts.len() <= MAX_QUALITY_INTERVALS
+                && artifacts
+                    .iter()
+                    .all(|id| valid_artifact(id) && ids.insert(id))
+        };
+        self.version == CONTINUOUS_QUALITY_VERSION
+            && valid_uuid(&self.generation)
+            && (1..=JS_MAX_INTEGER).contains(&self.control_epoch)
+            && (1..=JS_MAX_INTEGER).contains(&self.sequence)
+            && self.attachment.valid()
+            && valid_uuid(&self.transaction_id)
+            && match &self.operation {
+                QualityOperation::Prepare {
+                    intent_revision,
+                    target_rendition_id,
+                } => {
+                    (1..=JS_MAX_INTEGER).contains(intent_revision)
+                        && valid_artifact(target_rendition_id)
+                }
+                QualityOperation::Scheduled { intervals }
+                | QualityOperation::Appended { intervals } => intervals_valid(intervals, false),
+                QualityOperation::CancelUnappended { completed } => {
+                    intervals_valid(completed, true)
+                }
+                QualityOperation::Presented {
+                    artifact_id,
+                    film_tick,
+                    observed_at_ms,
+                } => {
+                    valid_artifact(artifact_id)
+                        && *film_tick <= JS_MAX_INTEGER
+                        && *observed_at_ms > 0
+                }
+                QualityOperation::Disposed { artifacts }
+                | QualityOperation::RecoveryOwned {
+                    disposed_artifacts: artifacts,
+                } => artifacts_valid(artifacts),
+            }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QualityTransitionReceipt {
@@ -166,6 +223,47 @@ pub struct QualityTransitionReceipt {
     pub accepted_sequence: u64,
     pub attachment: QualityAttachment,
     pub transaction: QualityTransaction,
+}
+
+impl QualityTransitionReceipt {
+    pub fn valid_for(&self, request: &QualityTransitionRequest) -> bool {
+        if !request.valid()
+            || self.version != CONTINUOUS_QUALITY_VERSION
+            || self.generation != request.generation
+            || self.control_epoch != request.control_epoch
+            || self.accepted_sequence != request.sequence
+            || self.attachment != request.attachment
+            || self.transaction.transaction_id != request.transaction_id
+        {
+            return false;
+        }
+        if let QualityOperation::Prepare {
+            intent_revision,
+            target_rendition_id,
+        } = &request.operation
+        {
+            if self.transaction.intent_revision != *intent_revision
+                || self.transaction.target_rendition_id != *target_rendition_id
+            {
+                return false;
+            }
+        }
+        let candidate = QualityLedger {
+            version: self.version,
+            generation: self.generation.clone(),
+            control_epoch: self.control_epoch,
+            attachment: self.attachment.clone(),
+            latest_intent_revision: self.transaction.intent_revision,
+            accepted_sequence: self.accepted_sequence,
+            transactions: vec![self.transaction.clone()],
+            receipts: vec![],
+        };
+        candidate.valid()
+            && (!matches!(
+                self.transaction.state,
+                QualityState::RetainedCurrent | QualityState::Superseded
+            ) || (!self.transaction.ever_appended && self.transaction.reserved.is_empty()))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -297,6 +395,7 @@ impl QualityLedger {
                     && receipt.request.sequence <= self.accepted_sequence
                     && receipt.accepted_at_ms > 0
                     && receipt.response.accepted_sequence == receipt.request.sequence
+                    && receipt.response.valid_for(&receipt.request)
             })
     }
 
@@ -327,12 +426,7 @@ impl QualityLedger {
         request: &QualityTransitionRequest,
         now_ms: i64,
     ) -> Result<QualityTransitionReceipt, QualityTransitionError> {
-        if request.version != CONTINUOUS_QUALITY_VERSION
-            || !valid_uuid(&request.transaction_id)
-            || request.sequence == 0
-            || request.sequence > JS_MAX_INTEGER
-            || now_ms <= 0
-        {
+        if !request.valid() || now_ms <= 0 {
             return Err(QualityTransitionError::Invalid);
         }
         if request.generation != self.generation
@@ -1042,6 +1136,60 @@ mod tests {
                 assert!(ledger.valid());
             }
         }
+    }
+
+    #[test]
+    fn transport_validation_refuses_duplicate_facts_and_mismatched_receipts() {
+        let mut ledger = ledger();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: "c".repeat(64),
+            },
+        );
+        assert!(prepare.valid());
+        let receipt = ledger.apply(&prepare, 1000).expect("prepare");
+        assert!(receipt.valid_for(&prepare));
+        let mut wrong = receipt.clone();
+        wrong.accepted_sequence += 1;
+        assert!(!wrong.valid_for(&prepare));
+        let mut wrong = receipt.clone();
+        wrong.attachment.lifetime_id = "another player".into();
+        assert!(!wrong.valid_for(&prepare));
+        let mut wrong = receipt;
+        wrong.transaction.state = QualityState::RetainedCurrent;
+        wrong.transaction.ever_appended = true;
+        assert!(!wrong.valid_for(&prepare));
+        let duplicate = request(
+            &ledger,
+            2,
+            QualityOperation::CancelUnappended {
+                completed: vec![interval(), interval()],
+            },
+        );
+        assert!(!duplicate.valid());
+        let before = ledger.clone();
+        assert_eq!(
+            ledger.apply(&duplicate, 1100),
+            Err(QualityTransitionError::Invalid)
+        );
+        assert_eq!(ledger, before);
+        let oversized = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: vec![interval(); MAX_QUALITY_INTERVALS + 1],
+            },
+        );
+        assert!(!oversized.valid());
+        let mut uppercase = prepare;
+        uppercase.operation = QualityOperation::Prepare {
+            intent_revision: 2,
+            target_rendition_id: "C".repeat(64),
+        };
+        assert!(!uppercase.valid());
     }
 
     #[test]
