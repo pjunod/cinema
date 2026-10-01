@@ -72,16 +72,10 @@ function playbackStallActions(p,transcodeReason){
   if(p) p.surfaceTranscodeReason=transcodeReason||"stall-manual";
   return ["retry"].concat(p&&p.method!=='transcode'?["force_transcode"]:[]).concat(["close"]);
 }
-// The same list for an `exhausted` PROMPT, which leads with one more bounded
-// attempt. Ruled 2026-09-13: the web offers Keep waiting. The class's default
-// actions are `keep_waiting · retry · close` and the label and handler have
-// been in place since M1 — the only thing missing was a site that offered it.
-// Deliberately not folded into `playbackStallActions`: that list is also what a
-// `stopped` terminal carries, and a server verdict that ended the recipe has
-// nothing left to wait for, so re-arming a detector over it would be a button
-// that lies.
+// Exhaustion has stopped the owner and loaders. Its actions must execute a
+// new attempt or close; re-arming the retired detector cannot resume playback.
 function playbackExhaustedActions(p,transcodeReason){
-  return ["keep_waiting"].concat(playbackStallActions(p,transcodeReason));
+  return playbackStallActions(p,transcodeReason);
 }
 // One step of the presenter: feed the event, keep the state, emit what it says,
 // render what it returns. The only way a surface changes.
@@ -136,7 +130,7 @@ function stopPlayerForExhaustion(){
   finishPlaybackSeekTelemetry(p,p&&p.controlSeek,"seek_abandoned");
   if(p) retireHlsTerminalAttempt(p);
   const v=document.getElementById("video");
-  if(v) pausePlaybackInternally(v);
+  if(v) pausePlaybackInternally(v,"recovery_exhausted");
   stopPlayerTimers();
 }
 function retireHlsTerminalAttempt(p){
@@ -160,6 +154,7 @@ function retireHlsTerminalAttempt(p){
 // inside the render (§3.2).
 function playbackSurfaceAction(action){
   const p=PLAYER;
+  if(action==="keep_waiting"&&p&&(p.terminalStop||p.sessionTerminal))return undefined;
   playbackSurfaceStep({user_action:action});
   if(action==="retry") return retryPlayback();
   if(action==="close") return closePlayer();

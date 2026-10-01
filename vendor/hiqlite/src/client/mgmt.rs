@@ -120,11 +120,18 @@ pub(crate) async fn db_quorum_watermark_local(
     let before = state.raft_db.raft.metrics().borrow().clone();
     before.running_state?;
 
-    let committed = tokio::time::timeout(
+    let started = std::time::Instant::now();
+    let result = tokio::time::timeout(
         Duration::from_secs(1),
         state.raft_db.raft.ensure_linearizable(),
-    )
-    .await
+    ).await;
+    if started.elapsed() >= Duration::from_millis(100) {
+        tracing::warn!(node = state.id, term = before.current_term,
+            phase = "linearizable_check", elapsed_ms = started.elapsed().as_millis() as u64,
+            timed_out = result.is_err(),
+            "slow leader quorum watermark proof (quorum/apply split unavailable)");
+    }
+    let committed = result
     .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??
     .ok_or_else(|| Error::LeaderChange("database leader has no read index".into()))?;
     let after = state.raft_db.raft.metrics().borrow().clone();

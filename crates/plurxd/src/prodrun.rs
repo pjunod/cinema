@@ -113,6 +113,11 @@ impl ProducerSlot {
         }
     }
 
+    /// Nonblocking diagnostic read; contention means unknown, never authority.
+    pub fn try_belief(&self) -> Option<Producer> {
+        self.inner.try_lock().ok().map(|state| state.belief)
+    }
+
     /// What the executor currently believes about the producer process.
     pub async fn belief(&self) -> Producer {
         self.inner.lock().await.belief

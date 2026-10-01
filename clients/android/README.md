@@ -20,7 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `141` — buffer roles retain their existing ceilings
+> Status: **v0.3.0**, build `142` — newer 10/30-second directional seek controls
+> are preserved from current main; no physical production install is claimed.
+> Build `141` — buffer roles retain their existing ceilings
 > and clamp to the actual process heap; local diagnostics name the actual Coil
 > cache bound. Larger incumbent allocation and three-device memory/HDMI
 > qualification remain open. No physical production install is claimed.

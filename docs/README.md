@@ -34,6 +34,10 @@ Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-
 
 Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
 
+Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-seek-controls.md).
+
+Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
+
 ## Find it fast
 
 | You want to know… | Read |
@@ -184,6 +188,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
 | [STATUS-HISTORY.md](streaming/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [HONEST-MASTER-PLAYLIST.md](streaming/HONEST-MASTER-PLAYLIST.md) | Implementation plan from the 2026-09-20 architecture review: M1/M2 landed; bounded M3/M4 and retained VOD M5 implemented; rolling/PUT collection and bounded automatic-copy preparation claimed; manual-copy and fleet/device acceptance remain open. | open |
 | [CODEC-AND-GPU-QUALIFICATION.md](streaming/CODEC-AND-GPU-QUALIFICATION.md) | Codec/GPU qualification: typed output contract, actual corpus acquisition, gradient VUI/scoring work, offline rolling-output census and private real-owner/headless-browser acquisition candidate, scoped family inventory, and separate graph/device acceptance. Organic-use week is supplementary, not M1/M2 eligibility. | open |

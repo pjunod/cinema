@@ -726,6 +726,7 @@ impl VodServe {
             )),
             control: StdMutex::new(crate::playback_control::ControlState::default()),
             marker_destinations,
+            control_observed_at: None,
             last_control_snapshot: None,
             control_end: None,
             control_end_snapshot: None,

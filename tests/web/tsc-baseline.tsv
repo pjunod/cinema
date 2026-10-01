@@ -71,7 +71,6 @@ crates/plurxd/src/web/player/measurements.js	TS2339	7
 crates/plurxd/src/web/player/measurements.js	TS2345	1
 crates/plurxd/src/web/player/menus.js	TS2339	3
 crates/plurxd/src/web/player/player.js	TS2339	1
-crates/plurxd/src/web/player/prepared-switch-measurement.js	TS2339	6
 crates/plurxd/src/web/player/prepared-switch-measurement.js	TS2721	1
 crates/plurxd/src/web/player/projection-chrome.js	TS2339	1
 crates/plurxd/src/web/player/projection-chrome.js	TS2551	1
