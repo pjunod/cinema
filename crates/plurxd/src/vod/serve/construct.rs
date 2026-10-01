@@ -137,6 +137,7 @@ impl VodServe {
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
+                audio_delivery: None,
                 video: CopyVideoOptions::new(false, false),
                 source_object_version: None,
                 cluster_cache_key: None,

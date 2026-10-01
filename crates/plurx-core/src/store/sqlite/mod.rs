@@ -1183,6 +1183,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
+    // v88: preserve the resolved audio recipe across offline queue retries.
+    "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -4653,5 +4655,38 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("collect files columns");
         assert!(columns.iter().any(|column| column == "field_order"));
+    }
+
+    #[test]
+    fn v88_offline_audio_snapshot_upgrade_preserves_legacy_package() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(87) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'synthetic-audio', 'unused-test-hash')", []).expect("owned test user");
+            conn.execute("INSERT INTO offline_packages (id, request_id, user_id, file_id, node_id, source_path, source_size, source_mtime, target_height, subtitle_mode, state, phase, expires_at) VALUES ('legacy-audio', 'legacy-request', 1, 1, 'owned-node', '/synthetic/source.mkv', 4096, 1, 720, 'none', 'queued', 'queued', 10000)", []).expect("legacy package");
+            conn.pragma_update(None, "user_version", 87)
+                .expect("v87 marker");
+        }
+        SqliteStore::open(&db).expect("migrate legacy snapshot");
+        let conn = Connection::open(&db).expect("raw reopen");
+        let (path, audio) = conn
+            .query_row(
+                "SELECT source_path, audio_recipe FROM offline_packages WHERE id = 'legacy-audio'",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .expect("retained package");
+        assert_eq!(path, "/synthetic/source.mkv");
+        assert_eq!(audio, None, "upgrade must not invent a new audio recipe");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("upgraded version"),
+            SQLITE_SCHEMA_VERSION
+        );
     }
 }

@@ -9070,6 +9070,7 @@ impl JobManager {
     ) -> bool {
         let result = fence
             .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms: retry_at_ms,
             })
@@ -9912,6 +9913,7 @@ impl JobManager {
                     tracing::warn!(job = job.id, %error, "source row unavailable for speculative transcode");
                     let _ = fence
                         .yield_job(
+                            "store_unavailable",
                             self.store.as_ref(),
                             now_unix_ms,
                             now_unix_ms.saturating_add(5_000),
@@ -9956,7 +9958,12 @@ impl JobManager {
                     );
                 }
                 let _ = fence
-                    .yield_job(self.store.as_ref(), now_unix_ms, now_unix_ms)
+                    .yield_job(
+                        "source_unreadable_on_node",
+                        self.store.as_ref(),
+                        now_unix_ms,
+                        now_unix_ms,
+                    )
                     .await;
                 active.finish().await;
                 skipped += 1;
@@ -10007,14 +10014,15 @@ impl JobManager {
                         "distributed speculative transcode ready"
                     );
                 }
-                Ok(PretranscodeProduceOutcome::Yielded) if lost.is_cancelled() => {
+                Ok(PretranscodeProduceOutcome::Yielded(_)) if lost.is_cancelled() => {
                     skipped += 1;
                     *reasons.entry("lease_lost").or_default() += 1;
                 }
-                Ok(PretranscodeProduceOutcome::Yielded) => {
+                Ok(PretranscodeProduceOutcome::Yielded(reason)) => {
                     let now_unix_ms = clock_ms();
                     let _ = fence
                         .yield_job(
+                            reason,
                             self.store.as_ref(),
                             now_unix_ms,
                             now_unix_ms.saturating_add(1_000),
@@ -10027,6 +10035,7 @@ impl JobManager {
                     let now_unix_ms = clock_ms();
                     let _ = fence
                         .yield_job(
+                            "store_unavailable",
                             self.store.as_ref(),
                             now_unix_ms,
                             now_unix_ms.saturating_add(5_000),
@@ -10080,6 +10089,7 @@ impl JobManager {
                     let now_unix_ms = clock_ms();
                     let _ = fence
                         .yield_job(
+                            "capacity",
                             self.store.as_ref(),
                             now_unix_ms,
                             now_unix_ms.saturating_add(5_000),

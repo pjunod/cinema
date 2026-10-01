@@ -148,7 +148,9 @@ const RECEIPT_PRESSURE_SCHEMA_VERSION: i64 = 64;
 const RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
 const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 65;
 const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+const OFFLINE_AUDIO_SCHEMA_VERSION: i64 = 66;
+const OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = OFFLINE_AUDIO_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3268,6 +3270,25 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    // Like the desired-selection/drain migrations, tolerate
+                    // an already-present additive column during upgrade replay.
+                    // An incompatible type/nullability is not an audio snapshot.
+                    let columns = self.client().query_consistent_map::<CountRow, _>(
+                        "SELECT COUNT(*) AS count FROM pragma_table_info('offline_packages') WHERE name = 'audio_recipe' AND upper(type) = 'TEXT' AND \"notnull\" = 0", params!()).await?;
+                    let mut statements = Vec::new();
+                    if !columns.first().is_some_and(|row| row.count == 1) {
+                        statements.push((
+                            "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT".to_owned(),
+                            params!(),
+                        ));
+                    }
+                    statements.push(("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(), params!(OFFLINE_AUDIO_SCHEMA_VERSION, now, OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -5328,7 +5349,8 @@ fn schema_migration_action(
         | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE
         | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
         | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
-        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE => {
+        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
+        | OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -7736,9 +7758,9 @@ mod tests {
             "v64 advances to the viewer-analysis schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 60,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 61,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v65 step"
+            "this implementation contains every additive v5→v66 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

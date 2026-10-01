@@ -313,7 +313,13 @@ mod tests {
     /// a scheduler would tear down work the viewer never asked it to.
     #[test]
     fn transport_and_destination_movement_leave_the_recipe_axis_alone() {
-        let building = envelope(4, DesiredQuality::Auto { height: None });
+        let building = envelope(
+            4,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         let mut moved = building.clone();
         moved.destination_revision = 900;
         moved.transport_revision = 900;
@@ -340,7 +346,13 @@ mod tests {
     /// Revisions from two different counters are not evidence about each other.
     #[test]
     fn envelopes_from_different_lifetimes_never_supersede_each_other() {
-        let mine = envelope(2, DesiredQuality::Auto { height: None });
+        let mine = envelope(
+            2,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         let mut theirs = envelope(900, DesiredQuality::Original);
         theirs.lifetime_id = "lifetime-b".to_owned();
 
@@ -366,7 +378,13 @@ mod tests {
     /// A retry is one ask arriving twice, not two asks.
     #[test]
     fn an_identical_repeat_does_not_supersede() {
-        let ask = envelope(7, DesiredQuality::Auto { height: None });
+        let ask = envelope(
+            7,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         let repeat = ask.clone();
         assert_eq!(repeat.order(&ask, IntentAxis::Recipe), IntentOrder::Same);
         assert!(!repeat.supersedes(&ask, IntentAxis::Recipe));
@@ -377,7 +395,13 @@ mod tests {
     /// it — otherwise a first ask and no ask at all become the same row.
     #[test]
     fn a_zero_revision_on_any_axis_is_refused() {
-        let good = envelope(1, DesiredQuality::Auto { height: None });
+        let good = envelope(
+            1,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         good.validate().expect("a complete envelope is valid");
 
         for (axis, mutate) in [
@@ -408,17 +432,35 @@ mod tests {
     /// A lifetime that cannot identify anything, or that no column can hold.
     #[test]
     fn a_lifetime_id_outside_its_bounds_is_refused() {
-        let mut empty = envelope(1, DesiredQuality::Auto { height: None });
+        let mut empty = envelope(
+            1,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         empty.lifetime_id = String::new();
         assert_eq!(empty.validate(), Err(IntentEnvelopeError::LifetimeId));
 
-        let mut longest = envelope(1, DesiredQuality::Auto { height: None });
+        let mut longest = envelope(
+            1,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         longest.lifetime_id = "x".repeat(MAX_LIFETIME_ID);
         longest
             .validate()
             .expect("the bound itself is a legal length");
 
-        let mut over = envelope(1, DesiredQuality::Auto { height: None });
+        let mut over = envelope(
+            1,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
+        );
         over.lifetime_id = "x".repeat(MAX_LIFETIME_ID + 1);
         assert_eq!(over.validate(), Err(IntentEnvelopeError::LifetimeId));
     }

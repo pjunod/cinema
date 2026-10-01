@@ -20,6 +20,8 @@
             request_id: Some("r".to_owned()),
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             kind: SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: true,
@@ -470,6 +472,7 @@
             subtitle_burn,
         );
         let offline_spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index,
             subtitle: OfflineSubtitle::None,
@@ -561,6 +564,7 @@
         supported.set_supported(Encoder::Software, true);
         let package_id = "offline-vbr-snapshot";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-vbr-snapshot-request".to_owned(),
             user_id: user.id,
@@ -605,6 +609,7 @@
             };
         };
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -621,7 +626,7 @@
             )
             .await
             .expect("first offline pass"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let first_hash = store
             .offline_package_for_user(package_id, user.id)
@@ -651,7 +656,7 @@
             )
             .await
             .expect("resumed offline pass after hot setting change"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         assert_eq!(
             store
@@ -686,12 +691,13 @@
         mgr.set_automatic_decoder_recovery(true);
         mgr.test_script_offline_production([
             OfflineProduceOutcome::HealthRefused,
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
         ]);
 
         let package_id = "offline-one-shot-decode-recovery";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-one-shot-decode-recovery-request".to_owned(),
             user_id: user.id,
@@ -726,6 +732,7 @@
             .expect("claim")
             .expect("queued package");
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -742,7 +749,7 @@
             )
             .await
             .expect("first offline pass"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let attempts = mgr.test_offline_produced_recipes();
         assert_eq!(attempts.len(), 2, "one refused primary gets one alternate");
@@ -920,7 +927,7 @@
             .expect("pending fixture after restart");
         assert_eq!(pending_resumed.decoder_recovery_state, "recovery_pending");
         assert_eq!(pending_resumed.recipe_hash, None);
-        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded]);
+        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded("production_interrupted")]);
         assert!(matches!(
             mgr.ensure_offline(
                 &pending_resumed,
@@ -931,7 +938,7 @@
             )
             .await
             .expect("resume from pending recovery"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         assert_eq!(
             mgr.test_offline_produced_recipes().last(),
@@ -1023,7 +1030,7 @@
         );
         survivor.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
         survivor.test_script_offline_production([
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
             OfflineProduceOutcome::HealthRefused,
         ]);
@@ -1038,7 +1045,7 @@
                 )
                 .await
                 .expect("software survivor recovery"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let survivor_attempts = survivor.test_offline_produced_recipes();
         assert_eq!(survivor_attempts.len(), 1);

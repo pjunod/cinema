@@ -4339,7 +4339,15 @@ Settings → Activity keeps Watching above its Status and Jobs tabs. Status
 shows the node matrix and collapsible activity sections. Jobs offers global
 job-type counts, state and owner/destination filters, 20-row pages (selectable 10, 20 or 50), and admin
 cancellation and explicit retry. Select a node or job for its detail dialog;
-job details separate Summary, Stages and History. Unknown stages stay unknown. A cancelled interest does not cancel
+job details separate Summary, Stages and History. History distinguishes charged
+failures from yields: a yield returns work to the queue without spending its
+failure budget. Transcode attempts record a bounded reason such as foreground
+demand, an offline download waiting, unavailable storage, or a publication
+refusal. Older attempts without a reason say “Reason not recorded by this
+worker”; the reason cannot be reconstructed from the counter. Repeated yields
+can indicate a stuck job. Final manifest publication ignores the producing
+job's own background reservation while still yielding to foreground demand
+and waiting downloads. Unknown stages stay unknown. A cancelled interest does not cancel
 another viewer's demand. Running children keep their physical permits until
 they have exited. Offline packages retain their own quota and download
 permissions; an exact recipe already preparing on their delivery node can be

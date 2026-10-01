@@ -233,6 +233,7 @@ async fn background_jobs_reservations_bound_distinct_jobs_and_yield_releases_cap
         .settle_job(SettleJob {
             token: tokens.remove(0),
             settlement: JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms: 10_000,
             },
@@ -312,6 +313,7 @@ async fn background_jobs_twenty_yields_compact_history_without_spending_failure_
             .settle_job(SettleJob {
                 token: job.token.expect("token"),
                 settlement: JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: None,
                     not_before_ms: now_ms + 1,
                 },
@@ -1537,4 +1539,114 @@ async fn waiter_pressure_compacts_internal_receipts_and_spares_protected_ones() 
         assert!(ticks < 16, "pressure paging must converge");
     }
     assert!(!store.maintain_jobs(5_100).await.expect("settled"));
+}
+
+#[tokio::test]
+async fn background_job_yield_reason_survives_reclaim_without_charging_failure() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let request = enqueue(1_000);
+    store.enqueue_job(request.clone()).await.expect("enqueue");
+    let job = claimed(&store, claim(&request.id, 0, 1_000)).await;
+    let token = job.token.expect("token");
+    for code in ["bad reason".to_owned(), "x".repeat(65)] {
+        assert!(store
+            .settle_job(SettleJob {
+                token: token.clone(),
+                settlement: JobSettlement::Yield {
+                    error_code: Some(code),
+                    checkpoint: None,
+                    not_before_ms: 2_000
+                },
+                now_ms: 2_000,
+            })
+            .await
+            .is_err());
+    }
+    assert!(store
+        .settle_job(SettleJob {
+            token,
+            settlement: JobSettlement::Yield {
+                error_code: Some("foreground_demand".into()),
+                checkpoint: None,
+                not_before_ms: 2_000
+            },
+            now_ms: 2_000,
+        })
+        .await
+        .expect("yield"));
+    let yielded = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(yielded.state, JobState::Queued);
+    assert_eq!(yielded.yield_count, 0); // Counts compacted attempts only.
+    assert_eq!(yielded.failed_attempts, 0);
+    assert_eq!(
+        yielded.last_error_code.as_deref(),
+        Some("foreground_demand")
+    );
+    let reclaimed = claimed(&store, claim(&request.id, yielded.revision, 2_001)).await;
+    assert_eq!(reclaimed.failed_attempts, 0);
+    let attempts = store.job_attempts(&request.id).await.expect("attempts");
+    let previous = attempts
+        .iter()
+        .find(|attempt| attempt.outcome.as_deref() == Some("yielded"))
+        .expect("previous attempt");
+    assert_eq!(previous.error_code.as_deref(), Some("foreground_demand"));
+    assert!(store
+        .settle_job(SettleJob {
+            token: reclaimed.token.expect("second token"),
+            settlement: JobSettlement::Yield {
+                error_code: Some("production_deadline".into()),
+                checkpoint: None,
+                not_before_ms: 2_500
+            },
+            now_ms: 2_500,
+        })
+        .await
+        .expect("deadline yield"));
+    let deadline_job = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(deadline_job.failed_attempts, 0);
+    let attempts = store.job_attempts(&request.id).await.expect("history");
+    assert!(attempts
+        .iter()
+        .any(|a| a.error_code.as_deref() == Some("foreground_demand")));
+    assert!(attempts
+        .iter()
+        .any(|a| a.error_code.as_deref() == Some("production_deadline")));
+    let reclaimed = claimed(&store, claim(&request.id, deadline_job.revision, 2_501)).await;
+    let legacy: JobSettlement =
+        serde_json::from_str(r#"{"disposition":"yield","checkpoint":null,"not_before_ms":3000}"#)
+            .expect("old worker wire format");
+    assert!(store
+        .settle_job(SettleJob {
+            token: reclaimed.token.expect("token"),
+            settlement: legacy,
+            now_ms: 3_000
+        })
+        .await
+        .expect("legacy yield"));
+    let latest = store
+        .background_job(&request.id)
+        .await
+        .expect("read")
+        .expect("job");
+    assert_eq!(latest.yield_count, 0);
+    assert_eq!(
+        store
+            .job_attempts(&request.id)
+            .await
+            .expect("attempts")
+            .iter()
+            .filter(|attempt| attempt.outcome.as_deref() == Some("yielded"))
+            .count(),
+        3
+    );
+    assert_eq!(latest.failed_attempts, 0);
+    assert_eq!(latest.last_error_code, None);
 }

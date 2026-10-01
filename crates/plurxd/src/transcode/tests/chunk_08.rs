@@ -26,6 +26,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -168,6 +170,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -242,6 +246,8 @@
             kind: SessionKind::Transcode { height: 720 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -294,6 +300,8 @@
             kind: SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -1929,7 +1937,7 @@ scope = "test"
             ExitDisposition::CleanEnd
         );
         assert_eq!(
-            part_exit_disposition(&PartEnd::Preempted),
+            part_exit_disposition(&PartEnd::Preempted("foreground_demand")),
             ExitDisposition::IntentionalYield
         );
         assert_eq!(

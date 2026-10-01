@@ -39,7 +39,7 @@ impl TranscodeManager {
                 .await?
             {
                 PretranscodeProduceOutcome::Ready(produced) => Some(produced),
-                PretranscodeProduceOutcome::Yielded
+                PretranscodeProduceOutcome::Yielded(_)
                 | PretranscodeProduceOutcome::StoreUnavailable
                 | PretranscodeProduceOutcome::PolicyChanged
                 | PretranscodeProduceOutcome::SourceChanged
@@ -90,20 +90,20 @@ impl TranscodeManager {
         pretranscode_fence: Option<PretranscodeFence>,
     ) -> Result<PretranscodeProduceOutcome, String> {
         if cancelled.is_cancelled() {
-            return Ok(PretranscodeProduceOutcome::Yielded);
+            return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
         }
         if self.cache.is_none() {
-            return Ok(PretranscodeProduceOutcome::Yielded);
+            return Ok(PretranscodeProduceOutcome::Yielded("cache_unavailable"));
         }
         if self
             .offline_waiting
             .load(std::sync::atomic::Ordering::Acquire)
         {
-            return Ok(PretranscodeProduceOutcome::Yielded);
+            return Ok(PretranscodeProduceOutcome::Yielded("offline_waiting"));
         }
         let _producer = match self.background_producer.try_lock() {
             Ok(permit) => permit,
-            Err(_) => return Ok(PretranscodeProduceOutcome::Yielded),
+            Err(_) => return Ok(PretranscodeProduceOutcome::Yielded("producer_busy")),
         };
         let policy = match self.try_pretranscode_policy_snapshot().await {
             Ok(policy) => policy,
@@ -112,12 +112,12 @@ impl TranscodeManager {
                     target: "plurxd::transcode",
                     %error, "speculative worker could not read transcode policy"
                 );
-                return Ok(PretranscodeProduceOutcome::Yielded);
+                return Ok(PretranscodeProduceOutcome::Yielded("policy_unavailable"));
             }
         };
         if let Some(fence) = &pretranscode_fence {
             let Some(job) = fence.snapshot().await else {
-                return Ok(PretranscodeProduceOutcome::Yielded);
+                return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
             };
             if job.policy_generation != policy.generation {
                 return Ok(PretranscodeProduceOutcome::PolicyChanged);
@@ -146,7 +146,7 @@ impl TranscodeManager {
             .iter()
             .any(|family| family == encoder.family_name())
         {
-            return Ok(PretranscodeProduceOutcome::Yielded);
+            return Ok(PretranscodeProduceOutcome::Yielded("encoder_not_allowed"));
         }
         // Through the same track selection a real playback uses. Not an
         // optimisation — the tracks are part of the recipe, so producing with
@@ -198,7 +198,7 @@ impl TranscodeManager {
         let digest = self.digest().ok_or("no cache digest")?;
         let hash = self.effective_recipe(&digest, &plan, false).hash();
         if cancelled.is_cancelled() {
-            return Ok(PretranscodeProduceOutcome::Yielded);
+            return Ok(PretranscodeProduceOutcome::Yielded("ownership_lost"));
         }
         if let Some(fence) = &pretranscode_fence {
             if !fence
@@ -207,7 +207,9 @@ impl TranscodeManager {
                 .await
                 .map_err(|error| error.to_string())?
             {
-                return Ok(PretranscodeProduceOutcome::Yielded);
+                return Ok(PretranscodeProduceOutcome::Yielded(
+                    "recipe_binding_refused",
+                ));
             }
         }
         let queue_owned = pretranscode_fence.is_some();
@@ -247,9 +249,12 @@ impl TranscodeManager {
                     PretranscodeProduceOutcome::StoreUnavailable
                 }
                 OfflineProduceOutcome::HealthRefused => PretranscodeProduceOutcome::HealthRefused,
-                OfflineProduceOutcome::Cached(_)
-                | OfflineProduceOutcome::Yielded
-                | OfflineProduceOutcome::ClaimedElsewhere => PretranscodeProduceOutcome::Yielded,
+                OfflineProduceOutcome::Yielded(reason) => {
+                    PretranscodeProduceOutcome::Yielded(reason)
+                }
+                OfflineProduceOutcome::Cached(_) | OfflineProduceOutcome::ClaimedElsewhere => {
+                    PretranscodeProduceOutcome::Yielded("claimed_elsewhere")
+                }
             },
         )
     }
@@ -405,7 +410,7 @@ impl TranscodeManager {
         cancelled: &tokio_util::sync::CancellationToken,
     ) -> Result<OfflineProduceOutcome, String> {
         if cancelled.is_cancelled() {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         let encoder = self
             .encoder_for_file(file, crate::process_control::ChildClass::Background)
@@ -450,13 +455,15 @@ impl TranscodeManager {
                 .await
                 .map_err(|error| error.to_string())?
             {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("recipe_binding_refused"));
             }
             if !self
                 .wait_for_shared_offline_preparation(package, &primary_hash, deadline, cancelled)
                 .await?
             {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded(
+                    "shared_preparation_interrupted",
+                ));
             }
         }
         struct Waiting<'a>(&'a AtomicBool);
@@ -471,7 +478,7 @@ impl TranscodeManager {
         let _producer = self.background_producer.lock().await;
         drop(waiting);
         if cancelled.is_cancelled() {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         let mut recovery_began_now = false;
         let mut outcome = OfflineProduceOutcome::HealthRefused;
@@ -528,7 +535,7 @@ impl TranscodeManager {
                     }
                 };
                 if !consumed || cancelled.is_cancelled() {
-                    return Ok(OfflineProduceOutcome::Yielded);
+                    return Ok(OfflineProduceOutcome::Yielded("recovery_interrupted"));
                 }
                 recovery_state = OfflineRecoveryState::Pending;
                 recovery_began_now = true;
@@ -593,7 +600,7 @@ impl TranscodeManager {
                         }
                     };
                     if !installed || cancelled.is_cancelled() {
-                        return Ok(OfflineProduceOutcome::Yielded);
+                        return Ok(OfflineProduceOutcome::Yielded("recipe_binding_refused"));
                     }
                 }
                 OfflineRecoveryState::Alternate => {
@@ -618,7 +625,7 @@ impl TranscodeManager {
                         .await
                         .map_err(|error| error.to_string())?
                     {
-                        return Ok(OfflineProduceOutcome::Yielded);
+                        return Ok(OfflineProduceOutcome::Yielded("recipe_binding_refused"));
                     }
                 }
             }
@@ -735,21 +742,21 @@ impl TranscodeManager {
         let cache = self.cache.as_ref().ok_or("no cache configured")?;
         let queue_job = if let Some(fence) = &pretranscode_fence {
             let Some(job) = fence.snapshot().await else {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
             };
             Some(job)
         } else {
             None
         };
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         // Queue reuse has the same lookup/delete race as playback reuse. Hold
         // the recipe guard through manifest validation and fenced completion,
         // otherwise eviction can remove the bytes and row before the queue
         // transaction re-publishes that location as ready.
         let Some(cache_lookup) = self.cache_readers.begin_lookup(&hash) else {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("cache_maintenance"));
         };
         let cached = match self.store.cache_hit(&hash, &cache.node_id).await {
             Ok(cached) => cached,
@@ -760,7 +767,7 @@ impl TranscodeManager {
         };
         if let Some(cached) = cached {
             let Some(_cache_reader) = self.cache_readers.begin_read(&hash) else {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("cache_maintenance"));
             };
             drop(cache_lookup);
             let cache_location = CachedLocationIdentity {
@@ -772,7 +779,7 @@ impl TranscodeManager {
                 manifest_digest: cached.manifest_digest.clone(),
             };
             if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
             }
             let Some(root) =
                 crate::cachekeep::validated_entry_dir(&cache.dir, &cached.relative_dir).await
@@ -901,6 +908,7 @@ impl TranscodeManager {
                     .collect::<Vec<_>>();
                 let adopting_legacy = cached.manifest_digest.is_none();
                 if manifest.is_none() {
+                    let mut manifest_yield_reason = None;
                     manifest = Some(std::sync::Arc::new(
                         match plurx_core::transcode::manifest::publish_controlled(
                             &root,
@@ -911,16 +919,26 @@ impl TranscodeManager {
                             // and a receipt is a claim about bytes you watched.
                             None,
                             || {
-                                cancelled
+                                manifest_yield_reason = if cancelled
                                     .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-                                    || !self.pretranscode_worker_idle()
-                                    || Instant::now() >= *deadline
+                                {
+                                    Some("ownership_lost")
+                                } else if Instant::now() >= *deadline {
+                                    Some("production_deadline")
+                                } else {
+                                    self.pretranscode_publication_yield_reason()
+                                };
+                                manifest_yield_reason.is_some()
                             },
                         )
                         .await
                         {
                             Ok(Some(manifest)) => manifest,
-                            Ok(None) => return Ok(OfflineProduceOutcome::Yielded),
+                            Ok(None) => {
+                                return Ok(OfflineProduceOutcome::Yielded(
+                                    manifest_yield_reason.unwrap_or("manifest_interrupted"),
+                                ))
+                            }
                             Err(error) => {
                                 self.invalidate_cache_location(
                                     &cache_location,
@@ -972,7 +990,7 @@ impl TranscodeManager {
                     }
                 };
                 if !completed {
-                    return Ok(OfflineProduceOutcome::Yielded);
+                    return Ok(OfflineProduceOutcome::Yielded("publication_refused"));
                 }
             }
             if let Some(package_id) = offline_package_id {
@@ -995,7 +1013,7 @@ impl TranscodeManager {
                     }
                 };
                 if !current {
-                    return Ok(OfflineProduceOutcome::Yielded);
+                    return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
                 }
             }
             return Ok(OfflineProduceOutcome::Cached(Produced {
@@ -1009,7 +1027,7 @@ impl TranscodeManager {
         drop(cache_lookup);
 
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         let subtitle_handle = self
             .ensure_text_subtitle(
@@ -1021,11 +1039,11 @@ impl TranscodeManager {
             )
             .await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         let lease_generation = if let Some(fence) = publication_fence {
             let Some(lease) = fence.snapshot().await else {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
             };
             Some(lease.fence)
         } else {
@@ -1062,7 +1080,7 @@ impl TranscodeManager {
         // Empty-parent cleanup is otherwise able to unlink it in the gap
         // between this check and the first staging child installation.
         let Some(_staging_guard) = self.cache_readers.begin_staging(staging_identity) else {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("staging_maintenance"));
         };
         ensure_cache_directory(&cache.dir, temp_parent).await?;
         let taken = if pretranscode_fence.is_some() {
@@ -1091,7 +1109,7 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?
         };
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         if !taken {
             if plurx_core::fs_secure::SecureDirectory::open(&temp)
@@ -1144,10 +1162,10 @@ impl TranscodeManager {
             .produce_into(&staging, &hash, &request, subtitle_handle.as_ref())
             .await
         {
-            Ok(Some(published)) => published,
-            Ok(None) => {
+            Ok(ProductionProgress::Ready(published)) => published,
+            Ok(ProductionProgress::Yielded(reason)) => {
                 if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                    return Ok(OfflineProduceOutcome::Yielded);
+                    return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
                 }
                 if pretranscode_fence.is_some() {
                     // The queue heartbeat is the claim heartbeat. No cache
@@ -1162,7 +1180,7 @@ impl TranscodeManager {
                 } else {
                     self.touch_claim(&hash, &cache.node_id).await;
                 }
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded(reason));
             }
             Err(error) => {
                 // A failed assembly may have created another generation-sized
@@ -1203,7 +1221,7 @@ impl TranscodeManager {
         };
 
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         if let Some(expected) = expected_policy_generation.as_deref() {
             if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
@@ -1269,6 +1287,7 @@ impl TranscodeManager {
             // the first check and every check after it, and the package would
             // never become ready.
             let owes_idle_courtesy = offline_package_id.is_none();
+            let mut manifest_yield_reason = None;
             let manifest = plurx_core::transcode::manifest::publish_controlled_directory(
                 &generation,
                 &generation_id,
@@ -1278,14 +1297,25 @@ impl TranscodeManager {
                 // the only place a producer receipt reaches durable storage.
                 published.health.clone(),
                 || {
-                    cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
-                        || (owes_idle_courtesy && !self.pretranscode_worker_idle())
-                        || Instant::now() >= request.deadline
+                    manifest_yield_reason = if cancelled
+                        .is_some_and(tokio_util::sync::CancellationToken::is_cancelled)
+                    {
+                        Some("ownership_lost")
+                    } else if Instant::now() >= request.deadline {
+                        Some("production_deadline")
+                    } else if owes_idle_courtesy {
+                        self.pretranscode_publication_yield_reason()
+                    } else {
+                        None
+                    };
+                    manifest_yield_reason.is_some()
                 },
             )
             .await?;
             let Some(manifest) = manifest else {
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded(
+                    manifest_yield_reason.unwrap_or("manifest_interrupted"),
+                ));
             };
             self.hooks.get().manifest_published();
             if let Some(expected) = expected_policy_generation.as_deref() {
@@ -1315,12 +1345,12 @@ impl TranscodeManager {
         // empty ensure -> child-install race with orphan cleanup.
         let identity = identity_for(&relative)?;
         let Some(publication_guard) = self.cache_readers.begin_publication(&hash, identity) else {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("publication_maintenance"));
         };
         let final_parent = final_dir.parent().ok_or("final generation has no parent")?;
         ensure_cache_directory(&cache.dir, final_parent).await?;
         if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-            return Ok(OfflineProduceOutcome::Yielded);
+            return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
         }
         if let Some(expected) = expected_policy_generation.as_deref() {
             if let Some(outcome) = self.pretranscode_policy_interruption(expected).await {
@@ -1419,7 +1449,7 @@ impl TranscodeManager {
             };
             if !completed {
                 let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
-                return Ok(OfflineProduceOutcome::Yielded);
+                return Ok(OfflineProduceOutcome::Yielded("publication_refused"));
             }
         } else {
             // Every queue completion is settled by the branch above, because
@@ -1467,7 +1497,7 @@ impl TranscodeManager {
                 };
                 if !completed {
                     let _ = quarantine_remove_cache_tree(&final_dir, 1).await;
-                    return Ok(OfflineProduceOutcome::Yielded);
+                    return Ok(OfflineProduceOutcome::Yielded("publication_refused"));
                 }
             } else if let Some(fence) = publication_fence {
                 PublicationStore::fenced(self.store.as_ref(), fence.clone())
@@ -1547,14 +1577,14 @@ impl TranscodeManager {
     }
 
     /// Encode into `temp` until finished, out of time, or out of patience with
-    /// being preempted. `Ok(None)` means nothing publishable was produced.
+    /// being preempted. A yield retains the cause observed when work stopped.
     pub(super) async fn produce_into(
         &self,
         temp: &plurx_core::fs_secure::SecureDirectory,
         hash: &str,
         request: &PortableProduction<'_>,
         subtitle_handle: Option<&std::fs::File>,
-    ) -> Result<Option<Published>, String> {
+    ) -> Result<ProductionProgress, String> {
         let PortableProduction {
             file,
             opts,
@@ -1599,7 +1629,7 @@ impl TranscodeManager {
                     segments = published.segments,
                     "resuming an assembled generation awaiting integrity publication"
                 );
-                return Ok(Some(published));
+                return Ok(ProductionProgress::Ready(published));
             }
         }
         if !parts.is_empty() {
@@ -1620,21 +1650,21 @@ impl TranscodeManager {
                 return Err("retained transcode exceeds its part bound".to_owned());
             }
             if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                return Ok(None);
+                return Ok(ProductionProgress::Yielded("ownership_lost"));
             }
             if yield_to_offline
                 && self
                     .offline_waiting
                     .load(std::sync::atomic::Ordering::Acquire)
             {
-                return Ok(None);
+                return Ok(ProductionProgress::Yielded("offline_waiting"));
             }
             if Instant::now() >= deadline {
                 tracing::debug!(
                     target: "plurxd::transcode",
                     recipe = %hash, "producer out of time for this run"
                 );
-                return Ok(None);
+                return Ok(ProductionProgress::Yielded("production_deadline"));
             }
             // Do not even start while a viewer is queuing — and never spend
             // what a viewer would want.
@@ -1697,7 +1727,7 @@ impl TranscodeManager {
             let source_offset_permit = if let Some(source) = &bound_source {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Ok(None);
+                    return Ok(ProductionProgress::Yielded("production_deadline"));
                 }
                 Some(tokio::select! {
                     biased;
@@ -1706,7 +1736,7 @@ impl TranscodeManager {
                             Some(cancelled) => cancelled.cancelled().await,
                             None => std::future::pending::<()>().await,
                         }
-                    } => return Ok(None),
+                    } => return Ok(ProductionProgress::Yielded("ownership_lost")),
                     permit = tokio::time::timeout(
                         remaining,
                         Arc::clone(&source.offset_gate).acquire_owned(),
@@ -1741,7 +1771,7 @@ impl TranscodeManager {
             #[cfg(windows)]
             let ffmpeg_file = if let Some(source) = &bound_source {
                 if bound_source_snapshot(Some(source)).await != Some(source.snapshot) {
-                    return Ok(None);
+                    return Ok(ProductionProgress::Yielded("source_changed"));
                 }
                 descriptor_file = file.clone();
                 descriptor_file.path = plurx_core::fs_secure::std_file_path(&source.handle)
@@ -1912,11 +1942,23 @@ impl TranscodeManager {
             match ended {
                 PartEnd::Finished => {
                     if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                        return Ok(None);
+                        return Ok(ProductionProgress::Yielded("ownership_lost"));
                     }
-                    return publish_from(temp, &parts, generation_health.settle()).await;
+                    return publish_from(temp, &parts, generation_health.settle())
+                        .await
+                        .map(|published| {
+                            published.map_or(
+                                ProductionProgress::Yielded("assembly_incomplete"),
+                                ProductionProgress::Ready,
+                            )
+                        });
                 }
-                PartEnd::Preempted | PartEnd::Deadline => {
+                PartEnd::Preempted(_) | PartEnd::Deadline => {
+                    let reason = match ended {
+                        PartEnd::Preempted(reason) => reason,
+                        PartEnd::Deadline => "production_deadline",
+                        _ => unreachable!(),
+                    };
                     tracing::info!(
                         target: "plurxd::transcode",
                         recipe = %hash, spawned,
@@ -1929,17 +1971,17 @@ impl TranscodeManager {
                         let _ = remove_staged_child(temp, &part_name).await;
                     }
                     if pretranscode_fence.is_some() {
-                        return Ok(None);
+                        return Ok(ProductionProgress::Yielded(reason));
                     }
                     if yield_to_offline
                         && self
                             .offline_waiting
                             .load(std::sync::atomic::Ordering::Acquire)
                     {
-                        return Ok(None);
+                        return Ok(ProductionProgress::Yielded("offline_waiting"));
                     }
                     if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
-                        return Ok(None);
+                        return Ok(ProductionProgress::Yielded("ownership_lost"));
                     }
                     if matches!(ended, PartEnd::Deadline) {
                         // Out of budget for this pass. Nothing is published —
@@ -1955,7 +1997,7 @@ impl TranscodeManager {
                         // parts and the claim are the checkpoint, and there
                         // is deliberately no second bookmark in the database
                         // to disagree with them after a crash.
-                        return Ok(None);
+                        return Ok(ProductionProgress::Yielded("production_deadline"));
                     }
                 }
                 PartEnd::Failed(why) => return Err(why),
@@ -1966,11 +2008,11 @@ impl TranscodeManager {
             recipe = %hash, parts = parts.len(),
             "pre-transcode preempted too many times; giving up on this run"
         );
-        Ok(None)
+        Ok(ProductionProgress::Yielded("preemption_limit"))
     }
 
     /// Run one part to completion, or until a viewer wants the hardware.
-    async fn run_part(
+    pub(super) async fn run_part(
         &self,
         child: &mut Child,
         deadline: Instant,
@@ -1980,7 +2022,7 @@ impl TranscodeManager {
         loop {
             if cancelled.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
                 let _ = child.kill().await;
-                return PartEnd::Preempted;
+                return PartEnd::Preempted("ownership_lost");
             }
             match child.try_wait() {
                 Ok(Some(status)) if status.success() => return PartEnd::Finished,
@@ -1993,14 +2035,17 @@ impl TranscodeManager {
             // Checkpoint and terminate. Not SIGSTOP: a stopped ffmpeg still
             // holds the hardware codec session, so the viewer this is yielding
             // to would be blocked by a process that is doing nothing.
-            if self.admissions.live_is_waiting()
-                || (yield_to_offline
-                    && self
-                        .offline_waiting
-                        .load(std::sync::atomic::Ordering::Acquire))
+            if self.admissions.live_is_waiting() {
+                let _ = child.kill().await;
+                return PartEnd::Preempted("foreground_demand");
+            }
+            if yield_to_offline
+                && self
+                    .offline_waiting
+                    .load(std::sync::atomic::Ordering::Acquire)
             {
                 let _ = child.kill().await;
-                return PartEnd::Preempted;
+                return PartEnd::Preempted("offline_waiting");
             }
             if Instant::now() >= deadline {
                 let _ = child.kill().await;
