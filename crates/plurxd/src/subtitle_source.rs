@@ -2321,6 +2321,7 @@ mod tests {
             .await
             .expect("second");
         let bad = crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"invalid!".to_vec(),
         };
@@ -2330,6 +2331,7 @@ mod tests {
         );
         forget_stale_publication(&catalog, &stale).await;
         let good = crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: b"verified".to_vec(),
         };
@@ -2349,6 +2351,7 @@ mod tests {
     fn a_404_holder_is_skipped_and_forgotten() {
         let holder = publication(0, "extracted", "kept", 1);
         let missing = crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::NOT_FOUND,
             body: Vec::new(),
         };
@@ -2357,6 +2360,7 @@ mod tests {
             PeerArtifactVerdict::Forget
         );
         let unavailable = crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
             body: Vec::new(),
         };

@@ -2996,6 +2996,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | Method | Path | Body limit | What it does |
 |---|---|---|---|
 | GET | `/_internal/v1/activity-snapshot` | — | Node-local delivery snapshot |
+| GET | `/_internal/v1/clock` | — (empty exact request) | Signed `{node_id, received_unix_ms, sent_unix_ms}` for four-timestamp clock observation. Any exact committed member, including a learner; unchanged 30 s auth window. The prober captures the exact signed request timestamp and bounded-body receipt before verifying the response; 1 KiB response budget and 2 s peer deadline. Measurement only, with no takeover, membership or readiness consequence. |
 | GET | `/api/v1/internal/cluster/operations-status` | — | This node's own operations status, for the aggregate |
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |

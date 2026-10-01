@@ -144,6 +144,23 @@ pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
 /// replacement database even when every disposable cache is full.
 const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+const SNAPSHOT_STORAGE_FLOOR_CAPABILITY: &str = "snapshot_storage_floor_v1";
+const PROMOTION_TARGET_SQL: &str =
+    "SELECT node.raft_id, node.role, node.last_seen_at, \
+        EXISTS (SELECT 1 FROM cluster_node_removals removal \
+          WHERE removal.node_id = node.node_id) AS removal_pending, \
+        progress.last_applied_index, progress.apply_lag_entries, \
+        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+        (SELECT capability.last_seen_at FROM cluster_node_capabilities capability \
+          WHERE capability.node_id = node.node_id \
+            AND capability.capability = 'snapshot_storage_floor_v1') AS snapshot_floor_observed_at, \
+        progress.observed_at \
+     FROM cluster_nodes node \
+     LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+     WHERE node.node_id = $1 AND ($2 OR node.removed_at IS NULL)";
 /// A promotion barrier waits for the target's own heartbeat to prove that its
 /// local state machine applied through the quorum-confirmed barrier index.
 const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
@@ -1886,6 +1903,7 @@ impl PassiveMembershipMetrics {
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
+    clock: Arc<super::clock::ClusterClockGuard>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2955,6 +2973,36 @@ fn reachable_after(now: i64) -> i64 {
     now.saturating_sub(NODE_REACHABLE_WINDOW_MS)
 }
 
+fn snapshot_floor_heartbeat_matches(
+    capability: Option<i64>,
+    progress: Option<i64>,
+    node: i64,
+) -> bool {
+    capability.is_some_and(|observed| Some(observed) == progress && observed == node)
+}
+
+fn voter_snapshot_storage_ready(
+    durable: bool,
+    fresh: bool,
+    required: Option<u64>,
+    available: Option<u64>,
+) -> bool {
+    durable
+        && fresh
+        && required
+            .zip(available)
+            .is_some_and(|(required, available)| {
+                available >= required.max(MIN_VOTER_STORAGE_HEADROOM_BYTES)
+            })
+}
+
+fn snapshot_database_path(storage_root: &Path) -> PathBuf {
+    storage_root
+        .join(super::migration::HIQLITE_ACTIVE_DIRNAME)
+        .join("state_machine/db")
+        .join(super::migration::HIQLITE_DATABASE_FILENAME)
+}
+
 fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
     now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
 }
@@ -3235,7 +3283,15 @@ impl std::fmt::Debug for JoinSecretPayload {
 impl MembershipManager {
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            clock: Arc::new(super::clock::ClusterClockGuard::new(false)),
+        }
+    }
+
+    #[must_use]
+    pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
+        Arc::clone(&self.clock)
     }
 
     #[must_use]
@@ -3270,7 +3326,11 @@ impl MembershipManager {
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
         let voter_storage_probe = StorageDurabilityObservation {
-            successful: voter_storage_durability_probe(&storage_root),
+            successful: voter_storage_durability_probe(
+                snapshot_database_path(&storage_root)
+                    .parent()
+                    .expect("database has a parent"),
+            ),
             observed_at: unix_ms()?,
             checked_at: tokio::time::Instant::now(),
         };
@@ -3280,6 +3340,7 @@ impl MembershipManager {
         );
         let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
+            clock: Arc::new(super::clock::ClusterClockGuard::new(true)),
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
                 local_metrics,
@@ -4381,16 +4442,35 @@ impl MembershipManager {
             && passive.watermark_valid
             && passive.watermark_local_reads_supported
             && watermark.is_some_and(|sample| sample.apply_lag_entries == Some(0));
-        let storage_headroom = available_storage_headroom_bytes(&inner.storage_root);
+        let snapshot_database = snapshot_database_path(&inner.storage_root);
+        let storage_headroom = available_storage_headroom_bytes(
+            snapshot_database.parent().expect("database has a parent"),
+        );
+        let required_storage =
+            hiqlite::snapshot_admission::snapshot_storage_requirement(&snapshot_database).ok();
         let storage_probe = self.refresh_voter_storage_probe(inner).await?;
         let storage_probe_fresh =
             now.saturating_sub(storage_probe.observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS;
-        let voter_storage_ready = storage_probe.successful
-            && storage_probe_fresh
-            && storage_headroom.is_some_and(|bytes| bytes >= MIN_VOTER_STORAGE_HEADROOM_BYTES);
+        let voter_storage_ready = voter_snapshot_storage_ready(
+            storage_probe.successful,
+            storage_probe_fresh,
+            required_storage,
+            storage_headroom,
+        );
         let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
+            (
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3) ON CONFLICT(node_id, capability) DO UPDATE SET \
+                 last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    SNAPSHOT_STORAGE_FLOOR_CAPABILITY,
+                    now
+                ),
+            ),
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
@@ -4662,7 +4742,10 @@ impl MembershipManager {
     ) -> Result<StorageDurabilityObservation, MembershipError> {
         let mut observation = inner.voter_storage_probe.lock().await;
         if observation.checked_at.elapsed() >= STORAGE_DURABILITY_PROBE_INTERVAL {
-            let root = inner.storage_root.clone();
+            let root = snapshot_database_path(&inner.storage_root)
+                .parent()
+                .expect("database has a parent")
+                .to_owned();
             let successful =
                 tokio::task::spawn_blocking(move || voter_storage_durability_probe(&root))
                     .await
@@ -6154,6 +6237,37 @@ impl MembershipManager {
         Ok(Self::operations_peer_directory(now, &members, rows))
     }
 
+    /// Exact bounded clock roster, including stale and pending-removal members.
+    /// Missing identity or endpoint invalidates the whole round; reachability
+    /// never shortens clock coverage. No credential-guard mutation is involved.
+    pub async fn clock_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityPeerRow, _>(
+                CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                params!(inner.identity.node_id.as_str(), members_json),
+            )
+            .await?;
+        Self::cache_admin_revocation_peer_directory(
+            unix_ms()?,
+            &members,
+            inner.identity.raft_id,
+            rows,
+        )
+    }
+
     /// Resolve every exact committed remote member for cache-admin revocation.
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
@@ -6468,8 +6582,13 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedMember)
-            .await
+        self.verify_live_peer_authority_counted(
+            &auth.node_id,
+            now,
+            PeerAuthorityRole::CommittedMember,
+            path == "/_internal/v1/clock",
+        )
+        .await
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -6931,6 +7050,17 @@ impl MembershipManager {
         now: i64,
         role: PeerAuthorityRole,
     ) -> Result<bool, MembershipError> {
+        self.verify_live_peer_authority_counted(node_id, now, role, false)
+            .await
+    }
+
+    async fn verify_live_peer_authority_counted(
+        &self,
+        node_id: &str,
+        now: i64,
+        role: PeerAuthorityRole,
+        clock_request: bool,
+    ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
@@ -6945,6 +7075,9 @@ impl MembershipManager {
             return Ok(false);
         }
         let reachable_after = reachable_after(now);
+        if clock_request {
+            self.clock.record_authority_read();
+        }
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
@@ -7581,19 +7714,8 @@ impl MembershipManager {
         inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1 AND node.removed_at IS NULL",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, false),
             )
             .await?
             .into_iter()
@@ -7615,7 +7737,11 @@ impl MembershipManager {
         {
             return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
         }
-        if !target.voter_storage_ready
+        if !snapshot_floor_heartbeat_matches(
+            target.snapshot_floor_observed_at,
+            target.observed_at,
+            target.last_seen_at,
+        ) || !target.voter_storage_ready
             || !target.storage_probe_observed_at.is_some_and(|observed_at| {
                 now.saturating_sub(observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS
             })
@@ -7730,19 +7856,8 @@ impl MembershipManager {
         let target = inner
             .client
             .query_consistent_map::<PromotionTargetRow, _>(
-                "SELECT node.raft_id, node.role, node.last_seen_at, \
-                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                          WHERE removal.node_id = node.node_id) AS removal_pending, \
-                        progress.last_applied_index, progress.apply_lag_entries, \
-                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
-                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
-                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
-                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
-                        progress.observed_at \
-                 FROM cluster_nodes node \
-                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                 WHERE node.node_id = $1",
-                params!(node_id),
+                PROMOTION_TARGET_SQL,
+                params!(node_id, true),
             )
             .await?
             .into_iter()
@@ -8010,33 +8125,17 @@ impl MembershipManager {
                     .await);
             }
         }
-        match request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(removal_error)) => {
-                return Err(self
-                    .rollback_node_removal_after_failure(node_id, &removal_attempt, removal_error)
-                    .await);
-            }
-            Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(
-                    &inner.secrets.api,
-                    target_raft_id,
-                    &membership_nodes,
-                )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%removal_error, %node_id, "voter removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::Internal(format!(
-                        "voter removal outcome is indeterminate after {removal_error}; the target remains fenced"
-                    )));
-                    }
-                }
-            }
-        }
-        self.finalize_node_removal(node_id).await;
+        dispatch_voter_removal_outcome(
+            node_id,
+            &removal_attempt,
+            request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes),
+            |finalize_node| self.finalize_node_removal(finalize_node),
+        )
+        .await?;
         if resolved.requeued + resolved.failed > 0 {
             tracing::info!(
                 requeued = resolved.requeued,
@@ -9509,6 +9608,64 @@ enum MembershipChangeFailure {
     Ambiguous(MembershipError),
 }
 
+/// The production outcome consumer. Effects remain manager-owned operations;
+/// the pure step cannot inspect fresh rows, clear another attempt, or interpret
+/// an ambiguous send as a definite failure. The wrapper adds no I/O, task or
+/// suspension beyond polling those same manager-owned effect futures.
+async fn dispatch_voter_removal_outcome<'a, R, RF, C, CF, F, FF>(
+    node_id: &'a str,
+    attempt_id: &'a str,
+    proposal: Result<(), MembershipChangeFailure>,
+    rollback: R,
+    reconcile: C,
+    finalize: F,
+) -> Result<(), MembershipError>
+where
+    R: FnOnce(&'a str, &'a str, MembershipError) -> RF,
+    RF: Future<Output = MembershipError>,
+    C: FnOnce() -> CF,
+    CF: Future<Output = MembershipChangeOutcome>,
+    F: FnOnce(&'a str) -> FF,
+    FF: Future<Output = ()>,
+{
+    use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+    let (outcome, error) = match proposal {
+        Ok(()) => (RemovalProposalOutcome::Accepted, None),
+        Err(MembershipChangeFailure::Rejected(error)) => {
+            (RemovalProposalOutcome::Rejected, Some(error))
+        }
+        Err(MembershipChangeFailure::Ambiguous(error)) => {
+            (RemovalProposalOutcome::Ambiguous, Some(error))
+        }
+    };
+    let transition = RemovalTransition::proposal(node_id, attempt_id, outcome);
+    match (transition.effect, error) {
+        (RemovalEffect::FinalizeTombstone, None) => {
+            finalize(transition.node_id).await;
+            Ok(())
+        }
+        (RemovalEffect::RollbackExactAttempt, Some(error)) => {
+            Err(rollback(transition.node_id, transition.attempt_id, error).await)
+        }
+        (RemovalEffect::ReconcileSurvivors, Some(error)) => {
+            let outcome = reconcile().await;
+            let next = transition.survivors(outcome == MembershipChangeOutcome::Removed);
+            if next.is_some_and(|next| next.effect == RemovalEffect::FinalizeTombstone) {
+                tracing::warn!(removal_error = %error, %node_id, "voter removal committed after an ambiguous HTTP result");
+                finalize(transition.node_id).await;
+                Ok(())
+            } else {
+                Err(MembershipError::Internal(format!(
+                    "voter removal outcome is indeterminate after {error}; the target remains fenced"
+                )))
+            }
+        }
+        _ => Err(MembershipError::Internal(
+            "invalid voter removal transition".to_owned(),
+        )),
+    }
+}
+
 #[derive(Serialize)]
 struct RemoveVoterRequest {
     remove_voter: u64,
@@ -9891,7 +10048,7 @@ fn unix_seconds() -> Result<i64, MembershipError> {
     i64::try_from(seconds).map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
 }
 
-/// Prove that the authoritative root can durably publish and remove a file.
+/// Prove that the state-machine filesystem can durably publish and remove a file.
 /// A learner may replicate on storage that is merely writable; promotion is
 /// the point where that machine becomes part of the quorum's durability
 /// promise, so the proof is retained separately from current free space.
@@ -10047,6 +10204,7 @@ struct TargetNodeRow {
 }
 
 struct PromotionTargetRow {
+    snapshot_floor_observed_at: Option<i64>,
     raft_id: i64,
     admitted_role: Option<String>,
     last_seen_at: i64,
@@ -10456,6 +10614,7 @@ impl From<&mut Row<'_>> for TargetNodeRow {
 impl From<&mut Row<'_>> for PromotionTargetRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
+            snapshot_floor_observed_at: row.get("snapshot_floor_observed_at"),
             raft_id: row.get("raft_id"),
             admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
@@ -10767,6 +10926,136 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn snapshot_floor_requires_current_process_heartbeat_proof() {
+        let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
+        database.execute_batch(
+            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, role TEXT, last_seen_at INTEGER, removed_at INTEGER); \
+             CREATE TABLE cluster_node_removals (node_id TEXT); \
+             CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id,capability)); \
+             CREATE TABLE cluster_node_progress (node_id TEXT, last_applied_index INTEGER, apply_lag_entries INTEGER, bounded_read_ready INTEGER, voter_storage_ready INTEGER, storage_headroom_bytes INTEGER, storage_probe_observed_at INTEGER, voter_role_persisted INTEGER, observed_at INTEGER); \
+             INSERT INTO cluster_nodes VALUES ('target',1,'learner',50,NULL); \
+             INSERT INTO cluster_node_progress VALUES ('target',10,0,1,1,536870912,50,0,50);"
+        ).expect("seed legacy readiness rows");
+        let proven = || {
+            database
+                .query_row(
+                    super::PROMOTION_TARGET_SQL,
+                    rusqlite::params!["target", false],
+                    |row| {
+                        Ok(super::snapshot_floor_heartbeat_matches(
+                            row.get("snapshot_floor_observed_at")?,
+                            row.get("observed_at")?,
+                            row.get("last_seen_at")?,
+                        ))
+                    },
+                )
+                .expect("production promotion target projection")
+        };
+        assert!(
+            !proven(),
+            "legacy 512MiB readiness is not the new floor proof"
+        );
+        database
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('target',?1,49)",
+                [super::SNAPSHOT_STORAGE_FLOOR_CAPABILITY],
+            )
+            .expect("insert stale capability");
+        assert!(!proven(), "stale capability must fail closed");
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=50", [])
+            .expect("publish current capability");
+        assert!(
+            proven(),
+            "same heartbeat must prove the target's new semantics"
+        );
+        database
+            .execute("UPDATE cluster_node_progress SET observed_at=51", [])
+            .expect("advance legacy progress");
+        assert!(
+            !proven(),
+            "a later legacy progress row invalidates the retained marker"
+        );
+        database
+            .execute("UPDATE cluster_nodes SET last_seen_at=51", [])
+            .expect("advance node heartbeat");
+        assert!(!proven());
+        database
+            .execute("UPDATE cluster_node_capabilities SET last_seen_at=51", [])
+            .expect("publish new same-heartbeat capability");
+        assert!(proven());
+        database
+            .execute("UPDATE cluster_nodes SET removed_at=52", [])
+            .expect("mark node removed");
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", false],
+                |_| Ok(())
+            )
+            .is_err());
+        assert!(database
+            .query_row(
+                super::PROMOTION_TARGET_SQL,
+                rusqlite::params!["target", true],
+                |_| Ok(())
+            )
+            .is_ok());
+    }
+
+    #[test]
+    fn voter_snapshot_storage_floor_is_target_local_known_fresh_and_at_least_512_mib() {
+        let minimum = super::MIN_VOTER_STORAGE_HEADROOM_BYTES;
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum - 1)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            Some(minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(minimum)
+        ));
+        assert!(super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(2 * minimum),
+            Some(2 * minimum)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            None,
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            true,
+            Some(1),
+            None
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            false,
+            true,
+            Some(1),
+            Some(u64::MAX)
+        ));
+        assert!(!super::voter_snapshot_storage_ready(
+            true,
+            false,
+            Some(1),
+            Some(u64::MAX)
+        ));
+    }
     use super::*;
 
     #[test]
@@ -13883,6 +14172,99 @@ mod tests {
                 membership_response_failure(status),
                 MembershipChangeFailure::Ambiguous(_)
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn removal_transition_preserves_proposal_outcomes() {
+        use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+        for (proposal_kind, survivor, expected) in [
+            (
+                RemovalProposalOutcome::Rejected,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["rollback:node-a:attempt-a"],
+            ),
+            (
+                RemovalProposalOutcome::Accepted,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["finalize:node-a"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Removed,
+                vec!["reconcile", "finalize:node-a"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["reconcile"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Promoted,
+                vec!["reconcile"],
+            ),
+        ] {
+            let events = Mutex::new(Vec::<String>::new());
+            let events = &events;
+            let error = MembershipError::Internal("original proposal error".to_owned());
+            let proposal = match proposal_kind {
+                RemovalProposalOutcome::Accepted => Ok(()),
+                RemovalProposalOutcome::Rejected => Err(MembershipChangeFailure::Rejected(error)),
+                RemovalProposalOutcome::Ambiguous => Err(MembershipChangeFailure::Ambiguous(error)),
+            };
+            let result = dispatch_voter_removal_outcome(
+                "node-a",
+                "attempt-a",
+                proposal,
+                |node, attempt, error| async move {
+                    events
+                        .lock()
+                        .expect("events")
+                        .push(format!("rollback:{node}:{attempt}"));
+                    error
+                },
+                || async move {
+                    events.lock().expect("events").push("reconcile".to_owned());
+                    survivor
+                },
+                |node| async move {
+                    events
+                        .lock()
+                        .expect("events")
+                        .push(format!("finalize:{node}"));
+                },
+            )
+            .await;
+            assert_eq!(*events.lock().expect("events"), expected);
+            match proposal_kind {
+                RemovalProposalOutcome::Accepted => assert!(result.is_ok()),
+                RemovalProposalOutcome::Rejected => assert!(
+                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "original proposal error")
+                ),
+                RemovalProposalOutcome::Ambiguous
+                    if survivor == MembershipChangeOutcome::Removed =>
+                {
+                    assert!(result.is_ok())
+                }
+                RemovalProposalOutcome::Ambiguous => assert!(
+                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "voter removal outcome is indeterminate after cluster membership operation failed: original proposal error; the target remains fenced")
+                ),
+            }
+            let transition = RemovalTransition::proposal("node-a", "attempt-a", proposal_kind);
+            assert_eq!(
+                (transition.node_id, transition.attempt_id),
+                ("node-a", "attempt-a")
+            );
+            if proposal_kind == RemovalProposalOutcome::Ambiguous {
+                assert_eq!(transition.effect, RemovalEffect::ReconcileSurvivors);
+                assert_eq!(
+                    transition.survivors(false).expect("proof pending").effect,
+                    RemovalEffect::RetainFence
+                );
+            } else {
+                assert!(transition.survivors(true).is_none());
+            }
         }
     }
 

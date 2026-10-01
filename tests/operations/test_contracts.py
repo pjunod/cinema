@@ -1067,6 +1067,9 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
+        # Only the shipped media installer owns these two cache-clean points.
+        # The CI tooling stage cleans its independently installed build tools.
+        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
         jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
@@ -1503,7 +1506,14 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertNotIn("uses: ./.github/actions/ffmpeg", fast_rust)
         self.assertIn("uses: ./.github/actions/ffmpeg", unit_rust)
-        self.assertIn('major: "6"', unit_rust)
+        self.assertIn('major: "8"', unit_rust)
+        self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
+        # The shipped-runtime qualification uses FFmpeg 8; the independent
+        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        self.assertIn(
+            'major: "6"',
+            workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
+        )
         # Membership alone would stay green with the step moved below the gate
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
@@ -1709,16 +1719,21 @@ assert.equal(context.ACT_TIMER, null);
                 contract_preflight.index(
                     "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
                 ),
-                contract_preflight.index("run: make operations-check"),
+                contract_preflight.index(
+                    "run: python3 -m validation.python_unit_receipts run"
+                    if contract_preflight == effort_preflight
+                    else "run: make operations-check"
+                ),
             )
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            self.assertIn(
-                "node tests/playback/player-input-contract.test.js",
-                contract_preflight,
-            )
-            self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
+            if contract_preflight == effort_preflight:
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            else:
+                self.assertIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)
@@ -3111,7 +3126,7 @@ assert.equal(context.ACT_TIMER, null);
         for point in ("cluster.auth", "cluster.membership", "cluster.operations"):
             self.assertIn("cluster-transport-recovery", points[point]["checks"])
 
-    def test_workflow_cancellation_preserves_only_frozen_qualification(self):
+    def test_workflow_cancellation_preserves_qualification_and_python_receipts(self):
         workflow = read(".github/workflows/ci.yml")
         effort_workflow = read(".github/workflows/effort-ci.yml")
 
@@ -3126,7 +3141,8 @@ assert.equal(context.ACT_TIMER, null);
             self.assertIn(contract, workflow)
         self.assertIn("group: ci-${{ github.ref }}", workflow)
         self.assertNotIn("github.event.pull_request.number || github.ref", workflow)
-        self.assertIn("cancel-in-progress: true", effort_workflow)
+        self.assertIn("cancel-in-progress: false", effort_workflow)
+        self.assertNotIn("cancel-in-progress: true", effort_workflow)
 
         def cancels(
             event: str, *, ref: str = "", head: str = "", base: str = ""
@@ -3329,7 +3345,8 @@ assert.equal(context.ACT_TIMER, null);
                 for command in (
                     "make history-check",
                     "make validation-lint",
-                    "make operations-check",
+                    "python3 -m validation.python_unit_receipts run"
+                    if workflow == "effort-ci" else "make operations-check",
                 ):
                     self.assertIn(command, preflight)
 
@@ -3474,12 +3491,20 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name == "cluster_daemon":
-                    expected = high_cpu_ffmpeg6
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
+                    "cluster_daemon",
+                }:
+                    # The pinned private CI image supplies shipped FFmpeg 8;
+                    # host trust labels remain unchanged, without a FFmpeg-6
+                    # installation requirement on these image-owned jobs.
+                    expected = high_cpu
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "web_layout", "vod_web"
+                }:
+                    expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
                     expected = high_cpu
-                elif path == ".github/workflows/ci.yml" and name == "web_layout":
-                    expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -3511,8 +3536,6 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
@@ -3772,6 +3795,73 @@ assert.equal(context.ACT_TIMER, null);
             "the ffmpeg majors CI covers changed; update docs/VALIDATION.md's "
             "'Which ffmpeg the profiles assume' in the same commit",
         )
+
+    def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        self.assertIn("COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/", ci_stage)
+        self.assertIn("COPY licenses/ /usr/share/doc/plurx/licenses/", ci_stage)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers", dockerfile)
+        self.assertLess(
+            dockerfile.index("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers"),
+            dockerfile.index("python3 -m playwright install --with-deps chromium"),
+        )
+        self.assertIn("PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg", dockerfile)
+        self.assertIn("/usr/local/bin/ffmpeg", dockerfile)
+
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        image = None
+        self.assertNotIn("coverage", jobs)
+        for name in ("check", "cluster_daemon", "web_layout", "vod_web"):
+            with self.subTest(job=name):
+                block = jobs[name]
+                self.assertNotIn("ffmpeg-6", block)
+                self.assertIn('major: "8"', block)
+                self.assertIn(
+                    "binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", block
+                )
+                steps = workflow_step_blocks(block)
+                capture = steps["Capture mounted runner workspace owner"]
+                restore = steps["Restore persistent runner workspace ownership"]
+                self.assertIn('dirname -- "$GITHUB_WORKSPACE"', capture)
+                self.assertIn('echo "HOST_WORKSPACE_OWNER=$owner"', capture)
+                self.assertIn('"${owner%%:*}" = 0', capture)
+                self.assertIn('"${owner##*:}" = 0', capture)
+                self.assertIn('chown -R "$HOST_WORKSPACE_OWNER"', restore)
+                self.assertNotIn('stat -c', restore)
+                self.assertIn("    container:\n", block)
+                match = re.search(r"(?m)^      image: (.+)$", block)
+                self.assertIsNotNone(match)
+                pinned = match.group(1)
+                self.assertRegex(
+                    pinned,
+                    r"^192\.168\.4\.7:3000/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+                )
+                if image is None:
+                    image = pinned
+                self.assertEqual(image, pinned)
+                self.assertIn("      credentials:\n        username: noirr\n", block)
+                self.assertIn(
+                    "        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", block
+                )
+                self.assertNotIn("secrets.LOCAL_REGISTRY_TOKEN", block.split("    steps:", 1)[0])
+
+        fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "rust_compile"
+        ]
+        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn('major: "6"', fast)
+        self.assertIn("make unit", fast)
+        coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
+        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertNotIn("plurx-ci@sha256:", coverage)
+        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 
     def test_ci_flake_ledger_records_real_job_outcomes_and_durations(self):
         script = ROOT / "scripts/ci-flake-report"
