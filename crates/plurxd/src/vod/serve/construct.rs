@@ -134,6 +134,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                retained_logical: None,
                 measured_candidate: None,
                 file: file.clone(),
                 audio_index: None,

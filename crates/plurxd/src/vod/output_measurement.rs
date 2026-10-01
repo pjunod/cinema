@@ -11,6 +11,7 @@ pub(super) struct PublishedOutputMeasurement {
 }
 
 struct OutputObservation {
+    preimage: OutputOrigin,
     origin: [u8; 32],
     epoch: u64,
     muxer_init: String,
@@ -20,19 +21,55 @@ struct OutputObservation {
     members: Vec<Option<ObservedOutputMember>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ObservedOutputMember {
     pub(super) bytes: u64,
     pub(super) digest: [u8; 32],
     pub(super) publication: u64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct CompleteOutputObservation {
+    pub(super) preimage: OutputOrigin,
     pub(super) rates: CompleteOutputRates,
     pub(super) epoch: u64,
     pub(super) served_init: String,
     pub(super) members: Vec<ObservedOutputMember>,
+}
+
+/// Original execution identity. Restart validation never substitutes a new
+/// observer nonce, process recipe or publication epoch into this preimage.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct OutputOrigin {
+    pub(super) nonce: [u8; 16],
+    pub(super) epoch: u64,
+    pub(super) source_version: String,
+    pub(super) recipe_key: String,
+    pub(super) playlist: Vec<u8>,
+    pub(super) muxer_init: String,
+    pub(super) served_init: String,
+}
+
+impl OutputOrigin {
+    pub(super) fn identity(&self) -> [u8; 32] {
+        let mut hash = Sha256::new();
+        hash.update(b"plurx/vod-published-output/v1\0");
+        hash.update(self.nonce);
+        hash.update(self.epoch.to_le_bytes());
+        for field in [
+            self.source_version.as_bytes(),
+            self.recipe_key.as_bytes(),
+            self.playlist.as_slice(),
+            self.muxer_init.as_bytes(),
+            self.served_init.as_bytes(),
+        ] {
+            hash.update((field.len() as u64).to_le_bytes());
+            hash.update(field);
+        }
+        hash.finalize().into()
+    }
 }
 
 impl Default for PublishedOutputMeasurement {
@@ -117,6 +154,15 @@ impl PublishedOutputMeasurement {
                 return;
             };
             self.observation = Some(OutputObservation {
+                preimage: OutputOrigin {
+                    nonce: *self.nonce.as_bytes(),
+                    epoch,
+                    source_version: source.object_version().to_owned(),
+                    recipe_key: rendition.key.clone(),
+                    playlist: rendition.playlist.to_vec(),
+                    muxer_init: init.muxer_init.clone(),
+                    served_init: init.served_init.clone(),
+                },
                 origin,
                 epoch,
                 muxer_init: init.muxer_init.clone(),
@@ -164,6 +210,7 @@ impl PublishedOutputMeasurement {
         let rates = self.complete_rates()?;
         let observation = self.observation.as_ref()?;
         Some(CompleteOutputObservation {
+            preimage: observation.preimage.clone(),
             rates,
             epoch: observation.epoch,
             served_init: observation.served_init.clone(),
