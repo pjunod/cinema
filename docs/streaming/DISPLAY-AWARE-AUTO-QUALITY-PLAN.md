@@ -1030,7 +1030,8 @@ change; that review ran diff/hash checks, not compiler or playback tests. Both
 actor mailbox and dropped-reply ownership regressions passed after that change.
 The tracked commit hook, exact-source check and draft PR are being completed. Documentation index: 4 passed; catalog: 27 points,
 35 checks, 2572 audited files; staged whitespace clean. Preserved independent
-Opus review matches the untouched original byte-for-byte, SHA-256
+Opus review source artifact (`DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt`)
+matches the untouched original byte-for-byte, SHA-256
 `334766d5e8c591a8b4f91c3da122e34f3df338d55cbf96cd74c5e51859ff246a`.
 
 **Apple M0-B compile experiment from the coordinating session:** a standalone
@@ -1043,3 +1044,34 @@ JIT/pacing provenance, foreground impact or physical cliff result is claimed;
 older OS and nullable/missing metrics must remain honestly unknown. The full
 source/client adapter and shaped-device experiments remain implementation and
 evidence work, not a reason to raise the deployment minimum.
+
+
+### 9.2.1 B-R1 static preflight follow-up — 2026-09-30
+
+The actual gate exposed two static contract omissions: server-first optional
+`presentation_target` was compared as if already emitted by native clients,
+and two new Axum response-status assertions matched the process-capable
+sentinel. The correction keeps exact parity for every legacy field, with a
+single explicitly phased optional/omitted target premise that fails when a
+client learns the field. The existing nested Rust fixture explicitly verifies
+legacy target omission. The inventory delta names both HTTP status reads;
+neither creates a task/process or changes producer ownership.
+
+The complete validation-contract suite passed253 tests (one skip), the nested
+parser fixtures passed3, and all seven shared web preflight commands passed.
+The independent reviewer found no blockers in the exact static correction.
+The broader local operations run also exposed the original Opus review's
+missing repository Status header. Its supplied bytes are now an indexed `.txt`
+source artifact behind the existing `.md` lifecycle wrapper; SHA-256 is unchanged.
+The general status audit remains unchanged. Pinned all-target check/Clippy, formatting and history/catalog passed. Existing
+documentation index/status checks passed7. An escalated `make operations-check`
+ran580 tests with exactly three failures on macOS: the two signing-input tests
+`test_a_relative_keystore_is_resolved_before_gradle_sees_it` and
+`test_it_refuses_to_start_without_each_signing_input` use `/bin/true`, which is
+absent here (`/usr/bin/true` exists); the janitor
+`test_a_docker_that_never_answers_costs_one_pass_and_not_the_janitor` requires
+GNU `timeout`, absent here, and took60.4s. These unchanged platform fixtures are
+not claimed passing. Escalation resolved all seven loopback socket errors and
+four pgrep-related failures from the first sandboxed run. The general docs
+status audit and unrelated operations fixtures remain unchanged; Linux
+preflight is still required.

@@ -15429,6 +15429,9 @@ mod tests {
         assert!(legacy["control"]["selection"]["quality"]
             .get("candidate_id")
             .is_none());
+        assert!(legacy["control"]["capabilities"]
+            .get("presentation_target")
+            .is_none());
     }
 
     #[test]

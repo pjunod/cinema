@@ -4241,7 +4241,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # assertion on the in-process `/metrics` response in
 # `metrics_render_the_media_session_route_cache_families`. It launches nothing and
 # owns nothing.
-expected_occurrences = 406
+# +2 B-R1: Axum Response::status() reads in the authenticated local-refusal
+# and public-ingress remote-owner fixtures. Both assert HTTP response codes;
+# neither creates a process/task or changes producer lifecycle ownership.
+expected_occurrences = 408
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

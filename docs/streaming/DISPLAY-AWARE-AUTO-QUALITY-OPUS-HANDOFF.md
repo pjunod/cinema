@@ -19,7 +19,8 @@ Repository: /Users/pjunod/code/plurx
 Read AGENTS.md and docs/README.md first, then:
 - docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md
 - docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md
-- docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md
+- docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md (lifecycle wrapper)
+- docs/streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt (byte-identical supplied review)
 
 User intent: Cinema should automatically deliver the highest useful quality
 that the server, network and device can sustain smoothly. The immediate
