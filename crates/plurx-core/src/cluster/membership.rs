@@ -1903,6 +1903,7 @@ impl PassiveMembershipMetrics {
 #[derive(Clone)]
 pub struct MembershipManager {
     inner: Option<Arc<ReplicatedMembership>>,
+    clock: Arc<super::clock::ClusterClockGuard>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3282,7 +3283,15 @@ impl std::fmt::Debug for JoinSecretPayload {
 impl MembershipManager {
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: None }
+        Self {
+            inner: None,
+            clock: Arc::new(super::clock::ClusterClockGuard::new(false)),
+        }
+    }
+
+    #[must_use]
+    pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
+        Arc::clone(&self.clock)
     }
 
     #[must_use]
@@ -3331,6 +3340,7 @@ impl MembershipManager {
         );
         let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
+            clock: Arc::new(super::clock::ClusterClockGuard::new(true)),
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
                 local_metrics,
@@ -6227,6 +6237,37 @@ impl MembershipManager {
         Ok(Self::operations_peer_directory(now, &members, rows))
     }
 
+    /// Exact bounded clock roster, including stale and pending-removal members.
+    /// Missing identity or endpoint invalidates the whole round; reachability
+    /// never shortens clock coverage. No credential-guard mutation is involved.
+    pub async fn clock_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        let members_json = bounded_committed_raft_ids_json(&members)?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityPeerRow, _>(
+                CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                params!(inner.identity.node_id.as_str(), members_json),
+            )
+            .await?;
+        Self::cache_admin_revocation_peer_directory(
+            unix_ms()?,
+            &members,
+            inner.identity.raft_id,
+            rows,
+        )
+    }
+
     /// Resolve every exact committed remote member for cache-admin revocation.
     /// A pending removal is still a serving authority until Raft membership no
     /// longer contains it, so omission, missing identity, or missing endpoint
@@ -6541,8 +6582,13 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(&auth.node_id, now, PeerAuthorityRole::CommittedMember)
-            .await
+        self.verify_live_peer_authority_counted(
+            &auth.node_id,
+            now,
+            PeerAuthorityRole::CommittedMember,
+            path == "/_internal/v1/clock",
+        )
+        .await
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -7004,6 +7050,17 @@ impl MembershipManager {
         now: i64,
         role: PeerAuthorityRole,
     ) -> Result<bool, MembershipError> {
+        self.verify_live_peer_authority_counted(node_id, now, role, false)
+            .await
+    }
+
+    async fn verify_live_peer_authority_counted(
+        &self,
+        node_id: &str,
+        now: i64,
+        role: PeerAuthorityRole,
+        clock_request: bool,
+    ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
@@ -7018,6 +7075,9 @@ impl MembershipManager {
             return Ok(false);
         }
         let reachable_after = reachable_after(now);
+        if clock_request {
+            self.clock.record_authority_read();
+        }
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(

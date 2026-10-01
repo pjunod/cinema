@@ -1,7 +1,7 @@
 # Clock measurement — the separately owned observation release
 
-**Status:** open — owner unclaimed; runtime not started; enablement ruling
-pending · **Executes:** K-06 measurement handoff · **Written:** 2026-09-30 ·
+**Status:** open — measurement runtime implemented; release review/gate and fleet evidence pending
+· **Executes:** K-06 measurement handoff · **Written:** 2026-09-30 ·
 **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md), which fixes
@@ -12,22 +12,20 @@ claiming a separate implementation PR on the current effort. The
 until this release's identified fleet evidence exists. Neither plan closes
 the K-06 architecture issue on the [workboard](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md).
 
-## 1. Ownership and the unresolved enablement decision
+## 1. Ownership and the September 30 enablement clarification
 
 | Phase | Future owner / session | PR | State |
 |---|---|---|---|
-| Measurement release | unclaimed | none | blocked on the ruling below |
-| Enforcement release | unclaimed; separate owner claim | none | waits on measurement evidence and ruling |
+| Measurement release | gpt-6.1-sol · agent:/root/k06_runtime_sol61 | `codex/k06-measurement-runtime` | runtime implementation; review and exact-source evidence pending |
+| Enforcement release | unclaimed; separate owner claim | none | waits on measurement fleet evidence |
 
-The accepted design §§3.8/4/5.3 requires no enablement switch and describes
-measurement-only and enforcing binaries. Paul's current instruction requires
-unfinished features to have an explicit Settings → Developer switch whose
-readiness never disables the switch, rejects Save or overrides the saved
-choice. These conflict for K-06; the human ruling is pending. Do not silently
-choose either policy, rewrite the accepted design, or implement production
-wiring before that ruling. Record the ruling and its consequences in both
-plans before claiming runtime work. This docs-only handoff creates no switch
-and authorizes no rollout, clock step or fleet mutation.
+Paul clarified on 2026-09-30 that a switch belongs only where manual on/off
+has a meaningful purpose; unfinished work alone does not require one. K-06
+retains the accepted no-switch design: observation is automatic, enforcement
+is a separate reviewed release after measurement evidence, and Developer
+facts are read-only and advisory. A manual per-node safety-policy switch has
+no useful role in that contract. This ruling authorizes the assigned runtime
+implementation, not a rollout, clock step or fleet mutation.
 
 ## 2. Current entry points — re-verify before writing runtime code
 
@@ -72,6 +70,63 @@ only within an assigned operational window; do not step host clocks.
 
 ## 4. Acceptance and handoff — actual observations unlock enforcement
 
+### 4.1 Implemented runtime seams and focused evidence
+
+The daemon's [clock observer](../../crates/plurxd/src/clock_offset.rs) runs
+automatically under background shutdown, at ten seconds with eight concurrent
+peers. `MembershipManager::clock_peers` proves a bounded exact committed
+roster before and after fanout, retaining stale and pending-removal members.
+An incomplete roster invalidates the whole round. Each two-second request
+retains the original signed `t1` and captures `t4` before verification.
+The [core handle](../../crates/plurx-core/src/cluster/clock.rs) is shared by
+`MembershipManager` clones and owns serialized continuity and evidence.
+No acquisition, membership mutation or `/readyz` consumer is connected.
+
+Passive metrics drop expired numeric observations and departed peer series.
+`plurx_cluster_clock_authority_reads_total` counts actual consistent authority
+query attempts reached by inbound clock-route authorization, including failed
+queries, rather than all inbound requests or an inferred process-wide delta.
+The two consistent roster reads per round are separate from that route cost.
+Unknown rounds and local discontinuities have process-lifetime counters.
+Developer's clock card has no switch or Save and reads the same snapshot.
+
+Focused commands (pinned Rust 1.97.1; results recorded below when complete):
+
+```bash
+cargo test -p plurxd clock_offset::tests
+cargo test -p plurxd clock_route_refuses_household_and_forged_proofs_without_timing
+cargo test -p plurxd learner_route_matrix_admits_only_bounded_reads_and_node_local_media
+cargo test -p plurxd http::peer_transport::tests
+cargo test -p plurx-core --features hiqlite-store cluster::clock::tests
+cargo test -p plurx-core --features hiqlite-store cache_admin_revocation_roster_includes_pending_removals_and_fails_on_omission
+node --test tests/web/settings-sections.test.js
+python3 -m unittest tests.operations.test_clock_skew_guard_design tests.operations.test_docs_index
+```
+
+The original design's `local_discontinuity_invalidates_generation` fixture
+lives in core `cluster::clock::tests`, where the actual serialized handle can
+take deterministic wall/monotonic readings; it covers all four named schedules
+without stepping a host clock. The arithmetic/filter fixtures retain their
+original names in daemon `clock_offset::tests`. This relocates the shared
+handle test, not the measurement/enforcement evidence boundary. The existing
+roster fixture exercises the exact query and fail-closed directory reused by
+clock discovery, including pending removals and missing endpoints.
+
+Local Rust 1.97.1 workspace all-targets check passed. Focused daemon `clock_`
+selection passed sixteen tests (including the four arithmetic/filter fixtures,
+router refusal and delayed-verification transport test); core clock passed
+three with `hiqlite-store`, the reused exact-roster fixture passed one, the
+transport suite three, and the learner matrix one. Web settings passed 34
+checks; Python design and docs index passed nine. These are development
+proofs, not fleet acceptance. Normal hook and sole review are recorded in
+the owning pull request against its exact source head.
+
+No measurement binary has been deployed or identified fleet receipt taken.
+Runtime review and gate remain pending; one-hour idle,
+loaded and subsequent enforcement acceptance remain open.
+
+### 4.2 Release and fleet acceptance
+
 Establish the pinned Rust compile loop before edits, use the named design
 §5.2 Rust tests and focused transport/roster/metric contracts, and preserve the
 [Python design oracle](../../tests/operations/test_clock_skew_guard_design.py).
@@ -89,3 +144,9 @@ assumptions fail, stop and retain the failure. Do not tune safety constants
 from the dashboard. Attach that receipt to this plan and the workboard before
 the separate enforcement owner may claim implementation. Runtime and
 operational acceptance remain open until actually recorded.
+
+## 5. Execution log
+
+| Date | Model | Session | Milestone | Outcome / evidence |
+|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M0–M2 measurement runtime | `codex/k06-measurement-runtime`, based on effort `8a7dbf533`; exact signed exchange, core continuity/generations, roster/filter observer, passive metrics and read-only Developer facts implemented. §4.1 records focused development proofs. Sole review, release gate and identified fleet evidence remain open. |
