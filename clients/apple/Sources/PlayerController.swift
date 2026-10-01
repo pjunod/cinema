@@ -6833,7 +6833,8 @@ final class PlayerController: ObservableObject {
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
                 let opened = try await PlaybackLinkRequestContext.$receipt.withValue(currentLinkReceipt()) {
-                    try await requestHlsSession(model, file, request)
+                    let opened = try await requestHlsSession(model, file, request)
+                    return opened
                 }
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
