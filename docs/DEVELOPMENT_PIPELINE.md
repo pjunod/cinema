@@ -22,6 +22,12 @@
 > regressions reach the author before merge without spending runner capacity
 > on recurring runtime schedules; no periodic test schedule was added.
 
+> **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
+> refreshes the dated unit coverage badge on pushes to `main`, independently
+> of full CI. It also accepts manual retries on `main`. Coverage runs serialize
+> and measure current `main` when they start; failed runs retain the last
+> successful badge and its UTC measurement date.
+
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
 2026-08-29
