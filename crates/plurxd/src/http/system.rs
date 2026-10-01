@@ -613,9 +613,25 @@ pub struct ClientControlObservation {
     pub error_detail: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ClientTransportRecord {
+    pub command_id: String,
+    pub action: String,
+    pub origin: String,
+    pub reason: String,
+    pub intent_generation: Option<u64>,
+    pub position_ms: Option<i64>,
+    pub desired_before: Option<bool>,
+    pub desired_after: Option<bool>,
+    pub media_paused: Option<bool>,
+    pub media_ended: Option<bool>,
+    pub client_timestamp_ms: Option<i64>,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
+    pub transport: Option<ClientTransportRecord>,
     /// "error" | "warn" — anything but "error" logs at WARN.
     pub level: String,
     /// Short machine tag: "playback_failed" | "stream_rejected" | "hls_fatal" |
@@ -1225,6 +1241,40 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
+    if let Some(record) = ev.transport.as_ref().filter(|record| {
+        record.command_id.len() <= 64
+            && !record.command_id.is_empty()
+            && record
+                .command_id
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+            && matches!(record.action.as_str(), "play" | "pause")
+            && matches!(
+                record.origin.as_str(),
+                "viewer_control"
+                    | "viewer_keyboard"
+                    | "media_session"
+                    | "internal"
+                    | "native_unknown"
+            )
+            && record.reason.len() <= 64
+            && record
+                .reason
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    }) {
+        extra.insert("transport".to_owned(), serde_json::json!({
+            "command_id": record.command_id, "action": record.action,
+            "origin": record.origin, "reason": record.reason,
+            "intent_generation": record.intent_generation,
+            "position_ms": record.position_ms.filter(|value| *value >= 0 && *value <= 31_622_400_000),
+            "desired_before": record.desired_before, "desired_after": record.desired_after,
+            "media_paused": record.media_paused, "media_ended": record.media_ended,
+            "client_timestamp_ms": record.client_timestamp_ms.filter(|value| *value >= 0),
+            "server_receipt_timestamp_ms": crate::media_sessions::unix_ms(),
+        }));
+    }
+
     for (key, value) in [
         ("message", clipped(&Some(ev.message.clone()), 200)),
         ("title", clipped(&ev.title, 120)),
@@ -3908,6 +3958,7 @@ struct ActivityNodeStatus {
 
 #[derive(Serialize)]
 struct ClusterDelivery {
+    vod_observation: Option<crate::vodserve::VodActivityObservation>,
     method: String,
     presentation: Option<String>,
     user: String,
@@ -3925,6 +3976,7 @@ struct ClusterDelivery {
 impl ClusterDelivery {
     fn local(delivery: Delivery, node_id: &str) -> Self {
         Self {
+            vod_observation: delivery.vod_observation,
             method: delivery.method.to_owned(),
             presentation: delivery.presentation.map(str::to_owned),
             user: delivery.user,
@@ -3942,6 +3994,7 @@ impl ClusterDelivery {
 
     fn peer(delivery: ActivityDelivery, node_id: String) -> Self {
         Self {
+            vod_observation: delivery.vod_observation,
             method: delivery.method,
             presentation: delivery.presentation,
             user: delivery.user,
@@ -4555,6 +4608,7 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
 /// rows here are not sessions at all.
 #[derive(Serialize)]
 pub struct Delivery {
+    pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     /// `direct` · `remux` · `hls-copy` · `transcode`.
     pub method: &'static str,
     /// Present for HLS: `vod` or `live-recovery`.
@@ -4595,6 +4649,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     let mut out: Vec<Delivery> = sessions
         .iter()
         .map(|(s, method)| Delivery {
+            vod_observation: s.vod_observation.clone(),
             method: method.as_str(),
             presentation: Some(s.presentation),
             user: s.user_name.clone(),
@@ -4615,6 +4670,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     let mut titles: HashMap<i64, String> = HashMap::new();
     for stream in state.streams.list() {
         out.push(Delivery {
+            vod_observation: None,
             method: crate::delivery::Method::Remux.as_str(),
             presentation: None,
             user: stream.user_name,
@@ -4632,6 +4688,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     }
     for play in state.direct_plays.list() {
         out.push(Delivery {
+            vod_observation: None,
             method: crate::delivery::Method::Direct.as_str(),
             presentation: None,
             user: play.user_name,
@@ -5630,6 +5687,7 @@ mod tests {
 
     fn test_delivery(method: &'static str, started_unix: i64) -> Delivery {
         Delivery {
+            vod_observation: None,
             method,
             presentation: Some("live-recovery"),
             user: "paul".to_owned(),
@@ -5718,6 +5776,7 @@ mod tests {
                             workers: None,
                             node_id: "node-b".to_owned(),
                             deliveries: vec![ActivityDelivery {
+                                vod_observation: None,
                                 method: "direct".to_owned(),
                                 presentation: None,
                                 user: "viewer".to_owned(),
@@ -6327,6 +6386,7 @@ mod tests {
 
     fn beacon(event: &str, ms: i64) -> ClientLog {
         ClientLog {
+            transport: None,
             level: "warn".into(),
             event: event.into(),
             message: "x".into(),
@@ -6359,6 +6419,46 @@ mod tests {
             delivered_range: None,
             delivered_dv_profile: None,
             declared_dv_profiles: None,
+        }
+    }
+
+    #[test]
+    fn transport_provenance_is_bounded_and_retained_in_playback_events() {
+        for origin in [
+            "viewer_control",
+            "viewer_keyboard",
+            "media_session",
+            "internal",
+            "native_unknown",
+        ] {
+            let mut ev = beacon("transport_command", 0);
+            ev.transport = Some(ClientTransportRecord {
+                command_id: "tc-123-1".into(),
+                action: "pause".into(),
+                origin: origin.into(),
+                reason: "recovery_exhausted".into(),
+                intent_generation: Some(2),
+                position_ms: Some(123000),
+                desired_before: Some(true),
+                desired_after: Some(false),
+                media_paused: Some(false),
+                media_ended: Some(false),
+                client_timestamp_ms: Some(100),
+            });
+            let projected = client_playback_event(&ev, 7);
+            let extra: serde_json::Value =
+                serde_json::from_str(projected.extra.as_deref().expect("retained transport"))
+                    .expect("JSON");
+            assert_eq!(extra["transport"]["origin"], origin);
+            assert_eq!(extra["transport"]["desired_before"], true);
+            assert!(extra["transport"]["server_receipt_timestamp_ms"]
+                .as_i64()
+                .is_some());
+            ev.transport.as_mut().expect("record").reason = "private\nforged".into();
+            let malformed = client_playback_event(&ev, 7);
+            let extra: serde_json::Value =
+                serde_json::from_str(malformed.extra.as_deref().expect("message")).expect("JSON");
+            assert!(extra.get("transport").is_none());
         }
     }
 
@@ -6744,6 +6844,7 @@ mod tests {
         beacon.session_id = Some("session-a".into());
         let event = client_playback_event(&beacon, 7);
         let info = crate::transcode::SessionInfo {
+            vod_observation: None,
             id: "session-a".into(),
             presentation: "live-recovery",
             file_id: 42,

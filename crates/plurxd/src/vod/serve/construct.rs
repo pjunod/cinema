@@ -222,6 +222,7 @@ impl VodServe {
                 delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
+                control_observed_at: None,
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
@@ -350,6 +351,51 @@ impl VodServe {
 
     /// None means this node has no source attestation yet. The caller may
     /// still use a local index; only a complete index miss queues analysis.
+    pub(crate) async fn cluster_index_available(
+        &self,
+        file: &MediaFile,
+        video: CopyVideoOptions,
+    ) -> Result<bool, String> {
+        let Some(node_id) = self.shared.cluster_node_id.as_deref() else {
+            return Ok(false);
+        };
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Ok(false);
+        }
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(file).await?;
+        let Some(observation) = self
+            .shared
+            .store
+            .fragment_index_source(node_id, file.id, &object_version)
+            .await
+            .map_err(|error| format!("reading source attestation: {error}"))?
+        else {
+            return Ok(false);
+        };
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
+        let Some(key) = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &observation.source_sha256,
+            &pipeline,
+        ) else {
+            return Ok(false);
+        };
+        Ok(self
+            .shared
+            .store
+            .cluster_fragment_index_artifact(&key)
+            .await
+            .map_err(|error| format!("reading cluster index catalog: {error}"))?
+            .is_some_and(|artifact| {
+                artifact.source_size == file.size
+                    && artifact.source_sha256 == observation.source_sha256
+                    && artifact.pipeline_sha256 == pipeline
+            }))
+    }
+
     pub(super) async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,
