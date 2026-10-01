@@ -323,6 +323,7 @@ impl VodServe {
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
                     session.last_control_snapshot = Some(control.snapshot.clone());
+                    session.control_observed_at = Some(Instant::now());
                 }
                 let mut last_touch = session.last_touch.lock().expect("touch lock");
                 if disposition == crate::playback_control::ControlDisposition::Accepted {

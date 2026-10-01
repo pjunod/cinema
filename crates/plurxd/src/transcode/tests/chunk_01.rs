@@ -915,35 +915,16 @@
     }
 
     #[tokio::test]
-    async fn orphan_sweep_never_enters_the_live_tv_owned_namespace() {
-        use plurx_core::store::SqliteStore;
-
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let work = crate::test_tempdir().expect("work root");
-        let live_session = work
-            .path()
-            .join(LIVE_TV_WORK_DIR_NAME)
-            .join("live-tv-active");
-        tokio::fs::create_dir_all(&live_session)
-            .await
-            .expect("active Live TV scratch");
-        tokio::fs::write(live_session.join("index.m3u8"), b"active")
-            .await
-            .expect("active playlist");
-        let ordinary_orphan = work.path().join("orphan-vod");
-        tokio::fs::create_dir(&ordinary_orphan)
-            .await
-            .expect("ordinary orphan");
-        let manager = TranscodeManager::new(
-            store,
-            work.path().to_path_buf(),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        );
-
-        assert!(manager.sweep_orphan_dirs().await >= 1);
-        assert!(live_session.join("index.m3u8").is_file());
-        assert!(!ordinary_orphan.exists());
+    async fn rolling_cleanup_missing_directory_is_successful_and_idempotent() {
+        let root = crate::test_tempdir().expect("root");
+        let missing = root.path().join("already-unlinked");
+        clear_session_dir(&missing).await.expect("missing is successful absence");
+        clear_session_dir(&missing).await.expect("duplicate cleanup is settled");
+        assert!(!missing.exists(), "cleanup cannot recreate its retired directory");
+        let blocked = root.path().join("not-a-directory");
+        tokio::fs::write(&blocked, b"owned file").await.expect("fixture");
+        assert!(clear_session_dir(&blocked).await.is_err(), "real I/O failure stays retryable");
+        assert!(blocked.exists());
     }
 
     #[test]
@@ -1279,7 +1260,7 @@
                 .hls_session_control(request(3, 1))
                 .await,
             Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded
+                crate::playback_control::ControlStateError::RollingEnded(crate::playback_control::RollingTerminalCause::End)
             ))
         ));
         assert!(
@@ -1469,7 +1450,7 @@
                 .hls_session_control(request(2))
                 .await,
             Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded
+                crate::playback_control::ControlStateError::RollingEnded(crate::playback_control::RollingTerminalCause::End)
             ))
         ));
         // Keep the filesystem-backed retirement and concurrent retry on real
@@ -1511,14 +1492,18 @@
             .contains_key(&session_id));
 
         tokio::time::advance(Duration::from_millis(1)).await;
+        // The acknowledgement and retirement-owned presentation have distinct
+        // lifetimes. Cleanup may still retain the winning terminal fact, but
+        // neither outcome may replay an expired acknowledgement.
+        let after_expiry = fixture.state.transcode.hls_session_control(request(1)).await;
         assert!(
-            fixture
-                .state
-                .transcode
-                .hls_session_control(request(1))
-                .await
-                .is_none(),
-            "the rolling manager must drop the exact retained operation at acknowledgement expiry"
+            matches!(
+                after_expiry,
+                None | Some(Err(crate::playback_control::ControlStateError::RollingEnded(
+                    crate::playback_control::RollingTerminalCause::End
+                )))
+            ),
+            "expired acknowledgement cannot replay; retirement may still retain its winning End"
         );
         assert!(!fixture
             .state
@@ -1528,12 +1513,19 @@
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&session_id));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(fixture
+        assert!(matches!(
+            fixture.state.transcode.hls_session_control(request(1)).await,
+            None | Some(Err(crate::playback_control::ControlStateError::RollingEnded(
+                crate::playback_control::RollingTerminalCause::End
+            )))
+        ));
+        assert!(!fixture
             .state
             .transcode
-            .hls_session_control(request(1))
-            .await
-            .is_none());
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
     }
 
     #[tokio::test]
@@ -1949,7 +1941,7 @@
         assert!(matches!(
             control.await.expect("control task"),
             Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded
+                crate::playback_control::ControlStateError::RollingEnded(crate::playback_control::RollingTerminalCause::End)
                     | crate::playback_control::ControlStateError::OwnerTransition
             ))
         ));

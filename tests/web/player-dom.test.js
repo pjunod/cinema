@@ -46,9 +46,11 @@ const rowFor = (id) => {
   return row;
 };
 const WEB_ELEMENT_FOR_ITEM = {
+  skip_back_30: "pbback30",
   skip_back: "pbback",
   play_pause: "pbplay",
   skip_forward: "pbforward",
+  skip_forward_30: "pbforward30",
   audio: "pbaudio",
   subtitles: "pbsubs",
   quality: "pbquality",
