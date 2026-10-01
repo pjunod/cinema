@@ -262,7 +262,9 @@ class PythonReceiptCase(unittest.TestCase):
         preflight = workflow.split("  preflight:", 1)[1].split("  web_static:", 1)[0]
         self.assertNotIn("player-input-contract.test.js", preflight)
         self.assertNotIn("player-dom.test.js", preflight)
-        self.assertIn("make web-check", workflow.split("  web_static:", 1)[1])
+        web_lane = workflow.split("  web_static:", 1)[1].split("  apple_compile:", 1)[0]
+        self.assertIn("run: make effort-web-static-check", web_lane)
+        self.assertNotIn("run: make web-check", web_lane)
         makefile = (root / "Makefile").read_text()
         self.assertIn("player-input-contract.test.js", makefile)
         self.assertIn("player-dom.test.js", makefile)
