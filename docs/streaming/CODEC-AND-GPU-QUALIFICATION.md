@@ -780,6 +780,53 @@ hashes the argument list before and after).
 
 ### 5.4 M3 — Q8a: does the rolling grid drift?
 
+**2026-10-01 offline evidence collector candidate:**
+`scripts/rolling-grid-census` captures only flat, owned, private copied
+MPEG-TS rolling-transcode outputs; it never starts a session or opens a server URL.
+It verifies the selected local ffprobe binary hash, retains bounded raw packet
+probes and media hashes, and consumes them again to report EXTINF spread,
+presentation-start spacing, distinct packet cadence, packet-span/EXTINF
+disagreement and keyframe-at-start counts. Duplicate timestamps or incomplete
+packet timelines refuse; truthful complete timelines off the two-second grid
+remain measured drift. Fractional cadence uses exact rational arithmetic and
+bounded actual-timebase quantization, not a nominal integer fps guess.
+Supplied source/daemon/graph provenance is recorded, not authenticated by
+this tool: the campaign owner must independently bind it to the actual
+executed session before using a result for M3 acceptance. Keyframe flags are
+not NAL IDR/CRA proof. One cell is not the full four-fixture×four-rung census.
+
+```bash
+# Read an already copied, owned mode700 directory; no encoder/server activity.
+python3 scripts/rolling-grid-census capture --root /private/owned/cell-input \
+  --output /private/owned/new-cell-evidence --ffprobe /absolute/ffprobe \
+  --provenance /private/owned/cell-provenance.json
+# Recompute the copied objects and raw probe hashes; do not trust a stored verdict.
+python3 scripts/rolling-grid-census validate --root /private/owned/new-cell-evidence
+```
+
+The provenance object requires `route: rolling-transcode`, source commit,
+source/graph-argv/daemon/tool SHA-256 identities, session/family/pipeline,
+fixture/rung, tool version, exact rational `output_cadence: [numerator,
+denominator]` and `output_geometry: [width,height]`. Unknown facts refuse.
+Every playlist URI must name one consecutive local `segN.ts`
+object; URLs, missing/duplicate segments, symlinks and changed copies refuse.
+`#EXT-X-MAP` and `.m4s` refuse explicitly: this collector does not yet capture
+the initialization context required to measure fMP4. This is an evidence
+format limit, not a production setting or gate.
+The completed-segment window requires 30–256 entries: do not substitute a
+short terminal segment or loop/relabel a 45-second corpus fixture to earn
+that count. Acquire separately identified ≥60-second measurement inputs.
+Bounded capture is ≤600 s aggregate, ≤20 s/probe, ≤512 MiB copied evidence,
+≤16 MiB/probe output and ≤1 MiB/probe stderr; existing destinations refuse.
+Every text/JSON input is capped before decoding/parsing using cap+1 reads:
+playlist/receipt 1 MiB, provenance/tool-version 64 KiB, raw probe 16 MiB.
+Failed partial captures retain their intent and files, not a completed receipt.
+No drift means every completed interval/start spacing lies within one actual
+output frame and every segment's first presented packet has a keyframe flag;
+extra internal keys are reported separately, not treated as grid drift.
+Physical/graph acceptance, authenticated campaign provenance and the original
+full census below remain open. No production GOP flag changes follow here.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).
