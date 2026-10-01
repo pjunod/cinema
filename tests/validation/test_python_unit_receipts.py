@@ -98,7 +98,7 @@ class PythonReceiptCase(unittest.TestCase):
             self.assertEqual([p.name for p in path.parent.iterdir()], ["receipt.json"])
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/effort-ci.yml").read_text()
         self.assertNotIn("cancel-in-progress: true", workflow)
-        self.assertIn("group: python-unit-${{ needs.scope.outputs.receipt_key }}", workflow)
+        self.assertIn("group: python-unit-${{ github.repository }}-${{ github.ref }}", workflow)
         self.assertLess(workflow.index("Publish Python attempt-start marker"),
                         workflow.index("python_unit_receipts run"))
         self.assertIn("if: always() && steps.receipts.outcome == 'success'", workflow)
@@ -187,6 +187,74 @@ class PythonReceiptCase(unittest.TestCase):
                                                                   "branch": "codex/other"}), {})
             finally:
                 os.chdir(previous)
+
+    def test_http_diagnostics_reveal_only_status_and_normalized_path(self):
+        import urllib.error
+        api = receipts.API("https://forge.example.test/api/v1", "owner/repo", "secret-token")
+        class FakeOpener:
+            def open(self, request, timeout):
+                raise urllib.error.HTTPError(request.full_url, 403, "secret-reason",
+                                             {"Authorization": "secret-header"}, io.BytesIO(b"secret-body"))
+        api.opener = FakeOpener()
+        with self.assertRaises(receipts.ReceiptHTTPError) as caught:
+            api.get("/collaborators/writer/permission", {"secret-query": "secret-value"})
+        self.assertEqual(str(caught.exception),
+                         "HTTP 403 at /repos/owner/repo/collaborators/writer/permission; evidence unavailable")
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_collaborator_403_accepts_only_explicit_verified_owner_enrollment(self):
+        class FakeAPI:
+            def __init__(self, status=403, permission=None):
+                self.status, self.permission = status, permission
+            def get(self, path):
+                if self.permission is not None:
+                    return {"user": {"id": 1}, "permission": self.permission}
+                raise receipts.ReceiptHTTPError(self.status, "/repos/noirr/plurx" + path)
+        scope = {**SCOPE, "repository": 1}
+        owner = {"id": 1, "login": "pjunod"}
+        with patch("sys.stderr", new=io.StringIO()):
+            receipts.verify_attestor(FakeAPI(), scope, owner)
+            for api, candidate_scope, candidate_owner in (
+                (FakeAPI(401), scope, owner), (FakeAPI(404), scope, owner),
+                (FakeAPI(), SCOPE, owner), (FakeAPI(), scope, {"id": 2, "login": "pjunod"}),
+                (FakeAPI(), scope, {"id": 1, "login": "reader"}),
+                (FakeAPI(permission="read"), scope, owner)):
+                with self.assertRaises(receipts.ReceiptError):
+                    receipts.verify_attestor(api, candidate_scope, candidate_owner)
+
+    def test_literal_job_and_step_local_artifact_identity_do_not_need_job_outputs(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/effort-ci.yml").read_text()
+        preflight = workflow.split("  preflight:", 1)[1].split("  rust_compile:", 1)[0]
+        self.assertIn("name: Python unit receipts", preflight)
+        self.assertIn("group: python-unit-${{ github.repository }}-${{ github.ref }}", preflight)
+        self.assertIn("name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}", preflight)
+        self.assertIn("name: ${{ steps.receipts.outputs.receipt_key }}\n", preflight)
+        self.assertNotIn("needs.scope.outputs.receipt_key", preflight)
+        self.assertEqual(receipts.job_name(SCOPE), "Python unit receipts")
+        self.assertNotEqual(receipts.key(SCOPE), receipts.key({**SCOPE, "pr": 99}))
+
+    def test_failed_prepare_recovery_requires_exact_run_job_source_and_log(self):
+        proof = json.loads((Path(__file__).resolve().parents[2] /
+                            "validation/python-unit-preunit-failure3705.json").read_text())
+        prior = {"id": proof["run"], "commit_sha": proof["commit"]}
+        job = {"id": proof["job"], "run_id": proof["run"], "repo_id": 1,
+               "attempt": 1, "name": "", "status": "failure"}
+        class FakeAPI:
+            def __init__(self, mismatch):
+                self.mismatch = mismatch
+            def get(self, path):
+                return {"repository": {"id": 1}, "commit_sha": proof["commit"],
+                        "prettyref": proof["scope"]["branch"], "workflow_id": "effort-ci.yml",
+                        "status": "success" if self.mismatch == "run" else "failure"}
+            def bytes(self, path, query=None):
+                return b"contradictory-source-or-log"
+        for mismatch in ("run", "source"):
+            with self.assertRaises(receipts.ReceiptError):
+                receipts.pre_unit_recovery(FakeAPI(mismatch), proof["scope"], prior, [job])
+        self.assertFalse(receipts.pre_unit_recovery(FakeAPI("source"), SCOPE, prior, [job]))
+        with self.assertRaises(receipts.ReceiptError):
+            receipts.pre_unit_recovery(FakeAPI("source"), proof["scope"], prior,
+                                      [{**job, "attempt": 2}])
 
     def test_effort_node_units_have_only_the_existing_web_lane(self):
         root = Path(__file__).resolve().parents[2]

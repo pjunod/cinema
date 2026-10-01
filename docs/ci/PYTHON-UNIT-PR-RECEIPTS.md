@@ -53,8 +53,18 @@ Python-Unit-Receipt: {"repository":1,"pr":123,"suite":"validation","sha256":"<64
 ```
 
 The API must confirm that the comment author's numeric identity has owner,
-admin or write permission; reader claims and unknown/unavailable permission
-metadata refuse reuse. Every claim binds repository, PR, suite and hash.
+admin or write permission. Forgejo 16.0.3 restricts that permission endpoint
+to admins or the queried user, so the automatic job token may receive 403.
+Only that exact collaborator-permission 403 can use the source-reviewed
+`validation/python-unit-attestors.json` enrollment: repository1/user1/login
+pjunod, independently verified as owner by ROOT on 2026-10-01 through the
+actual authenticated user and collaborator-permission APIs. Changing the
+enrollment requires a fresh actual role check and review. Other statuses,
+identities, repositories, reader roles and unavailable evidence still refuse.
+The safe diagnostic reports HTTP status and normalized API path, never token,
+headers, response body or query. The old generic error did not identify its
+actual denied endpoint; the next runtime diagnostic must establish that.
+Every claim binds repository, PR, suite and hash.
 Worktree successes retain null commit/run values and the original source
 hash plus attestation comment ID; they never pretend the base commit or
 current commit executed the tests. A relevant local receipt awaiting
@@ -65,6 +75,21 @@ than silently rerunning units. Keep the original run/job IDs and recover the
 original attributable journal before retrying; do not delete receipt artifacts
 to manufacture a first run. A process stopped between success and durable
 publication leaves an incomplete attempt and requires evidence recovery.
+
+The preflight job has a fixed literal name; Forgejo resolves job names before
+`needs` outputs are available. Repository/ref concurrency serializes its one
+validated open PR, while start/final artifact names use the prepare step's own
+validated PR key. Journals bind repository, PR, branch, base, run and source;
+branch reuse cannot import another PR's successes. Missing current-attempt
+identity or evidence remains blocking, including unknown empty-name jobs.
+
+First gate API3705/UI3684 failed prepare at source a3b795a37 before any unit or
+start marker. Its one explicit recovery record binds job39306, actual failure
+metadata, exact workflow/receipt-code hashes and original log SHA-256. Skipped
+start/final artifact main steps plus reviewed source ordering prove zero units;
+the record imports no success. Every unknown or contradictory attempt refuses
+instead of treating an absent journal as a fresh run. This is not a generic
+failed-attempt exemption.
 
 Non-method fixture errors (module/class setup, teardown or cleanup) remain
 explicit unresolved evidence even when every method already succeeded. A
