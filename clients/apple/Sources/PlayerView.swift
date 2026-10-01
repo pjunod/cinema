@@ -720,7 +720,10 @@ struct PlayerView: View {
                 allowsPictureInPicture: PlayerSurface.shouldAllowPictureInPicture(
                     isTearingDown: lifecycle.isTearingDown,
                     pgsOverlayIsActive: controller.pgsOverlayIsActive
-                )
+                ),
+                presentationTargetChanged: { width, height in
+                    controller.updatePresentationTarget(widthPx: width, heightPx: height)
+                }
             )
                 .ignoresSafeArea()
 

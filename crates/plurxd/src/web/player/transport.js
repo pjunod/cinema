@@ -80,6 +80,7 @@ function playbackChangeRecipeKey(p,targetSec,change){
     c.method===undefined?(p.method||null):(c.method||null),
     c.copyHls===undefined?!!p.copyHls:!!c.copyHls,
     c.height==null?null:c.height,
+    c.candidateId||null,
     !!c.forceReopen,
     c.previousSessionId||null,
     c.recoveryCause||null,
@@ -511,6 +512,9 @@ function togglePlay(){
   else if(PLAYER){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.wantsPlayback=!PLAYER.wantsPlayback;
+    const pauseStarted=PLAYER.abr&&PLAYER.abr.explicitPauseAtMs;
+    const qualityBoundary=PLAYER.wantsPlayback&&pauseStarted!=null&&performance.now()-pauseStarted>=60000;
+    if(PLAYER.abr) PLAYER.abr.explicitPauseAtMs=PLAYER.wantsPlayback?null:performance.now();
     if(PLAYER.wantsPlayback&&PlaybackPolicy.pausedRetirementCurrent(
       PLAYER.pausedRetirement,PLAYER.sessionId)){
       // The session this pause held was retired (§9.5): reopen at the saved
@@ -520,11 +524,12 @@ function togglePlay(){
         ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
       clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",
         message:`reopening the retired paused session at ${at.toFixed(1)}s`},playbackContext()));
-      seekTo(at,true,null,false);
+      seekTo(at,true,null,false,null,qualityBoundary);
     }else{
       if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
       else pauseHlsStartup(PLAYER);
       applyPlaybackTransportIntent(v,PLAYER);
+      if(qualityBoundary) seekTo(pbPosSec(),false,null,false,null,true);
     }
   }
   if(PLAYER)playerActivity();
@@ -1000,8 +1005,9 @@ function playbackSeekBufferCovers(v,p,targetMs){
 // Seek that works for every method: direct/VOD and safe rolling/progressive
 // destinations seek the attached element; everything else reopens at film time.
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
-  recoveryEpisode=null){
+  recoveryEpisode=null,qualityBoundary=false){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
+  if(viewerInitiated&&PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
   if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){
@@ -1079,6 +1085,24 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   await new Promise(done=>setTimeout(done,100));
   if(!PLAYER||PLAYER.controlSeek!==seekIntent||hasPendingPlaybackOpen(PLAYER)) return;
   const me=PLAYER;
+  if((viewerInitiated&&!forceReopen||qualityBoundary)&&qualityForce()==='auto'){
+    const candidate=await naturalBoundaryQualityCandidate(me,seekIntent);
+    if(PLAYER!==me||me.controlSeek!==seekIntent||hasPendingPlaybackOpen(me)) return;
+    if(candidate){
+      const previousId=me.abr.requestedCandidateId||me.qualityCandidateId;
+      me.abr.requestedCandidateId=candidate.id;
+      const copy=candidate.route!=='encode';
+      const change={method:copy?'remux':'transcode',copyHls:copy,
+        height:copy?null:candidate.target_height,candidateId:candidate.id,
+        reason:'seek',automatic:true,naturalBoundary:true};
+      const changed=await requestPlaybackMediaChange(me,change);
+      if(changed||PLAYER!==me||me.controlSeek!==seekIntent) return;
+      // The alternate failed before attachment. Fulfil the same viewer seek
+      // on the retained route instead of leaving a failed quality request.
+      me.pendingMediaChange=null;
+      me.abr.requestedCandidateId=previousId||null;
+    }
+  }
   const bufferedMs=playbackSeekBufferedRangesMs(v,me);
   const published=playbackSeekPublishedRangeMs(me);
   const seekableMs=playbackSeekSeekableRangesMs(v,me);

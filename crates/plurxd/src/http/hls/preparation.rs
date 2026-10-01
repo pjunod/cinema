@@ -1057,7 +1057,19 @@ pub(super) async fn plan_preparation_candidate(
         presentation: Some("vod".to_owned()),
         block_budget_secs: predecessor.request.block_budget_secs,
         transport: predecessor.request.transport.clone(),
-        intent: None,
+        intent: match selection.quality {
+            crate::playback_control::QualitySelection::Auto {
+                candidate_id: Some(_),
+                ..
+            } => Some(plurx_core::playback::MediaIntentEnvelope {
+                lifetime_id: predecessor.request.playback_id.clone(),
+                recipe_revision: 1,
+                destination_revision: 1,
+                transport_revision: 1,
+                selection: selection.desired(),
+            }),
+            _ => None,
+        },
     };
     let review = review_client_plan_inner(
         caps,
@@ -1255,6 +1267,30 @@ pub(super) async fn process_preparation_candidate(
         crate::playback_control::record_preparation_staged(false);
         return;
     }
+    if let Some(runtime) = capabilities.as_ref() {
+        recipe.presentation_target = runtime.presentation_target;
+        if let Some(snapshot) = runtime.decoder_caps.as_ref() {
+            recipe.decoder_caps = Some(snapshot.clone());
+        }
+    }
+    let mut planning_caps = planning_caps;
+    if let Some(runtime) = capabilities.as_ref() {
+        if let Some(snapshot) = runtime.decoder_caps.as_ref() {
+            if !snapshot.video.iter().any(|entry| entry.available) {
+                return;
+            }
+            if let Some(caps) = planning_caps.as_mut() {
+                caps.video = snapshot.device_caps().video;
+            }
+        }
+        if recipe.candidate_id.is_some() {
+            if let Some(caps) = planning_caps.as_mut() {
+                if let Some(display) = caps.display.as_mut() {
+                    display.presentation_target = runtime.presentation_target;
+                }
+            }
+        }
+    }
     let candidate = match plan_preparation_candidate(
         &state,
         &recipe,
@@ -1328,7 +1364,13 @@ pub(super) async fn process_preparation_candidate(
             decision,
             crate::playback_control::PreparationDecision::Prepare { .. }
         )
-        .then(|| state.node_id.clone()),
+        .then(|| {
+            candidate
+                .candidate_context
+                .as_ref()
+                .and_then(|context| context.owner_node_id.clone())
+                .unwrap_or_else(|| state.node_id.clone())
+        }),
         PreparationPurpose::PlannedRelocation(fence)
             if capabilities
                 .as_ref()
@@ -1546,6 +1588,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
+        candidate_context: candidate.candidate_context.clone(),
         request_id: Some(staged_incarnation_id.clone()),
         start_seconds: resume_ms as f64 / 1_000.0,
         // A successor is its own generation, not a reopen of the one it
@@ -1557,9 +1600,12 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let staged_recipe = RemoteStartRequest {
-        candidate_id: None,
-        presentation_target: None,
-        decoder_caps: None,
+        candidate_id: candidate
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        presentation_target: predecessor.presentation_target,
+        decoder_caps: predecessor.decoder_caps.clone(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
         user_id: route.user_id,
@@ -1580,6 +1626,40 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
         delivered_audio: staged_request.audio_delivery.clone(),
+        display_aware_auto_protocol: predecessor
+            .decoder_caps
+            .as_ref()
+            .map(|_| "route-v1".to_owned()),
+        quality_candidate_id: candidate
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        quality_candidates: if let Some(caps) = predecessor.decoder_caps.as_ref() {
+            Some(
+                state
+                    .media_pool
+                    .quality_candidates(
+                        state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: candidate.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.device_caps(),
+                            audio_index: candidate.audio_index,
+                            audio_offset_ms: candidate.audio_offset_ms,
+                            subtitle_burn: candidate.subtitle_burn,
+                            presentation: candidate.presentation,
+                        },
+                    )
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect(),
+            )
+        } else {
+            None
+        },
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,

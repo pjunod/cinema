@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import tv.plurx.app.data.PlaybackQuality
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.launch
@@ -1723,5 +1724,133 @@ class PlaybackControlSettleTest {
         assertTrue(subject.isStopped())
         assertEquals(1, harness.requests.size)
         assertEquals("protocol:body", harness.exchanges.last().failure)
+    }
+}
+
+class DisplayAwareAutoEvidenceTest {
+    private fun candidate(height: Int, route: String = "encode", peak: Long? = 3_000_000L) =
+        tv.plurx.app.data.QualityCandidate("0a7ba9bab6fbdd31bab5e5e362a3fac7", List(32) { 0 },
+            route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,
+            grade = "sdr", decoder_compatible = true, complete_cache = false, sustainable = false)
+
+    @Test fun runtimeDecoderSnapshotUsesStrictServerVocabulary() {
+        val caps = tv.plurx.app.data.VideoEntry("hevc", listOf("main10"), 1_440, 2_560,
+            tv.plurx.app.data.DecoderFrameRate(30, 1), listOf("pq", "sdr"), listOf(8))
+        val snapshot = DecoderCapabilitySnapshot.fromVideo(1L, listOf(caps))
+        val wire = Json.encodeToString(DecoderCapabilitySnapshot.serializer(), snapshot)
+        val expected = """{"revision":1,"video":[{"codec":"hevc","profiles":["main10"],"available":true,"dynamic_ranges":["hdr10","sdr","dolby_vision"],"dv_profiles":[8],"max_width":2560,"max_height":1440,"max_frame_rate":{"numerator":30,"denominator":1}}]}"""
+        assertEquals(Json.parseToJsonElement(expected), Json.parseToJsonElement(wire))
+        val empty = DecoderCapabilitySnapshot.fromVideo(2L, listOf(tv.plurx.app.data.VideoEntry("h264", present = listOf("sdr"))))
+        val emptyWire = Json.encodeToString(DecoderCapabilitySnapshot.serializer(), empty)
+        assertTrue(emptyWire.contains("\"profiles\":[]"))
+        assertTrue(emptyWire.contains("\"dv_profiles\":[]"))
+        assertFalse(emptyWire.contains("\"present\":"))
+        val many = (1..20).map { caps.copy(max_height = 100 + it) }
+        assertEquals(16, DecoderCapabilitySnapshot.fromVideo(3L, many).video.size)
+    }
+
+    @Test fun currentDisplayOptimumDoesNotUpgradeAndBothAxesLimitEnlargement() {
+        val current = candidate(1_080)
+        assertEquals(current, autoPreferredDisplayCandidate(listOf(current, candidate(1_440)), 2_000.0, 1_125.0))
+        assertEquals(1_440, autoPreferredDisplayCandidate(listOf(current, candidate(1_440)), 2_400.0, 1_350.0)?.height)
+        assertFalse(autoDisplayFits(1_920, 1_000, 2_000.0, 1_125.0))
+        assertFalse(autoDisplayFits(1_800, 1_080, 2_000.0, 1_125.0))
+    }
+
+    @Test fun coldOriginalCanRecoverToUnprovedCompatibleEncodeWithinLinkBudget() {
+        val original = candidate(2_160, "remux", null)
+        val lower = candidate(1_080)
+        assertEquals(lower, autoRecoveryCandidate(listOf(original, lower), original, emptySet(), 4_000_000.0))
+        assertNull(autoRecoveryCandidate(listOf(lower), original, emptySet(), 2_000_000.0))
+        assertNull(autoRecoveryCandidate(listOf(lower), original, setOf(lower.id)))
+        assertFalse(lower.sustainable)
+        val hdrOriginal = original.copy(grade = "hdr10")
+        assertNull(autoRecoveryCandidate(listOf(lower), hdrOriginal, emptySet()))
+        assertEquals(lower, autoRecoveryCandidate(listOf(lower), hdrOriginal, emptySet(), decoderRecovery = true))
+    }
+
+    @Test fun originalAverageIsDownsideOnlyAndRequiresFreshUnpacedCurrentSessionEvidence() {
+        val original = candidate(2_160, "remux", null)
+        assertEquals(8_000_000.0, autoDownsideCostBps(original, sample(), "staged", 2_000L))
+        assertNull(original.peak_bps)
+        assertNull(autoDownsideCostBps(original, sample(), "other", 2_000L))
+        assertNull(autoDownsideCostBps(original, sample(paced = true), "staged", 2_000L))
+        assertNull(autoDownsideCostBps(original, sample(), "staged", 12_000L))
+    }
+
+    private fun sample(segment: String = "a", bodyMs: Long = 500L, mediaMs: Long? = 1_000L,
+                       completedAt: Long = 1_000L, cached: Boolean? = false, paced: Boolean? = false) =
+        AutoCompletedTransfer(100_000L, bodyMs, completedAt, "https://example.invalid", true,
+            cached, paced, "/api/v1/hls/staged/seg$segment.m4s", mediaMs)
+
+    @Test fun freshLinkRejectsStaleCachedPacedAndUnknownProvenance() {
+        assertNotNull(autoCompletedTransferBps(sample(), 2_000L))
+        assertNull(autoCompletedTransferBps(sample(completedAt = 0L), 10_001L))
+        assertNull(autoCompletedTransferBps(sample(cached = true), 2_000L))
+        assertNull(autoCompletedTransferBps(sample(paced = true), 2_000L))
+        assertNull(autoCompletedTransferBps(sample(paced = null), 2_000L))
+        assertNull(autoCompletedTransferBps(sample(cached = null), 2_000L))
+    }
+
+    @Test fun unknownPeakOriginalNeedsDistinctSegmentsAndEmpiricalMargin() {
+        assertFalse(autoOriginalTransferMarginProven(listOf(sample(), sample()), "staged", 2_000L))
+        assertTrue(autoOriginalTransferMarginProven(listOf(sample("a"), sample("b")), "staged", 2_000L))
+        assertFalse(autoOriginalTransferMarginProven(listOf(sample("a", bodyMs = 600L), sample("b")), "staged", 2_000L))
+        assertFalse(autoOriginalTransferMarginProven(listOf(sample("a"), sample("b", mediaMs = null)), "staged", 2_000L))
+        assertFalse(autoOriginalTransferMarginProven(listOf(sample("a"), sample("b")), "another", 2_000L))
+    }
+
+    @Test fun stagedProductionProofRequiresExactCandidateAndCombinedAge() {
+        val status = tv.plurx.app.data.PlaybackSessionStatus(id = "staged", active_encode_candidate_id = "candidate",
+            active_encode_milli_realtime = 1_150, active_encode_age_ms = 1_000L,
+            active_encode_active_ms = 2_000L, active_encode_segments = 2)
+        assertTrue(autoStagedEncodeProof(status, 1_000L, 2_000L, "staged", "candidate"))
+        assertFalse(autoStagedEncodeProof(status, 1_000L, 2_000L, "staged", "other"))
+        assertFalse(autoStagedEncodeProof(status.copy(active_encode_age_ms = 14_500L), 1_000L, 2_000L, "staged", "candidate"))
+        assertFalse(autoStagedEncodeProof(status.copy(active_encode_segments = 1), 1_000L, 2_000L, "staged", "candidate"))
+    }
+
+    @Test fun supersededAutoTrialCannotReplaceIncumbent() {
+        assertTrue(autoTrialMayCommit("a", "a", 2L, 2L, 4L, 4L, true, true, false))
+        assertFalse(autoTrialMayCommit("a", "a", 2L, 3L, 4L, 4L, true, true, false))
+        assertFalse(autoTrialMayCommit("a", "a", 2L, 2L, 4L, 5L, true, true, false))
+    }
+
+    @Test fun manual1440RemainsSelectableBeforeProductionProof() {
+        val candidate = tv.plurx.app.data.QualityCandidate("0a7ba9bab6fbdd31bab5e5e362a3fac7", List(32) { 0 },
+            "encode", 2_560, 1_440, 1_440, grade = "sdr", decoder_compatible = true,
+            complete_cache = false, sustainable = false)
+        assertEquals(listOf(1_440), tv.plurx.app.data.manualCatalogHeights(listOf(candidate)))
+    }
+}
+
+class DisplayAwareAutoIntentTest {
+    @Test fun automaticCandidateRecoveryPreservesIntentLifetimeAndIndependentRevisions() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val id = "0a7ba9bab6fbdd31bab5e5e362a3fac7"
+        intent.requestAutomaticCandidate(id, 1_440)
+        val selection = ClientSelection(QualitySelection.AutoCandidate(1_440, id),
+            audioTrack = 2, subtitle = SubtitleSelection(SubtitleMode.OFF), audioOffsetMs = 250,
+            codec = CodecPolicy.AUTO, dynamicRange = DynamicRangePolicy.AUTO)
+        val initial = intent.mediaIntent(selection)
+        assertEquals(initial, intent.mediaIntent(selection))
+        assertEquals(PlaybackQuality.Auto, intent.desiredQuality)
+        intent.setPlaybackRequested(false)
+        val paused = intent.mediaIntent(selection)
+        assertEquals(initial.lifetime_id, paused.lifetime_id)
+        assertEquals(initial.recipe_revision, paused.recipe_revision)
+        assertEquals(initial.destination_revision, paused.destination_revision)
+        assertEquals(initial.transport_revision + 1, paused.transport_revision)
+        intent.noteViewerDestination()
+        val sought = intent.mediaIntent(selection)
+        assertEquals(paused.destination_revision + 1, sought.destination_revision)
+        assertEquals(paused.recipe_revision, sought.recipe_revision)
+        val changed = intent.mediaIntent(selection.copy(audioOffsetMs = 500))
+        assertEquals(sought.recipe_revision + 1, changed.recipe_revision)
+        assertEquals(sought.destination_revision, changed.destination_revision)
+        assertEquals(sought.transport_revision, changed.transport_revision)
+        val wire = Json.encodeToString(tv.plurx.app.data.MediaIntentEnvelope.serializer(), changed)
+        assertTrue(wire.contains("\"mode\":\"auto\""))
+        assertTrue(wire.contains("\"candidate_id\":\"$id\""))
     }
 }
