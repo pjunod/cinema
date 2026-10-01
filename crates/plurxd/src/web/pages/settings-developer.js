@@ -151,14 +151,14 @@ async function saveDisplayAwareAuto(btn){
   const err=document.getElementById("daqerr"); if(err) err.textContent="";
   const card=btn&&btn.closest?btn.closest(".setcard"):null;
   const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
-  const requested=document.getElementById("pdisplayauto").checked;
+  const requested=(/** @type {HTMLInputElement} */ (document.getElementById("pdisplayauto"))).checked;
   if(btn) btn.disabled=true;
   try{
     const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_display_aware_auto:requested}}));
     if(SERVER) SERVER.playback_display_aware_auto=!!saved.playback_display_aware_auto;
     if(card&&!card.isConnected) return true;
     if(card&&Number(card.dataset.revision||0)!==revision){toast("Earlier display Auto choice saved; newer edit remains unsaved");return true;}
-    const toggle=document.getElementById("pdisplayauto");if(toggle)toggle.checked=!!saved.playback_display_aware_auto;
+    const toggle=/** @type {HTMLInputElement|null} */ (document.getElementById("pdisplayauto"));if(toggle)toggle.checked=!!saved.playback_display_aware_auto;
     const state=document.getElementById("daqstate");if(state)state.textContent=saved.playback_display_aware_auto?"Enabled":"Disabled";
     toast("Display Auto saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
