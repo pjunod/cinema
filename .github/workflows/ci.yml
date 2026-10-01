@@ -1444,6 +1444,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error
@@ -1457,6 +1458,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/*.dwp
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error
