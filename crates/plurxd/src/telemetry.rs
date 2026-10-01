@@ -2000,6 +2000,17 @@ fn prior_observation(
     let network = network?;
     let credential_generation = network.credential_generation.as_ref()?;
     let user_id = network.user_id?;
+    let detail = event.detail.as_deref().unwrap_or_default();
+    // CPU encode pressure, decoder failure, deliberate hold or lost authority say nothing about
+    // this credential's network. Even accompanying throughput must not turn
+    // those observations into a shared quality ceiling.
+    let cause = detail.split_once(':').map(|(cause, _)| cause);
+    if matches!(
+        cause,
+        Some("encode" | "decode" | "hold" | "authority" | "unknown")
+    ) {
+        return None;
+    }
     let client_kbps = event
         .bandwidth_kbps
         .filter(|value| *value > 0)
@@ -2013,9 +2024,9 @@ fn prior_observation(
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     };
-    let detail = event.detail.as_deref().unwrap_or_default();
     let starved = event.event == "stall"
-        && (detail.contains("supply")
+        && (cause == Some("link")
+            || detail.contains("supply")
             || detail.contains("network")
             || detail.contains("blocked")
             || detail.contains("kind=buffering")
@@ -3172,13 +3183,56 @@ mod tests {
 
         let mut decode = event;
         decode.detail = Some("decode:late_frames".to_owned());
-        let observation = prior_observation(&decode, Some(&network)).expect("throughput remains");
-        assert_eq!(observation.starved_rung_height, None);
+        assert!(prior_observation(&decode, Some(&network)).is_none());
 
         decode.height = None;
-        let observation = prior_observation(&decode, Some(&network))
-            .expect("a throughput sample does not require a rung");
-        assert_eq!(observation.throughput_kbps, Some(5_000));
+        assert!(prior_observation(&decode, Some(&network)).is_none());
+    }
+
+    #[test]
+    fn typed_auto_causes_do_not_turn_decode_hold_or_authority_into_network_pressure() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        for cause in ["link", "decode", "hold", "authority", "unknown"] {
+            let event = PlaybackEvent {
+                event: "stall".into(),
+                height: Some(720),
+                bandwidth_kbps: Some(100),
+                runway_ds: Some(0),
+                detail: Some(format!("{cause}:buffering")),
+                ..PlaybackEvent::default()
+            };
+            let observation = prior_observation(&event, Some(&network));
+            if cause == "link" {
+                assert_eq!(observation.expect(cause).starved_rung_height, Some(720));
+            } else {
+                assert!(observation.is_none(), "{cause} is not network evidence");
+            }
+        }
+    }
+
+    #[test]
+    fn encode_cpu_pressure_never_updates_network_prior() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        let event = PlaybackEvent {
+            event: "stall".into(),
+            height: Some(1440),
+            bandwidth_kbps: Some(100),
+            delivered_bps: Some(100_000),
+            runway_ds: Some(0),
+            detail: Some("encode:adaptive_reopen".into()),
+            ..PlaybackEvent::default()
+        };
+        assert!(prior_observation(&event, Some(&network)).is_none());
     }
 
     /// How the writer called its Store, recorded call by call.
