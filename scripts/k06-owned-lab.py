@@ -57,6 +57,19 @@ def validate_manifest(m):
     require(m["artifact"]["compiler"] == "rustc 1.97.1 (8bab26f4f 2026-07-14)", "wrong compiler")
     require(m["artifact"]["command"] == "cargo build --offline --locked --release -p plurxd --bin plurxd",
             "only actual default-feature daemon artifact allowed")
+    artifact = m["artifact"]
+    require(HEX.fullmatch(artifact.get("config_digest", "")), "independently verified OCI config digest required")
+    layers = artifact.get("rootfs_diff_ids")
+    require(isinstance(layers, list) and 1 <= len(layers) <= 128
+            and all(isinstance(layer, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", layer)
+                    for layer in layers), "independently verified ordered RootFS diffIDs required")
+    image_config = artifact.get("image_config")
+    require(isinstance(image_config, dict) and len(json.dumps(image_config)) <= 64 * 1024,
+            "bounded independently verified image configuration required")
+    labels = image_config.get("Labels", {}) or {}
+    require(labels.get("org.opencontainers.image.revision") == artifact["source"]
+            and labels.get("tv.plurx.k06-source-tree") == artifact["tree"],
+            "canonical image configuration source/tree mismatch")
     require([(n["host"], n["ip"]) for n in m["nodes"]] == HOSTS, "exact four-host scope required")
     for n in m["nodes"]:
         stem = "plurx-k06-measure." + m["owner"] + "-" + n["host"]
@@ -64,7 +77,43 @@ def validate_manifest(m):
         require(n["name"] == stem and n["network_name"] == stem + "-net", "identity not owner-bound")
         for field in ("container_id", "network_id"):
             require(not n.get(field) or HEX.fullmatch(n[field]), "unsafe exact Docker ID")
+        require(not n.get("docker_image_id") or n["docker_image_id"] in image_ids(artifact),
+                "node Docker image identity outside canonical manifest/config pair")
+        if n.get("container_id"):
+            require(n.get("docker_image_id"), "container lacks retained per-node image authority")
     return m
+
+
+def image_ids(artifact):
+    return (artifact["image"], "sha256:" + artifact["config_digest"])
+
+
+def validate_image(item, artifact):
+    require(item["Id"] in image_ids(artifact) and item["Architecture"] == "amd64"
+            and item["Os"] == "linux", "image outside independently verified manifest/config pair")
+    require(item.get("RootFS") == {"Type": "layers", "Layers": artifact["rootfs_diff_ids"]},
+            "image ordered RootFS proof mismatch")
+    require(item.get("Config") == artifact["image_config"], "image canonical configuration proof mismatch")
+    return item["Id"]
+
+
+def resolve_image(artifact, retained=None):
+    # No tag/source-only fallback. Containerd exposes the manifest digest as
+    # Docker Id, classic stores expose its referenced config digest instead.
+    # Both exact objects were independently verified in the selected archive.
+    if retained:
+        actual = validate_image(inspect("image", retained), artifact)
+        require(actual == retained, "retained per-node Docker Id changed")
+        return actual
+    found = set()
+    for identity in dict.fromkeys(image_ids(artifact)):
+        try:
+            item = inspect("image", identity)
+        except ValueError:
+            continue  # Missing immutable lookup is allowed, never a bad proof.
+        found.add(validate_image(item, artifact))
+    require(len(found) == 1, "missing or ambiguous loaded immutable artifact")
+    return found.pop()
 
 
 def load_manifest(path):
@@ -85,8 +134,11 @@ def load_manifest(path):
 
 
 def daemon_args(m, n, uid, gid):
+    identity = n.get("docker_image_id")
+    require(identity in image_ids(m["artifact"]), "persisted per-node image preflight required before create")
     return ["docker", "create", "--name", n["name"], "--label", LABEL + "=" + m["owner"],
             "--label", "tv.plurx.k06-source=" + m["artifact"]["source"],
+            "--label", "tv.plurx.k06-config=sha256:" + m["artifact"]["config_digest"],
             "--network", n["network_id"], "--user", f"{uid}:{gid}", "--cpus=2",
             "--memory=2g", "--memory-swap=2g", "--pids-limit=256", "--read-only",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--restart=no",
@@ -97,7 +149,7 @@ def daemon_args(m, n, uid, gid):
             "--env", "PLURX_DATA_DIR=/data/state", "--env", "PLURX_CONFIG=/data/plurx.toml",
             "--entrypoint=/usr/bin/timeout",
             *sum((["--publish", f"{n['ip']}:{p}:{p}/tcp"] for p in (55420, 55421, 55422)), []),
-            m["artifact"]["image"], "-k", "10s", "5400s", "/usr/local/bin/plurxd",
+            identity, "-k", "10s", "5400s", "/usr/local/bin/plurxd",
             "--config", "/data/plurx.toml", "run"]
 
 
@@ -226,7 +278,12 @@ def capacity(check_swap=True):
 
 def validate_container(item, m, n):
     owner_check(item, m)
-    require(item["Id"] == n["container_id"] and item["Image"] == m["artifact"]["image"], "container identity mismatch")
+    require(item["Id"] == n["container_id"] and item["Image"] == n.get("docker_image_id")
+            and n.get("docker_image_id") in image_ids(m["artifact"]), "container identity mismatch")
+    labels = item["Config"].get("Labels", {}) or {}
+    require(labels.get("tv.plurx.k06-config") == "sha256:" + m["artifact"]["config_digest"]
+            and labels.get("tv.plurx.k06-source") == m["artifact"]["source"], "container artifact attribution mismatch")
+    resolve_image(m["artifact"], n["docker_image_id"])
     h = item["HostConfig"]
     require(h["NanoCpus"] == 2_000_000_000 and h["Memory"] == 2 * 1024**3
             and h["MemorySwap"] == 2 * 1024**3 and h["PidsLimit"] == 256
@@ -291,12 +348,9 @@ def worker(request):
                 "reserved port occupied")
         publications = command(["docker", "ps", "--format", "{{.Ports}}"])
         require(not any(str(p) in publications for p in (55420, 55421, 55422, 55423)), "Docker port occupied")
-        image = inspect("image", m["artifact"]["image"])
-        require(image["Architecture"] == "amd64" and image["Id"] == m["artifact"]["image"], "wrong artifact")
-        require(image["Config"]["Labels"]["org.opencontainers.image.revision"] == m["artifact"]["source"],
-                "wrong source label")
+        identity = resolve_image(m["artifact"])
         return {"production": production(), "capacity": facts,
-                "discipline": discipline()}
+                "discipline": discipline(), "docker_image_id": identity}
     if action == "claim":
         os.mkdir(n["root"], 0o700)
         root = Path(n["root"])
@@ -381,7 +435,8 @@ def worker(request):
                 continue
             owner_check(item, m)
             if kind == "container":
-                require(item["Image"] == m["artifact"]["image"], "recovered container artifact mismatch")
+                require(item["Image"] == n.get("docker_image_id"), "recovered container artifact mismatch")
+                validate_container(item, m, dict(n, container_id=item["Id"]))
                 result["started"] = item["State"]["StartedAt"]
             result[field] = item["Id"]
         return result
@@ -390,6 +445,8 @@ def worker(request):
                             n["network_name"]]).strip()
         return {"network_id": identity}
     if action == "create":
+        resolve_image(m["artifact"], n.get("docker_image_id"))
+        require(n.get("docker_image_id"), "create lacks persisted node image identity")
         owner_check(inspect("network", n["network_id"]), m)
         for filename, data in (("plurx.toml", config(n, bool(payload))), ("join.token", payload or "")):
             fd = os.open(root / filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

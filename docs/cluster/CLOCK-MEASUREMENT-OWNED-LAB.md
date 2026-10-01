@@ -90,10 +90,15 @@ No topology fake, validation feature, `--no-default-features` or debug daemon
 can supply this receipt. Package that binary over the existing reviewed runtime
 layer using a source-free Docker context containing only the binary and a
 small Dockerfile; preserve `org.opencontainers.image.revision=<full SHA>`.
-Record the resulting immutable OCI **config image ID**, binary hash, compiler,
-full build stamp and build command. Do not confuse a local config image ID
-with a registry manifest digest. Load the identical approved image on all four
-hosts and verify its ID before launch. Image build/load is a separately
+Record the canonical OCI manifest digest, its referenced config digest, complete
+config and ordered uncompressed layer diff IDs, binary hash, compiler, full
+build stamp and build command. Independently verify the archive index → manifest
+→ config → compressed layers → uncompressed diff IDs before selecting it.
+Docker's local `Id` is not universally the config digest: containerd stores can
+expose the manifest digest while classic stores expose the config digest.
+The former global-ID requirement was incorrect for this genuine mixed-store
+case and is superseded by the proof-bound per-node identity below.
+Load the identical approved archive on all four hosts. Image build/load is a separately
 authorized later action, not performed by this controller preparation.
 
 The private artifact JSON supplied to `plan` has these fields:
@@ -105,6 +110,9 @@ The private artifact JSON supplied to `plan` has these fields:
   "archive_sha256": "<64 lowercase hexadecimal characters>",
   "binary_sha256": "<64 lowercase hexadecimal characters>",
   "image": "sha256:<64 lowercase hexadecimal characters>",
+  "config_digest": "<64 lowercase hexadecimal characters>",
+  "rootfs_diff_ids": ["sha256:<ordered uncompressed layer digest>"],
+  "image_config": {"Labels": {"org.opencontainers.image.revision": "<source>", "tv.plurx.k06-source-tree": "<tree>"}},
   "build": "<same full source SHA>",
   "compiler": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
   "command": "cargo build --offline --locked --release -p plurxd --bin plurxd"
@@ -114,6 +122,15 @@ The private artifact JSON supplied to `plan` has these fields:
 Placeholders are documentation only and fail validation. The executing binary
 hash is checked after owned-container start, and the HTTP build stamp during
 collection. A mismatch leaves the recovery manifest and fails the run.
+`image` is the canonical manifest digest; `image_config` is the **entire**
+independently verified runtime Config, not only the abbreviated Labels example.
+Preflight inspects only the two pinned immutable manifest/config identifiers,
+requires Linux/amd64 plus exact Config and ordered RootFS equality, and refuses
+missing, foreign or ambiguous objects. It persists each node's actual
+`docker_image_id` before any claim/create. Create, validation and recovery bind
+to that retained node ID and recheck the canonical proof; source/config labels
+and the existing binary/build checks remain additional checks, not substitutes.
+No tag fallback, store reconfiguration or weaker source-only acceptance exists.
 
 ## 3. Claim controller ownership, then enter the authorized window
 
