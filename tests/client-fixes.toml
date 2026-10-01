@@ -3473,3 +3473,83 @@ source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlA
 source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-staged-advertised-interval-proof"
+commits = ["fd5dbb84921e72025d4349d9c523e860abf1c6a9"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoVODAdvertisedIntervals(_ data: Data)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-staged-completed-load-interval-proof"
+commits = []
+supplements = "apple.auto-staged-advertised-interval-proof"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline()"
+
+# Native original-boundary source-to-current-test bridges. These two methods
+# passed once on exact a82 source; no historical fd74 execution is implied.
+[[fixes]]
+id = "android.auto-prepared-viewer-boundary-owner-and-budget"
+commits = ["e7511b9c9945d0ab19a0234d64a74ed19d35ae60", "228874547df1c1c870973e417be0986d7e0948e4", "d9dea0ab387f6e7f69047162d4a47f53ba466481"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoViewerTransport(delegate: Player"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline()"
+
+[[fixes]]
+id = "apple.auto-prepared-viewer-boundary-original-budget"
+commits = []
+supplements = "android.auto-prepared-viewer-boundary-owner-and-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoViewerBoundaryBudget"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal"
+
+[[fixes]]
+id = "player.ten-and-thirty-second-controls"
+commits = ["270231322"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = 'id="pbforward30"'
+test = "tests/playback/seek-control.test.js"
+test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+[[fixes]]
+id = "player.seek-controls-fit-player-width"
+commits = ["589986d5c"]
+source = "crates/plurxd/src/web/app.css"
+source_anchor = "@container (max-width:780px){"
+test = "tests/web/test_seek_controls_layout.py"
+test_anchor = "test_seek_controls_fit_landscape_and_embedded_players"
+
+# Arrow artwork changes while the shared control order, labels, and seek
+# actions retain their existing regression coverage.
+[[fixes]]
+id = "player.directional-seek-arrow-controls"
+commits = ["c43a993ad"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = 'class="pseek-arrows"'
+test = "tests/playback/seek-control.test.js"
+test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+# Actual caller provenance, covered once by the new source-contract method;
+# this does not claim physical AVPlayer boundary execution.
+[[fixes]]
+id = "apple.auto-viewer-relative-and-internal-marker-provenance"
+commits = ["603964bccac111a019d5515c8011eb4d603a5375"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
+
+[[fixes]]
+id = "apple.auto-boundary-captured-typed-epoch-ownership"
+commits = ["f94345baa99553e333f0a8280dc9995ee640cc43"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes"
