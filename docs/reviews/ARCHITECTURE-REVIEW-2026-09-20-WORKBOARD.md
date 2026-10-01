@@ -161,6 +161,15 @@ only per-call or exact staged-attachment receipts. See combined plan §9.11;
 formal review, current-source gate and physical/typed-recovery acceptance remain
 separate and open.
 
+The next native A-05 source task (gpt-6.1-sol,
+agent:/root/a05_current_remaining_sol61) separates routine producer pacing
+from fresh exact-session/candidate active-work saturation and adds attachment-
+bound 60-second stall-free / 90-second post-cliff upgrade observations. It
+preserves the newer combined controller, existing owners and advisory switches;
+see combined plan §9.12. A-05 remains code-in-progress and physically unqualified,
+not an evidence-only or completed row. Unknown-cost trials, natural-boundary
+integration and typed recovery disposition remain separately open.
+
 ## How to claim, work and finish a plan
 
 **P-02 post-merge evidence continuation, 2026-10-01 (gpt-6.1-sol,
