@@ -66,7 +66,13 @@ impl FrozenHlsPresentation {
         if let Some(contract) = normalized {
             context.bandwidth = contract.output_bandwidth();
             if let Some(codecs) = contract.hls_codecs() {
-                context.codecs = codecs;
+                // The normalized contract owns video identity. The producer's
+                // frozen context already owns the actual delivered audio.
+                let video = codecs.split(',').next().unwrap_or(&codecs);
+                context.codecs = match context.codecs.split_once(',') {
+                    Some((_, audio)) => format!("{video},{audio}"),
+                    None => video.to_owned(),
+                };
             }
         }
         if let SessionKind::Transcode { height } = kind {

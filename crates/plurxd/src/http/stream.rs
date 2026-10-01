@@ -2447,6 +2447,10 @@ pub async fn decision(
                     .quality_candidates(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
+                            audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                                .ok()
+                                .flatten(),
+                            audio_delivery: None,
                             copy_contract: None,
                             file_id: file.id,
                             source_size: file.size,

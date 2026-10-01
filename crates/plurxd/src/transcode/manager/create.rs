@@ -7,12 +7,28 @@ impl TranscodeManager {
         &self,
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
+        options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        Self::encoded_audio_options(
+            file,
+            req.audio_index,
+            req.audio_claim.as_ref(),
+            req.audio_delivery.as_ref(),
+            options,
+        )
+    }
+
+    pub(super) fn encoded_audio_options(
+        file: &plurx_core::domain::MediaFile,
+        audio_index: Option<i64>,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
         mut options: TranscodeOptions,
     ) -> Result<TranscodeOptions, String> {
-        if let Some(audio) = &req.audio_delivery {
+        if let Some(audio) = retained {
             options.set_audio_delivery(audio.clone());
-        } else if let Some(claim) = &req.audio_claim {
-            let selected = req.audio_index.map_or_else(
+        } else if let Some(claim) = claim {
+            let selected = audio_index.map_or_else(
                 || file.audio_streams.first(),
                 |index| {
                     file.audio_streams

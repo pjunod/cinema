@@ -84,6 +84,18 @@ integration, not main promotion or fleet/device qualification. Follow-on PRs
 are not completed plans: the assessment remains seven definite, five
 conditional and 35 validation items, with two closed and 47 acceptance-open.
 
+**Integration review disposition, 2026-10-01:** candidate
+[PR #675](http://192.168.4.7:3000/noirr/plurx/pulls/675), original `d04373c7e`,
+received sole independent review 36 with three composition findings. The same
+PR binds catalog recipes to execution's original audio claim and retained
+producer answer (video capability snapshots are not audio authority), keeps
+actual audio CODECS when normalized video metadata is frozen, and supplies the
+synchronous decode adapter's actual hourly switch count. Full candidate digest
+and ID checks remain. Three new focused consumer IDs supplement the two
+original one-pass IDs; successful units are not repeated. Same-record
+disposition and the current Effort development gate remain required before
+landing; none of this closes physical or main qualification.
+
 ## How to claim, work and finish a plan
 
 **S-14 continuation, 2026-10-01 (gpt-6.1-sol,

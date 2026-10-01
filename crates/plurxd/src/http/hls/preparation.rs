@@ -1641,6 +1641,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
                     .quality_candidates(
                         state,
                         crate::media_pool::QualityCatalogRequest {
+                            audio_claim: candidate.audio_claim.clone(),
+                            audio_delivery: candidate.audio_delivery.clone(),
                             copy_contract: candidate.kind.copy_contract(),
                             file_id: source.id,
                             source_size: source.size,

@@ -178,6 +178,10 @@ pub(crate) struct MediaNodeSnapshot {
 #[serde(deny_unknown_fields)]
 pub(crate) struct QualityCatalogRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_claim: Option<plurx_core::playback::audio::AudioClaim>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copy_contract: Option<(bool, bool, bool)>,
     pub file_id: i64,
     pub source_size: i64,
@@ -191,8 +195,16 @@ pub(crate) struct QualityCatalogRequest {
 
 impl QualityCatalogRequest {
     pub(crate) fn is_valid(&self) -> bool {
-        self.copy_contract
-            .is_none_or(|(_, preserve, convert)| !convert || preserve)
+        self.audio_claim
+            .as_ref()
+            .is_none_or(|claim| claim.valid_snapshot())
+            && self
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|audio| audio.valid_snapshot())
+            && self
+                .copy_contract
+                .is_none_or(|(_, preserve, convert)| !convert || preserve)
             && self.file_id > 0
             && self.source_size >= 0
             && self.source_mtime >= 0
@@ -1261,6 +1273,8 @@ pub(crate) async fn local_quality_candidates(
             request.subtitle_burn,
             request.presentation,
             request.copy_contract,
+            request.audio_delivery.as_ref(),
+            request.audio_claim.as_ref(),
         )
         .await
         .into_iter()
@@ -1728,6 +1742,8 @@ mod tests {
     #[test]
     fn quality_catalog_requires_bounded_source_tracks_and_current_caps() {
         let mut request = QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
             copy_contract: None,
             file_id: 1,
             source_size: 10,
