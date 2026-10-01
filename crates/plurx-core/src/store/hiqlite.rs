@@ -3881,6 +3881,15 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl crate::store::FragmentIndexStore for HiqliteAuthStore {
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, crate::segplan::SourceIdentity)],
+    ) -> Result<Vec<crate::store::FragmentIndexStatus>, StoreError> {
+        crate::store::fragindex::check_status_batch(wanted)?;
+        crate::store::record_http_index_status_call();
+        self.telemetry.fragment_index_status(wanted.to_vec()).await
+    }
+
     async fn put_fragment_index(
         &self,
         file_id: i64,

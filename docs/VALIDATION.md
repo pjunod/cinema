@@ -227,8 +227,16 @@ release-build, and container checks run as parallel jobs only when the diff can
 affect their contracts. Ready pull requests run the unit suite in the fast Rust
 lane. After the current-head and base gate passes, it publishes the PR gate
 badge; the PR lint badge updates when that PR also ran the Rust lane. Coverage
-runs only when the full CI sweep is manually dispatched on `main`, so its badge
-reports the last measurement rather than the current PR verdict.
+runs independently through [coverage.yml](../.github/workflows/coverage.yml)
+on every push to `main`, with a manual dispatch option on `main` for retries.
+It runs on the general high-CPU pool inside Ubuntu 24.04, which supplies the
+pinned FFmpeg 6 even when the host has FFmpeg 8; the retired FFmpeg 6 runner
+labels are not required. It measures Rust workspace line coverage, excluding
+`plurx-cluster-check`, and publishes the percentage with its UTC measurement
+date. Runs are serialized and check out current `main` when they start so retries cannot publish an older
+event snapshot. A failed measurement or publication fails the workflow and
+leaves the last successful badge in place; its date makes that age visible.
+This diagnostic is separate from the current PR verdict and full CI sweep.
 [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md)
 records the measured failure history and the remaining suite-splitting,
 invalidation, rebase-evidence, and telemetry milestones.
@@ -443,13 +451,24 @@ the source of truth for installed toolchains.
 
 ### Which ffmpeg the profiles assume
 
-Every CI profile runs **ffmpeg 6**, from a pinned Ubuntu 24.04 environment.
-`.github/actions/ffmpeg` verifies the Ansible-provisioned build on a persistent
-lab runner. It prints the build
-that actually resolved into the job log and step summary, and fails the job
-when the major is not the one that lane named. So the selected environment and
-the expected major move together in a reviewable diff, and neither can move on
-its own.
+The ready-PR fast Rust gate retains **ffmpeg 6** in its Ubuntu 24.04 job
+container. It runs `make unit`, including the live session test in
+`crates/plurxd/src/transcode/tests/chunk_05.rs`: the ahead-window and
+suspend-resume assertions run on a build that honours
+`-readrate_initial_burst`, rather than being skipped on ffmpeg 8. The nightly
+deep-validation lane also remains on its `ffmpeg-6` runner label.
+
+The four full-sweep jobs in `ci.yml` — `check`, `cluster_daemon`, `web_layout`
+and `vod_web` — use one digest-pinned CI container built from the
+Dockerfile's `runtime-assets` stage. That stage supplies the same
+`jellyfin-ffmpeg8` package as the shipped image; its CI layer adds the pinned
+Rust 1.97.1 toolchain, Node 22, and Playwright/Chromium. Both the daemon's
+`PLURX_FFMPEG` and shell-invoked `ffmpeg` resolve to the Jellyfin binary.
+The container image is built and published before its immutable digest is
+written into the workflow; a missing image is not a runner capability label.
+`./.github/actions/ffmpeg` records the resolved executable, banner and apt
+package in the job summary, and refuses any major other than the job's one
+declared major.
 
 This is a deliberate choice rather than an inherited default, because the two do
 not agree. **ffmpeg 8 declares `-readrate_initial_burst` and then ignores it**,
@@ -461,17 +480,12 @@ ffmpeg 8; the gate was green by accident of whichever image `ubuntu-latest`
 resolved to that week, and a promotion past 24.04 would have turned `main` red
 in one silent step with no diff to blame.
 
-So "green in CI" and "green on a worker" currently mean different things, and
-this is the difference: a worker host on Ubuntu 26.04 runs ffmpeg 8.0.1, where
-`make validate` fails on the pacing assumptions in
-`crates/plurxd/src/transcode.rs` until #386 lands. The nightly `ffmpeg8-pacing`
-job is where that gap is watched — it runs the same capability contract as the
-`playback-recovery` point against a real ffmpeg 8, pinned by the `ubuntu:26.04`
-container tag. It is nightly rather than required on purpose: making the gate a
-matrix over both majors before #386 exists would leave a required check red by
-design. `tests/operations/test_contracts.py` enforces the whole arrangement —
-no job may install ffmpeg outside the action, name a major without pinning the
-image or container that supplies it, or drop either major's coverage.
+The nightly `ffmpeg8-pacing` job remains a separate capability contract on
+Ubuntu 26.04's distro ffmpeg 8. It is not a substitute for the full-sweep
+jobs on the shipped Jellyfin build: the two builds can differ despite sharing
+a major. `tests/operations/test_contracts.py` enforces the two-major
+arrangement, the full-sweep image digest, and the retained fast-lane
+`make unit` coverage.
 
 ### Base syncs — convention keeps the qualified tree current
 

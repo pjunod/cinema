@@ -839,6 +839,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadExpandWrite,
     },
     SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "purge_dvr_recording_catalog",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
         module: "library_channels.rs",
         method: "subject_write",
         is_async: true,
@@ -1181,7 +1188,9 @@ mod tests {
         // transaction bridge: six claim/publication methods and submission.
         // Subtitle execution now uses the common queue transaction.
         // E2 retires the unfenced manifest-cursor transaction.
-        assert_eq!(methods.len(), 94);
+        // DVR catalog cleanup removes the linked rows and clears the recording
+        // links together so a failed delete remains retryable.
+        assert_eq!(methods.len(), 95);
     }
 
     #[test]

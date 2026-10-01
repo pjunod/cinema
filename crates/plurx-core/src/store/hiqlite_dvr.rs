@@ -1399,6 +1399,16 @@ impl DvrStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn purge_dvr_recording_catalog(&self, id: &str) -> Result<(), StoreError> {
+        self.client()
+            .txn(crate::dvr::DVR_PURGE_CATALOG.map(|sql| (sql, params!(id))))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(())
+    }
+
     async fn transition_dvr_recording_with_event(
         &self,
         transition: &DvrTransition<'_>,
@@ -2249,6 +2259,9 @@ mod schema_tests {
     /// held to the same rule here.
     #[test]
     fn every_assembled_statement_introduces_its_placeholders_in_order() {
+        for sql in crate::dvr::DVR_PURGE_CATALOG {
+            validate_sql(sql).expect("replicated catalog purge placeholder contract");
+        }
         let patches = [
             DvrStatePatch::None,
             DvrStatePatch::Started {

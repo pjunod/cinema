@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import re
+import tempfile
 import unittest
 import shlex
 import subprocess
+import importlib.util
+from unittest import mock
 from validation.rust_modules import module_source
 
 
@@ -13,6 +18,171 @@ ROOT = Path(__file__).resolve().parents[2]
 class EvidenceWorkflowCase(unittest.TestCase):
     def read(self, path: str) -> str:
         return (ROOT / path).read_text(encoding="utf-8")
+
+    def test_release_cost_measurement_is_serial_cold_bounded_and_not_ci_acceptance(self) -> None:
+        script = self.read("scripts/p02-release-cost.py")
+        for required in ('(("thin", 16), ("thin", 1), ("fat", 16), ("fat", 1))',
+                         '"trial_seconds": 2700', '"total_seconds": 10800',
+                         '"scratch": 20 * GIB', '"--memory-swap=24g"',
+                         '"--cpus=8"', '"--pids-limit=1024"', '"--cap-drop=ALL"',
+                         '"--security-opt=no-new-privileges"', 'shutil.rmtree(target)',
+                         '"high-cpu-runner-host-not-workflow-job"',
+                         '"CARGO_PROFILE_RELEASE_PANIC=unwind"',
+                         '"CARGO_PROFILE_RELEASE_DEBUG=0"',
+                         '"CARGO_PROFILE_RELEASE_STRIP=symbols"',
+                         '"CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=false"',
+                         '"--user=" + f"{os.getuid()}:{os.getgid()}"',
+                         'data["Config"]["User"] == f"{os.getuid()}:{os.getgid()}"',
+                         '"HOME=/tmp/home"', 'mkdir -p "$HOME"',
+                         '"/source": (str(mounts[0]), False)',
+                         '"/target": (str(mounts[1]), True)',
+                         '"/cargo": (str(mounts[2]), True)',
+                         '"archive_sha256": archive_sha', 'state["OOMKilled"]'):
+            self.assertIn(required, script)
+        self.assertNotIn('"--privileged"', script)
+        self.assertNotIn('/var/run/docker.sock', script)
+        self.assertNotIn('cargo test', script)
+        # Dry description executes no compiler/Docker workload.
+        result = subprocess.run(["python3", str(ROOT / "scripts/p02-release-cost.py")],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"execution": "not started"', result.stdout)
+        # Invalid setup fails before Docker and still retains a compact receipt.
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run([
+                "python3", str(ROOT / "scripts/p02-release-cost.py"), "--run",
+                "--source", "0" * 40, "--archive", directory + "/missing.tar",
+                "--archive-sha", "0" * 64, "--image", "sha256:" + "0" * 64,
+                "--receipts", directory + "/receipts"], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(len(list(Path(directory).glob("receipts/setup-failure-*.json"))), 1)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_release_cost_running_guard_allows_own_load_but_refuses_pressure(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        baseline = {"swap": 0, "restarts": 0}
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(module, "capacity") as capacity, \
+                mock.patch.object(module, "inspect", return_value={"RestartCount": 0, "State": {"Health": {"Status": "healthy"}}}), \
+                mock.patch.object(module.shutil, "disk_usage", return_value=mock.Mock(free=48 * module.GIB)), \
+                mock.patch.object(module, "command", return_value="0 owned"), \
+                mock.patch.object(module.urllib.request, "urlopen") as ready:
+            ready.return_value.__enter__.return_value.status = 200
+            capacity.return_value = {"available": 40 * module.GIB, "swap": 0, "load": 9}
+            module.guard(Path(directory), baseline, "http://localhost/readyz")
+            with self.assertRaisesRegex(RuntimeError, "load/swap"):
+                module.guard(Path(directory), baseline, "http://localhost/readyz", initial=True)
+            capacity.return_value["load"] = 13
+            with self.assertRaisesRegex(RuntimeError, "load/swap"):
+                module.guard(Path(directory), baseline, "http://localhost/readyz")
+
+    def test_release_cost_effective_user_and_bind_roles_preserve_host_cleanup(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        mounts = tuple(Path("/owned") / name for name in ("source", "target", "cargo"))
+        data = {"Config": {"User": f"{os.getuid()}:{os.getgid()}"}, "HostConfig": {
+            "NanoCpus": 8 * 10 ** 9, "Memory": 24 * module.GIB, "MemorySwap": 24 * module.GIB,
+            "PidsLimit": 1024, "Privileged": False, "Devices": [], "NetworkMode": "none",
+            "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"], "ReadonlyRootfs": True,
+            "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=1g"},
+            "LogConfig": {"Type": "local", "Config": {"max-size": "10m", "max-file": "1", "compress": "false"}}},
+            "Mounts": [{"Type": "bind", "Source": str(p), "Destination": "/" + name, "RW": name != "source"}
+                       for p, name in zip(mounts, ("source", "target", "cargo"))]}
+        module.validate_caps(data, mounts)
+        data["Config"]["User"] = ""
+        with self.assertRaises(AssertionError):
+            module.validate_caps(data, mounts)
+        data["Config"]["User"] = f"{os.getuid()}:{os.getgid()}"
+        data["Mounts"][0]["RW"] = True
+        with self.assertRaises(AssertionError):
+            module.validate_caps(data, mounts)
+
+    def test_release_cost_cooldown_is_passive_bounded_and_keeps_original_preflight(self) -> None:
+        spec = importlib.util.spec_from_file_location("release_cost", ROOT / "scripts/p02-release-cost.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        clock = [0]
+        def sleep(seconds):
+            clock[0] += seconds
+        receipt = {}
+        with mock.patch.object(module.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(module.time, "sleep", side_effect=sleep), \
+                mock.patch.object(module, "guard") as guard:
+            guard.side_effect = [RuntimeError("host load/swap pressure crossed"), {}, {}]
+            module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, True)
+            self.assertEqual(receipt["preflight_wait"]["seconds"], 2)
+            self.assertEqual(guard.call_args.kwargs, {"initial": True})
+            clock[0] = 0
+            guard.side_effect = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("load")) if k.get("initial") else {}
+            with self.assertRaisesRegex(RuntimeError, "bounded cooldown"):
+                module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, True)
+            self.assertEqual(receipt["preflight_wait"]["seconds"], 60)
+            clock[0] = 0
+            with self.assertRaisesRegex(RuntimeError, "bounded cooldown"):
+                module.preflight(Path("/owned"), {}, "http://localhost/readyz", 10800, receipt, False)
+            self.assertEqual(clock[0], 0)
+    def test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps(self) -> None:
+        workflow = self.read(".github/workflows/validation-nightly.yml")
+        inputs = workflow.split("    inputs:\n", 1)[1].split("\nenv:", 1)[0]
+        selector = inputs.split("      fuzz_only:\n", 1)[1].split("      seed_pgs_crash:", 1)[0]
+        self.assertIn("type: boolean", selector)
+        self.assertIn("default: false", selector)
+        self.assertNotIn("  schedule:", workflow)
+        jobs = dict(re.findall(r"^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)",
+                               workflow.split("\njobs:\n", 1)[1], re.M | re.S))
+        self.assertEqual(set(jobs), {"deep-validation", "pgs-fuzz", "parser-fuzz",
+                                     "ffmpeg8-pacing", "mutation"})
+        for name in ("deep-validation", "ffmpeg8-pacing", "mutation"):
+            self.assertIn("    if: ${{ !inputs.fuzz_only }}\n", jobs[name])
+        for name in ("pgs-fuzz", "parser-fuzz"):
+            self.assertNotRegex(jobs[name], r"(?m)^    (if|needs):", name)
+            self.assertNotIn("inputs.fuzz_only", jobs[name])
+        self.assertIn("target: [fmp4_reader, rpu_rewrite, nfo_parse, epub_facts]",
+                      jobs["parser-fuzz"])
+        self.assertIn('echo "corpus_before=$before" >> "$GITHUB_OUTPUT"', jobs["pgs-fuzz"])
+        self.assertIn("find fuzz/corpus/inspect_sup -type f", jobs["pgs-fuzz"])
+        self.assertIn('"${{ steps.pgs_fuzz.outputs.corpus_before }}"', jobs["pgs-fuzz"])
+
+    def test_fuzz_summary_records_growth_and_refuses_an_unexecuted_clean_receipt(self) -> None:
+        # Run the summary code on disposable corpora/logs, never a fuzzer.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "scripts").mkdir()
+            script = root / "scripts/fuzz-campaign"
+            script.write_text(self.read("scripts/fuzz-campaign"), encoding="utf-8")
+            corpus = root / "fuzz/corpus/inspect_sup"
+            corpus.mkdir(parents=True)
+            for name in ("seed", "new-edge"):
+                (corpus / name).write_bytes(b"seed")
+            log = root / "campaign.log"
+            summary = root / "summary.md"
+            env = {**os.environ, "GITHUB_STEP_SUMMARY": str(summary)}
+            command = ["bash", str(script), "--summarize", "inspect_sup", str(log)]
+            for line in ("stat::number_of_executed_units: 123", "Done 123 runs"):
+                log.write_text(line + "\n", encoding="utf-8")
+                result = subprocess.run(command + ["0", "1"], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("| `inspect_sup` | 123 | 1 → 2 files", result.stdout)
+                self.assertIn("budget spent, no finding", result.stdout)
+            log.write_text("#99 crash found\n", encoding="utf-8")
+            result = subprocess.run(command + ["1", "1"], env=env,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("| `inspect_sup` | 99 | 1 → 2 files", result.stdout)
+            self.assertIn("finding (exit 1)", result.stdout)
+            before = summary.read_text(encoding="utf-8")
+            log.write_text("compilation failed before fuzzing\n", encoding="utf-8")
+            result = subprocess.run(command + ["0", "1"], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(summary.read_text(encoding="utf-8"), before)
+            result = subprocess.run(command + ["0", ""], env=env,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
 
     def test_vod_restart_checks_reuse_workspace_features_and_stay_exact_serial(self) -> None:
         # Selecting just plurxd changes Cargo's dependency feature union and
