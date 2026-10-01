@@ -2363,7 +2363,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # return path. The third spawn is the wake regression's consumer, aborted and
 # awaited before the fixture returns. None starts a producer or process.
 # Combined effort/main census: retain C-05's one owner and seek's three.
-expected_occurrences = 684
+# +1 cluster probe-batch regression in source_probe.rs: test-only Tokio
+# tasks each retain their Arc admission and await the cancellable probe.
+# The test joins both tasks after lease-loss/playback cancellation.
+expected_occurrences = 685
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3502,7 +3505,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # C06 #639: +6 test-owned bounds: parent poll sleep, writer release backstop,
 # per-request/body timeout, whole scenario timeout, entered-write timeout and
 # recovery timeout. All end with this isolated fixture, not playback policy.
-expected_occurrences = 1125
+# +4 cluster probe-batch regression in source_probe.rs: three five-second
+# test deadlines and one 10 ms readiness poll bounded by the first deadline.
+# They observe child startup/reaping; production cancellation/pacing timers
+# replace existing waits and add no timer owner.
+expected_occurrences = 1129
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3829,7 +3836,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # with a fresh latch lifetime. OwnedChild owns bounded completion/kill/reap.
 # C06 #639: +1 current_exe command for its exact handler-pressure test only;
 # bounded parent owns kill/reap and requires completed-assertions proof.
-expected_occurrences = 201
+# +1 cluster probe-batch regression in source_probe.rs: test-only /bin/kill
+# -0 checks that the already-cancelled child PID is gone. The finite liveness
+# command is synchronously waited; bounded::output owns/reaps probe children.
+expected_occurrences = 202
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4284,7 +4294,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # and method-spawn, not another child or a production process owner.
 # C06 #639: +2, same owned re-exec spawn plus Response::status assertion.
 # The latter starts no process. Existing idle-child fixture callers unchanged.
-expected_occurrences = 409
+# +1 cluster probe-batch regression: the synchronous .status() on the
+# test-only /bin/kill -0 liveness command described above. No new producer.
+# C-05 M2 #655: +1 Response::status() assertion in
+# http/browse.rs::a_detail_render_unpacks_no_index. The authenticated in-process
+# oneshot response is inspected before its body is collected. This adds no
+# process launch, asynchronous task, timer or producer owner.
+expected_occurrences = 411
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
