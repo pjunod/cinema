@@ -8125,33 +8125,17 @@ impl MembershipManager {
                     .await);
             }
         }
-        match request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
-            Ok(()) => {}
-            Err(MembershipChangeFailure::Rejected(removal_error)) => {
-                return Err(self
-                    .rollback_node_removal_after_failure(node_id, &removal_attempt, removal_error)
-                    .await);
-            }
-            Err(MembershipChangeFailure::Ambiguous(removal_error)) => {
-                match reconcile_membership_change(
-                    &inner.secrets.api,
-                    target_raft_id,
-                    &membership_nodes,
-                )
-                .await
-                {
-                    MembershipChangeOutcome::Removed => {
-                        tracing::warn!(%removal_error, %node_id, "voter removal committed after an ambiguous HTTP result");
-                    }
-                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
-                        return Err(MembershipError::Internal(format!(
-                        "voter removal outcome is indeterminate after {removal_error}; the target remains fenced"
-                    )));
-                    }
-                }
-            }
-        }
-        self.finalize_node_removal(node_id).await;
+        dispatch_voter_removal_outcome(
+            node_id,
+            &removal_attempt,
+            request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await,
+            |rollback_node, rollback_attempt, error| {
+                self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
+            },
+            || reconcile_membership_change(&inner.secrets.api, target_raft_id, &membership_nodes),
+            |finalize_node| self.finalize_node_removal(finalize_node),
+        )
+        .await?;
         if resolved.requeued + resolved.failed > 0 {
             tracing::info!(
                 requeued = resolved.requeued,
@@ -9622,6 +9606,64 @@ enum MembershipChangeFailure {
     /// Transport failure or timeout after send. The proposal may still commit;
     /// the fence must remain until a retry proves the uniform new membership.
     Ambiguous(MembershipError),
+}
+
+/// The production outcome consumer. Effects remain manager-owned operations;
+/// the pure step cannot inspect fresh rows, clear another attempt, or interpret
+/// an ambiguous send as a definite failure. The wrapper adds no I/O, task or
+/// suspension beyond polling those same manager-owned effect futures.
+async fn dispatch_voter_removal_outcome<'a, R, RF, C, CF, F, FF>(
+    node_id: &'a str,
+    attempt_id: &'a str,
+    proposal: Result<(), MembershipChangeFailure>,
+    rollback: R,
+    reconcile: C,
+    finalize: F,
+) -> Result<(), MembershipError>
+where
+    R: FnOnce(&'a str, &'a str, MembershipError) -> RF,
+    RF: Future<Output = MembershipError>,
+    C: FnOnce() -> CF,
+    CF: Future<Output = MembershipChangeOutcome>,
+    F: FnOnce(&'a str) -> FF,
+    FF: Future<Output = ()>,
+{
+    use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+    let (outcome, error) = match proposal {
+        Ok(()) => (RemovalProposalOutcome::Accepted, None),
+        Err(MembershipChangeFailure::Rejected(error)) => {
+            (RemovalProposalOutcome::Rejected, Some(error))
+        }
+        Err(MembershipChangeFailure::Ambiguous(error)) => {
+            (RemovalProposalOutcome::Ambiguous, Some(error))
+        }
+    };
+    let transition = RemovalTransition::proposal(node_id, attempt_id, outcome);
+    match (transition.effect, error) {
+        (RemovalEffect::FinalizeTombstone, None) => {
+            finalize(transition.node_id).await;
+            Ok(())
+        }
+        (RemovalEffect::RollbackExactAttempt, Some(error)) => {
+            Err(rollback(transition.node_id, transition.attempt_id, error).await)
+        }
+        (RemovalEffect::ReconcileSurvivors, Some(error)) => {
+            let outcome = reconcile().await;
+            let next = transition.survivors(outcome == MembershipChangeOutcome::Removed);
+            if next.is_some_and(|next| next.effect == RemovalEffect::FinalizeTombstone) {
+                tracing::warn!(removal_error = %error, %node_id, "voter removal committed after an ambiguous HTTP result");
+                finalize(transition.node_id).await;
+                Ok(())
+            } else {
+                Err(MembershipError::Internal(format!(
+                    "voter removal outcome is indeterminate after {error}; the target remains fenced"
+                )))
+            }
+        }
+        _ => Err(MembershipError::Internal(
+            "invalid voter removal transition".to_owned(),
+        )),
+    }
 }
 
 #[derive(Serialize)]
@@ -14130,6 +14172,99 @@ mod tests {
                 membership_response_failure(status),
                 MembershipChangeFailure::Ambiguous(_)
             ));
+        }
+    }
+
+    #[tokio::test]
+    async fn removal_transition_preserves_proposal_outcomes() {
+        use lifecycle::{RemovalEffect, RemovalProposalOutcome, RemovalTransition};
+        for (proposal_kind, survivor, expected) in [
+            (
+                RemovalProposalOutcome::Rejected,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["rollback:node-a:attempt-a"],
+            ),
+            (
+                RemovalProposalOutcome::Accepted,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["finalize:node-a"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Removed,
+                vec!["reconcile", "finalize:node-a"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Indeterminate,
+                vec!["reconcile"],
+            ),
+            (
+                RemovalProposalOutcome::Ambiguous,
+                MembershipChangeOutcome::Promoted,
+                vec!["reconcile"],
+            ),
+        ] {
+            let events = Mutex::new(Vec::<String>::new());
+            let events = &events;
+            let error = MembershipError::Internal("original proposal error".to_owned());
+            let proposal = match proposal_kind {
+                RemovalProposalOutcome::Accepted => Ok(()),
+                RemovalProposalOutcome::Rejected => Err(MembershipChangeFailure::Rejected(error)),
+                RemovalProposalOutcome::Ambiguous => Err(MembershipChangeFailure::Ambiguous(error)),
+            };
+            let result = dispatch_voter_removal_outcome(
+                "node-a",
+                "attempt-a",
+                proposal,
+                |node, attempt, error| async move {
+                    events
+                        .lock()
+                        .expect("events")
+                        .push(format!("rollback:{node}:{attempt}"));
+                    error
+                },
+                || async move {
+                    events.lock().expect("events").push("reconcile".to_owned());
+                    survivor
+                },
+                |node| async move {
+                    events
+                        .lock()
+                        .expect("events")
+                        .push(format!("finalize:{node}"));
+                },
+            )
+            .await;
+            assert_eq!(*events.lock().expect("events"), expected);
+            match proposal_kind {
+                RemovalProposalOutcome::Accepted => assert!(result.is_ok()),
+                RemovalProposalOutcome::Rejected => assert!(
+                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "original proposal error")
+                ),
+                RemovalProposalOutcome::Ambiguous
+                    if survivor == MembershipChangeOutcome::Removed =>
+                {
+                    assert!(result.is_ok())
+                }
+                RemovalProposalOutcome::Ambiguous => assert!(
+                    matches!(result, Err(MembershipError::Internal(ref message)) if message == "voter removal outcome is indeterminate after cluster membership operation failed: original proposal error; the target remains fenced")
+                ),
+            }
+            let transition = RemovalTransition::proposal("node-a", "attempt-a", proposal_kind);
+            assert_eq!(
+                (transition.node_id, transition.attempt_id),
+                ("node-a", "attempt-a")
+            );
+            if proposal_kind == RemovalProposalOutcome::Ambiguous {
+                assert_eq!(transition.effect, RemovalEffect::ReconcileSurvivors);
+                assert_eq!(
+                    transition.survivors(false).expect("proof pending").effect,
+                    RemovalEffect::RetainFence
+                );
+            } else {
+                assert!(transition.survivors(true).is_none());
+            }
         }
     }
 
