@@ -71,6 +71,36 @@ causes; pure policy inspections and scrapes remain uncounted. Takeover,
 membership, fenced-target removal and the final enforcing Developer facts
 are still pending, so this is not complete enforcement or a merge candidate.
 
+**2026-10-01 original-time takeover preparation:** root consulted an Astra
+design session (not the formal PR review) before choosing the detached-task
+boundary. The private implementation carries an opaque, exact-`Arc`-bound
+owned acquisition ticket from before preparation into the supervisor. It
+never reconstructs authority from measurement generations or reacquires a
+fresh timestamp after preparation. The expiry scan also uses one original
+ticket timestamp and discards a page invalidated during its Store await,
+without advancing its keyset cursor.
+
+The immutable takeover proposal keeps `now_ms = ticket.now_ms()` and
+`lease_expires_at_ms = ticket.now_ms() + 24_000`; its monotonic expiry starts
+immediately before that same acquisition, not after worker creation. A
+synchronous final revalidation precedes only the initial CAS. Refusal stops
+the same provisional worker and does not enter commit-unknown reconciliation.
+After submission, exact replay/read, pinning, bootstrap renewal, adoption,
+ordinary renewal, serving and self-fencing remain ungated.
+
+This preserves the original contract and constants, **not unchanged
+worst-case recovery availability**: at most eight seconds of preparation
+spends the original 24-second lease, leaving approximately 16 seconds against
+the shipped 13-second publication-runway floor. Three one-second Store
+windows can spend nearly all remaining margin. Existing runway checks safely
+refuse late publication; successful bootstrap renewal still grants its
+existing fresh 24-second lease before adoption. Adding preparation time to
+expiry or minting a post-preparation replacement ticket would silently widen
+or replace the fixed proposal, so neither is implemented. Membership and
+fenced-target removal still require their complete separate boundary audit.
+This is private source preparation; current compiler/focused results and
+measurement evidence are not inferred from the decision.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

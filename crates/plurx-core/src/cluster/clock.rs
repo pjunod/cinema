@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub const CLOCK_OFFSET_REFUSAL_MS: i64 = 2_000;
@@ -172,6 +172,60 @@ mod tests {
             12,
             "metric cardinality is exactly three decisions by four causes"
         );
+    }
+
+    #[test]
+    fn owned_acquisition_keeps_original_guard_time_across_detached_preparation() {
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let proof = guard
+            .acquire_owned_for(ClockDecision::Takeover)
+            .expect("standalone admission");
+        let original_now = proof.now_ms();
+        drop(guard);
+        let (carried_now, result) = std::thread::spawn(move || {
+            std::thread::yield_now();
+            (proof.now_ms(), proof.revalidate())
+        })
+        .join()
+        .expect("opaque owned proof moves into detached work");
+        assert_eq!(carried_now, original_now);
+        assert_eq!(result, Ok(()));
+
+        for cause in ["recovered generation", "local/common-mode step", "expiry"] {
+            let guard = Arc::new(ClusterClockGuard::new(true));
+            publish_offset(&guard, 0, 1_000);
+            let proof = guard
+                .acquire_owned_for(ClockDecision::Takeover)
+                .expect("safe bound");
+            let original_now = proof.now_ms();
+            match cause {
+                "recovered generation" => {
+                    guard.roster_failed();
+                    publish_offset(&guard, 0, 1_000);
+                }
+                "local/common-mode step" => {
+                    let mut inner = guard.inner.lock().expect("clock state lock");
+                    let mono = Instant::now();
+                    let wall = inner.anchor_wall_ms.expect("fixture anchor") + 15_000;
+                    ClusterClockGuard::continuity(&mut inner, mono, Some(wall), mono);
+                }
+                "expiry" => {
+                    let mut inner = guard.inner.lock().expect("clock state lock");
+                    inner.snapshot.peers = bounded(Instant::now() - Duration::from_secs(26));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                proof.revalidate(),
+                Err(if cause == "local/common-mode step" {
+                    ClockRefusal::LocalDiscontinuity
+                } else {
+                    ClockRefusal::GenerationChanged
+                }),
+                "{cause}"
+            );
+            assert_eq!(proof.now_ms(), original_now, "{cause}");
+        }
     }
 
     #[test]
@@ -495,6 +549,34 @@ impl ClockAcquisitionTicket<'_> {
     }
 }
 
+/// A detached preparation task carries the same opaque proof and original
+/// caller time. Owning the exact guard does not mint a new decision or let a
+/// caller reconstruct authority from public measurement generations.
+pub struct OwnedClockAcquisitionTicket {
+    guard: Arc<ClusterClockGuard>,
+    decision: ClockDecisionTicket,
+    consumer: ClockDecision,
+}
+
+impl OwnedClockAcquisitionTicket {
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        self.decision.now_ms
+    }
+
+    /// Only before initial submission. An already submitted, commit-unknown
+    /// proposal must continue its exact reconciliation without this admission.
+    pub fn revalidate(&self) -> Result<(), ClockRefusal> {
+        self.guard.revalidate_for(
+            self.consumer,
+            &ClockAcquisitionTicket {
+                guard: &self.guard,
+                decision: self.decision,
+            },
+        )
+    }
+}
+
 /// Passive facts from completed observation rounds, not readiness polls.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClockReadiness {
@@ -637,6 +719,18 @@ impl ClusterClockGuard {
     ) -> Result<ClockAcquisitionTicket<'_>, ClockRefusal> {
         self.acquire().inspect_err(|cause| {
             self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
+    pub fn acquire_owned_for(
+        self: &Arc<Self>,
+        consumer: ClockDecision,
+    ) -> Result<OwnedClockAcquisitionTicket, ClockRefusal> {
+        let ticket = self.acquire_for(consumer)?;
+        Ok(OwnedClockAcquisitionTicket {
+            guard: Arc::clone(self),
+            decision: ticket.decision,
+            consumer,
         })
     }
 
