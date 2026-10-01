@@ -596,6 +596,7 @@ impl TranscodeManager {
                     req.automatic,
                     req.hdr10,
                     priority,
+                    req.audio_claim.as_ref(),
                 )
                 .await
             }
@@ -621,6 +622,7 @@ impl TranscodeManager {
                     takeover,
                     &req.playback_id,
                     req.automatic,
+                    req.audio_delivery.as_ref(),
                 )
                 .await
             }
@@ -883,6 +885,34 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
+        if let Some(claim) = &req.audio_claim {
+            let selected = req.audio_index.map_or_else(
+                || file.audio_streams.first(),
+                |index| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            options.set_audio_delivery(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            ));
+        } else if let Some(audio) = &req.audio_delivery {
+            options.set_audio_delivery(audio.clone());
+        }
+        if options
+            .audio
+            .as_ref()
+            .is_some_and(|audio| !audio.is_encoded_vod_compatible())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_recipe_invalid",
+                "encoded VOD requires its fixed AAC sample lattice",
+            ));
+        }
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -1115,6 +1145,11 @@ impl TranscodeManager {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
         Ok(StartInfo {
+            audio_delivery: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.audio_delivery),
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
             duration_ms: Some(start.duration_ms),

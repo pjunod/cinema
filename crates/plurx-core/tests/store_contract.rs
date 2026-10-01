@@ -29808,6 +29808,7 @@ async fn offline_lifecycles_pin_shared_generations_through_dyn_store() {
 
 fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> NewOfflinePackage {
     NewOfflinePackage {
+        audio_recipe: None,
         id: id.into(),
         request_id: request_id.into(),
         user_id,
@@ -29829,6 +29830,99 @@ fn offline_request(id: &str, request_id: &str, user_id: i64, file_id: i64) -> Ne
         reserved_bytes: 5_000,
         expires_at: 10_000,
     }
+}
+
+#[tokio::test]
+async fn offline_audio_snapshot_survives_claim_and_server_policy_retry() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "offline-audio-snapshot").await;
+        let audio = plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::Encode { codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000 },
+            downmix: None, reason: "accepted audio route".into(),
+        };
+        let mut first = offline_request("audio-package", "audio-request", user_id, file_id);
+        first.audio_recipe = Some(serde_json::to_string(&audio).expect("offline audio contract operation"));
+        let OfflineCreateOutcome::Created(created) = store.create_offline_package(&first, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: create"); };
+        assert_eq!(created.audio_recipe, first.audio_recipe);
+        let mut retried = first.clone();
+        retried.audio_recipe = None;
+        let OfflineCreateOutcome::Existing(existing) = store.create_offline_package(&retried, 10, 100_000, 100_000).await.expect("offline audio contract operation") else { panic!("{backend}: retry changed server snapshot"); };
+        assert_eq!(existing.audio_recipe, first.audio_recipe);
+        let claimed = store.claim_next_offline_package("offline-node").await.expect("offline audio contract operation").expect("claim");
+        assert_eq!(claimed.audio_recipe, first.audio_recipe);
+        let mut invalid = offline_request("bad-audio-package", "bad-audio-request", user_id, file_id);
+        invalid.audio_recipe = Some("{\"action\":{\"kind\":\"encode\",\"codec\":\"eac3\",\"channels\":6,\"bitrate_kbps\":640,\"sample_rate\":48000},\"reason\":\"not the AAC lattice\"}".into());
+        assert!(store.create_offline_package(&invalid, 10, 100_000, 100_000).await.is_err(), "{backend}: invalid VOD audio accepted");
+    }).await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v65_offline_audio_migration_preserves_legacy_packages() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let current: Arc<dyn Store> = Arc::new(open_contract_hiqlite_store(&cluster).await);
+    let (user_id, file_id) = seed_file(&current, "offline-audio-v65").await;
+    let legacy = offline_request("legacy-audio", "legacy-audio-request", user_id, file_id);
+    current
+        .create_offline_package(&legacy, 10, 100_000, 100_000)
+        .await
+        .expect("offline audio contract operation");
+    drop(current);
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("offline audio contract operation");
+    client
+        .txn([
+            (
+                "ALTER TABLE offline_packages DROP COLUMN audio_recipe",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(65_i64),
+            ),
+        ])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    let telemetry = cluster._root.path().join("offline-audio-v65-telemetry.db");
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("offline audio contract operation");
+    assert_eq!(replicated_schema_marker(&client).await, 66);
+    let stored = migrated
+        .offline_package_for_user(&legacy.id, user_id)
+        .await
+        .expect("offline audio contract operation")
+        .expect("offline audio contract operation");
+    assert_eq!(stored.audio_recipe, None);
+    assert_eq!(stored.source_path, legacy.source_path);
+    assert_eq!(stored.effective_rate_control, legacy.effective_rate_control);
+    drop(migrated);
+    client
+        .txn([(
+            "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+            hiqlite::params!(65_i64),
+        )])
+        .await
+        .expect("offline audio contract operation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("offline audio contract operation");
+    HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("additive column replay");
+    assert_eq!(replicated_schema_marker(&client).await, 66);
 }
 
 #[tokio::test]

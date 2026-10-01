@@ -477,6 +477,12 @@ pub struct SessionRequest {
     pub kind: SessionKind,
     pub start_seconds: f64,
     pub audio_index: Option<i64>,
+    /// Server-resolved audio bytes, frozen across cluster ownership, offline
+    /// production and prepared successors. No public create field accepts it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_claim: Option<plurx_core::playback::audio::AudioClaim>,
     /// Subtitle stream to burn into the picture, chosen by the viewer.
     ///
     /// Only ever a *burn*: a text subtitle the client can render itself never
@@ -813,7 +819,7 @@ impl SessionRequest {
         // These strings are client-controlled. A typed JSON tuple keeps a
         // colon inside a username, playback id, or session id from producing
         // the same fingerprint as a different set of fields.
-        serde_json::json!([
+        let legacy = serde_json::json!([
             user_name,
             self.file_id,
             self.playback_id,
@@ -826,7 +832,11 @@ impl SessionRequest {
             self.previous_session_id,
             self.reopen_reason.map(ReopenReason::as_str),
         ])
-        .to_string()
+        .to_string();
+        match &self.audio_claim {
+            Some(claim) => serde_json::json!([legacy, claim]).to_string(),
+            None => legacy,
+        }
     }
 
     pub(super) fn intent_fingerprint(&self, user_name: &str) -> String {
@@ -846,6 +856,7 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,

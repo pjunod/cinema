@@ -2714,6 +2714,8 @@ pub struct StreamQuery {
     pub vcodec: Option<String>,
     pub vmaxheight: Option<String>,
     pub acodec: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
+    pub achannels: Option<u8>,
     pub container: Option<String>,
     pub maxheight: Option<i64>,
     pub hdr: Option<u8>,
@@ -2785,7 +2787,7 @@ impl StreamQuery {
             vcodec: self.vcodec.clone(),
             vmaxheight: self.vmaxheight.clone(),
             acodec: self.acodec.clone(),
-            achannels: None,
+            achannels: self.achannels,
             container: self.container.clone(),
             maxheight: self.maxheight,
             hdr: self.hdr,
@@ -2949,6 +2951,12 @@ async fn serve_stream_mp4(
     #[cfg(not(windows))]
     let remux_path = file.path.clone();
     remux(RemuxSpec {
+        audio_delivery: (caps.achannels.is_some()
+            || caps
+                .caps_v2
+                .as_ref()
+                .is_some_and(|caps| !caps.audio_sinks.is_empty()))
+        .then_some(&served.delivered_audio),
         path: &remux_path,
         #[cfg(windows)]
         source: &source.handle,
@@ -3203,6 +3211,7 @@ pub(crate) async fn serve_file_range(
 /// bare bools and numbers — a call site with seven positional arguments is one
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
+    audio_delivery: Option<&'a plurx_core::playback::audio::AudioDelivery>,
     path: &'a Path,
     #[cfg(windows)]
     source: &'a std::fs::File,
@@ -3389,6 +3398,7 @@ async fn consume_remux_stderr<R>(
 
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
+        audio_delivery,
         path,
         #[cfg(windows)]
         source,
@@ -3480,7 +3490,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
             retain_hevc_parameter_sets,
         ));
     }
-    if transcode_audio {
+    if let Some(audio) = audio_delivery {
+        if audio.transcodes() {
+            if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
+                args.extend(["-af".to_owned(), af]);
+            }
+        }
+        plurx_core::transcode::push_audio_delivery_args(&mut args, audio, false);
+    } else if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
             args.extend(["-af".to_owned(), af]);
         }
@@ -3723,6 +3740,43 @@ mod tests {
             ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
         );
         assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
+
+    #[test]
+    fn progressive_query_preserves_the_existing_flat_audio_channel_claim() {
+        let query: StreamQuery =
+            serde_urlencoded::from_str("acodec=aac&achannels=2").expect("bounded flat claim");
+        let caps = query.caps();
+        assert_eq!(caps.achannels, Some(2));
+        let source = plurx_core::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        };
+        let audio = plurx_core::playback::audio::resolve_audio(
+            Some(&source),
+            &caps.profile(NOW_MS),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            0,
+        );
+        assert!(matches!(
+            audio.action,
+            plurx_core::playback::audio::AudioAction::Encode { channels: 2, .. }
+        ));
+        let mut argv = Vec::new();
+        plurx_core::transcode::push_audio_delivery_args(&mut argv, &audio, false);
+        assert!(argv.windows(2).any(|pair| pair == ["-ac", "2"]));
+        for value in [0, 17] {
+            assert!(
+                serde_urlencoded::from_str::<StreamQuery>(&format!("achannels={value}")).is_err()
+            );
+        }
+        assert!(serde_urlencoded::from_str::<StreamQuery>("")
+            .expect("legacy query")
+            .caps()
+            .achannels
+            .is_none());
     }
 
     /// A fixed clock for every test that builds a device profile.

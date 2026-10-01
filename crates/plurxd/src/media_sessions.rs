@@ -1252,6 +1252,8 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
         && request
             .audio_index
             .is_none_or(|index| (0..=1_024).contains(&index))
+        && request.audio_delivery.as_ref().is_none_or(|audio| audio.valid_snapshot())
+        && request.audio_claim.as_ref().is_none_or(|claim| claim.valid_snapshot())
         && request
             .subtitle_burn
             .is_none_or(|index| (0..=1_024).contains(&index))
@@ -1282,6 +1284,8 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,
@@ -1394,6 +1398,7 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            audio_delivery: info.audio_delivery,
             session_id: info.session_id,
             playlist_url: info.playlist_url,
             duration_ms: info.duration_ms,
@@ -1413,6 +1418,10 @@ impl From<StartInfo> for RemoteStartResponse {
 impl RemoteStartResponse {
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|audio| audio.valid_snapshot())
             && self.playlist_url == format!("/api/v1/hls/{}/index.m3u8", self.session_id)
             && self
                 .duration_ms
@@ -5852,6 +5861,8 @@ mod tests {
                 kind: SessionKind::Transcode { height: 720 },
                 start_seconds: 12.5,
                 audio_index: Some(1),
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -5898,6 +5909,7 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: Some(7_200_000),

@@ -924,6 +924,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -933,6 +935,7 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1776,6 +1779,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2010,6 +2014,8 @@
                 kind: crate::transcode::SessionKind::Transcode { height: 720 },
                 start_seconds: 0.0,
                 audio_index: None,
+                audio_delivery: None,
+                audio_claim: None,
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
@@ -2019,6 +2025,7 @@
             },
         };
         let start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2245,6 +2252,8 @@
                     kind: crate::transcode::SessionKind::Transcode { height: 720 },
                     start_seconds: 0.0,
                     audio_index: None,
+                    audio_delivery: None,
+                    audio_claim: None,
                     subtitle_burn: None,
                     audio_offset_ms: 0,
                     hdr10: false,
@@ -2254,6 +2263,7 @@
                 },
             };
             let start = StartResponse {
+                delivered_audio: None,
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(60_000),
