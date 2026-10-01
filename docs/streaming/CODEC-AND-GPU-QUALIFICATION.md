@@ -659,6 +659,18 @@ HEVC Profile 5 / RPU-present probe record before copying it into the corpus.
 inputs; the ordinary incumbent corpus remains unchanged. Missing media and failed generation fail the command, never count as a built
 class. No genuine P5 source is yet identified for this run.
 
+**2026-10-01 continuation:** a bounded read-only private-library header census
+identified a genuine HEVC Profile 5 / RPU-present candidate; private path and
+stat/prefix-hash facts stay in the owned receipt. Whole-source hash, acquisition
+and per-frame RPU evidence remain open. The independent
+[HDR reference scorer](../performance/HDR-REFERENCE-SCORING.md) adds matched
+decoded PQ-domain PSNR/SSIM, highlight/shadow code census and exact metadata
+checks, plus a separately pinned explicit BT.709 grade for SDR VMAF. Actual
+eight-frame authored-reference generation, a distinct lossy PQ comparison and
+bounded offline grade/model execution are diagnostics, not genuine-film,
+GPU, production-session or physical A/B acceptance. The incumbent generator,
+fixtures and SDR scorer are unchanged; HLG/unreshaped DV remain refused.
+
 M1 is **not accepted** by the generator or its mock tests. Actual generation,
 the intended per-class stream facts, production bitmap-burn selection and
 captured session matrix remain owed. The incumbent rate-control scorer refuses
