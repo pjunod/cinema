@@ -786,6 +786,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         quality: PlaybackQuality = _preferences.value.playbackQuality,
         presentationTarget: PresentationTarget? = null,
         audioOffsetMs: Long = 0,
+        linkReceipt: String? = null,
     ): PlaybackDecision {
         val measured = Caps.snapshot(getApplication<Application>())
         val snapshot = measured.copy(document = measured.document.copy(
@@ -800,7 +801,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
             preplayQueryParams(tracks) + if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1")
                 mapOf("audio_offset_ms" to audioOffsetMs.toString()) else emptyMap()
         val decision = try {
-            api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))
+            api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document), validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
             if (!shouldFallBackToLegacyDecision(error.code())) throw error
             api().decision(fileId, snapshot.legacyQuery + request)
@@ -880,12 +881,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
+    private fun validLinkReceipt(receipt: String?): String? = receipt?.takeIf {
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(it)
+    }
+
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq, linkReceipt: String? = null): HlsStart {
         requireNotNull(body.caps) {
             "Playback session is missing its decision capabilities."
         }
         val started = try {
-            api().createHlsSession(fileId, body)
+            api().createHlsSession(fileId, body, validLinkReceipt(linkReceipt))
         } catch (error: HttpException) {
             // The surface adapter (PLAYBACK-SURFACE-CONTRACT.md §3.5): a
             // refusal the server explained reaches the presenter as its own

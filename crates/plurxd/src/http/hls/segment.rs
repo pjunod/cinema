@@ -727,6 +727,7 @@ async fn vod_segment_response_before(
     // time it runs.
     let delivery = std::sync::Arc::clone(&ready.delivery);
     let retained_lease = ready.retained_lease;
+    let observed_media_duration_ms = ready.observed_media_duration_ms;
     let reader = tokio_util::io::ReaderStream::with_capacity(
         tokio::io::AsyncReadExt::take(ready.file, len),
         MEDIA_BODY_READ_BUFFER,
@@ -749,7 +750,7 @@ async fn vod_segment_response_before(
         seg,
         &etag,
         len,
-        None,
+        observed_media_duration_ms,
         status == StatusCode::OK && complete_object,
     ) {
         Some((nonce, observer)) => (Some(nonce), Some(observer)),
@@ -806,10 +807,13 @@ async fn vod_segment_response_before(
     headers_mut.insert("x-plurx-producer-paced", "0".parse().expect("provenance"));
     if let Some(nonce) = link_nonce {
         headers_mut.insert("x-plurx-link-receipt", nonce.parse().expect("UUID receipt"));
+        if let Some(duration) = observed_media_duration_ms {
+            headers_mut.insert("x-plurx-link-media-duration-ms", duration.into());
+        }
     }
     headers_mut.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        "X-Plurx-Producer-Paced, X-Plurx-Link-Receipt, ETag"
+        "X-Plurx-Producer-Paced, X-Plurx-Link-Receipt, X-Plurx-Link-Media-Duration-Ms, ETag"
             .parse()
             .expect("expose"),
     );

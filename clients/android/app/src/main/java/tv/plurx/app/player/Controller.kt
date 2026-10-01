@@ -309,7 +309,7 @@ class Controller internal constructor(
      * the user request the server's final replacement as well as the UI's.
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body) },
+        createSession = { body -> vm.createHlsSession(plan.fileId, body, currentLinkReceipt()) },
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
@@ -676,7 +676,7 @@ class Controller internal constructor(
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
     private var autoNextTickMs = 0L
-    private val autoLinkClaims = LinkedHashMap<String, Pair<Long, Boolean>>()
+    private val autoLinkClaims = LinkedHashMap<String, Triple<Long, Boolean, String>>()
     private var autoUpgradeSinceMs: Long? = null
     private var autoLastSwitchMs: Long? = null
     private val autoSwitchTimes = mutableListOf<Long>()
@@ -2997,7 +2997,7 @@ class Controller internal constructor(
         scope.launch {
             val fresh = try {
                 vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
-                    PlaybackQuality.Auto, target, selectionKey.third).decision
+                    PlaybackQuality.Auto, target, selectionKey.third, currentLinkReceipt()).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
             if (fresh.display_aware_auto_protocol == "route-v1") {
@@ -3033,6 +3033,7 @@ class Controller internal constructor(
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
             transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            autoTransferOriginCurrent(transfer) &&
             transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
             transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0)
@@ -3098,6 +3099,7 @@ class Controller internal constructor(
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
             transfer.statusCode == 200 && transfer.receipt != null && transfer.etag != null &&
+            autoTransferOriginCurrent(transfer) &&
             transfer.pipelineIdentity === autoTransfersByPlayer[player] && sessionId != null &&
             transfer.segmentId.contains("/$sessionId/") &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0) {
@@ -3170,6 +3172,31 @@ class Controller internal constructor(
         }
     }
 
+    private fun autoTransferOriginCurrent(sample: AutoCompletedTransfer): Boolean {
+        val actual = sample.origin?.let(tv.plurx.app.data.Session::canonicalOrigin) ?: return false
+        val primary = tv.plurx.app.data.Session.canonicalPrimaryOrigin() ?: return false
+        return actual == primary
+    }
+
+    private fun currentLinkReceipt(): String? {
+        if (playbackIntent.desiredQuality != PlaybackQuality.Auto) return null
+        val sample = latestAutoCompletedTransfer ?: return null
+        val currentSession = sessionId ?: return null
+        val receipt = sample.receipt ?: return null
+        val duration = sample.bodyDurationMs ?: return null
+        val uri = android.net.Uri.parse(sample.segmentId)
+        if (sample.pipelineIdentity !== autoTransfersByPlayer[player] ||
+            !uri.pathSegments.contains(currentSession) || autoActiveCandidateId == null ||
+            sample.statusCode != 200 || !sample.networkLoad || sample.fromLocalCache != false ||
+            !autoTransferOriginCurrent(sample) ||
+            sample.producerPaced != false || sample.ageMs(monotonicNowMs()) > 15_000L ||
+            duration !in 1..120_000L || sample.bodyBytes <= 0 || sample.etag.isNullOrEmpty() ||
+            autoLinkClaims[receipt]?.first != sample.completedAtMs ||
+            autoLinkClaims[receipt]?.third != autoActiveCandidateId ||
+            !Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt)) return null
+        return receipt
+    }
+
     private fun reportCandidateLinkSample(negative: Boolean) {
         val now = monotonicNowMs()
         autoLinkClaims.entries.removeAll { now < it.value.first || now - it.value.first > 15_000L }
@@ -3185,6 +3212,7 @@ class Controller internal constructor(
             !uri.pathSegments.contains(currentSession) || candidate.id != autoActiveCandidateId ||
             !Regex("seg[0-9]+\\.(m4s|ts)").matches(uri.lastPathSegment.orEmpty()) ||
             sample.statusCode != 200 || !sample.networkLoad || sample.fromLocalCache != false ||
+            !autoTransferOriginCurrent(sample) ||
             sample.producerPaced != false || sample.ageMs(now) > 15_000L ||
             duration !in 1..120_000L || sample.bodyBytes <= 0 || receipt.length != 36 || etag.isEmpty()) return
         val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
@@ -3192,16 +3220,16 @@ class Controller internal constructor(
             if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
                 !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
                 playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
-                runway > 1500 || sample.mediaDurationMs?.let { it > 0 && duration > it } != true) return
+                runway > 1500 || sample.observedMediaDurationMs?.let { duration > it } != true) return
         } else if (autoLinkClaims.containsKey(receipt)) return
         if (autoLinkClaims.size >= 32 && !autoLinkClaims.containsKey(receipt)) return
         postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_link_sample",
             message = "Completed candidate body", ua = "Android Media3", sessionId = currentSession,
             linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), etag,
                 sample.bodyBytes, duration, sample.ageMs(now), true, false, false, "link", negative,
-                sample.mediaDurationMs, establishedPlayback && presentationForeground,
+                sample.observedMediaDurationMs, establishedPlayback && presentationForeground,
                 player.playbackState == Player.STATE_BUFFERING, runway)))
-        autoLinkClaims[receipt] = sample.completedAtMs to negative
+        autoLinkClaims[receipt] = Triple(sample.completedAtMs, negative, candidate.id)
     }
 
     private fun measuredCostCatalog(): List<tv.plurx.app.data.QualityCandidate> = autoCatalog.map { candidate ->
@@ -4190,6 +4218,7 @@ class Controller internal constructor(
             val now = monotonicNowMs()
             val margin = autoTransfersByPlayer[successor]?.recent().orEmpty().any { sample ->
                 sample.segmentId.contains("/${action.sessionId ?: return}/") && sample.receipt != null && sample.etag != null &&
+                autoTransferOriginCurrent(sample) &&
                     sample.statusCode == 200 && autoCompletedTransferBps(sample, now, 15_000L)?.let { it >= peak * 1.8 } == true
             }
             if (!margin) return
@@ -4732,6 +4761,7 @@ internal data class AutoCompletedTransfer(
     val etag: String? = null,
     val statusCode: Int? = null,
     val pipelineIdentity: Any? = null,
+    val observedMediaDurationMs: Long? = null,
 ) {
     fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
 }
@@ -4779,7 +4809,8 @@ internal fun autoTrialMayCommit(requestedId: String?, offeredId: String?, reques
 internal class AutoTransferEvidence(private val delegate: TransferListener) : TransferListener {
     private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
                             val origin: String?, val paced: Boolean?, val receipt: String?,
-                            val etag: String?, val statusCode: Int?, var bytes: Long = 0)
+                            val etag: String?, val statusCode: Int?, val observedMediaDurationMs: Long?,
+                            var bytes: Long = 0)
     private val active = java.util.IdentityHashMap<DataSource, Body>()
     private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
     private var completed: AutoCompletedTransfer? = null
@@ -4811,13 +4842,16 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
         val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }?.value?.singleOrNull()
         val receipt = headers.entries.firstOrNull { it.key.equals("X-Plurx-Link-Receipt", true) }?.value?.singleOrNull()
         val etag = headers.entries.firstOrNull { it.key.equals("ETag", true) }?.value?.singleOrNull()
+        val observedMediaDuration = headers.entries.firstOrNull {
+            it.key.equals("X-Plurx-Link-Media-Duration-Ms", true)
+        }?.value?.singleOrNull()?.toLongOrNull()?.takeIf { it in 1..4_294_967_295L }
         val uri = source.uri ?: dataSpec.uri
         val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}${if (uri.port >= 0) ":${uri.port}" else ""}" else null
         synchronized(this) {
             if (active.size >= 32) active.clear()
             active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
                 when (paced) { "0" -> false; "1" -> true; else -> null }, receipt, etag,
-                (source as? HttpDataSource)?.responseCode)
+                (source as? HttpDataSource)?.responseCode, observedMediaDuration)
         }
     }
     override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
@@ -4832,7 +4866,8 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             val duration = (now - body.startedAtMs).takeIf { it in 1..120_000 }
             ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
                 if (body.network) false else null, body.paced, receipt = body.receipt, etag = body.etag,
-                statusCode = body.statusCode, pipelineIdentity = this)
+                statusCode = body.statusCode, pipelineIdentity = this,
+                observedMediaDurationMs = body.observedMediaDurationMs)
             while (ended.size > 32) ended.remove(ended.keys.first())
         }
     }

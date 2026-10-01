@@ -604,7 +604,7 @@ async function refreshQualityCandidates(p){
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
   try{
     const decision=await askDecision(p.fileId,qualityForce(),
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0});
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
     p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
@@ -623,6 +623,21 @@ function candidateTransferEvidence(p,now){
   return transfer&&transfer.attachment===p.mediaAttachment
     &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     ? {...transfer,age_ms:now-transfer.atMs}:null;
+}
+function candidateLinkReceipt(p,fileId,now=performance.now()){
+  if(!p||PLAYER!==p||p.fileId!==fileId||qualityForce()!=='auto'
+    ||!playbackOwnsAttachedMedia(p)) return null;
+  const sample=candidateTransferEvidence(p,now);
+  return sample&&candidateTransferOriginCurrent(sample)&&sample.linkPositiveReported&&sample.etag
+    &&typeof sample.receipt==='string'
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sample.receipt)
+    &&sample.age_ms>=0&&sample.age_ms<=15000&&PlaybackPolicy.qualityTransferBps(sample)>0
+    ? sample.receipt:null;
+}
+function candidateTransferOriginCurrent(sample){
+  try{
+    return typeof sample?.origin==='string'&&sample.origin===new URL(location.href).origin;
+  }catch(e){ return false; }
 }
 function measuredCandidateOutput(p,candidate){
   const outputs=p.measuredCandidateOutputs;
@@ -647,7 +662,7 @@ function measuredCandidateCatalog(p,candidates){
 }
 function candidatePositiveMargin(p,candidate,transfer){
   const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
-  return !!(output&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
+  return !!(output&&candidateTransferOriginCurrent(transfer)&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
     &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     &&link>0&&link>=output.peak_bps*1.8);
 }
@@ -664,7 +679,7 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
   const generation=p.controlIntentGeneration;
   try{
     const decision=await askDecision(p.fileId,'auto',
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal);
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal,p);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
     const candidates=decision.quality_candidates;
@@ -739,12 +754,12 @@ function reportCandidateLinkSample(p,v,cause,now){
   const negative=!!sample.linkPositiveReported;
   if(negative&&(sample.linkNegativeReported||cause!=='link'||!p.started||v.paused
     ||v.seeking||p.controlSeek||p.pendingMediaChange||!p.waitAt||bufferRunway(v)>1.5
-    ||!(sample.media_duration_ms>0&&sample.elapsed_ms>sample.media_duration_ms))) return;
+    ||!(sample.server_media_duration_ms>0&&sample.elapsed_ms>sample.server_media_duration_ms))) return;
   clientLog({event:'candidate_link_sample',message:'Completed candidate body',session_id:p.sessionId,
     link_sample:{receipt:sample.receipt,object_name:sample.object_name,etag:sample.etag,
       body_bytes:sample.bytes,body_duration_ms:Math.round(sample.elapsed_ms),age_ms:Math.round(now-sample.atMs),
       network_load:true,from_cache:false,producer_paced:false,cause:'link',negative,
-      media_duration_ms:Math.round(sample.media_duration_ms||0),presenting:!!p.started,
+      media_duration_ms:sample.server_media_duration_ms??null,presenting:!!p.started,
       stalled:!!p.waitAt,runway_ms:Math.max(0,Math.round(bufferRunway(v)*1000))}});
   if(negative) sample.linkNegativeReported=true;
   else sample.linkPositiveReported=true;

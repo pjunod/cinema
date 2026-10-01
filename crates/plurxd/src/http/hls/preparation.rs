@@ -1089,6 +1089,7 @@ pub(super) async fn plan_preparation_candidate(
             source: Some(source),
             network_prior: None,
             network_identity: None,
+            incumbent_receipt: None,
         },
         Some(review),
         body,
@@ -1628,6 +1629,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        measured_candidate_outputs: None,
         delivered_audio: staged_request.audio_delivery.clone(),
         display_aware_auto_protocol: predecessor
             .decoder_caps

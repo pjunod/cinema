@@ -29,10 +29,12 @@ function observeReadAfter(value,request){
     READ_AFTER.expires=performance.now()+60000;
   }
 }
-async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null, keepSessionOn401=false, linkReceipt=null}={}){
   const authGeneration=AUTH_GENERATION;
   const readAfter=readAfterRequest();
   const headers={};
+  if(typeof linkReceipt==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(linkReceipt))
+    headers["x-plurx-link-receipt"]=linkReceipt;
   if(readAfter.index) headers["x-plurx-read-after"]=readAfter.index;
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }

@@ -2405,6 +2405,7 @@ final class PlayerController: ObservableObject {
         var etag: String? = nil
         var installedSessionId: String? = nil
         var installedCandidateId: String? = nil
+        var observedMediaDurationMs: Int? = nil
         func ageMs(nowMs: Int) -> Int { nowMs >= completedAtMs ? nowMs - completedAtMs : Int.max }
     }
     private(set) var latestAutoCompletedTransfer: AutoCompletedTransfer?
@@ -2412,6 +2413,32 @@ final class PlayerController: ObservableObject {
     private var autoStagedTransferMetricTask: Task<Void, Never>?
     private var autoStagedTransfers: [AutoCompletedTransfer] = []
     private var autoLinkClaims: [String: (completedAtMs: Int, negative: Bool)] = [:]
+
+    private func autoTransferOriginCurrent(_ sample: AutoCompletedTransfer) -> Bool {
+        guard let origin = sample.origin,
+              let actual = Session.canonicalOrigin(origin),
+              let primary = Session.shared.canonicalPrimaryOrigin else { return false }
+        return actual == primary
+    }
+
+    private func currentLinkReceipt() -> String? {
+        let now = PlaybackControlSession.monotonicMs()
+        guard model?.displayAwareAuto == true, selectedHeight == nil, !selectedQualityIsOriginal,
+              let sample = latestAutoCompletedTransfer,
+              let sessionId, sample.installedSessionId == sessionId,
+              let candidateId = autoActiveCandidateId, sample.installedCandidateId == candidateId,
+              sample.statusCode == 200, sample.networkLoad, !sample.fromLocalCache,
+              autoTransferOriginCurrent(sample),
+              sample.producerPaced == false, sample.ageMs(nowMs: now) <= 15_000,
+              let duration = sample.bodyDurationSeconds, duration > 0, duration <= 120,
+              sample.bodyBytes > 0, let receipt = sample.receipt,
+              UUID(uuidString: receipt)?.uuidString.lowercased() == receipt,
+              let claim = autoLinkClaims[receipt], claim.completedAtMs == sample.completedAtMs,
+              let etag = sample.etag, !etag.isEmpty,
+              let url = URL(string: sample.segmentId), url.pathComponents.contains(sessionId)
+        else { return nil }
+        return receipt
+    }
 
     private func retireAutoTransferMetrics() {
         autoTransferMetricTask?.cancel()
@@ -2448,6 +2475,8 @@ final class PlayerController: ObservableObject {
                             .flatMap { $0.isFinite && $0 > 0 && $0 <= 120 ? $0 : nil }
                         let response = transfer.response as? HTTPURLResponse
                         let paced = response?.value(forHTTPHeaderField: "X-Plurx-Producer-Paced")
+                        let observedMediaDuration = response?.value(forHTTPHeaderField: "X-Plurx-Link-Media-Duration-Ms")
+                            .flatMap { Int($0) }.flatMap { (1...Int(UInt32.max)).contains($0) ? $0 : nil }
                         let now = PlaybackControlSession.monotonicMs()
                         let ageMs = Int(age * 1000)
                         let url = response?.url ?? resource.url
@@ -2471,7 +2500,8 @@ final class PlayerController: ObservableObject {
                             receipt: response?.value(forHTTPHeaderField: "X-Plurx-Link-Receipt"),
                             etag: response?.value(forHTTPHeaderField: "ETag"),
                             installedSessionId: staged ? nil : installedSessionId,
-                            installedCandidateId: staged ? nil : installedCandidateId
+                            installedCandidateId: staged ? nil : installedCandidateId,
+                            observedMediaDurationMs: observedMediaDuration
                         )
                         if staged {
                             self.autoStagedTransfers.removeAll { $0.segmentId == sample.segmentId }
@@ -2499,6 +2529,7 @@ final class PlayerController: ObservableObject {
               let candidateId = autoActiveCandidateId, sample.installedCandidateId == candidateId,
               let runway = bufferedRunwaySeconds(), runway.isFinite, runway >= 0,
               sample.statusCode == 200, sample.networkLoad, !sample.fromLocalCache,
+              autoTransferOriginCurrent(sample),
               sample.producerPaced == false, sample.ageMs(nowMs: now) <= 15_000,
               let duration = sample.bodyDurationSeconds, duration > 0, duration <= 120,
               sample.bodyBytes > 0, let receipt = sample.receipt, receipt.count == 36,
@@ -2510,7 +2541,7 @@ final class PlayerController: ObservableObject {
             guard autoLinkClaims[receipt]?.negative == false, wantsPlayback, surface.presenting,
                   seekState.pendingMs == nil, preparedPlayer == nil,
                   player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
-                  let media = sample.mediaDurationSeconds, media > 0, duration > media,
+                  let media = sample.observedMediaDurationMs, duration * 1000 > Double(media),
                   runway <= 1.5 else { return }
         } else if autoLinkClaims[receipt] != nil { return }
         if autoLinkClaims.count >= 32, autoLinkClaims[receipt] == nil { return }
@@ -2518,7 +2549,7 @@ final class PlayerController: ObservableObject {
             receipt: receipt, object_name: url.lastPathComponent, etag: etag,
             body_bytes: sample.bodyBytes, body_duration_ms: Int((duration * 1000).rounded()),
             age_ms: sample.ageMs(nowMs: now), negative: negative,
-            media_duration_ms: sample.mediaDurationSeconds.map { Int(($0 * 1000).rounded(.up)) },
+            media_duration_ms: sample.observedMediaDurationMs,
             presenting: surface.presenting, stalled: player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
             runway_ms: Int(min(runway * 1000, Double(UInt32.max))))))
         autoLinkClaims[receipt] = (sample.completedAtMs, negative)
@@ -6748,7 +6779,9 @@ final class PlayerController: ObservableObject {
         generation: Int
     ) async throws -> HlsStart {
         guard surfaceContext == .start else {
-            return try await requestHlsSession(model, file, body)
+            return try await PlaybackLinkRequestContext.$receipt.withValue(currentLinkReceipt()) {
+                try await requestHlsSession(model, file, body)
+            }
         }
         // ONE identity for the whole sequence. The server persists a create's
         // answer under `request_id`, so replaying one recovers the session it
@@ -6799,7 +6832,9 @@ final class PlayerController: ObservableObject {
                 // Not `started`: that is the controller's own "is this player
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
-                let opened = try await requestHlsSession(model, file, request)
+                let opened = try await PlaybackLinkRequestContext.$receipt.withValue(currentLinkReceipt()) {
+                    try await requestHlsSession(model, file, request)
+                }
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
@@ -10098,8 +10133,11 @@ extension PlayerController {
         let catalogAttempt = snapshotAttempt()
         let target = presentationTarget
         Task { @MainActor [weak self] in
+            let incumbentReceipt = self?.decision?.fileId == fileId ? self?.currentLinkReceipt() : nil
             let fresh = try? await Caps.PresentationContext.$target.withValue(target) {
-                try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0)
+                try await PlaybackLinkRequestContext.$receipt.withValue(incumbentReceipt) {
+                    try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0)
+                }
             }
             guard let self, self.started,
                   self.attemptStillCurrent(catalogAttempt, fence: .autoCatalogRefresh),
@@ -10147,6 +10185,7 @@ extension PlayerController {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
                   transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
+                  autoTransferOriginCurrent(transfer),
                   transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
                   transfer.ageMs(nowMs: now) <= 10_000, let duration = transfer.bodyDurationSeconds,
                   duration > 0, transfer.bodyBytes > 0 else { return nil }
@@ -10199,6 +10238,7 @@ extension PlayerController {
         let now = PlaybackControlSession.monotonicMs()
         let samples = autoStagedTransfers.filter { sample in
             sample.segmentId.contains("/\(action.sessionId)/") && sample.receipt != nil && sample.etag != nil
+                && autoTransferOriginCurrent(sample)
                 && sample.statusCode == 200 && sample.networkLoad && !sample.fromLocalCache
                 && sample.producerPaced == false && sample.ageMs(nowMs: now) <= 15_000
                 && (sample.bodyDurationSeconds ?? 0) > 0 && sample.bodyBytes > 0
@@ -10248,6 +10288,7 @@ extension PlayerController {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
                   transfer.statusCode == 200, transfer.receipt != nil, transfer.etag != nil,
+                  autoTransferOriginCurrent(transfer),
                   transfer.installedSessionId == sessionId, transfer.installedCandidateId == autoActiveCandidateId,
                   transfer.ageMs(nowMs: now) <= 10_000,
                   let duration = transfer.bodyDurationSeconds, duration > 0,
