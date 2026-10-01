@@ -2406,10 +2406,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # mutations retain artifact Arc leases until settlement so cancellation cannot
 # let GC overtake filesystem writes. Existing maintenance owns GC, not a new
 # scheduler or rolling recovery task.
+# +2 durable retained-output owners: awaited atomic-manifest commit and lazy
+# byte validation. Each blocking closure retains its artifact lease; validation
+# also retains the single-flight guard through caller timeout/cancellation.
 # A05 #683: +2: system.rs detaches optional ClientLog proof persistence with
 # no producer authority; link_receipts.rs's intake race task is test-only,
 # paused per instance and joined after retirement/owner replacement.
-expected_occurrences = 696
+expected_occurrences = 698
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3571,13 +3574,17 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # uses the caller's existing response budget; one 20 ms test-only sleep polls
 # completed artifact assembly in the new measured-cost fixture. No new
 # production periodic timer or rolling lifecycle deadline owner.
+# +4 durable-output waits: lazy validation timeout plus three bounded polling
+# sleeps in the private assembly and real Restore fixtures. No new scheduler.
+# +1 bounded polling sleep in sole-review45's new real same-key/incoming-tuple
+# consumer regression. It awaits actual completed artifact assembly, no task.
 # A05 #683: +9 awaited fail-open proof queries. link_receipts.rs bounds source
 # opening (100 ms), live-positive revalidation (100 ms), route/file reads
 # (1 s each), source reopening (100 ms), post-await route read (1 s), negative
 # filtering (100 ms), and public measured projection (100 ms). create.rs
 # bounds opaque measured_candidate_cost reacquisition (100 ms). Missing proof
 # stays Unknown; none starts media, owns recovery, or refreshes original EOF.
-expected_occurrences = 1143
+expected_occurrences = 1148
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -3910,7 +3917,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 203
+# +1 test-only finite FFmpeg fixture in retained_durable.rs, synchronously
+# collected before exercising actual trailerless vodgen completion.
+expected_occurrences = 204
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4385,7 +4394,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # every other structural row retained its reviewed count.
 # S09 composition retains all of the above: effort414 plus B-R1's two
 # non-process response reads and the one bounded queued-publication child.
-expected_occurrences = 417
+# +1 matching collected `.output()` for that finite trailer-negative fixture.
+expected_occurrences = 418
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

@@ -448,7 +448,16 @@ impl VodServe {
                 "its parameter sets vary mid-film (the §2 ruling)",
             ));
         }
+        // Sharing may return an existing rendition and discard this Recipe.
+        // Issued proof compatibility belongs to this incoming resolved request.
+        let incoming_logical = Some(crate::vodserve::retained_manifest::LogicalOutput::resolve(
+            req,
+            prepared.encoding.as_deref(),
+            file,
+            video,
+        ));
         let recipe = Recipe {
+            retained_logical: incoming_logical.clone(),
             measured_candidate: prepared.measured_candidate,
             file: file.clone(),
             audio_index: req.audio_index,
@@ -477,6 +486,36 @@ impl VodServe {
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let retained_output = match prepared.retained_capture {
+            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
+                self.shared
+                    .retained_artifacts
+                    .reacquire_expected_for_request(
+                        expected,
+                        &self.shared,
+                        &rendition,
+                        &incoming_logical,
+                        rendition.materialize_budget,
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        crate::transcode::vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the issued output artifact cannot be exactly reacquired",
+                        )
+                    })?,
+            ),
+            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
+                None
+            }
+            RetainedOutputCapture::New => rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock")
+                .complete_rates()
+                .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
+                .filter(|artifact| artifact.logical == incoming_logical),
+        };
         let marker_destinations = stored_marker_destinations(
             self.shared.store.as_ref(),
             file,
@@ -499,28 +538,17 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
-        let retained_output = match prepared.retained_capture {
-            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
-                self.shared
-                    .retained_artifacts
-                    .acquire_expected(expected, &rendition)
-                    .ok_or_else(|| {
-                        crate::transcode::vod_refusal_error(
-                            "retained_artifact_unavailable",
-                            "the issued output artifact cannot be exactly reacquired",
-                        )
-                    })?,
-            ),
-            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
-                None
-            }
-            RetainedOutputCapture::New => rendition
-                .output_measurement
-                .lock()
-                .expect("output measurement lock")
-                .complete_rates()
-                .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity)),
-        };
+        if retained_output.as_ref().is_some_and(|artifact| {
+            self.shared
+                .retained_artifacts
+                .acquire_expected_for_request(&artifact.facts(), &rendition, &incoming_logical)
+                .is_none()
+        }) {
+            return Err(crate::transcode::vod_refusal_error(
+                "retained_artifact_unavailable",
+                "the exact artifact changed before attachment",
+            ));
+        }
         let replacement = Session {
             retained_output,
             rendition: Some(Arc::clone(&rendition)),

@@ -743,9 +743,20 @@ pub(super) async fn credit_marker_prewarm_publication(
 
 impl vodgen::Sink for RenditionSink {
     async fn completed_output(&self) {
+        if !recipe_engine_is_current(&self.rendition.recipe).await {
+            return;
+        }
         let manifest = self.rendition.manifest.lock().await;
-        if self.rendition.gen_epoch.load(Relaxed) == self.epoch
-            && !self.rendition.closed.load(Relaxed)
+        // Only vodgen's verified normal trailer reaches this callback. The
+        // driver may already have retired an all-done child, but that cannot
+        // invalidate its successfully published bytes. The observer still
+        // checks the original Sink epoch; mixed/repeated writes lose proof.
+        if !self.rendition.closed.load(Relaxed)
+            && self
+                .rendition
+                .source
+                .as_ref()
+                .is_some_and(|source| source.unchanged())
         {
             let mut measurement = self
                 .rendition

@@ -941,6 +941,8 @@ mod output_measurement;
 use output_measurement::PublishedOutputMeasurement;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
+#[path = "vod/retained_manifest.rs"]
+mod retained_manifest;
 // split: end vod-generation
 
 // split: begin vod-plan
