@@ -434,7 +434,10 @@ impl TranscodeManager {
         if operation.identity.matches(control) {
             Ok(Some(operation))
         } else {
-            Err(crate::playback_control::ControlStateError::SessionEnded)
+            // This tombstone is admitted only for the actor's winning End.
+            // A different exchange cannot replay it, but retirement must not
+            // erase the cause once the live worker has been removed.
+            Err(crate::playback_control::RollingTerminalCause::End.control_error())
         }
     }
 

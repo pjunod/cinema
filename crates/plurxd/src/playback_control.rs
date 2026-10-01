@@ -23703,24 +23703,56 @@ mod tests {
     }
 
     #[test]
-    fn thirty_minute_foreground_hold_remains_live_on_delivered_heartbeats() {
+    fn thirty_minute_foreground_play_pause_remains_live_on_delivered_heartbeats() {
         let started = Instant::now();
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        actor.begin_producer_attempt_at(started).expect("producer");
+        actor.startup.activate_at(started);
         let mut request = request();
-        request.demand = PlaybackDemand::Hold;
-        request.playback_rate = 0.0;
-        request.render_state = RenderState::Waiting;
+        request.render_state = RenderState::Rendering;
+        request.position_ms = 1_000;
+        actor
+            .control_at(started, owned_control(&request))
+            .expect("presentation baseline");
+        request.sequence += 1;
+        request.position_ms += 300;
+        let presented = actor
+            .control_at(
+                started + Duration::from_millis(300),
+                owned_control(&request),
+            )
+            .expect("advancing rendering observation");
+        assert_eq!(
+            presented.lease.startup.phase,
+            RollingStartupPhase::Presented
+        );
+
         let mut now = started + Duration::from_secs(1);
-        for sequence in 1..=360 {
+        for sequence in 3..=362 {
             request.sequence = sequence;
+            // Continuous Hold retains its existing finite grace after presentation,
+            // too. Real foreground playback resumes between bounded pause episodes;
+            // a heartbeat cannot renew the pause grace by itself.
+            let active = (sequence - 3) % 30 == 0;
+            request.demand = if active {
+                PlaybackDemand::Active
+            } else {
+                PlaybackDemand::Hold
+            };
+            request.playback_rate = if active { 1.0 } else { 0.0 };
+            request.render_state = if active {
+                RenderState::Rendering
+            } else {
+                RenderState::Waiting
+            };
             let outcome = actor
                 .control_at(now, owned_control(&request))
-                .expect("delivered hold heartbeat remains admissible");
+                .expect("delivered foreground heartbeat remains admissible");
             assert_eq!(outcome.disposition, ControlDisposition::Accepted);
             assert_eq!(
                 outcome.lease.demand.as_ref().map(|demand| demand.demand),
-                Some(PlaybackDemand::Hold)
+                Some(request.demand)
             );
             now += Duration::from_secs(5);
         }
