@@ -135,7 +135,8 @@ FIXTURES = {
         qualification=True,
         size="1920x1080", codec="libx265", hdr=None,
         source=("nullsrc=size={size}:rate=24:duration={duration},format=yuv420p10le,"
-                "geq=lum='64+64*X/W*(0.75+0.25*sin(T))':cb=512:cr=512"),
+                "geq=lum='64+64*X/W*(0.75+0.25*sin(T))':cb=512:cr=512,"
+                "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709"),
         extra=["-pix_fmt", "yuv420p10le", "-color_primaries", "bt709",
                "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
                "-x265-params", "log-level=none:pools=1:frame-threads=1:"
