@@ -256,11 +256,29 @@ fn probe_failure_reason(stderr: &[u8]) -> String {
 /// weird file doesn't abort a scan. Errors are reserved for ffprobe being
 /// missing or emitting unparseable output.
 pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
+    probe_with_threads(path, None).await
+}
+
+/// A durable probe batch reserves one CPU thread per child. Both stream and
+/// first-frame inspection must use that bound; output identity is unchanged.
+pub async fn probe_single_threaded(path: &Path) -> Result<ProbeResult, ProbeError> {
+    probe_with_threads(path, Some(1)).await
+}
+
+async fn probe_with_threads(
+    path: &Path,
+    threads: Option<usize>,
+) -> Result<ProbeResult, ProbeError> {
     // `-v error` rather than `-v quiet`: on success stderr stays empty, and on
     // failure it holds the one thing worth reporting — *why* ffprobe refused.
     // "Permission denied" and "Invalid data found" are opposite problems with
     // opposite fixes, and an exit code alone tells them apart for nobody.
-    let invocation = probe_invocation(path);
+    let mut invocation = probe_invocation(path);
+    if let Some(threads) = threads {
+        invocation
+            .args
+            .splice(0..0, ["-threads".into(), threads.to_string().into()]);
+    }
     let path_display = path.display().to_string();
     #[cfg(test)]
     let synthetic_stdout = invocation.synthetic_stdout.clone();
@@ -313,7 +331,7 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
     // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
     // but that label must not suppress the bounded frame observation.
     if result.luminance_source.as_deref() == Some("none") {
-        if let Some(frame) = probe_first_frame_luminance(path).await {
+        if let Some(frame) = probe_first_frame_luminance(path, threads).await {
             apply_frame_luminance(&mut result, &frame);
         }
     }
@@ -327,10 +345,12 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
     Ok(result)
 }
 
-async fn probe_first_frame_luminance(path: &Path) -> Option<Value> {
+async fn probe_first_frame_luminance(path: &Path, threads: Option<usize>) -> Option<Value> {
     let output = crate::process::bounded::output(
         ffprobe_bin(),
         &[
+            OsString::from("-threads"),
+            OsString::from(threads.unwrap_or(0).to_string()),
             OsString::from("-v"),
             OsString::from("error"),
             OsString::from("-print_format"),

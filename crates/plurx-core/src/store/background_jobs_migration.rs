@@ -285,6 +285,7 @@ mod tests {
         assert!(store.import_legacy_jobs(1_000).await.expect("page"));
         let jobs = store
             .list_jobs(JobQuery {
+                node_id: None,
                 state: None,
                 kind: None,
                 after_id: None,
@@ -395,6 +396,7 @@ mod tests {
         loop {
             let page = store
                 .list_jobs(JobQuery {
+                    node_id: None,
                     state: None,
                     kind: None,
                     after_id: cursor,
@@ -448,6 +450,7 @@ mod tests {
         while store.import_legacy_jobs(1000).await.expect("import") {}
         let jobs = store
             .list_jobs(JobQuery {
+                node_id: None,
                 state: None,
                 kind: None,
                 after_id: None,
@@ -530,6 +533,7 @@ mod tests {
         );
         assert!(store
             .list_jobs(JobQuery {
+                node_id: None,
                 state: None,
                 kind: None,
                 after_id: None,
