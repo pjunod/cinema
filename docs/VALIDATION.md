@@ -227,8 +227,14 @@ release-build, and container checks run as parallel jobs only when the diff can
 affect their contracts. Ready pull requests run the unit suite in the fast Rust
 lane. After the current-head and base gate passes, it publishes the PR gate
 badge; the PR lint badge updates when that PR also ran the Rust lane. Coverage
-runs only when the full CI sweep is manually dispatched on `main`, so its badge
-reports the last measurement rather than the current PR verdict.
+runs independently through [coverage.yml](../.github/workflows/coverage.yml)
+on every push to `main`, with a manual dispatch option on `main` for retries.
+It measures Rust workspace line coverage, excluding `plurx-cluster-check`,
+and publishes the percentage with its UTC measurement date. Runs are serialized
+and check out current `main` when they start so retries cannot publish an older
+event snapshot. A failed measurement or publication fails the workflow and
+leaves the last successful badge in place; its date makes that age visible.
+This diagnostic is separate from the current PR verdict and full CI sweep.
 [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md)
 records the measured failure history and the remaining suite-splitting,
 invalidation, rebase-evidence, and telemetry milestones.
