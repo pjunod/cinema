@@ -1424,3 +1424,27 @@ Authored regressions cover strict wire parsing, distinct request identities,
 unsupported-role refusal and real-source video/audio recipe preparation. Rust
 1.97.1 workspace/all-target compilation passed; tests remain deferred. This makes worker creation role-aware; the family actor still
 needs pairing, parent ownership, delivery routing and consumer-pin integration.
+
+### 10.17 Actual soundtrack configuration
+
+Shared soundtrack init publication and head regeneration now verify the actual
+MP4 audio sample description against the frozen AAC recipe. The structural
+parser follows the selected track to its sole `mp4a`/`esds` entry, bounds every
+MPEG-4 descriptor within its parent, and verifies AAC-LC, 48 kHz, 1024-sample
+frames and actual AudioSpecificConfig channel count. It refuses ambiguous
+entries, extra tracks, unsupported descriptor flags, HE-AAC, PCE layouts,
+short-frame modes and unknown extensions before publication. Channel count
+comes from AudioSpecificConfig rather than the older container default.
+
+The descriptor and configuration layouts are checked against FFmpeg's
+[ISO-media descriptor parser](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavformat/isom.c)
+and [MPEG-4 audio configuration parser](https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/libavcodec/mpeg4audio.c).
+Authored regressions exercise actual mono/stereo encoder init segments and
+malformed/configuration boundaries; unit execution remains deferred.
+
+Inspection also found that the legacy video-boundary helper would restart an
+audio-only plan at zero on every seek. Shared soundtracks now restart at their
+requested AAC interval; mixed video/audio plans retain their final-video
+boundary behavior. The authored regression checks both paths.
+
+Rust 1.97.1 workspace/all-target compilation passed for the exact tree.

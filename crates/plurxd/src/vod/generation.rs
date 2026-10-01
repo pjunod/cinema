@@ -386,6 +386,23 @@ async fn establish_or_verify(
         .await;
         return false;
     }
+    if let Some(audio) = rendition
+        .recipe
+        .encoding
+        .as_ref()
+        .and_then(|encoding| encoding.shared_audio.as_ref())
+    {
+        if let Err(error) = audio.verify_init(muxer) {
+            on_generation_end(
+                shared,
+                rendition,
+                Outcome::Failed(Failure::Stream(format!("shared soundtrack init: {error}"))),
+                epoch,
+            )
+            .await;
+            return false;
+        }
+    }
     let served = {
         let mut state = rendition.identity.lock().await;
         match &state.identity {

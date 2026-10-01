@@ -2628,3 +2628,19 @@
         assert_eq!(beyond.server_next_ready_start_ms, None);
         assert_eq!(beyond.server_next_ready_end_ms, None);
     }
+
+    #[test]
+    fn shared_soundtrack_restart_uses_its_own_interval_boundary() {
+        let audio = plurx_core::transcode::vod_shared_audio_plan(96_000, 160);
+        assert_eq!(video_entry_at_or_before(&audio, 40), 40);
+        assert_eq!(video_entry_at_or_before(&audio, 1), 1);
+        assert_eq!(video_entry_at_or_before(&audio, u32::MAX), 0);
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let mut muxed = grid.plan(8_000, 4_000_000);
+        let tail = muxed.entries.len() as u32;
+        let mut entry = muxed.entries.last().expect("last video").clone();
+        entry.index = tail;
+        entry.kind = PlanEntryKind::AudioTail;
+        muxed.entries.push(entry);
+        assert_eq!(video_entry_at_or_before(&muxed, tail), tail - 1);
+    }

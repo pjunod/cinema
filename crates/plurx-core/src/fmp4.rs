@@ -128,6 +128,145 @@ pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>
     }))
 }
 
+/// Actual configuration of the initial shared soundtrack family. This parser
+/// accepts the production AAC-LC/48 kHz/1024-sample shape, not an arbitrary
+/// audio entry whose filename happens to end in MP4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AacSampleEntryFacts {
+    pub codec: &'static str,
+    pub channels: u16,
+    pub sample_rate: u32,
+    pub samples_per_frame: u16,
+}
+
+pub fn aac_lc_sample_entry_facts(init: &Init) -> Result<AacSampleEntryFacts, Fmp4Error> {
+    if init.tracks.len() != 1
+        || init.tracks[0].kind != TrackKind::Audio
+        || init.tracks[0].timescale != 48_000
+    {
+        return malformed("shared AAC requires one 48 kHz audio track");
+    }
+    let bytes = &init.bytes;
+    let only_child = |range, kind| -> Result<Range<usize>, Fmp4Error> {
+        let boxes = find_children(bytes, range, kind)?;
+        let [(at, header)] = boxes.as_slice() else {
+            return malformed("shared AAC has a missing or ambiguous configuration box");
+        };
+        Ok(at.start + header.header_len..at.start + header.size)
+    };
+    let moov = only_child(0..bytes.len(), b"moov")?;
+    let selected = find_children(bytes, moov, b"trak")?
+        .into_iter()
+        .map(|(at, header)| at.start + header.header_len..at.start + header.size)
+        .filter_map(|range| match track_id_in_trak(bytes, range.clone()) {
+            Ok(Some(id)) if id == init.tracks[0].id => Some(Ok(range)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let [trak] = selected.as_slice() else {
+        return malformed("shared AAC track id is missing or duplicated");
+    };
+    let mdia = only_child(trak.clone(), b"mdia")?;
+    let minf = only_child(mdia, b"minf")?;
+    let stbl = only_child(minf, b"stbl")?;
+    let stsd = only_child(stbl, b"stsd")?;
+    if stsd.len() < 8 || be_u32(bytes, stsd.start + 4) != 1 {
+        return malformed("shared AAC requires one sample description");
+    }
+    let entries = &bytes[stsd.start + 8..stsd.end];
+    let descriptions = children(entries)?;
+    let [(header, start, end)] = descriptions.as_slice() else {
+        return malformed("shared AAC has ambiguous sample descriptions");
+    };
+    if header.kind() != b"mp4a" || end - start < 28 {
+        return malformed("shared AAC has no complete mp4a entry");
+    }
+    let body = &entries[*start..*end];
+    if body[8..10] != [0, 0] || be_u32(body, 24) != 48_000 << 16 {
+        return malformed("shared AAC requires a version-zero 48 kHz sample entry");
+    }
+    let body_start = stsd.start + 8 + start;
+    let esds = only_child(body_start + 28..body_start + body.len(), b"esds")?;
+    let record = &bytes[esds];
+    if record.len() < 4 || record[..4] != [0, 0, 0, 0] {
+        return malformed("shared AAC has an unsupported esds version");
+    }
+    let mut root = &record[4..];
+    let (tag, es) = read_audio_descriptor(&mut root)?;
+    if tag != 3 || !root.is_empty() || es.len() < 3 || es[2] & 0xe0 != 0 {
+        return malformed("shared AAC has an unsupported ES descriptor");
+    }
+    let mut configs = &es[3..];
+    let (tag, decoder) = read_audio_descriptor(&mut configs)?;
+    if tag != 4 || decoder.len() < 13 || decoder[0] != 0x40 || decoder[1] != 0x15 {
+        return malformed("shared AAC has no MPEG-4 audio decoder configuration");
+    }
+    let (tag, sl) = read_audio_descriptor(&mut configs)?;
+    if tag != 6 || sl != [2] || !configs.is_empty() {
+        return malformed("shared AAC has an unsupported synchronization descriptor");
+    }
+    let mut specific = &decoder[13..];
+    let (tag, asc) = read_audio_descriptor(&mut specific)?;
+    if tag != 5 || !specific.is_empty() {
+        return malformed("shared AAC has ambiguous AudioSpecificConfig");
+    }
+    parse_shared_aac_config(asc)
+}
+
+/// Descriptor lengths are bounded to the MPEG-4 four-byte vocabulary and
+/// always checked against their enclosing descriptor before any slice.
+fn read_audio_descriptor<'a>(input: &mut &'a [u8]) -> Result<(u8, &'a [u8]), Fmp4Error> {
+    let Some((&tag, mut remaining)) = input.split_first() else {
+        return malformed("missing MPEG-4 audio descriptor");
+    };
+    let mut length = 0_usize;
+    for _ in 0..4 {
+        let Some((&value, rest)) = remaining.split_first() else {
+            return malformed("truncated MPEG-4 audio descriptor length");
+        };
+        remaining = rest;
+        length = (length << 7) | usize::from(value & 0x7f);
+        if value & 0x80 == 0 {
+            if length > remaining.len() {
+                return malformed("MPEG-4 audio descriptor exceeds its parent");
+            }
+            let (body, rest) = remaining.split_at(length);
+            *input = rest;
+            return Ok((tag, body));
+        }
+    }
+    malformed("MPEG-4 audio descriptor length exceeds four bytes")
+}
+
+fn parse_shared_aac_config(config: &[u8]) -> Result<AacSampleEntryFacts, Fmp4Error> {
+    if config.len() < 2 {
+        return malformed("truncated AAC AudioSpecificConfig");
+    }
+    let bits = u16::from_be_bytes([config[0], config[1]]);
+    let channel_config = (bits >> 3) & 15;
+    // Accept no extension, or the encoder's explicit absent-SBR extension.
+    // HE-AAC, PCE, short frames and unknown extensions need another family.
+    if bits >> 11 != 2
+        || (bits >> 7) & 15 != 3
+        || bits & 7 != 0
+        || !(1..=7).contains(&channel_config)
+        || (!config[2..].is_empty() && config[2..] != [0x56, 0xe5, 0x00])
+    {
+        return malformed("shared AAC requires AAC-LC, 48 kHz and 1024-sample frames");
+    }
+    Ok(AacSampleEntryFacts {
+        codec: "mp4a.40.2",
+        channels: if channel_config == 7 {
+            8
+        } else {
+            channel_config
+        },
+        sample_rate: 48_000,
+        samples_per_frame: 1_024,
+    })
+}
+
 /// The validated HEVC sample-description shape carried by an initialization
 /// segment. Every reported description has already had its decoder
 /// configuration checked; this is therefore safe policy input rather than an
@@ -5514,6 +5653,72 @@ mod tests {
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].index, 0);
         assert!(!cutter.complete());
+    }
+
+    #[test]
+    fn shared_soundtrack_facts_verify_actual_aac_configuration() {
+        crate::testfixtures::require_ffmpeg();
+        for channels in [1, 2] {
+            let mut command = Command::new(ffmpeg());
+            command.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000",
+                "-t",
+                "0.2",
+                "-vn",
+                "-c:a",
+                "aac",
+                "-profile:a",
+                "aac_low",
+                "-ar",
+                "48000",
+                "-ac",
+            ]);
+            command.arg(channels.to_string()).args([
+                "-movflags",
+                "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ]);
+            let (mut init, _, _) = read_all(&run(&mut command));
+            let facts = aac_lc_sample_entry_facts(&init).expect("actual AAC facts");
+            assert_eq!(facts.channels, channels);
+            assert_eq!(facts.codec, "mp4a.40.2");
+            assert_eq!(facts.sample_rate, 48_000);
+            assert_eq!(facts.samples_per_frame, 1_024);
+            init.tracks.push(init.tracks[0].clone());
+            assert!(aac_lc_sample_entry_facts(&init).is_err());
+        }
+        assert_eq!(
+            parse_shared_aac_config(&[0x11, 0xb8])
+                .expect("eight channels")
+                .channels,
+            8
+        );
+        for config in [
+            &[0x11][..],
+            &[0x11, 0x90, 0x56, 0xe5, 0x80][..],
+            &[0x11, 0x94][..],
+            &[0x12, 0x10][..],
+            &[0x11, 0x80][..],
+            &[0x29, 0x90][..],
+        ] {
+            assert!(parse_shared_aac_config(config).is_err(), "{config:?}");
+        }
+        for bytes in [
+            &[5, 0x80, 0x80, 0x80, 0x80, 0][..],
+            &[5, 3, 0x11, 0x90][..],
+            &[5, 0x80][..],
+        ] {
+            let mut input = bytes;
+            assert!(read_audio_descriptor(&mut input).is_err());
+        }
     }
 
     #[test]

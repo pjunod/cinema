@@ -259,6 +259,9 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert_eq!(init.tracks.len(), 1);
     assert_eq!(init.tracks[0].kind, plurx_core::fmp4::TrackKind::Audio);
     assert_eq!(init.tracks[0].timescale, 48_000);
+    let facts = encoding.shared_audio.as_ref().expect("soundtrack recipe")
+        .verify_init(&init).expect("actual soundtrack matches frozen recipe");
+    assert_eq!(facts.codec, "mp4a.40.2");
     assert!(matches!(reader.next_unit().expect("soundtrack media"), Some(Unit::Fragment(_))));
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);

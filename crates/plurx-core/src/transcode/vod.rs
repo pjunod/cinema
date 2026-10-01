@@ -403,6 +403,19 @@ impl VodSharedAudioRecipe {
         &self.digest
     }
 
+    pub fn verify_init(
+        &self,
+        init: &crate::fmp4::Init,
+    ) -> Result<crate::fmp4::AacSampleEntryFacts, crate::fmp4::Fmp4Error> {
+        let facts = crate::fmp4::aac_lc_sample_entry_facts(init)?;
+        if u32::from(facts.channels) != self.audio_channels {
+            return Err(crate::fmp4::Fmp4Error::Unsupported(
+                "shared AAC output channels differ from the frozen recipe".into(),
+            ));
+        }
+        Ok(facts)
+    }
+
     pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
         vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps)
     }

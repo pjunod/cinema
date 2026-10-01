@@ -256,6 +256,17 @@ pub(super) async fn stored_marker_destinations(
 /// seek to the end of an affected film. The tail entries are produced by this
 /// generation's own `finish`.
 pub(super) fn video_entry_at_or_before(plan: &SegmentPlan, at: u32) -> u32 {
+    // A shared soundtrack has no video prefix or muxed tail. Each AAC entry
+    // is a valid restart boundary; replaying from zero on a far seek would
+    // defeat its bounded window and delay the selected film interval.
+    if !plan.entries.is_empty()
+        && plan
+            .entries
+            .iter()
+            .all(|entry| entry.kind == PlanEntryKind::AudioTail)
+    {
+        return plan.entry(at).map_or(0, |entry| entry.index);
+    }
     let mut best = 0u32;
     for entry in &plan.entries {
         if entry.index > at {
