@@ -476,6 +476,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [PYTHON-UNIT-PR-RECEIPTS.md](ci/PYTHON-UNIT-PR-RECEIPTS.md) | Once-per-PR Python successes, exact historical attribution, durable artifact journals and fail-closed recovery. | open |
 | [STATUS-HISTORY.md](ci/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | Implementation plan from the 2026-09-20 architecture review: a PR-level regression field bound to the merged tree that replaces per-commit receipts without deleting one, the narrowed corrective rule, the text-contract pruning protocol, the STATUS.md split, and the release-tag restart with `sha-` images kept as deploy identity. | open |
 | [ARCHITECTURE-DOC-RECONCILIATION.md](ci/ARCHITECTURE-DOC-RECONCILIATION.md) | Implementation plan from the 2026-09-20 architecture review: every wrong number in ARCHITECTURE.md verified against its constant, the one PR that rewrites it with named constants, the DVR reversal as a dated decision, a `doc_versions.py` extension, and the 46 index rows whose doc header disagrees. | done |
