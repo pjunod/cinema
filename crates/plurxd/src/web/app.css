@@ -3330,7 +3330,7 @@
    (watchPopoverBounds keeps them out from under the chrome). The picture's
    rounded corners belong to its parts instead of an overflow clip. */
 .modal.watch-host{position:fixed;inset:auto;padding:0;background:transparent;z-index:10;max-width:none;max-height:none;align-items:stretch;justify-content:stretch;overflow:visible;border-radius:12px}
-.modal.watch-host .player{width:100%;height:100%;max-width:none;max-height:none;aspect-ratio:auto;border-radius:0}
+.modal.watch-host .player{container-type:inline-size;width:100%;height:100%;max-width:none;max-height:none;aspect-ratio:auto;border-radius:0}
 .modal.watch-host .player video{width:100%;height:100%;object-fit:contain}
 .modal.watch-host:not(.watch-full) .player,.modal.watch-host:not(.watch-full) .player video,.modal.watch-host:not(.watch-full) .ploading{border-radius:12px}
 .modal.watch-host:not(.watch-full) .watch-inline video{border-radius:12px 12px 0 0}
@@ -3377,16 +3377,6 @@
   .watch-inline #pbaudio,.watch-inline #pbsubs,.watch-inline #pbquality,.watch-inline #pbsettings,.watch-inline #pbpip,.watch-inline #pbfs{grid-row:2}
   .watch-inline #pbaudio{grid-column:1}.watch-inline #pbsubs{grid-column:2}.watch-inline #pbquality{grid-column:3}.watch-inline #pbsettings{grid-column:4}.watch-inline #pbpip{grid-column:5}.watch-inline #pbfs{grid-column:6}
   .watch-inline .picon{justify-self:center}
-  /* Portrait fullscreen keeps all four skips reachable above the options. */
-  .watch-host.watch-full .ptimeline{bottom:calc(132px + env(safe-area-inset-bottom,0px))}
-  .watch-full .ptransport{height:calc(132px + env(safe-area-inset-bottom,0px));padding:0 10px env(safe-area-inset-bottom,0px);display:grid;grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(3,44px);gap:0}
-  .watch-full .ptransport-spacer{display:none}
-  .watch-full #pbback30{grid-area:1/1}.watch-full #pbback{grid-area:1/2}.watch-full #pbplay{grid-area:1/3}.watch-full #pbforward{grid-area:1/4}.watch-full #pbforward30{grid-area:1/5}
-  .watch-full #pbaudio{grid-area:2/1}.watch-full #pbsubs{grid-area:2/2}.watch-full #pbquality{grid-area:2/3}.watch-full #pbsettings{grid-area:2/4}.watch-full #pbinfo{grid-area:2/5}
-  .watch-full #pbpip{grid-area:3/4}.watch-full #pbfs{grid-area:3/5}
-  .watch-full .picon{justify-self:center}
-  .watch-full .pskip{bottom:calc(184px + env(safe-area-inset-bottom,0px))}
-  .watch-full .pmenu{bottom:calc(176px + env(safe-area-inset-bottom,0px))}
   .watch-inline .pskip{bottom:144px}
   .watch-inline .pbar{opacity:1!important;visibility:visible!important;pointer-events:auto!important}
   .watch-inline .pmenu{bottom:132px;max-width:calc(100% - 20px)}
@@ -3400,6 +3390,27 @@
 }
 
 @media(pointer:coarse){.watch-host .ptimeline{bottom:64px}.watch-host .watch-inline .ptimeline{bottom:88px}}
+
+/* The actual player width owns wrapping: a landscape phone or an embedded
+   desktop player can be narrower than the full set of transport controls. */
+@container (max-width:780px){
+  .watch-host .player:not(.watch-inline) .ptimeline{bottom:calc(88px + env(safe-area-inset-bottom,0px))}
+  .watch-host .player:not(.watch-inline) .ptransport{height:calc(88px + env(safe-area-inset-bottom,0px));padding:0 10px env(safe-area-inset-bottom,0px);display:grid;grid-template-columns:repeat(8,minmax(0,1fr));grid-template-rows:repeat(2,44px);gap:0}
+  .watch-host .player:not(.watch-inline) .ptransport-spacer{grid-column:6/9;grid-row:1}
+  .watch-host .player:not(.watch-inline) #pbback30{grid-area:1/1}.watch-host .player:not(.watch-inline) #pbback{grid-area:1/2}.watch-host .player:not(.watch-inline) #pbplay{grid-area:1/3}.watch-host .player:not(.watch-inline) #pbforward{grid-area:1/4}.watch-host .player:not(.watch-inline) #pbforward30{grid-area:1/5}
+  .watch-host .player:not(.watch-inline) #pbaudio{grid-area:2/1}.watch-host .player:not(.watch-inline) #pbsubs{grid-area:2/2}.watch-host .player:not(.watch-inline) #pbquality{grid-area:2/3}.watch-host .player:not(.watch-inline) #pbsettings{grid-area:2/4}.watch-host .player:not(.watch-inline) #pbinfo{grid-area:2/5}.watch-host .player:not(.watch-inline) #pbpip{grid-area:2/6}.watch-host .player:not(.watch-inline) #pblarger{grid-area:2/7}.watch-host .player:not(.watch-inline) #pbfs{grid-area:2/8}
+  .watch-host .player:not(.watch-inline) .picon{justify-self:center;min-width:44px;min-height:44px}
+  .watch-host .player:not(.watch-inline) .pskip{bottom:calc(140px + env(safe-area-inset-bottom,0px))}
+  .watch-host .player:not(.watch-inline) .pmenu{bottom:calc(132px + env(safe-area-inset-bottom,0px))}
+}
+@container (max-width:440px){
+  .watch-host .player:not(.watch-inline) .ptimeline{bottom:calc(132px + env(safe-area-inset-bottom,0px))}
+  .watch-host .player:not(.watch-inline) .ptransport{height:calc(132px + env(safe-area-inset-bottom,0px));grid-template-columns:repeat(5,minmax(0,1fr));grid-template-rows:repeat(3,44px)}
+  .watch-host .player:not(.watch-inline) .ptransport-spacer{display:none}
+  .watch-host .player:not(.watch-inline) #pbpip{grid-area:3/3}.watch-host .player:not(.watch-inline) #pblarger{grid-area:3/4}.watch-host .player:not(.watch-inline) #pbfs{grid-area:3/5}
+  .watch-host .player:not(.watch-inline) .pskip{bottom:calc(184px + env(safe-area-inset-bottom,0px))}
+  .watch-host .player:not(.watch-inline) .pmenu{bottom:calc(176px + env(safe-area-inset-bottom,0px))}
+}
 
 /* Close and presentation changes remain reachable while a stream prepares. */
 .watch-host .pbar{z-index:7}

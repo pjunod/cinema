@@ -108,7 +108,7 @@
           "fullscreen": "web only \u2014 a native player is already full screen",
           "larger": "web only, non-narrow watch browser; absent from the DOM on narrow web"
         },
-        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement; portrait fullscreen uses another options line to preserve touch target sizes.",
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement; constrained overlay players wrap their options based on player width to preserve touch target sizes.",
         "surface_placement": {
           "info": {
             "desktop": {
