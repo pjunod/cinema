@@ -362,6 +362,56 @@
         );
     }
 
+    #[test]
+    fn a05_candidate_hls_isolation_requires_actual_auto_not_protocol_or_manual() {
+        use plurx_core::playback::DesiredQuality;
+        let mut body = bare_create();
+        assert!(!body.candidate_auto_policy(), "old inferred Auto is not a candidate claim");
+        body.quality_auto = Some(true);
+        assert!(body.candidate_auto_policy());
+        body.copy = Some(true);
+        assert!(!body.candidate_auto_policy(), "compat Original keeps legacy semantics");
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        assert!(body.candidate_auto_policy(), "typed Auto is authoritative");
+        body.intent = Some(envelope(1, DesiredQuality::Manual { height: 1080 }));
+        assert!(!body.candidate_auto_policy(), "typed manual wins over compat Auto");
+        body.intent = Some(envelope(1, DesiredQuality::Original));
+        assert!(!body.candidate_auto_policy());
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        body.height = Some(1440);
+        assert!(!body.candidate_auto_policy(), "the explicit 1440 route is preserved");
+    }
+
+    #[tokio::test]
+    async fn a05_candidate_auto_fallback_ignores_both_legacy_prior_branches() {
+        let state = resolver_state();
+        let mut source = hls_file(Vec::new());
+        source.height = Some(2160);
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(unix_ms()),
+            sample_count: 99,
+            updated_at_ms: unix_ms(),
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
+        };
+        let neutral = resolve_height(&state, Some(&source), None, false, None).await;
+        let isolated = resolve_height(
+            &state, Some(&source),
+            crate::http::stream::prior_for_candidate_policy(Some(&prior), true),
+            false, None,
+        ).await;
+        let legacy = resolve_height(&state, Some(&source), Some(&prior), false, None).await;
+        assert_eq!(isolated, neutral);
+        assert!(legacy < isolated, "legacy policy still consumes its old rate/starvation history");
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(1440)).await, 1440);
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
+    }
+
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
         let body = CreateSession {
             playback_id: "player-a".into(),

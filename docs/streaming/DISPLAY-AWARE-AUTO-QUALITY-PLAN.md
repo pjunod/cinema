@@ -1354,3 +1354,11 @@ candidate-aware negative-prior consumer remain required; neither is claimed
 by this foundation. Existing controllers and legacy readers remain intact.
 Typed recovery, authenticated decoder evidence and physical qualification
 remain open; this is not combined-feature completion.
+
+The bounded candidate-reader isolation follow-up refuses legacy starvation
+and coarse rate EWMA in actual enabled caps_v2 catalogs and actual HLS Auto
+candidate execution, including their `prior_kbps` hints. Legacy routes,
+explicit candidate lookup and manual 1440 selection remain unchanged.
+This does not yet apply a measured negative to a candidate: the stored pair
+has no failed recipe/route identity. Fresh transfer rate proof, candidate-aware
+negative selection and the reachable provenance producer remain required.
