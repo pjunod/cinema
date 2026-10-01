@@ -1324,7 +1324,6 @@ impl TranscodeManager {
             None
         };
         if encoding.is_none()
-            && measured_candidate.is_some()
             && matches!(
                 &retained_capture,
                 crate::vodserve::RetainedOutputCapture::New
@@ -1332,7 +1331,7 @@ impl TranscodeManager {
             && req
                 .candidate_context
                 .as_ref()
-                .is_some_and(|context| context.retained_output.is_none())
+                .is_none_or(|context| context.retained_output.is_none())
         {
             // Bounded queue publication only, never full-title preparation in
             // the foreground. Ordinary unknown-cost playback remains usable.

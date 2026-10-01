@@ -1,9 +1,14 @@
 use super::*;
 
 impl TranscodeManager {
+    #[cfg(test)]
+    pub(crate) fn with_copy_test_vod(mut self, vod: Arc<crate::vodserve::VodServe>) -> Self {
+        self.vod = vod;
+        self
+    }
     /// Queue exact complete-copy work without waiting for its full body in
     /// the foreground. This budget is a hard allocation cap, not wire cost.
-    pub(super) async fn enqueue_copy_output(
+    pub(crate) async fn enqueue_copy_output(
         &self,
         request: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
@@ -20,20 +25,43 @@ impl TranscodeManager {
         else {
             return Ok(());
         };
-        let Some(context) = request
-            .candidate_context
-            .as_ref()
-            .filter(|context| context.normalized_geometry)
-        else {
+        let context = request.candidate_context.as_ref();
+        if context.is_some_and(|context| !context.normalized_geometry) {
             return Ok(());
-        };
-        let Some(node) = context.owner_node_id.as_ref() else {
+        }
+        let Some(node) = (match context {
+            Some(context) => context.owner_node_id.as_deref(),
+            None => self.cache_location().map(|(_, node)| node),
+        }) else {
             return Ok(());
         };
         let Some(audio_delivery) = request.audio_delivery.clone() else {
             return Ok(());
         };
         if request.subtitle_burn.is_some() || request.audio_claim.is_none() {
+            return Ok(());
+        }
+        if request.audio_offset_ms != file.audio_offset_ms {
+            return Ok(());
+        }
+        let selected_audio = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let claim = request.audio_claim.as_ref().expect("checked audio claim");
+        if !claim.valid_snapshot()
+            || audio_delivery
+                != plurx_core::playback::audio::resolve_audio(
+                    selected_audio,
+                    &claim.profile(),
+                    plurx_core::playback::audio::AudioRoute::Progressive,
+                    file.audio_offset_ms,
+                )
+        {
             return Ok(());
         }
         let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
@@ -71,11 +99,12 @@ impl TranscodeManager {
             Some(&engine.digest),
             (width, height),
         );
-        if actual != context.recipe_digest
-            || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
-                != context.candidate_id
-            || super::manager_candidates::copy_candidate_grade(file) != context.grade
-        {
+        if context.is_some_and(|context| {
+            actual != context.recipe_digest
+                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                    != context.candidate_id
+                || super::manager_candidates::copy_candidate_grade(file) != context.grade
+        }) {
             return Ok(());
         }
         if !source.unchanged() {
@@ -89,7 +118,7 @@ impl TranscodeManager {
             .filter(|bytes| *bytes > 0)
             .ok_or("copy preparation allocation cap unavailable")?;
         let intent = CopyOutputIntent {
-            target_node_id: node.clone(),
+            target_node_id: node.to_owned(),
             audio_index: request.audio_index,
             audio_offset_ms: request.audio_offset_ms,
             audio_claim: request.audio_claim.clone(),
@@ -97,14 +126,16 @@ impl TranscodeManager {
             aac,
             preserve_dolby_vision,
             convert_dolby_vision,
-            grade: context.grade,
+            grade: super::manager_candidates::copy_candidate_grade(file),
             hdr10_requested: request.hdr10,
-            normalized_geometry: context.normalized_geometry,
-            profile: context.profile.map(|profile| match profile {
-                plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
-                    CopyOutputProfile::H264Sdr1440P30V1
-                }
-            }),
+            normalized_geometry: context.is_some(),
+            profile: context
+                .and_then(|context| context.profile)
+                .map(|profile| match profile {
+                    plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
+                        CopyOutputProfile::H264Sdr1440P30V1
+                    }
+                }),
             width: file
                 .width
                 .and_then(|width| u32::try_from(width).ok())
@@ -117,13 +148,18 @@ impl TranscodeManager {
             pipeline_identity: crate::ffmpeg::fragment_index_engine_digest().await,
         };
         let payload = JobPayload::CopyOutputPrepare {
-            copy_output_version: 1,
+            copy_output_version: if context.is_some() { 1 } else { 2 },
             file_id: file.id,
             source_generation: source.object_version().to_owned(),
             source_size: file.size,
             source_mtime: file.mtime,
             source_object_version: source.object_version().to_owned(),
-            policy_generation: "copy_output_v1".to_owned(),
+            policy_generation: if context.is_some() {
+                "copy_output_v1".to_owned()
+            } else {
+                crate::vodserve::retained::manual_copy_policy_generation(file, &intent)
+                    .ok_or("manual source metadata unavailable")?
+            },
             intent,
             scratch_bytes: i64::try_from(cap).map_err(|_| "copy cap overflow")?,
             reason: "recent_demand".to_owned(),
@@ -146,7 +182,7 @@ impl TranscodeManager {
                     request_digest: digest,
                     consumer_kind: "copy_output".to_owned(),
                     consumer_ref: file.id.to_string(),
-                    target_node_id: Some(node.clone()),
+                    target_node_id: Some(node.to_owned()),
                     deadline_ms: None,
                     retain_identity: false,
                 },
@@ -169,11 +205,12 @@ impl TranscodeManager {
         use plurx_core::store::background_jobs::{CopyOutputProfile, JobPayload};
         let payload = job.supported_payload().map_err(|error| error.to_string())?;
         let JobPayload::CopyOutputPrepare {
-            copy_output_version: 1,
+            copy_output_version,
             file_id,
             source_size,
             source_mtime,
             source_object_version,
+            policy_generation,
             intent,
             scratch_bytes,
             ..
@@ -181,6 +218,14 @@ impl TranscodeManager {
         else {
             return Err("unsupported copy output payload".to_owned());
         };
+        let manual = *copy_output_version == 2;
+        if manual
+            && *policy_generation
+                != crate::vodserve::retained::manual_copy_policy_generation(file, intent)
+                    .ok_or("manual source metadata unavailable")?
+        {
+            return Err("manual copy source metadata changed".to_owned());
+        }
         if file.id != *file_id
             || file.size != *source_size
             || file.mtime != *source_mtime
@@ -218,6 +263,11 @@ impl TranscodeManager {
         if audio != intent.audio_delivery {
             return Err("copy output audio delivery changed".to_owned());
         }
+        // The stored row has its default offset; this exact claimed intent
+        // owns the resolved delivery offset, just as foreground create does.
+        let mut resolved_file = file.clone();
+        resolved_file.audio_offset_ms = intent.audio_offset_ms;
+        let file = &resolved_file;
         let probe = self
             .store
             .get_file_probe_json(file.id)
@@ -251,7 +301,7 @@ impl TranscodeManager {
             (intent.width, intent.height),
         );
         let request = SessionRequest {
-            candidate_context: Some(CandidateExecutionContext {
+            candidate_context: (!manual).then(|| CandidateExecutionContext {
                 retained_output: None,
                 owner_node_id: Some(intent.target_node_id.clone()),
                 candidate_id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(
@@ -293,26 +343,24 @@ impl TranscodeManager {
             .vod_settings(&request)
             .await?
             .ok_or("copy output VOD policy unavailable")?;
-        let binding = request
-            .candidate_context
-            .as_ref()
-            .expect("fresh copy context");
         let prepared_request = crate::vodserve::VodRecipeRequest {
             request: &request,
             encoding: None,
             retained_capture: crate::vodserve::RetainedOutputCapture::New,
-            measured_candidate: Some(crate::vodserve::RetainedCandidateBinding {
-                kind: request.kind,
-                normalized_geometry: binding.normalized_geometry,
-                profile: binding.profile,
-                candidate_id: binding.candidate_id,
-                recipe_digest: binding.recipe_digest,
-                file_id: file.id,
-                audio_index: request.audio_index,
-                audio_offset_ms: request.audio_offset_ms,
-                subtitle_burn: None,
-                grade: binding.grade,
-                route: plurx_core::playback::candidate::CandidateRoute::Remux,
+            measured_candidate: request.candidate_context.as_ref().map(|binding| {
+                crate::vodserve::RetainedCandidateBinding {
+                    kind: request.kind,
+                    normalized_geometry: binding.normalized_geometry,
+                    profile: binding.profile,
+                    candidate_id: binding.candidate_id,
+                    recipe_digest: binding.recipe_digest,
+                    file_id: file.id,
+                    audio_index: request.audio_index,
+                    audio_offset_ms: request.audio_offset_ms,
+                    subtitle_burn: None,
+                    grade: binding.grade,
+                    route: plurx_core::playback::candidate::CandidateRoute::Remux,
+                }
             }),
         };
         let prepared = self

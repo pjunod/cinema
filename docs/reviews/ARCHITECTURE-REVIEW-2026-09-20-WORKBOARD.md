@@ -141,9 +141,12 @@ distinct finite `CopyOutputPrepare` in the existing worker/VOD-driver lane.
 Private full-body reservation, successful exact settlement and independent
 post-await exposure precede compatible new-session capture; successful
 foreground attachments yield unfinished preparation without revoking issued
-bodies. Twelve new focused IDs passed once; current-base checks and one
-independent review remain required. Manual-copy first-publication, rolling/PUT
-retained-consumer and original corpus/device acceptance remain open. See the
+bodies. Fourteen new focused IDs passed once; current-base checks and one
+independent review remain required. Manual server-resolved Copy intents now
+reach the claimed worker and a later matching attachment through locally
+minted proof, without fabricated candidates or restart authority. Unseen-tail
+exact first-publication, encoded preparation, rolling/PUT retained-consumer
+and original corpus/device acceptance remain open. See the
 dated claim in [the canonical S-10 plan](../streaming/HONEST-MASTER-PLAYLIST.md).
 
 The local prepared-observation follow-up supplies optional independently

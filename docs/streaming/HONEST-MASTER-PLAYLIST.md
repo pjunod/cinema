@@ -1166,6 +1166,17 @@ does not cover this implementation. Unqualified plans keep their old recipe
 digest and encoder arguments. Local Homebrew FFmpeg 9 development observations
 are not shipped FFmpeg 8 or fleet qualification evidence.
 
+**2026-10-01 manual-copy reachability continuation:** the existing worker lane
+also accepts a closed version-two server-resolved manual Copy intent, without
+inventing candidate context. Source metadata and the full resolved audio,
+offset, delivery, grade, video and engine intent are bound together. A later
+compatible new attachment can acquire only the actually settled, locally
+minted private artifact after physical/source/logical/engine revalidation;
+persisted job success and restart manifests cannot mint this capability.
+The initial uncaptured attachment remains uncaptured. This does not make
+unknown full-tail facts available before preparation completes, and does not
+implement cold encoded preparation or waive original corpus/device evidence.
+
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;

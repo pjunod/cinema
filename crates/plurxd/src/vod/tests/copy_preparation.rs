@@ -1,6 +1,212 @@
 struct CopyPreparationAuthority;
 
 #[tokio::test]
+async fn manual_copy_queued_metadata_and_unsupported_versions_refuse_before_publication() {
+    use plurx_core::store::background_jobs::*;
+    let base = crate::test_tempdir().expect("manual metadata");
+    let path = base.path().join("source.mkv");
+    std::fs::copy(fixture_file().path, &path).expect("owned source");
+    let file = media_file_at(path, 12_000);
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let library = store.create_library(&plurx_core::domain::NewLibrary {
+        name: "metadata".into(), kind: plurx_core::domain::LibraryKind::Movies,
+        paths: vec![base.path().to_owned()], anime: false,
+    }).await.expect("library");
+    let item = store.insert_item(&plurx_core::domain::NewItem {
+        library_id: library.id, kind: plurx_core::domain::ItemKind::Movie,
+        parent_id: None, title: "metadata".into(), year: None,
+        season_number: None, episode_number: None,
+    }).await.expect("item");
+    let mut probe = plurx_core::domain::ProbeResult {
+        duration_ms: file.duration_ms, container: file.container.clone(),
+        video_codec: file.video_codec.clone(), width: file.width, height: file.height,
+        bit_depth: file.bit_depth, video_profile: file.video_profile.clone(),
+        ..Default::default()
+    };
+    assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
+        &probe).await.expect("file"), file.id);
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "metadata-test".into(), "test-local".into());
+    let mut manual = request("metadata", 0.0);
+    manual.audio_claim = Some(plurx_core::playback::audio::AudioClaim {
+        decoders: vec!["aac".into()], sinks: vec![],
+    });
+    manual.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+        None, &manual.audio_claim.as_ref().expect("claim").profile(),
+        plurx_core::playback::audio::AudioRoute::Progressive, 0,
+    ));
+    manager.enqueue_copy_output(&manual, &file, &settings()).await.expect("enqueue");
+    let mut jobs = store.list_jobs(JobQuery { node_id: None, state: None,
+        kind: Some(JobKind::CopyOutputPrepare), after_id: None, limit: 10,
+    }).await.expect("jobs").jobs;
+    assert_eq!(jobs.len(), 1);
+    let job = jobs.remove(0);
+    let original = job.supported_payload().expect("supported v2");
+    for (version, geometry) in [(3, false), (1, false), (2, true)] {
+        let mut changed = original.clone();
+        if let JobPayload::CopyOutputPrepare { copy_output_version, intent, .. } = &mut changed {
+            *copy_output_version = version; intent.normalized_geometry = geometry;
+        }
+        assert!(changed.validate().is_err(), "closed version/geometry contract");
+    }
+    let now = crate::media_sessions::unix_ms();
+    let claimed = match store.claim_job(ClaimJob {
+        job_id: job.id.clone(), expected_revision: job.revision,
+        node_id: "test-local".into(), boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(), kind: JobKind::CopyOutputPrepare,
+        payload_version: 1, now_ms: now, dispatched_at_ms: now,
+    }).await.expect("claim") {
+        ClaimOutcome::Claimed { job } => job,
+        other => panic!("claim {other:?}"),
+    };
+    // Real store metadata replacement, not a changed local test struct; the
+    // existing size/mtime trigger correctly leaves this job running.
+    probe.container = Some("mp4".into());
+    store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime, &probe)
+        .await.expect("metadata replacement");
+    assert_eq!(store.background_job(&job.id).await.expect("job").expect("row").state,
+        JobState::Running);
+    let current = store.get_file(file.id).await.expect("file").expect("row");
+    let active = crate::background_jobs::ActiveBackgroundJob::start(
+        Arc::clone(&store), Arc::new(CopyPreparationAuthority), claimed.token.clone().expect("token"),
+        tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
+    ).expect("owner");
+    let admission = manager.admit_fragment().await.expect("background admission");
+    let error = manager.produce_copy_output_job(&current, &claimed, active.fence(),
+        &admission, Instant::now() + Duration::from_secs(20)).await.expect_err("metadata refusal");
+    assert_eq!(error, "manual copy source metadata changed");
+    assert_ne!(store.background_job(&job.id).await.expect("job").expect("row").state,
+        JobState::Succeeded, "no historical completion or private publication");
+    active.finish().await;
+}
+
+#[tokio::test]
+async fn manual_copy_manager_queue_worker_and_matching_new_attachment_use_only_local_settled_proof() {
+    use plurx_core::store::background_jobs::*;
+    let base = crate::test_tempdir().expect("manual copy");
+    let path = base.path().join("source.mkv");
+    std::fs::copy(fixture_file().path, &path).expect("owned source");
+    let (serve, file) = serve_on_file(base.path(), media_file_at(path, 12_000)).await;
+    let store = Arc::clone(&serve.shared.store);
+    let library = store.create_library(&plurx_core::domain::NewLibrary {
+        name: "manual".into(), kind: plurx_core::domain::LibraryKind::Movies,
+        paths: vec![base.path().to_owned()], anime: false,
+    }).await.expect("library");
+    let item = store.insert_item(&plurx_core::domain::NewItem {
+        library_id: library.id, kind: plurx_core::domain::ItemKind::Movie,
+        parent_id: None, title: "manual".into(), year: None,
+        season_number: None, episode_number: None,
+    }).await.expect("item");
+    assert_eq!(store.upsert_file(item, &file.path.to_string_lossy(), file.size, file.mtime,
+        &plurx_core::domain::ProbeResult {
+            duration_ms: file.duration_ms, container: file.container.clone(),
+            video_codec: file.video_codec.clone(), width: file.width, height: file.height,
+            bit_depth: file.bit_depth, video_profile: file.video_profile.clone(),
+            ..Default::default()
+        }).await.expect("file"), file.id);
+    store.put_setting(plurx_core::store::keys::CACHE_MAX_GB, "1").await.expect("retention cap");
+    let manager = crate::transcode::TranscodeManager::new(
+        Arc::clone(&store), base.path().join("work"),
+        plurx_core::transcode::EncoderCaps::default(), plurx_core::transcode::Pipeline::Cpu,
+    ).with_cache(base.path().join("cache"), "manual-test".into(), "test-local".into())
+        .with_copy_test_vod(Arc::clone(&serve));
+    // A real cold mid-film attachment leaves a suffix, not a complete output.
+    let mut manual = request("cold-manual", 8.0);
+    manual.audio_claim = Some(plurx_core::playback::audio::AudioClaim {
+        decoders: vec!["aac".into()], sinks: vec![],
+    });
+    manual.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+        None, &manual.audio_claim.as_ref().expect("claim").profile(),
+        plurx_core::playback::audio::AudioRoute::Progressive, 0,
+    ));
+    assert!(manual.candidate_context.is_none());
+    serve.try_create(&manual, &file, &settings(), VodAttribution {
+        user_name: "user", item_title: "manual", supersession_user: "user",
+    }, "cold-manual".into()).await.expect("ordinary unknown cold playback");
+    assert!(serve.shared.sessions.lock().await.get("cold-manual").expect("cold")
+        .retained_output.is_none());
+    manager.enqueue_copy_output(&manual, &file, &settings()).await.expect("enqueue");
+    manager.enqueue_copy_output(&manual, &file, &settings()).await.expect("dedup enqueue");
+    let jobs = store.list_jobs(JobQuery { node_id: None, state: None,
+        kind: Some(JobKind::CopyOutputPrepare), after_id: None, limit: 10,
+    }).await.expect("jobs").jobs;
+    assert_eq!(jobs.len(), 1);
+    let job = &jobs[0];
+    assert!(matches!(job.supported_payload().expect("manual payload"),
+        JobPayload::CopyOutputPrepare { copy_output_version: 2, .. }));
+    let now = crate::media_sessions::unix_ms();
+    let claimed = match store.claim_job(ClaimJob {
+        job_id: job.id.clone(), expected_revision: job.revision,
+        node_id: "test-local".into(), boot_id: uuid::Uuid::new_v4().to_string(),
+        claim_id: uuid::Uuid::new_v4().to_string(), kind: JobKind::CopyOutputPrepare,
+        payload_version: 1, now_ms: now, dispatched_at_ms: now,
+    }).await.expect("claim") {
+        ClaimOutcome::Claimed { job } => job,
+        other => panic!("claim {other:?}"),
+    };
+    let active = crate::background_jobs::ActiveBackgroundJob::start(
+        Arc::clone(&store), Arc::new(CopyPreparationAuthority),
+        claimed.token.clone().expect("token"),
+        tokio::time::Instant::now() + Duration::from_secs(30), JobKind::CopyOutputPrepare,
+    ).expect("owner");
+    let admission = manager.admit_fragment().await.expect("existing background admission");
+    assert!(manager.produce_copy_output_job(&file, &claimed, active.fence(),
+        &admission, Instant::now() + Duration::from_secs(20)).await.expect("real copy worker"));
+    drop(admission);
+    active.finish().await;
+    manual.start_seconds = 0.0;
+    serve.try_create(&manual, &file, &settings(), VodAttribution {
+        user_name: "user", item_title: "manual", supersession_user: "user",
+    }, "later-manual".into()).await.expect("compatible new attachment");
+    let later = serve.shared.sessions.lock().await.get("later-manual").expect("later")
+        .retained_output.clone().expect("locally minted complete proof");
+    assert!(later.candidate.is_none(), "manual preparation never fabricates a candidate");
+    assert!(later.private_preparation_origin.get().is_some());
+    assert!(serve.shared.sessions.lock().await.get("cold-manual").expect("cold")
+        .retained_output.is_none(), "initial unknown capture is immutable");
+    drop(fetch(&serve, "later-manual", &segment_name(0)).await);
+    let rendition = serve.shared.sessions.lock().await.get("later-manual").expect("later")
+        .rendition.clone().expect("rendition");
+    let video = rendition.recipe.video;
+    let registry = &serve.shared.retained_artifacts;
+    for (name, changed) in [
+        ("offset", { let mut r = manual.clone(); r.audio_offset_ms = 1; r }),
+        ("audio", { let mut r = manual.clone(); r.audio_index = Some(123); r }),
+        ("delivery", { let mut r = manual.clone(); r.audio_delivery = None; r }),
+        ("hdr", { let mut r = manual.clone(); r.hdr10 = true; r }),
+    ] {
+        let logical = Some(super::retained_manifest::LogicalOutput::resolve(&changed, None, &file, video));
+        assert!(registry.acquire_prepared_manual(&rendition, &logical, &file).await.is_none(),
+            "{name} cannot inherit private artifact facts");
+    }
+    let mut wrong_container = file.clone();
+    wrong_container.container = Some("mp4".into());
+    let logical = Some(super::retained_manifest::LogicalOutput::resolve(&manual, None, &file, video));
+    assert!(registry.acquire_prepared_manual(&rendition, &logical, &wrong_container).await.is_none(),
+        "incoming metadata, not discarded healthy Recipe, must match");
+    let mut forged = later.facts();
+    forged.output_identity = "f".repeat(64);
+    assert!(registry.acquire_expected_for_request(&forged, &rendition, &logical).is_none(),
+        "serialized facts do not mint private proof");
+    let restarted = local_serve(base.path().to_owned(), Arc::clone(&store));
+    restarted.try_create(&manual, &file, &settings(), VodAttribution {
+        user_name: "user", item_title: "manual", supersession_user: "user",
+    }, "restart-manual".into()).await.expect("uncaptured restart playback");
+    assert!(restarted.shared.sessions.lock().await.get("restart-manual").expect("restart")
+        .retained_output.is_none(), "restart discovery cannot mint manual origin");
+    restarted.end("restart-manual", Terminal::Deleted).await;
+    let mut changed_source = std::fs::OpenOptions::new().append(true).open(&file.path)
+        .expect("owned source");
+    std::io::Write::write_all(&mut changed_source, b"new physical incarnation").expect("source change");
+    assert!(registry.acquire_prepared_manual(&rendition, &logical, &file).await.is_none(),
+        "changed physical source refuses new attachment authority");
+    serve.end("cold-manual", Terminal::Deleted).await;
+    serve.end("later-manual", Terminal::Deleted).await;
+}
+
+#[tokio::test]
 async fn copy_preparation_full_footprint_cap_and_drop_preserve_ordinary_working_set() {
     let base = crate::test_tempdir().expect("preparation accounting");
     let (serve, _) = serve_on_file(base.path(), fixture_file()).await;

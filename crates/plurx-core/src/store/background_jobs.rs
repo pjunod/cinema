@@ -654,10 +654,16 @@ impl CopyOutputIntent {
                 .is_none_or(|claim| claim.valid_snapshot())
             && self.audio_delivery.valid_snapshot()
             && (!self.convert_dolby_vision || self.preserve_dolby_vision)
-            && self.normalized_geometry
             && (1..=16_384).contains(&self.width)
             && (1..=16_384).contains(&self.height)
-            && digest(&self.video_identity)
+            // segplan::argv_fingerprint is a 16-hex FNV identity, not SHA256.
+            // Keep the original 64-hex accepted shape for v1 callers; neither
+            // is authority: the worker recomputes the actual video identity.
+            && (digest(&self.video_identity)
+                || (self.video_identity.len() == 16
+                    && self.video_identity.bytes().all(|byte| {
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                    })))
             && digest(&self.pipeline_identity)
     }
 }
@@ -787,7 +793,10 @@ impl JobPayload {
                 scratch_bytes,
                 reason,
             } => {
-                *copy_output_version == 1
+                ((*copy_output_version == 1 && intent.normalized_geometry)
+                    || (*copy_output_version == 2
+                        && !intent.normalized_geometry
+                        && intent.profile.is_none()))
                     && *file_id > 0
                     && *source_size > 0
                     && identifier(source_generation)

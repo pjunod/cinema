@@ -110,6 +110,26 @@ impl PreparedCopyOutput {
         if !published {
             return Ok(false);
         }
+        if !intent.normalized_geometry {
+            // Historical SQL success cannot grant current attachment authority
+            // after a metadata update with unchanged physical size/mtime.
+            let current = self
+                .shared
+                .store
+                .get_file(self.rendition.recipe.file.id)
+                .await
+                .map_err(|error| error.to_string())?;
+            if current
+                .as_ref()
+                .and_then(|file| super::retained::manual_copy_policy_generation(file, intent))
+                != super::retained::manual_copy_policy_generation(
+                    &self.rendition.recipe.file,
+                    intent,
+                )
+            {
+                return Ok(false);
+            }
+        }
         // SQL completion is historical. A source change after the statement
         // can make exposure unavailable; never recreate acquire from its ack.
         self.exposed = self

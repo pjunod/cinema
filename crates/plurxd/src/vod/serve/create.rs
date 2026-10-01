@@ -641,13 +641,23 @@ impl VodServe {
             RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
                 None
             }
-            RetainedOutputCapture::New => rendition
-                .output_measurement
-                .lock()
-                .expect("output measurement lock")
-                .complete_rates()
-                .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
-                .filter(|artifact| artifact.logical == incoming_logical),
+            RetainedOutputCapture::New => {
+                let existing = rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .complete_rates()
+                    .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity))
+                    .filter(|artifact| artifact.logical == incoming_logical);
+                if existing.is_some() || req.candidate_context.is_some() {
+                    existing
+                } else {
+                    self.shared
+                        .retained_artifacts
+                        .acquire_prepared_manual(&rendition, &incoming_logical, file)
+                        .await
+                }
+            }
         };
         let marker_destinations = stored_marker_destinations(
             self.shared.store.as_ref(),
