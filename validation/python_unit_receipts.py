@@ -292,6 +292,98 @@ def validate_journal(journal, scope, run, commit, completed=True):
     return passes
 
 
+def discovery_recovery_case():
+    """One reviewed historical case, not a caller-provided incomplete waiver."""
+    path = Path(__file__).resolve().parent / "python-unit-discovery-failure3719.json"
+    require(path.is_file() and not path.is_symlink(), "Discovery recovery record unavailable")
+    raw = path.read_bytes()
+    require(hashlib.sha256(raw).hexdigest() == "8f41ac8eb0fed5881df00ab0a2f4189db9af0a7057e3d3dbec4056138b2d1836",
+            "Discovery recovery descriptor differs from approved exact record")
+    proof = bounded_json(raw)
+    require(proof["version"] == 1 and proof["run"] == 3719 and proof["job"] == 39416
+            and proof["scope"] == {"repository": 1, "pr": 674,
+                "branch": "codex/k06-owned-measurement-launcher",
+                "base": "effort/architecture-review-2026-09-20"}
+            and proof["commit"] == "cd2e2f1467ab0e77e8e9e09c90b75580d6411294"
+            and proof["log_sha256"] == "1c7b7b0fd2738988a5e1aef91ebc7ad0c446e7d3882264b6b429fa665c2d0f40"
+            and proof["count"] == 277 and proof["local_count"] == 4,
+            "Unknown discovery recovery case")
+    return proof
+
+
+def recover_discovery_passes(api, scope, prior, job, marker, marker_raw,
+                             artifact, final_raw, journal, legacy):
+    proof = discovery_recovery_case()
+    if scope != proof["scope"] or prior["id"] != proof["run"]:
+        return False
+    require(prior["commit_sha"] == proof["commit"], "Discovery recovery source mismatch")
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual["repository"]["id"] == scope["repository"]
+            and actual["commit_sha"] == proof["commit"]
+            and actual["prettyref"] == scope["branch"]
+            and actual["workflow_id"] == "effort-ci.yml" and actual["status"] == "failure",
+            "Discovery recovery run metadata mismatch")
+    require(job["id"] == proof["job"] and job["run_id"] == proof["run"]
+            and job["repo_id"] == scope["repository"] and job["attempt"] == 1
+            and job["name"] == job_name(scope) and job["status"] == "failure",
+            "Discovery recovery job metadata mismatch")
+    for item, raw, expected, name in (
+            (marker, marker_raw, proof["start"], key(scope) + f"-start-{proof['run']}"),
+            (artifact, final_raw, proof["final"], key(scope))):
+        require(item["id"] == expected["id"] and item["run_id"] == proof["run"]
+                and item["name"] == name and not item["expired"]
+                and item["size_in_bytes"] == len(raw) == expected["bytes"]
+                and hashlib.sha256(raw).hexdigest() == expected["sha256"],
+                "Discovery recovery artifact mismatch")
+    start = artifact_json(marker_raw)
+    validate_journal(start, scope, proof["run"], proof["commit"], completed=False)
+    validate_journal(journal, scope, proof["run"], proof["commit"], completed=False)
+    require(start["complete"] is False and journal["complete"] is False,
+            "Discovery recovery must retain incomplete historical attempt")
+    baseline = start["passes"]
+    require(len(baseline) == proof["local_count"]
+            and all(k.startswith("operations:") and legacy.get(k) == source
+                    and source["commit"] is None and source["run"] is None
+                    and source.get("provenance", "").startswith("attested-local:")
+                    and journal["passes"].get(k) == source for k, source in baseline.items()),
+            "Discovery recovery local baseline lacks current authenticated attribution")
+    fresh = {k: v for k, v in journal["passes"].items() if k not in baseline}
+    require(len(fresh) == proof["count"] and all(k.startswith("validation:")
+            and v == {"commit": proof["commit"], "run": proof["run"]}
+            for k, v in fresh.items()), "Discovery recovery positive pass provenance mismatch")
+    require(set(proof["source_hashes"]) == {
+        ".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"},
+        "Discovery recovery source-order proof incomplete")
+    for path, digest in proof["source_hashes"].items():
+        require(hashlib.sha256(api.bytes("/raw/" + path, {"ref": proof["commit"]})).hexdigest() == digest,
+                "Discovery recovery original source mismatch")
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(hashlib.sha256(raw).hexdigest() == proof["log_sha256"], "Discovery recovery log mismatch")
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[0-9:.]+Z ", "", line) for line in raw.decode().splitlines()]
+    require(proof["commit"] in raw.decode() and lines.count(proof["summary"]) == 1
+            and lines.count("OK") == 1 and lines.count(
+                "Python receipt refusal: ReceiptError: Unit discovery failed; no cached pass may hide import errors") == 1
+            and lines.count(f"validation: discovered={proof['count']}, historical-passes=0, pending={proof['count']}") == 1
+            and not any(line.startswith("operations: discovered=") for line in lines),
+            "Discovery recovery phase evidence mismatch")
+    summary = lines.index(proof["summary"])
+    okay = lines.index("OK")
+    refusal = next(i for i, line in enumerate(lines) if line.startswith("Python receipt refusal:"))
+    require(summary < okay < refusal, "Discovery failure preceded validation completion")
+    headers = [(i, re.match(r"^test\w+ \((test_[A-Za-z0-9_.]+)\)", line))
+               for i, line in enumerate(lines)]
+    headers = [(i, match.group(1)) for i, match in headers if match]
+    require(len(headers) == proof["count"] and len({identity for _, identity in headers}) == proof["count"]
+            and all(i < summary for i, _ in headers), "Discovery recovery individual IDs ambiguous")
+    for position, (i, identity) in enumerate(headers):
+        end = headers[position + 1][0] if position + 1 < len(headers) else summary
+        outcomes = [line for line in lines[i:end] if line == "ok" or line.endswith(" ... ok")]
+        require(len(outcomes) == 1 and "validation:" + identity in fresh,
+                "Discovery recovery lacks one positive event per journal ID")
+    print(f"Recovered {proof['count']} individual validation passes from incomplete run {proof['run']}; operations not executed")
+    return True
+
+
 def restore(api, scope, run):
     legacy = {**legacy_pr663(api, scope), **local_receipts(api, scope)}
     artifacts = api.pages("/actions/artifacts", {"name": key(scope)})
@@ -332,12 +424,16 @@ def restore(api, scope, run):
         markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
         require(len(markers) == 1 and markers[0]["run_id"] == rid
                 and not markers[0]["expired"], f"Missing/expired start marker for run {rid}")
-        marker = artifact_json(api.bytes(f"/actions/artifacts/{positive(markers[0]['id'])}/zip"))
+        marker_raw = api.bytes(f"/actions/artifacts/{positive(markers[0]['id'])}/zip")
+        marker = artifact_json(marker_raw)
         validate_journal(marker, scope, rid, sha(prior["commit_sha"]), completed=False)
         require(marker["complete"] is False, "Start marker is not an initial attempt")
         artifact = indexed.pop(rid)
-        journal = artifact_json(api.bytes(f"/actions/artifacts/{artifact['id']}/zip"))
-        validate_journal(journal, scope, rid, sha(prior["commit_sha"]))
+        final_raw = api.bytes(f"/actions/artifacts/{artifact['id']}/zip")
+        journal = artifact_json(final_raw)
+        recovered = journal.get("complete") is False and recover_discovery_passes(
+            api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
+        validate_journal(journal, scope, rid, sha(prior["commit_sha"]), completed=not recovered)
         trusted_sources.add((rid, prior["commit_sha"]))
         journals.append(journal)
     require(not indexed, "Receipt artifacts lack corresponding trusted workflow/job metadata")
@@ -574,9 +670,14 @@ class RecordingResult(unittest.TextTestResult):
 def execute(journal, path, suites=None):
     require(not journal.get("fixture_errors"), "Unresolved fixture error; never rerun successful methods")
     journal.setdefault("fixture_errors", [])
+    # Discovery is an all-suite precondition: no first-suite successes before
+    # a later import failure. Do not stamp a discovery refusal complete.
+    inventories = {name: list(suites[name]) if suites is not None else discover(name) for name in SUITES}
+    for tests in inventories.values():
+        require(tests and len({test.id() for test in tests}) == len(tests), "Empty or duplicate unit inventory")
     failed = False
     for suite_name in SUITES:
-        tests = suites[suite_name] if suites is not None else discover(suite_name)
+        tests = inventories[suite_name]
         require(tests, "Empty unit suite")
         ids = [test.id() for test in tests]
         require(len(ids) == len(set(ids)), "Duplicate discovered test IDs")
