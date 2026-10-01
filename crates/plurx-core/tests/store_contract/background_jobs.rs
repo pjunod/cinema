@@ -1117,6 +1117,7 @@ async fn background_evicted_transcode_gets_one_new_interest_without_resetting_fa
         assert_eq!(
             store
                 .list_jobs(JobQuery {
+                    node_id: None,
                     state: None,
                     kind: Some(JobKind::TranscodePrepare),
                     after_id: None,
@@ -4571,4 +4572,60 @@ async fn background_jobs_replicated_settled_history_yields_after_the_v63_upgrade
         .await
         .expect("read")
         .is_some());
+}
+
+#[tokio::test]
+async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
+    use plurx_core::store::background_jobs_resources::StorageDomainMapping;
+    for_each_backend(|store, backend| async move {
+        let mut files = Vec::new();
+        let mut mappings = Vec::new();
+        for (index, domain) in ["nas", "nas", "other"].into_iter().enumerate() {
+            let prefix = format!("probe-batch-{index}");
+            let (_, file_id) = seed_file(&store, &prefix).await;
+            let file = store.get_file(file_id).await.expect("file").expect("file");
+            let item = store.get_item(file.item_id).await.expect("item").expect("item");
+            mappings.push(StorageDomainMapping { library_id: item.library_id,
+                root_path: format!("/{prefix}"), domain_id: domain.into() });
+            files.push(file_id);
+        }
+        assert!(store.replace_storage_domains(mappings.clone(), 1_000).await.expect("map"));
+        let mut payloads = vec![JobPayload::LibraryScan {
+            library_id: mappings[0].library_id, generation: "batch-parent".into(),
+        }];
+        for file in files { payloads.push(probe_fixture(&store, file).await); }
+        let mut claims = Vec::new();
+        for (index, payload) in payloads.into_iter().enumerate() {
+            let id = uuid::Uuid::new_v4().to_string();
+            let kind = payload.kind();
+            store.enqueue_job(EnqueueJob { id: id.clone(), payload,
+                dedupe_key: format!("probe-batch:{index}"), priority: 1, not_before_ms: 1_000, now_ms: 1_000,
+                request: JobRequest { scope: "probe-batch".into(), request_id: id.clone(), request_digest: "b".repeat(64),
+                    consumer_kind: "probe-test".into(), consumer_ref: id.clone(), target_node_id: None,
+                    deadline_ms: None, retain_identity: false },
+            }).await.expect("enqueue");
+            let claim = ClaimJob { job_id: id.clone(), expected_revision: 0,
+                node_id: "worker".into(), boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+                kind, payload_version: 1, now_ms: 1_000, dispatched_at_ms: 1_000,
+            };
+            let outcome = store.claim_job(claim.clone()).await.expect("claim");
+            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), matches!(index, 0 | 3),
+                "{backend}: scan owns the background NAS reader; both NAS probes refused; independent domain allowed");
+            if matches!(index, 1 | 2) { assert!(store.job_attempts(&id).await.expect("attempts").is_empty(), "{backend}"); }
+            claims.push(claim);
+        }
+        let parent = store.background_job(&claims[0].job_id).await.expect("parent").expect("parent");
+        store.settle_job(SettleJob { token: parent.token.expect("token"), now_ms: 1_001,
+            settlement: JobSettlement::Yield { checkpoint: None, not_before_ms: 60_000 },
+        }).await.expect("scan yielded after inline probing");
+        // Physical reservations deliberately survive settlement to lease expiry.
+        for (index, expected) in [(1, true), (2, false)] {
+            let outcome = store.claim_job(ClaimJob { now_ms: 31_001, dispatched_at_ms: 31_001,
+                ..claims[index].clone()
+            }).await.expect("post-scan probe claim");
+            assert_eq!(matches!(outcome, ClaimOutcome::Claimed { .. }), expected,
+                "{backend}: one background probe per domain; viewer capacity stays reserved");
+            if !expected { assert!(store.job_attempts(&claims[index].job_id).await.expect("attempts").is_empty()); }
+        }
+    }).await;
 }

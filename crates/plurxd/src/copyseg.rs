@@ -315,6 +315,9 @@ struct SessionDir {
     /// The playlist is on disk — the moment a player could be holding this
     /// timeline, and so the moment the legacy fallback stops being safe.
     started: bool,
+    /// Diagnostic identity and monotonic writer origin; no publication authority.
+    diagnostic_session: Option<String>,
+    writer_started_at: std::time::Instant,
     /// Authorizes every byte this writer creates, when the session was
     /// admitted with a growing reservation. `None` keeps the historical
     /// behaviour for a session that reserved its whole ceiling up front.
@@ -335,6 +338,8 @@ impl SessionDir {
             gate_secs,
             target_duration: target_duration.max(1),
             started: false,
+            diagnostic_session: None,
+            writer_started_at: std::time::Instant::now(),
             grants,
         }
     }
@@ -473,6 +478,16 @@ impl SessionDir {
         }
         let name = published.name();
         self.publish_file(&name, &published.segment.bytes).await?;
+        if self.published_secs == 0.0 {
+            tracing::info!(
+                target: "plurxd::transcode",
+                session = ?self.diagnostic_session,
+                phase = "copy_writer_first_complete_segment",
+                elapsed_ms = self.writer_started_at.elapsed().as_millis() as u64,
+                duration_seconds = published.seconds,
+                "playback startup phase completed"
+            );
+        }
         self.entries
             .push_str(&fmp4::playlist_entry(published.seconds, &name));
         self.published_secs += published.seconds;
@@ -483,11 +498,23 @@ impl SessionDir {
         if !self.started && self.published_secs < f64::from(self.gate_secs) {
             return Ok(());
         }
+        let first_playlist = !self.started;
         self.started = true;
         let text = self.playlist(false);
         self.publish_file("index.m3u8", text.as_bytes())
             .await
-            .map_err(PublishError::Io)
+            .map_err(PublishError::Io)?;
+        if first_playlist {
+            tracing::info!(
+                target: "plurxd::transcode",
+                session = ?self.diagnostic_session,
+                phase = "copy_writer_gate_open",
+                elapsed_ms = self.writer_started_at.elapsed().as_millis() as u64,
+                media_seconds = self.published_secs,
+                "playback startup phase completed"
+            );
+        }
+        Ok(())
     }
 
     async fn write_endlist(&mut self) -> std::io::Result<()> {
@@ -591,6 +618,7 @@ pub async fn run<R: AsyncRead + Unpin>(
     }
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
+    out.diagnostic_session = Some(crate::transcode::session_log_id(session_id));
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the
     // same records in hvcC before it will accept a PQ HLS variant.

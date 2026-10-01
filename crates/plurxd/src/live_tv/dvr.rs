@@ -2298,11 +2298,26 @@ impl LiveTvManager {
     async fn dvr_purge_deleted(&self) -> Result<(), LiveTvError> {
         for row in self.dvr_rows(&[DvrState::Deleted]).await? {
             if row.path.is_none() {
+                // Older versions purged the disk file but retained its
+                // catalog links. Repair those rows without raising the scan
+                // deletion budget or touching unrelated missing media.
+                if row.item_id.is_some() || row.file_id.is_some() {
+                    self.store
+                        .purge_dvr_recording_catalog(&row.id)
+                        .await
+                        .map_err(store_error)?;
+                }
                 continue;
             }
             if !self.delete_recording_files(&row).await {
                 continue;
             }
+            // Keep the path until catalog cleanup succeeds, so a failed
+            // replicated write is retried on the next owner tick.
+            self.store
+                .purge_dvr_recording_catalog(&row.id)
+                .await
+                .map_err(store_error)?;
             self.transition(
                 &row.id,
                 &[DvrState::Deleted],
