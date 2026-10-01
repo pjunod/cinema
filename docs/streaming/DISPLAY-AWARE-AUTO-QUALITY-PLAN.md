@@ -1488,5 +1488,27 @@ claims packet-exact duration. Android retains actual completed-load start/end
 intervals and the exact staged pipeline. Duplicate objects, receipts, ETags,
 overlap and stale attachment evidence cannot qualify the empirical margin.
 Missing proof retains the healthy incumbent without reopening or renewing a
-deadline. Native natural-boundary original-first routing remains in progress
-in this same task; this checkpoint is not the complete continuation.
+deadline. The same task's native boundary implementation uses the existing
+accepted preparation at the final coalesced viewer seek target, including a
+backward target, or a resume after an attachment-bound explicit viewer pause
+of at least 60 seconds. It never calls ordinary optional create: predecessor
+activation can retire the healthy session before the response is returned.
+The optional part borrows the original transaction's remaining budget, capped
+at eight seconds from its first entry, and reserves two seconds for that same
+healthy seek/resume. Refusal, missing proof or supersession cannot create a
+second quality operation or renew the fallback deadline. Apple prepares the
+exact staged item's native/audio selection before switching. Android intercepts
+current MediaSession transport before delegate mutation through a private
+forwarding wrapper; a second explicit Pause still revokes an optional resume
+while the delegate is held paused, and its SDK consequence is not a new viewer
+edge. Stale wrappers cannot issue transport intent for a new attachment.
+
+Boundary admission still requires current authenticated completed-body proof,
+decoder/recipe/selection ownership, incumbent runway, exact staged body proof
+and presentation continuity. Only ordinary mid-play quiet/cliff eligibility is
+not used to pin the viewer boundary after a cliff expires. Ordinary mid-play
+45-second headroom, 60-second quiet, 90-second original-EOF cliff, 60-second
+evaluation cadence and five-minute failure backoff remain unchanged. Current
+native source/test compilation and the two new focused boundary cases are being
+qualified before the single coherent review. This remains source work, not
+device startup-cost acceptance, shaped-network restoration or A-05 completion.

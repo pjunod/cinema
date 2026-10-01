@@ -170,6 +170,14 @@ see combined plan §9.12. A-05 remains code-in-progress and physically unqualifi
 not an evidence-only or completed row. Unknown-cost trials, natural-boundary
 integration and typed recovery disposition remain separately open.
 
+The grouped continuation in draft #692 adds unknown-cost staged empirical proof
+and original-first native viewer boundaries through the existing prepared
+transaction, not ordinary create or a second post-seek quality operation. Its
+original-budget healthy fallback and private current MediaSession transport
+interception are being qualified with new focused cases; combined plan §9.13
+records the exact scope. One coherent review/current gate and physical startup,
+decoder, shaped-network and recovery acceptance remain open.
+
 ## How to claim, work and finish a plan
 
 **P-02 post-merge evidence continuation, 2026-10-01 (gpt-6.1-sol,
