@@ -9,7 +9,11 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from .test_k06_owned_lab import LAB, manifest
+if __package__:
+    from .test_k06_owned_lab import LAB, manifest
+else:
+    # CI's discovery root loads operations modules without a package context.
+    from test_k06_owned_lab import LAB, manifest
 
 
 def executable(path, source):
