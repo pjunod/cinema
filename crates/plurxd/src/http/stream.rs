@@ -226,6 +226,8 @@ pub struct Caps {
     /// Request-local audio choice (`a:{index}`). Absent keeps the shared
     /// playback-default policy; it never writes the server setting.
     pub audio: Option<i64>,
+    /// Request-local synchronization adjustment; never changes stored media.
+    pub audio_offset_ms: Option<i64>,
     /// Request-local subtitle choice (`s:{index}`), or `-1` for Off. Absent
     /// keeps the shared playback-default policy.
     pub subtitle: Option<i64>,
@@ -721,6 +723,12 @@ pub struct DecisionSelection {
 
 #[derive(Serialize)]
 pub struct DecisionResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_aware_auto_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
     pub file_id: i64,
     /// Whether this node has a fragment index matching the current file and
     /// the copy-video identity selected by this decision.
@@ -2158,7 +2166,7 @@ pub async fn decision(
     // Older builds stored this against the file. A fresh playback must never
     // inherit that historical value; its client starts at zero and carries
     // any adjustment on each stream request for this one playback only.
-    file.audio_offset_ms = 0;
+    file.audio_offset_ms = q.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000);
     // Never hand back a play URL for a file that isn't on disk — the client
     // would open a player that can never load (the unmounted-share case).
     // Cached briefly: on a cold NAS this stat is remote I/O sitting between
@@ -2214,6 +2222,40 @@ pub async fn decision(
     let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
     let decision_now_ms = crate::media_sessions::unix_ms();
     let mut decision = q.decide(&file, &node, decision_now_ms);
+    if let Some(caps) = q.caps_v2.as_ref().filter(|caps| {
+        caps.video
+            .iter()
+            .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
+    }) {
+        if let Some(facts) = state.transcode.quality_source_facts(&file).await {
+            if let (Some(width), Some(height)) = (facts.width(), facts.height()) {
+                let rate = facts
+                    .frame_rate()
+                    .value()
+                    .map(|rate| (rate.numerator(), rate.denominator()));
+                let geometry_fits = caps
+                    .video
+                    .iter()
+                    .filter(|entry| file.video_codec.as_deref() == Some(entry.codec.as_str()))
+                    .any(|entry| {
+                        entry.geometry_admission(width, height, rate) != Some(false)
+                            && (entry.max_frame_rate.is_none() || rate.is_some())
+                    });
+                if !geometry_fits && decision.method != playback::PlaybackMethod::Transcode {
+                    decision.method = playback::PlaybackMethod::Transcode;
+                    decision.preserve_dolby_vision = false;
+                    decision.convert_dolby_vision = false;
+                    decision.delivered_dynamic_range = "sdr";
+                    decision.delivered_dolby_vision_profile = None;
+                    decision.reasons.push(
+                        "the measured coded frame exceeds the current decoder geometry or cadence"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+    }
+
     // The grade of the plan **with no subtitle burn**. Read here, before
     // `apply_selected_subtitle` can rewrite it, because both users below are
     // asking what adding a burn would cost — and a plan that is already SDR
@@ -2392,7 +2434,94 @@ pub async fn decision(
     // to Trakt, and a third-party call belongs nowhere near the click path.
     // The media endpoints announce it once delivery is actually happening.
 
+    let quality_candidates = if state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1")
+    {
+        if let Some(caps) = q.caps_v2.as_ref() {
+            Some(
+                state
+                    .media_pool
+                    .quality_candidates(
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: None,
+                            file_id: file.id,
+                            source_size: file.size,
+                            source_mtime: file.mtime,
+                            caps: caps.clone(),
+                            audio_index: selected_audio,
+                            audio_offset_ms: file.audio_offset_ms,
+                            subtitle_burn: selected_subtitle
+                                .filter(|_| selected_subtitle_requires_burn),
+                            presentation: crate::transcode::Presentation::Vod,
+                        },
+                    )
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let fallback_height = state
+        .transcode
+        .auto_height_for_request(Some(&file), network_prior.as_ref(), q.hdr10t == Some(1))
+        .await;
+    let display_aspect = state.transcode.quality_display_aspect(&file).await;
+    let quality_candidate_id = quality_candidates.as_ref().and_then(|catalog| {
+        if decision.method != playback::PlaybackMethod::Transcode {
+            catalog
+                .iter()
+                .find(|candidate| {
+                    candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode
+                })
+                .map(|candidate| candidate.id)
+        } else {
+            let encoded: Vec<_> = catalog
+                .iter()
+                .filter(|candidate| {
+                    candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                })
+                .cloned()
+                .collect();
+            display_aspect
+                .and_then(|aspect| {
+                    plurx_core::playback::candidate::select_quality_candidate(
+                        &encoded,
+                        aspect,
+                        q.caps_v2.as_ref().and_then(|caps| {
+                            caps.display
+                                .as_ref()
+                                .and_then(|display| display.presentation_target)
+                        }),
+                        None,
+                    )
+                })
+                .map(|candidate| candidate.id)
+                .or_else(|| {
+                    catalog
+                        .iter()
+                        .find(|candidate| {
+                            candidate.route
+                                == plurx_core::playback::candidate::CandidateRoute::Encode
+                                && candidate.target_height == fallback_height as u32
+                                && candidate.decoder_compatible
+                        })
+                        .map(|candidate| candidate.id)
+                })
+        }
+    });
     Ok(Json(DecisionResponse {
+        display_aware_auto_protocol: Some("route-v1".to_owned()),
+        quality_candidate_id,
+        quality_candidates,
         file_id: id,
         vod_indexed,
         source: source_summary(&file, probe_json.as_deref()),
@@ -2409,7 +2538,7 @@ pub async fn decision(
             subtitle_route: subtitle_route(&file, selected_subtitle, pgs_overlay),
         }),
         markers,
-        audio_offset_ms: 0,
+        audio_offset_ms: file.audio_offset_ms,
         declared_offset_ms: declared_av_offset(&state, id).await,
         ladder: crate::transcode::ladder(file.height),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
@@ -2800,6 +2929,7 @@ impl StreamQuery {
             dvstatus: None,
             force: self.force.clone(),
             audio: None,
+            audio_offset_ms: None,
             subtitle: None,
             caps_v2: None,
         }
@@ -4244,6 +4374,7 @@ mod tests {
                 hdr: true,
                 dolby_vision: true,
                 max_nits: None,
+                presentation_target: None,
             }),
             ..Default::default()
         }
@@ -4393,6 +4524,9 @@ mod tests {
         fn body(decision: Decision) -> serde_json::Value {
             let (play_url, delivery) = delivery_plan(42, &decision, None, false);
             serde_json::to_value(DecisionResponse {
+                display_aware_auto_protocol: Some("route-v1".to_owned()),
+                quality_candidate_id: None,
+                quality_candidates: None,
                 file_id: 42,
                 vod_indexed: false,
                 decision,

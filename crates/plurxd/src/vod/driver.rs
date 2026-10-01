@@ -103,6 +103,17 @@ async fn retire_failed_rendition(shared: &Shared, rendition: &Arc<Rendition>) {
 }
 
 fn record_performed_step(shared: &Shared, rendition: &Rendition, step: Step) {
+    if let Some(encoding) = &rendition.recipe.encoding {
+        match step {
+            Step::Start { .. } | Step::Restart { .. } | Step::Resume => {
+                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), true)
+            }
+            Step::Stop | Step::Terminate { .. } => {
+                encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false)
+            }
+            _ => {}
+        }
+    }
     match step {
         Step::Stop => rendition.ahead_hold.store(true, Release),
         Step::Resume | Step::Start { .. } | Step::Restart { .. } => {
@@ -167,7 +178,8 @@ async fn report_permit_wait(
     rendition: &Arc<Rendition>,
     encoding: &crate::vodencode::Encoding,
 ) {
-    let handoff = if encoding.is_speculative() {
+    encoding.reset_active_production(rendition.gen_epoch.load(Relaxed), false);
+    let handoff = if encoding.is_speculative() && !encoding.nonpreemptive_trial {
         request_predecessor_handoff(shared, rendition, encoding).await
     } else {
         Err("not_prepared")

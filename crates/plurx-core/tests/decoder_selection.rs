@@ -303,6 +303,8 @@ fn execution_file(path: &str) -> MediaFile {
 
 fn execution_options() -> TranscodeOptions {
     TranscodeOptions {
+        auto_quality_rate_profile: None,
+        normalized_geometry: false,
         target_height: 1080,
         video_bitrate_kbps: 8_000,
         effective_rate_control: EffectiveRateControl::Vbr,
@@ -2842,4 +2844,232 @@ fn requiring_what_just_failed_is_refused_by_the_record_not_by_the_conversion() {
         continuation_restriction("software", "software").encode(),
         Err(DecodeRestrictionError::InvalidField("required_backend")),
     );
+}
+
+#[test]
+fn bound_probe_geometry_keeps_coded_dimensions_and_truthful_missing_facts() {
+    let upright = facts(
+        json!({"index":0,"codec_type":"video","width":1440,"height":1080,"sample_aspect_ratio":"4:3","avg_frame_rate":"30000/1001"}),
+    );
+    assert_eq!(upright.width(), Some(1440));
+    assert_eq!(upright.rotation_degrees(), Some(0));
+    assert_eq!(
+        upright
+            .displayed_aspect()
+            .expect("measured aspect")
+            .output_at_height(1080),
+        Some((1920, 1080))
+    );
+    let rotated = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"rotation":-90}]}),
+    );
+    assert_eq!(rotated.rotation_degrees(), Some(270));
+    assert_eq!(
+        rotated
+            .displayed_aspect()
+            .expect("measured aspect")
+            .output_at_height(1920),
+        Some((1080, 1920))
+    );
+    let missing = facts(json!({"index":0,"codec_type":"video","width":1920,"height":1080}));
+    assert!(missing.displayed_aspect().is_none());
+    // Actual selective-probe shape before geometry fields were requested.
+    let omitted_matrix = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"side_data_type":"Display Matrix"}]}),
+    );
+    assert!(omitted_matrix.rotation_degrees().is_none());
+    let malformed_matrix = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"side_data_type":"Display Matrix","rotation":"invalid"}]}),
+    );
+    assert!(malformed_matrix.rotation_degrees().is_none());
+    let conflicting = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","tags":{"rotate":"0"},"side_data_list":[{"rotation":90}]}),
+    );
+    assert!(conflicting.rotation_degrees().is_none());
+}
+
+#[test]
+fn normalized_geometry_preserves_anamorphic_detail_and_versions_only_new_routes() {
+    for (width, height, sar, rotation, target, expected) in [
+        (1440, 1080, "4:3", 0, 1440, (1920, 1080)),
+        (1440, 1080, "4:3", 90, 1920, (1080, 1920)),
+        (1920, 1080, "3:4", 0, 1440, (1440, 1080)),
+        (1920, 1080, "3:4", -90, 1440, (1080, 1440)),
+        (1920, 1080, "1:1", 0, 1440, (1920, 1080)),
+        (360, 240, "64:45", 0, 144, (306, 144)),
+    ] {
+        let mut stream = video(
+            0,
+            Some("h264"),
+            Some("High"),
+            width,
+            height,
+            Some("yuv420p"),
+            "30/1",
+            "30/1",
+            Some("bt709"),
+        );
+        stream["sample_aspect_ratio"] = json!(sar);
+        let (a, b, c, d) = match rotation {
+            90 => (0, -65536, 65536, 0),
+            -90 => (0, 65536, -65536, 0),
+            _ => (65536, 0, 0, 65536),
+        };
+        stream["side_data_list"] = json!([{"side_data_type":"Display Matrix", "rotation":rotation,
+            "displaymatrix":format!("00000000: {a} {b} 0\n00000001: {c} {d} 0\n00000002: 0 0 1073741824\n")}]);
+        let input = facts(stream);
+        let mut media = options(Pipeline::Cpu);
+        media.target_height = target;
+        let legacy_request = TranscodeRequest::new(Encoder::Software, media);
+        let caps = software_capabilities("h264", "h264");
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+        let legacy = resolve_transcode(
+            &legacy_request,
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .expect("legacy route");
+        let normalized = resolve_transcode(
+            &legacy_request.with_normalized_geometry(),
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .expect("normalized route");
+        assert_eq!(
+            normalized
+                .output_contract()
+                .effective_width()
+                .zip(normalized.output_contract().effective_height()),
+            Some(expected)
+        );
+        assert_ne!(normalized.plan_digest(), legacy.plan_digest());
+        assert!(legacy.output_contract().normalized_geometry().is_none());
+        let source = execution_file("/fixture/source.mkv");
+        let execution = TranscodeExecution::from_options(
+            &source,
+            &execution_options(),
+            Pacing::unpaced(),
+            "/fixture/out",
+        )
+        .expect("bound execution fixture");
+        let args = plurx_core::transcode::hls_args_for_plan(&normalized, &execution);
+        let filter = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter")
+            + 1];
+        assert!(filter.contains(&format!("scale={}:{},setsar=1", expected.0, expected.1)));
+        let matrix = args
+            .iter()
+            .position(|arg| arg == "-display_rotation")
+            .expect("input matrix reset");
+        assert_eq!(args[matrix + 1], "0");
+        assert!(matrix < args.iter().position(|arg| arg == "-i").expect("input"));
+        assert!(args.iter().any(|arg| arg == "-noautorotate"));
+        match rotation {
+            90 => assert!(filter.contains("transpose=cclock")),
+            -90 => assert!(filter.contains("transpose=clock")),
+            _ => {}
+        }
+    }
+}
+
+#[test]
+fn normalized_geometry_refuses_unknown_facts_without_changing_legacy_identity() {
+    let stream = video(
+        0,
+        Some("h264"),
+        Some("High"),
+        1920,
+        1080,
+        Some("yuv420p"),
+        "30/1",
+        "30/1",
+        Some("bt709"),
+    );
+    let input = facts(stream);
+    let request = TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu));
+    let caps = software_capabilities("h264", "h264");
+    let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+    let legacy = resolve_transcode(
+        &request,
+        &input,
+        &caps,
+        &policy,
+        &AttemptRestrictions::none(),
+    )
+    .expect("legacy route");
+    assert_eq!(
+        resolve_transcode(
+            &request.with_normalized_geometry(),
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none()
+        ),
+        Err(PlanError::InvalidFact("sample_aspect_ratio"))
+    );
+    assert!(serde_json::to_value(legacy.output_contract())
+        .expect("legacy contract")
+        .get("normalized_geometry")
+        .is_none());
+}
+
+#[test]
+fn normalization_refuses_reflection_shear_and_missing_full_display_matrix() {
+    for matrix in [
+        None,
+        Some("00000000: 65536 0 0\n00000001: 0 -65536 0\n00000002: 0 0 1073741824"),
+        Some("00000000: 65536 100 0\n00000001: 0 65536 0\n00000002: 0 0 1073741824"),
+        Some("00000000: 65536 0 10\n00000001: 0 65536 0\n00000002: 0 0 1073741824"),
+    ] {
+        let mut stream = video(
+            0,
+            Some("h264"),
+            Some("High"),
+            1920,
+            1080,
+            Some("yuv420p"),
+            "30/1",
+            "30/1",
+            Some("bt709"),
+        );
+        stream["sample_aspect_ratio"] = json!("1:1");
+        stream["side_data_list"] = json!([{"side_data_type":"Display Matrix", "rotation":0}]);
+        if let Some(matrix) = matrix {
+            stream["side_data_list"][0]["displaymatrix"] = json!(matrix);
+        }
+        let input = facts(stream);
+        assert_eq!(
+            input.rotation_degrees(),
+            Some(0),
+            "scalar angle alone hides reflection"
+        );
+        assert!(!input.normalization_transform_known());
+        let request = TranscodeRequest::new(Encoder::Software, options(Pipeline::Cpu));
+        let caps = software_capabilities("h264", "h264");
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None);
+        assert!(resolve_transcode(
+            &request,
+            &input,
+            &caps,
+            &policy,
+            &AttemptRestrictions::none()
+        )
+        .is_ok());
+        assert_eq!(
+            resolve_transcode(
+                &request.with_normalized_geometry(),
+                &input,
+                &caps,
+                &policy,
+                &AttemptRestrictions::none()
+            ),
+            Err(PlanError::InvalidFact("display_matrix"))
+        );
+    }
 }

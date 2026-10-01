@@ -585,6 +585,39 @@ pub(crate) enum DynamicRangePolicy {
     Sdr,
 }
 
+/// Omission retains prior knowledge; only a newer revision can change a
+/// snapshot. Equal revisions are immutable identities, including decoder loss.
+fn merge_quality_capabilities(
+    previous: Option<&DynamicCapabilities>,
+    incoming: Option<&DynamicCapabilities>,
+) -> Result<Option<DynamicCapabilities>, ControlStateError> {
+    let Some(incoming) = incoming else {
+        return Ok(previous.cloned());
+    };
+    let mut merged = incoming.clone();
+    if let Some(previous) = previous {
+        if let (Some(old), Some(new)) = (&previous.decoder_caps, &incoming.decoder_caps) {
+            if new.revision < old.revision || new.revision == old.revision && new != old {
+                return Err(ControlStateError::StaleSequence);
+            }
+        }
+        if let (Some(old), Some(new)) =
+            (&previous.presentation_target, &incoming.presentation_target)
+        {
+            if new.revision < old.revision || new.revision == old.revision && new != old {
+                return Err(ControlStateError::StaleSequence);
+            }
+        }
+        if merged.decoder_caps.is_none() {
+            merged.decoder_caps.clone_from(&previous.decoder_caps);
+        }
+        if merged.presentation_target.is_none() {
+            merged.presentation_target = previous.presentation_target;
+        }
+    }
+    Ok(Some(merged))
+}
+
 /// Full runtime decoder snapshot. Absence is unknown; an empty video list is
 /// an explicit loss of every decoder. Entries remain profile-specific.
 /// Codec tokens include decode-only codecs such as VP9. Unknown canonical
@@ -626,6 +659,33 @@ pub(crate) struct RuntimeVideoConstraint {
 pub(crate) struct RuntimeFrameRate {
     pub numerator: u32,
     pub denominator: u32,
+}
+
+impl DecoderCapsSnapshot {
+    pub(crate) fn from_device_caps(
+        caps: &plurx_core::playback::DeviceCaps,
+        revision: u64,
+    ) -> Option<Self> {
+        let video: Vec<_> = caps.video.iter().map(|entry| serde_json::json!({
+            "codec": entry.codec, "profiles": entry.profiles, "available": true,
+            "dynamic_ranges": entry.present.iter().filter_map(|transfer| match transfer {
+                plurx_core::playback::Transfer::Sdr => Some("sdr"), plurx_core::playback::Transfer::Pq => Some("hdr10"), plurx_core::playback::Transfer::Hlg => Some("hlg"), _ => None,
+            }).chain((!entry.dv_profiles.is_empty()).then_some("dolby_vision")).collect::<Vec<_>>(),
+            "dv_profiles": entry.dv_profiles, "max_width": entry.max_width, "max_height": entry.max_height,
+            "max_frame_rate": entry.max_frame_rate, "max_bitrate_bps": entry.max_bitrate_bps,
+        })).collect();
+        serde_json::from_value(serde_json::json!({"revision": revision, "video": video})).ok()
+    }
+
+    pub(crate) fn device_caps(&self) -> plurx_core::playback::DeviceCaps {
+        let video: Vec<_> = self.video.iter().filter(|entry| entry.available).map(|entry| serde_json::json!({
+            "codec": entry.codec, "profiles": entry.profiles, "max_width": entry.max_width, "max_height": entry.max_height,
+            "max_frame_rate": entry.max_frame_rate, "max_bitrate_bps": entry.max_bitrate_bps,
+            "dv_profiles": entry.dv_profiles,
+            "present": entry.dynamic_ranges.iter().filter_map(|grade| match grade { DynamicRangePolicy::Sdr => Some("sdr"), DynamicRangePolicy::Hdr10 | DynamicRangePolicy::DolbyVision => Some("pq"), DynamicRangePolicy::Hlg => Some("hlg"), _ => None }).collect::<Vec<_>>(),
+        })).collect();
+        serde_json::from_value(serde_json::json!({"v": 2, "video": video, "audio": ["aac"], "containers": ["mp4"], "transports": ["hls"]})).expect("validated runtime constraints preserve capability schema")
+    }
 }
 
 impl TryFrom<DecoderCapsSnapshotWire> for DecoderCapsSnapshot {
@@ -1381,7 +1441,9 @@ impl EffectiveSelection {
         delivered_height: i64,
         dynamic_range: Option<String>,
     ) -> Self {
-        Self::from_request(&recipe.request, delivered_height, dynamic_range)
+        let mut effective = Self::from_request(&recipe.request, delivered_height, dynamic_range);
+        effective.candidate_id = recipe.candidate_id;
+        effective
     }
 
     /// The same view, from the request alone.
@@ -1406,7 +1468,10 @@ impl EffectiveSelection {
             SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
-            candidate_id: None,
+            candidate_id: request
+                .candidate_context
+                .as_ref()
+                .map(|context| context.candidate_id),
             quality_auto: request.automatic,
             height: delivered_height,
             audio_track: request.audio_index,
@@ -3379,9 +3444,10 @@ pub(crate) struct ControlState {
     /// fires on a *later* exchange — which is every consumer worth having —
     /// would see `None` every time.
     ///
-    /// Last write wins over `Some`, and cleared with the client identity on an
-    /// owner-epoch advance: the next accepted exchange must then be sequence 1,
-    /// which the fence requires to carry a document.
+    /// Legacy fields follow accepted documents; versioned quality snapshots
+    /// advance monotonically and omitted snapshots retain previous knowledge.
+    /// Cleared with the client identity on an owner-epoch advance, whose next
+    /// accepted exchange must be sequence 1 with a capability document.
     last_capabilities: Option<DynamicCapabilities>,
     /// This playback's single preparation slot.
     ///
@@ -3400,6 +3466,7 @@ pub(crate) struct ControlState {
     /// — but it is now a property each engine has to keep rather than one this
     /// field gets for free from living on an actor.
     preparation: PreparationSlot,
+    preparation_capabilities: Option<DynamicCapabilities>,
 }
 
 impl Default for ControlState {
@@ -3422,12 +3489,14 @@ impl Default for ControlState {
             persisted_digest: None,
             last_capabilities: None,
             preparation: PreparationSlot::Empty,
+            preparation_capabilities: None,
         }
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct ControlAcceptance {
+    capabilities: Option<DynamicCapabilities>,
     platform: Option<ClientPlatform>,
     prepared_successor: PreparedSuccessorObservation,
     acknowledgement: Option<ActionAcknowledgement>,
@@ -3452,6 +3521,7 @@ impl ControlAcceptance {
         prepared_successor: Option<&PreparedSuccessorAction>,
     ) -> Self {
         Self {
+            capabilities: None,
             platform,
             prepared_successor: prepared_successor
                 .map_or(PreparedSuccessorObservation::NotRequested, |successor| {
@@ -3470,8 +3540,10 @@ impl ControlAcceptance {
         acknowledgement: Option<&ActionAcknowledgement>,
         request_fingerprint: Option<&str>,
         selection: &ClientSelection,
+        capabilities: Option<&DynamicCapabilities>,
     ) -> Self {
         Self {
+            capabilities: capabilities.cloned(),
             platform,
             prepared_successor: prepared_successor.clone(),
             acknowledgement: acknowledgement.cloned(),
@@ -3484,6 +3556,7 @@ impl ControlAcceptance {
     #[cfg(test)]
     fn unavailable(platform: Option<ClientPlatform>) -> Self {
         Self {
+            capabilities: None,
             platform,
             prepared_successor: PreparedSuccessorObservation::Unavailable,
             acknowledgement: None,
@@ -3702,6 +3775,7 @@ impl ControlState {
     ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform, bool), ControlStateError>
     {
         let ControlAcceptance {
+            capabilities,
             platform,
             prepared_successor,
             acknowledgement,
@@ -3839,6 +3913,8 @@ impl ControlState {
                 ));
             }
         }
+        self.last_capabilities =
+            merge_quality_capabilities(self.last_capabilities.as_ref(), capabilities.as_ref())?;
         // The ask lands before anything decides on it, and only for an
         // exchange that has survived every fence above.
         //
@@ -4147,8 +4223,10 @@ impl ControlState {
                 digest,
             });
         self.last_selection = Some(selection.clone());
-        if let Some(capabilities) = capabilities {
-            self.last_capabilities = Some(capabilities.clone());
+        if let Ok(merged) =
+            merge_quality_capabilities(self.last_capabilities.as_ref(), capabilities)
+        {
+            self.last_capabilities = merged;
         }
         SelectionObservation {
             changed,
@@ -4232,6 +4310,10 @@ impl ControlState {
         if !matches!(self.preparation, PreparationSlot::Empty) {
             return false;
         }
+        self.preparation_capabilities = self
+            .last_capabilities
+            .clone()
+            .filter(|caps| caps.decoder_caps.is_some() || caps.presentation_target.is_some());
         self.preparation = PreparationSlot::Staged {
             staged_incarnation_id,
             predecessor_incarnation_id,
@@ -4295,6 +4377,9 @@ impl ControlState {
         staged_incarnation_id: &str,
         now_unix_ms: i64,
     ) -> bool {
+        if !self.preparation_quality_current() {
+            return false;
+        }
         match &self.preparation {
             // The ask is compared as well as the identity and the deadline.
             // Acceptance has already advanced `desired_digest` for this
@@ -4475,8 +4560,20 @@ impl ControlState {
         }
     }
 
+    fn preparation_quality_current(&self) -> bool {
+        self.preparation_capabilities.as_ref().is_none_or(|staged| {
+            self.last_capabilities.as_ref().is_some_and(|latest| {
+                latest.decoder_caps == staged.decoder_caps
+                    && latest.presentation_target == staged.presentation_target
+            })
+        })
+    }
+
     /// Whether this exact successor may still be committed.
     pub(crate) fn may_commit_preparation(&self, staged_incarnation_id: &str) -> bool {
+        if !self.preparation_quality_current() {
+            return false;
+        }
         self.preparation.may_commit(staged_incarnation_id)
             || matches!(
                 &self.prior_preparation_directive,
@@ -9816,6 +9913,7 @@ impl RollingControlActor {
                     request.snapshot.acknowledgement.as_ref(),
                     request.snapshot.request_fingerprint.as_deref(),
                     &request.snapshot.selection,
+                    request.snapshot.capabilities.as_ref(),
                 ),
             )?;
         let preparation_directive = self.control.preparation_directive();
@@ -9850,9 +9948,8 @@ impl RollingControlActor {
             // Retained before the snapshot is moved, and only over `Some`:
             // an exchange that omits capabilities is one that has already
             // told us, not one that has changed its mind.
-            if let Some(capabilities) = &request.snapshot.capabilities {
-                self.retained_capabilities = Some(capabilities.clone());
-            }
+            self.retained_capabilities
+                .clone_from(&self.control.last_capabilities);
             if self.startup.snapshot(now).phase == RollingStartupPhase::Presented {
                 match request.snapshot.demand {
                     PlaybackDemand::Hold => {
@@ -15470,6 +15567,147 @@ mod tests {
     }
 
     #[test]
+    fn quality_snapshots_refuse_regression_and_equal_revision_conflicts_before_acceptance() {
+        let request = request();
+        let mut caps = request.capabilities.clone().expect("fixture capabilities");
+        caps.decoder_caps = Some(DecoderCapsSnapshot {
+            revision: 5,
+            video: Vec::new(),
+        });
+        caps.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
+            width_px: 2400,
+            height_px: 1600,
+            revision: 5,
+        });
+        let now = Instant::now();
+        let mut state = ControlState::default();
+        let acceptance = |caps: &DynamicCapabilities| {
+            ControlAcceptance::observed(
+                Some(caps.platform),
+                &PreparedSuccessorObservation::NotRequested,
+                None,
+                None,
+                &request.selection,
+                Some(caps),
+            )
+        };
+        state
+            .accept_at(
+                now,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                acceptance(&caps),
+            )
+            .expect("first revision accepted");
+        let mut stale = caps.clone();
+        stale.decoder_caps.as_mut().expect("snapshot").revision = 4;
+        assert_eq!(
+            state.accept_at(
+                now + Duration::from_secs(2),
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                acceptance(&stale)
+            ),
+            Err(ControlStateError::StaleSequence)
+        );
+        assert_eq!(state.last_sequence, 1);
+        assert_eq!(state.last_capabilities.as_ref(), Some(&caps));
+        let mut conflict = caps.clone();
+        conflict
+            .presentation_target
+            .as_mut()
+            .expect("target")
+            .width_px = 1920;
+        assert_eq!(
+            state.accept_at(
+                now + Duration::from_secs(2),
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                acceptance(&conflict)
+            ),
+            Err(ControlStateError::StaleSequence)
+        );
+        let mut omitted = caps.clone();
+        omitted.decoder_caps = None;
+        omitted.presentation_target = None;
+        state
+            .accept_at(
+                now + Duration::from_secs(2),
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                acceptance(&omitted),
+            )
+            .expect("omission retains proof");
+        assert_eq!(
+            state
+                .last_capabilities
+                .as_ref()
+                .and_then(|row| row.decoder_caps.as_ref()),
+            caps.decoder_caps.as_ref()
+        );
+    }
+
+    #[test]
+    fn newer_quality_snapshot_revokes_a_previously_reserved_preparation_commit() {
+        let request = request();
+        let mut caps = request.capabilities.clone().expect("fixture capabilities");
+        caps.decoder_caps = Some(DecoderCapsSnapshot {
+            revision: 1,
+            video: Vec::new(),
+        });
+        let now = Instant::now();
+        let mut state = ControlState::default();
+        let acceptance = |caps: &DynamicCapabilities| {
+            ControlAcceptance::observed(
+                Some(caps.platform),
+                &PreparedSuccessorObservation::NotRequested,
+                None,
+                None,
+                &request.selection,
+                Some(caps),
+            )
+        };
+        state
+            .accept_at(
+                now,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                acceptance(&caps),
+            )
+            .expect("initial snapshot");
+        assert!(state.stage_preparation(
+            "quality-successor".into(),
+            "incumbent".into(),
+            10_000,
+            None
+        ));
+        assert!(state.reserve_preparation_commit("quality-successor", 1_000));
+        assert!(state.may_commit_preparation_for_owner("quality-successor", 1));
+        caps.decoder_caps.as_mut().expect("snapshot").revision = 2;
+        state
+            .accept_at(
+                now + Duration::from_secs(2),
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                acceptance(&caps),
+            )
+            .expect("new revision accepted");
+        assert!(!state.may_commit_preparation_for_owner("quality-successor", 1));
+    }
+
+    #[test]
     fn decoder_snapshot_parser_preserves_loss_and_refuses_unbounded_claims() {
         let empty = serde_json::json!({"revision": 1, "video": []});
         let parsed: DecoderCapsSnapshot =
@@ -15901,6 +16139,11 @@ mod tests {
         delivered_bps: Option<i64>,
     ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            active_encode_milli_realtime: None,
+            active_encode_age_ms: None,
+            active_encode_active_ms: None,
+            active_encode_segments: None,
+            active_encode_candidate_id: None,
             // A plausible total, not a rate divided by eight: a fixture that
             // encodes the wrong unit is how the wrong unit gets copied.
             delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),
@@ -24854,6 +25097,7 @@ mod tests {
 
     fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id: 5615,
             playback_id: "player-a".to_owned(),
             request_id: None,
@@ -25461,6 +25705,7 @@ mod tests {
 
         fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
             SessionRequest {
+                candidate_context: None,
                 file_id: 1,
                 playback_id: "player-a".to_owned(),
                 request_id: None,

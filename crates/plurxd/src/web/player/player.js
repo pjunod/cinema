@@ -119,6 +119,9 @@
  *
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
+ * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
+ * @property {string|null} [qualityCandidateId] the server-confirmed active route
+ * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
  * @property {number|null} [autoHeight]    the rung Auto started or settled on
  * @property {number|null} [autoRequestedHeight] the rung Auto last asked the server for
@@ -630,7 +633,7 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
-function noteCompletedAutoTransfer(p,bytes,loading,now){
+function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=null,mediaDurationMs=null){
   if(!p||!p.abr) return;
   const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
   if(!(Number(bytes)>0)||!(elapsed>0)) return;
@@ -639,6 +642,29 @@ function noteCompletedAutoTransfer(p,bytes,loading,now){
     row.atMs<=now&&now-row.atMs<=age).slice(-31);
   recent.push({bytes:Number(bytes),startedAtMs:now-elapsed,endedAtMs:now,atMs:now});
   p.abr.completedTransfers=recent;
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  if(document.hidden||!video||video.paused||video.seeking||p.controlSeek) return;
+  const evidence=completedQualityTransfer(networkDetails,url,loading,now);
+  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment};
+}
+function completedQualityTransfer(networkDetails,url,loading,now){
+  // Upgrade evidence needs a completed network body from bytes already sealed
+  // by the server. hls.js load averages alone cannot distinguish cache hits,
+  // producer waits or revalidated bodies from a fresh link measurement.
+  try{
+    if(!networkDetails||networkDetails.status!==200
+      ||networkDetails.getResponseHeader("X-Plurx-Producer-Paced")!=="0"||!url) return;
+    const name=new URL(url,location.href).href;
+    const entries=performance.getEntriesByName(name,"resource");
+    const timing=/** @type {PerformanceResourceTiming|undefined} */ (entries.at(-1));
+    if(!timing||!(timing.encodedBodySize>0&&timing.transferSize>=timing.encodedBodySize)
+      ||!(timing.responseEnd>timing.responseStart)
+      ||Math.abs(timing.responseEnd-now)>1000
+      ||Math.abs(timing.startTime-Number(loading.start))>1000) return;
+    return {bytes:timing.encodedBodySize,
+      elapsed_ms:timing.responseEnd-timing.responseStart,atMs:now,completed:true,
+      from_cache:false,producer_paced:false};
+  }catch(e){}
 }
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
@@ -679,6 +705,9 @@ function createHlsStartupLoader(StockLoader,episode){
           const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
             loadingStartMs:previous.at,loadingEndMs:now});
           if(kbps&&player.abr){
+            if(xhr.getResponseHeader("X-Plurx-Producer-Paced")==="0")
+              player.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:player.mediaAttachment,
+                mediaBps:Number(xhr.getResponseHeader("Content-Length"))*8/context.frag.duration};
             player.abr.recentEstimateKbps=kbps;
             player.abr.recentEstimateAtMs=now;
             player.abr.recentEstimateSource='progress';
@@ -1004,7 +1033,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
       : null;
     if(sampleKbps&&p.abr){
       const now=performance.now();
-      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now);
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now,d.networkDetails,d.frag.url,d.frag.duration*1000);
       // The completed fragment's full-load average can include fast bytes
       // from before a cliff. Preserve a fresher within-fragment byte delta
       // until the next request supplies its own measurement.

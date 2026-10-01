@@ -901,6 +901,13 @@ async fn vod_segment_response_before(
     let headers_mut = response.headers_mut();
     headers_mut.insert(header::CONTENT_TYPE, content_type.parse().expect("mime"));
     headers_mut.insert(header::CONTENT_LENGTH, len.into());
+    // The source body is a held complete immutable object; response-body
+    // timing excludes the bounded wait before headers were published.
+    headers_mut.insert("x-plurx-producer-paced", "0".parse().expect("provenance"));
+    headers_mut.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        "X-Plurx-Producer-Paced".parse().expect("expose"),
+    );
     headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
     headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
     headers_mut.insert(
@@ -1534,6 +1541,11 @@ pub(super) async fn segment_local_before(
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
         .header(header::CONTENT_LENGTH, opened_len)
+        .header("x-plurx-producer-paced", "0")
+        .header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "X-Plurx-Producer-Paced",
+        )
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, etag)
         // A finished segment never changes: ffmpeg writes `.tmp` and

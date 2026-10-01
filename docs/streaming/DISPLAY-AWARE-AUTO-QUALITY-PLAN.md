@@ -1,6 +1,6 @@
 # Automatic quality — the best sustainable picture on each display
 
-**Status:** M0/B-R1 source implementation in progress; combined feature
+**Status:** combined server/client implementation in progress; combined feature
 qualification remains open · Paul authorized GPT-6.1 Sol implementation on
 2026-09-30
 · **Written:** 2026-09-30 · **Original source baseline:** `ceb7dd8cc`
@@ -81,8 +81,8 @@ and [A-04's design](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) into that same
 execution ledger. Claim/update the existing A-05 board row for runtime work;
 do not create a second controller project with its own fixtures or ownership.
 At M0, amend A-05 to name this effort and the mapping in §7 before editing its
-runtime surfaces. This planning reconciliation has not claimed the board or
-started implementation. The labels A (starting selection) and B (runtime)
+runtime surfaces. The planning reconciliation did not claim the board or start implementation;
+§9 records subsequent source implementation. The labels A (starting selection) and B (runtime)
 below are workstreams, not separately shippable feature deliverables.
 
 The strictly additive parser-compatibility prerequisite in §4.1 is a necessary
@@ -1077,6 +1077,56 @@ status audit and unrelated operations fixtures remain unchanged; Linux
 preflight is still required.
 
 
+### 9.3 M1-A source progress — 2026-09-30
+
+B-R1 is committed as `62fcdaa12aa2cffa478dff4aff3b148a069a4885` and reviewed
+in [PR657](http://192.168.4.7:3000/noirr/plurx/pulls/657). The tracked hook and
+exact-commit check passed. The artifact attachment API rejected this Forgejo
+URL; the PR exists. No skipped workflow is treated as qualification. The
+combined effort and M1 task retain this reviewed dependency pending ordinary
+prerequisite landing; no deployment is claimed.
+
+The first M1 source slice adds exact two-axis fit using upright SAR/rotation
+aspect and integer cross-products at the agreed `11/10` scale. It checks actual
+even output dimensions; width 2112 admits 1920×1080 while width 2113 refuses it.
+Tablet, portrait, scope, SAR, rotation and missing/invalid geometry fixtures
+pass. Source coded dimensions remain separate from displayed aspect.
+
+The existing bound `DecodeFacts` FFprobe reader retains measured SAR and
+rotation with its existing source identity/lifecycle. A successful stream probe
+without a display matrix or rotate tag is upright; malformed/conflicting
+rotation or missing SAR stays unknown. Existing artifact FactsDigest remains
+unchanged; the normalized candidate recipe in M2 must include the actual SAR,
+rotation and transformation version rather than changing legacy cache identity.
+Both existing production selective probes now request SAR, rotate tags and
+display-matrix rotation. A matrix identified without its rotation remains
+unknown; a regression pins the actual incomplete selective-probe shape.
+No second probe, catalog migration or unbound fact cache was introduced.
+
+Create capabilities now carry optional render target and nullable per-entry
+coded-width/rational-frame-rate limits. Duplicate codec/profile entries remain
+separate. Known violations refuse admission; incomplete legacy constraints are
+unknown, including zero actual dimensions. Admission of original copy uses
+coded dimensions, while normalized encodes use their resulting output geometry.
+The new replicated `playback.display_aware_auto` choice defaults off when absent,
+is returned by settings/server info, and saves independently of advisory
+readiness. Its Developer card identifies combined source/device qualification
+and its graduation destination. Both choices and a late-save/newer-draft race
+are verified by the existing Settings suite.
+
+Current focused evidence: exact fit2 passed; per-profile admission1 passed;
+bound-probe geometry1 passed; Settings35/35 passed; pinned plurxd all-target
+check passed. Workspace all-target Clippy passed; the final zero-axis admission rerun passed.
+The existing decoder-selection/recipe-identity suite passed all 59 cases,
+including source-binding and artifact-identity regressions. Docs index4 passed. This
+is source implementation evidence only: worker grade, actual display, physical
+recovery, normalized production filters and retained/remote candidate transport
+remain later integration/qualification obligations, not passes from pure math.
+The final adversarial review found and rechecked the incomplete-matrix P2
+correction; its final verdict found no actionable blockers. Corrected focused
+probe test and pinned all-target check passed; final Clippy/hook passed.
+M1 source commit is `76a883fa0`; the B-R1 follow-up `78e9ba0ee` is retained
+on the effort and integrated into this task before exact-tree revalidation.
 ### 9.2.2 Authoritative-main refresh — 2026-09-30
 
 While PR657's corrected preflight passed, authoritative main advanced from
@@ -1138,3 +1188,146 @@ public ingress and retained terminal replay 1/1; candidate/revision tests with
 Rust 1.97.1. Independent schema/relay review found no actionable blockers;
 the normal commit hook remains pending. These are source checks, not a parser-floor deployment
 receipt or feature qualification.
+
+### 9.4 Dependency integration after parser snapshot qualification
+
+The M1 source retains its reviewed geometry/capability/settings implementation,
+with authoritative main f16be4f22 and parser snapshot source 357d47a07 integrated.
+The snapshot normal tracked hook passed catalog, pinned formatting/workspace
+Clippy and served JavaScript syntax. Parser PR657 remains unlanded; no fleet
+receipt or combined-feature promotion is inferred. Exact M1 integration all-target check passed on Rust 1.97.1; core playback
+90/90 with `hiqlite-store`, decoder selection 59/59, Developer settings 35/35,
+strict protocol conformance 15/15 and docs index 4/4 passed. Normal integration
+commit hook remains pending; older M1 results do not substitute for this tree.
+
+### 9.5 M2 normalized pipeline integration (in progress)
+
+Source work now opts new candidate routes into a conditional upright square-pixel
+presentation contract; legacy requests, FactsDigest and cache recipes retain
+their existing branch. New plan identity carries transformation version, measured
+SAR and rotation. Source ceilings use upright square-pixel presentation coordinates:
+1440×1080 SAR4:3 retains 1920×1080, while an ordinary 1920×1080 source never
+creates a synthetic 1440-high rung. The CPU pipeline, immutable VOD argument
+builder and encoded VOD manifest adapter consume the same resolved raster.
+Unknown geometry refuses only the new normalization claim. Rotated opaque GPU
+graphs are refused until a supported exact transform is proved.
+
+A local FFmpeg9.0.1 synthetic fixture independently measured the display-matrix
+sign: +90 matches `transpose=cclock`, -90 matches `transpose=clock`, and180
+matches `hflip,vflip`. Manual transforms plus output `rotate=0` metadata retained
+the input matrix; clearing the input matrix before manual rotation removed it.
+The new conditional argv therefore includes input `-noautorotate` and
+`-display_rotation 0`, plus one measured manual transform and explicit `setsar=1`.
+Even raster alone does not prove square pixels: a 360×240 SAR64:45 source scaled
+to306×144 retained SAR256:255 without `setsar=1`. These local experiments establish
+CPU behavior only; every actual eligible worker/build still needs exact graph,
+source-grade, fps, concurrency and codec/container proof. No1440 rate profile or
+production candidate admission is claimed yet. Core decoder regressions 62/62 passed after a reviewed correction: scalar
+rotation is insufficient to exclude reflected/sheared display matrices. Both
+production queries now collect full `displaymatrix` and its type; the normalized
+branch validates pure unit quarter-turn coefficients and refuses missing,
+reflected, translated or sheared matrices without changing legacy routes. Rolling
+start/cache now consume the same resolved contract as encoded VOD. New rolling
+masters remain attempt-bound; MPEG-TS does not have an AVC init object, so this
+is not an init-derived codec claim. Manifest adapter regression/compile checks
+are running.
+
+Read-only fleet discovery currently reports FOUR f16be4f22 members: nynuc
+192.168.5.236 and m6 192.168.4.14 voters, nuc4 192.168.4.8 leader/voter, and nuc3
+192.168.4.7 read-worker/learner. Bonjour's two responders were not a complete
+fleet census. Current nynuc UI reports jellyfin-ffmpeg8.1.3, QSV/VAAPI boot graph
+validation, but unavailable held FFprobe identity and explicit decode facts;
+Main10 plain-HDR and DV-HDR10 graphs failed. These are baseline observations,
+not source geometry/tone-map admission proofs or parser-floor deployment receipts.
+Missing bound facts must remain unknown through the new adapter.
+
+### 9.6 User-confirmed execution workflow (2026-09-30)
+
+Implementation now uses the independent clone `/private/tmp/plurx-auto-quality`,
+with no shared Git metadata or further access to the user's original checkout.
+The migration retained all twelve owned source files with exact byte verification
+in an external snapshot. Parser prerequisite PR657 landed as
+`5c99538fd0f6e96a7a6f6d8772f944735c4f33b1` after its final promotion gate.
+
+The user explicitly replaced intermediate task tests, reviews and effort gates
+with batched normal commits, compiler and formatting checks, then one adversarial
+pass when the combined PR is ready for main. Findings are addressed before the
+fast lane and green merge. Broad unrelated unit-failure cleanup is a separate
+process. Physical qualification gaps remain truthful advisory Developer status;
+readiness does not reject Save or override the saved feature choice. Safety and
+compatibility predicates still describe what evidence actually supports.
+
+### 9.7 Current source integration and compiler receipts
+
+The independent clone passed Rust1.97.1 daemon all-target checks after profile,
+manifest and request-context integration. New profile identity is explicit in
+TranscodeOptions; it pins H.264 High level5.0, measured normalized cadence and
+12Mb/s VBR, with actual audio contributing separately to average/peak bandwidth.
+A160kb/s audio budget yields12.16Mb/s average and18.16Mb/s peak. Rolling and VOD
+manifest adapters carry both values. Immutable output grid follows the resolved
+normalized cadence. Candidate execution context is serde-skipped inside the
+legacy SessionRequest; retained outer worker candidate/target/decoder fields
+remain the protocol reconstruction seam. Full recipe equality is checked before
+VOD admission. Catalog/owner/controller integration remains underway.
+
+Create-time Android, iOS and tvOS sources compile, as do web syntax/types with
+the existing baseline unchanged. Target pixels come from the actual player
+container. Android decoder maxima come from advertised component/profile limits;
+Apple/web absent maxima remain unknown. These are compiler receipts, not
+physical smoothness or D3 traces. Existing A-05 ownership is recorded on its
+work-board row and combined with this effort.
+
+The packaged bound probe now uses separately pinned upstreamFFmpeg8.1.3 source
+SHA2567138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3.
+An actual LinuxARM64 Bookworm compile passed; the resulting FFprobe8.1.3 ELF
+has no INTERP or DYNAMIC segment (binary SHA256
+bdd21afcf90f5cff773affb3912cb522e7a711b60e91dbd23330faedc9468326).
+PLURX_BOUND_FFPROBE selects this self-contained parser for held local-file facts;
+general scanning retains Jellyfin FFprobe unchanged. The build checks static
+closure on each target architecture. x86 compilation and production installation
+are not claimed. Receipt files remain under the external task artifact directory
+`/private/tmp/plurx-auto-static-probe/compiled/docs`; no production mutation occurred.
+
+
+### 9.8 Connected route and runtime source batch
+
+The negotiated `route-v1` response carries canonical full-recipe candidates and
+an active candidate ID. Decision, manual 1440 create and prepared Auto requests
+now resolve through the catalog. Worker envelopes retain candidate/target/decoder
+snapshots and reconstruct the internal context before execution; a different
+worker recipe is refused rather than relabelled. Final prepared commit compares
+the latest target and decoder snapshot with the staged recipe. Explicit candidate
+recovery bypasses legacy height reinterpretation after predecessor ownership is
+verified. The catalog retains unknown sustainability separately from compatible
+manual choices and bounded speculative trials; initial Auto does not treat an
+unknown production sample as proof.
+
+An unproved compatible route may obtain a nonpreemptive prepared slot while the
+incumbent keeps running. Actual successor frame/buffer/link and live encode
+production evidence gates commit. Completed unpaced production measurements are
+candidate-specific and require at least two segments and two seconds of active
+wall time; permit waits, suspension and retries reset the window. Transfer proof
+requires completed network bodies, excludes cache and producer pacing, and expires
+at 15 seconds. The six-per-hour voluntary budget excludes severe recovery and
+natural viewer discontinuities. Original source peak bitrate remains unknown
+unless independently measured; source average is not promoted into peak proof.
+
+For a bounded return to an original with unknown global peak, the clients can
+use at least two successor segments covering two seconds of media: completed
+unpaced network throughput must exceed 1.8 times the maximum observed segment
+wire bitrate. This is empirical evidence for those segments, not a claimed
+whole-title peak. Missing media durations or provenance leave that path unknown;
+natural-boundary recovery still follows the original-first compatibility rule.
+
+Rust1.97.1 daemon all-target compiler checks passed after the catalog, relay and
+commit-fence integration. Web syntax/types and native compilers remain source
+checks; new focused regression definitions have not been run under the user's
+batched workflow. Client controllers and exact resident-cache offering are now
+connected. Cluster catalogs use a separate authenticated, bounded inspection
+endpoint; legacy strict placement envelopes remain unchanged. Exact advertised
+worker recipes pin create and prepared placement, and takeover reconstructs the
+retained candidate before local dispatch. Native Android unit-test compilation
+and iOS/tvOS build-for-testing passed without executing tests (versions 140/202).
+Final main integration, adversarial review and fast-lane qualification remain
+in progress. No physical D3,
+TCL playback, source-grade 1440 throughput or production deployment is claimed.

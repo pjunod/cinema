@@ -491,6 +491,7 @@ function updateStats(){
 async function pollSessionHealth(force){
   const p=PLAYER;
   if(!playbackOwnsAttachedMedia(p)) return;
+  if(p.directedChange?.autoMove?.retainIncumbent) void pollPreparedQualityHealth(p);
   const session=p.sessionId, stream=p.streamId, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&p.sessionId===session&&p.streamId===stream
     &&p.mediaAttachment===attachment;

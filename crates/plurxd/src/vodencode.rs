@@ -1,6 +1,8 @@
 //! Frozen encoded-VOD recipes and per-generation foreground capacity.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
@@ -36,6 +38,11 @@ pub(crate) struct Encoding {
     /// successor. Admission reads it at each producer start so a committed VOD
     /// session becomes ordinary foreground work without rebuilding its recipe.
     pub speculative: std::sync::atomic::AtomicBool,
+    /// Voluntary Auto probes cannot borrow the incumbent's resources.
+    pub nonpreemptive_trial: bool,
+    pub candidate_recipe: Option<[u8; 32]>,
+    pub production_proofs: Arc<CandidateProductionProofs>,
+    pub active_production: Mutex<ActiveProductionWindow>,
     pub queued: Mutex<Option<LiveWait>>,
     pub policy_retry: std::sync::atomic::AtomicBool,
     /// Set while a refused prepared successor has asked its own viewer's
@@ -52,6 +59,121 @@ pub(crate) struct Encoding {
     /// The admission point a race test can pause at; production installs
     /// [`NoopEncodingHooks`] (TRANSCODE-DECOMPOSITION-PLAN §3.9, M8).
     pub hooks: Box<dyn EncodingHooks>,
+}
+
+/// Recent exact-recipe observations on this worker; this never grants a permit.
+#[derive(Debug, Default)]
+pub(crate) struct CandidateProductionProofs {
+    rows: Mutex<HashMap<[u8; 32], ActiveProductionEvidence>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ActiveProductionEvidence {
+    pub milli_realtime: u32,
+    pub active_ms: u32,
+    pub completed_segments: u32,
+    pub observed_at: Instant,
+}
+
+impl CandidateProductionProofs {
+    pub(crate) fn get(&self, recipe: [u8; 32]) -> Option<ActiveProductionEvidence> {
+        let now = Instant::now();
+        let mut rows = self.rows.lock().expect("candidate production proofs");
+        rows.retain(|_, proof| {
+            now.saturating_duration_since(proof.observed_at) <= Duration::from_secs(15)
+        });
+        rows.get(&recipe).copied()
+    }
+
+    fn remove(&self, recipe: Option<[u8; 32]>) {
+        if let Some(recipe) = recipe {
+            self.rows
+                .lock()
+                .expect("candidate production proofs")
+                .remove(&recipe);
+        }
+    }
+
+    fn record(&self, recipe: [u8; 32], proof: ActiveProductionEvidence) {
+        let mut rows = self.rows.lock().expect("candidate production proofs");
+        rows.retain(|_, value| {
+            proof
+                .observed_at
+                .saturating_duration_since(value.observed_at)
+                <= Duration::from_secs(15)
+        });
+        if rows.len() >= 256 && !rows.contains_key(&recipe) {
+            if let Some(oldest) = rows
+                .iter()
+                .min_by_key(|(_, value)| value.observed_at)
+                .map(|(key, _)| *key)
+            {
+                rows.remove(&oldest);
+            }
+        }
+        rows.insert(recipe, proof);
+    }
+}
+
+/// Points from one continuous unpaced producer interval. The first completed
+/// video fragment establishes a baseline, excluding startup. Holds and retries
+/// discard the interval rather than treating idle time as spare capacity.
+#[derive(Debug, Default)]
+pub(crate) struct ActiveProductionWindow {
+    generation: u64,
+    active: bool,
+    points: VecDeque<(Instant, u32, i64)>,
+    evidence: Option<ActiveProductionEvidence>,
+}
+
+impl ActiveProductionWindow {
+    fn observe(
+        &mut self,
+        now: Instant,
+        generation: u64,
+        entry: u32,
+        end_ms: i64,
+    ) -> Option<ActiveProductionEvidence> {
+        if !self.active || self.generation != generation {
+            return None;
+        }
+        if self.points.back().is_some_and(|(_, previous, end)| {
+            previous.checked_add(1) != Some(entry) || *end >= end_ms
+        }) {
+            self.points.clear();
+            self.evidence = None;
+        }
+        while self
+            .points
+            .front()
+            .is_some_and(|(at, _, _)| now.saturating_duration_since(*at) > Duration::from_secs(15))
+        {
+            self.points.pop_front();
+        }
+        self.points.push_back((now, entry, end_ms));
+        while self.points.len() > 64 {
+            self.points.pop_front();
+        }
+        let (first_at, first_entry, first_end) = *self.points.front()?;
+        let elapsed = now.saturating_duration_since(first_at).as_millis();
+        let completed_segments = entry.saturating_sub(first_entry);
+        if completed_segments < 2 || elapsed < 2000 {
+            return None;
+        }
+        let media_ms = end_ms.checked_sub(first_end)?;
+        let speed = u128::try_from(media_ms)
+            .ok()?
+            .checked_mul(1000)?
+            .checked_div(elapsed)?;
+        let evidence = ActiveProductionEvidence {
+            milli_realtime: u32::try_from(speed).ok()?,
+            active_ms: u32::try_from(elapsed).ok()?,
+            completed_segments,
+            observed_at: now,
+        };
+        self.evidence = Some(evidence);
+        Some(evidence)
+    }
 }
 
 /// The points of an encoding's admission that a test can pause at
@@ -158,6 +280,10 @@ impl Encoding {
             engine: self.engine.clone(),
             admissions,
             store: Arc::clone(&self.store),
+            nonpreemptive_trial: self.nonpreemptive_trial,
+            candidate_recipe: self.candidate_recipe,
+            production_proofs: Arc::clone(&self.production_proofs),
+            active_production: Mutex::new(ActiveProductionWindow::default()),
             speculative: std::sync::atomic::AtomicBool::new(
                 self.speculative.load(std::sync::atomic::Ordering::Acquire),
             ),
@@ -186,6 +312,34 @@ impl Encoding {
     pub(crate) fn mark_speculative(&self) {
         self.speculative
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub(crate) fn reset_active_production(&self, generation: u64, active: bool) {
+        let mut window = self.active_production.lock().expect("active production");
+        *window = ActiveProductionWindow {
+            generation,
+            active,
+            ..ActiveProductionWindow::default()
+        };
+        self.production_proofs.remove(self.candidate_recipe);
+    }
+
+    pub(crate) fn note_active_segment(&self, generation: u64, entry: u32, end_ms: i64) {
+        let mut window = self.active_production.lock().expect("active production");
+        let proof = window.observe(Instant::now(), generation, entry, end_ms);
+        if let (Some(recipe), Some(proof)) = (self.candidate_recipe, proof) {
+            self.production_proofs.record(recipe, proof);
+        } else if window.evidence.is_none() {
+            self.production_proofs.remove(self.candidate_recipe);
+        }
+    }
+
+    pub(crate) fn active_production_evidence(&self) -> Option<ActiveProductionEvidence> {
+        self.active_production
+            .lock()
+            .expect("active production")
+            .evidence
+            .filter(|proof| proof.observed_at.elapsed() <= Duration::from_secs(15))
     }
 
     pub(crate) fn promote(&self) {
@@ -431,4 +585,81 @@ pub(crate) fn frame_grid(probe: Option<&str>) -> Option<VodFrameGrid> {
             VodFrameGrid::new(numerator.parse().ok()?, denominator.parse().ok()?)
         })
     })
+}
+
+#[cfg(test)]
+mod production_evidence_tests {
+    use super::*;
+
+    #[test]
+    fn active_rate_excludes_startup_and_requires_two_complete_intervals() {
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow {
+            generation: 7,
+            active: true,
+            ..Default::default()
+        };
+        assert!(window.observe(now, 7, 10, 44_000).is_none());
+        assert!(window
+            .observe(now + Duration::from_secs(1), 7, 11, 48_000)
+            .is_none());
+        let proof = window
+            .observe(now + Duration::from_secs(2), 7, 12, 52_000)
+            .expect("two completed active intervals");
+        assert_eq!(proof.milli_realtime, 4000);
+        assert_eq!(proof.active_ms, 2000);
+        assert_eq!(proof.completed_segments, 2);
+    }
+
+    #[test]
+    fn production_proof_cannot_bridge_generation_hold_or_noncontiguous_seek() {
+        let now = Instant::now();
+        let mut window = ActiveProductionWindow {
+            generation: 3,
+            active: true,
+            ..Default::default()
+        };
+        window.observe(now, 3, 1, 8_000);
+        window.observe(now + Duration::from_secs(1), 3, 2, 12_000);
+        assert!(window
+            .observe(now + Duration::from_secs(2), 4, 3, 16_000)
+            .is_none());
+        assert!(window
+            .observe(now + Duration::from_secs(3), 3, 50, 204_000)
+            .is_none());
+        assert!(window.evidence.is_none());
+        assert_eq!(window.points.len(), 1);
+        window.active = false;
+        assert!(window
+            .observe(now + Duration::from_secs(5), 3, 51, 208_000)
+            .is_none());
+        assert_eq!(window.points.len(), 1);
+    }
+
+    #[test]
+    fn exact_recipe_production_proof_expires_without_refresh() {
+        let proofs = CandidateProductionProofs::default();
+        let recipe = [7; 32];
+        proofs.record(
+            recipe,
+            ActiveProductionEvidence {
+                milli_realtime: 1600,
+                active_ms: 2500,
+                completed_segments: 2,
+                observed_at: Instant::now(),
+            },
+        );
+        assert!(proofs.get(recipe).is_some());
+        assert!(proofs.get([8; 32]).is_none());
+        proofs.record(
+            recipe,
+            ActiveProductionEvidence {
+                milli_realtime: 1600,
+                active_ms: 2500,
+                completed_segments: 2,
+                observed_at: Instant::now() - Duration::from_secs(16),
+            },
+        );
+        assert!(proofs.get(recipe).is_none());
+    }
 }

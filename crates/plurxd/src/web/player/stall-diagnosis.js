@@ -119,10 +119,12 @@ async function startTranscodeFallback(reason, note){
 // and an explicit-Original session that measures comfortable margin for a
 // minute CLEARS the remembered limit, so a GPU upgrade is noticed.
 function maybeDecodeRescue(){
-  const p=PLAYER, v=document.getElementById("video");
+  const p=PLAYER, v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
   if(!playbackOwnsAttachedMedia(p)) return;
   if(!p || !v || !p.started || !p.hitches || v.paused) return;
-  if(p.method!=='remux' && p.method!=='direct_play') return;
+  const routeAuto=!!(SERVER&&SERVER.playback_display_aware_auto
+    &&p.qualityProtocol==='route-v1'&&Array.isArray(p.qualityCandidates));
+  if(p.method!=='remux' && p.method!=='direct_play'&&!routeAuto) return;
   const h=p.hitches, secs=playedSecs(v), q=qualityForce();
   // An Auto session that is deliberately re-testing an old limit gets judged
   // by the same rule as an explicit Original — that is what makes the re-test
@@ -156,9 +158,30 @@ function maybeDecodeRescue(){
     // entry, so it falls through to the trigger below rather than returning.
     if(q==='original') return;
   }
-  if(q!=='auto' || p.decodeRescued) return;
+  if(q!=='auto' || p.decodeRescued&&!routeAuto) return;
   const verdict=decodeMarginVerdict(h, secs);
   if(!verdict) return;
+  if(routeAuto&&p.abr){
+    const current=p.qualityCandidates.find(row=>row.id===p.qualityCandidateId);
+    if(current){
+      const now=performance.now();
+      const result=PlaybackPolicy.decideCandidateTransition({state:p.abr.candidateState||{},
+        candidates:p.qualityCandidates,currentId:current.id,target:measuredPresentationTarget(),
+        aspect:current.width/current.height,sample:{now_ms:now,automatic:true,presenting:true,
+          paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange
+            ||p.abr.switching||p.autoFallbackInFlight,cause:'decode',cause_age_ms:0,
+          runway_ms:bufferRunway(v)*1000,stalled:!!p.waitAt,natural_boundary:false}});
+      p.abr.candidateState=result.state;
+      if(result.candidate){
+        if(!((p.bufferLimits&&p.bufferLimits.quota)|0)) rememberDecodeLimit(p.source,verdict);
+        void switchAutoCandidate(p,v,current,result).catch(()=>{});
+        return;
+      }
+      // The route reducer permits one decode recovery per exact recipe. The
+      // existing compatibility/error owner handles a repeated failure.
+      if(p.method==='transcode'||result.reason==='decoder recovery owns repeated failure') return;
+    }
+  }
   // A supply rescue already opening a replacement owns this playback's one
   // automatic move. Return without latching `decodeRescued` or writing a note:
   // if that rescue lands the session becomes a transcode and the method check
@@ -212,6 +235,8 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
     position:Math.max(0,position||0),target_method:p.method||null,
     target_session_id:targetSessionId||p.sessionId||null,target_attempt_id:p.attemptId||null};
   p.abr.switches.push(entry);
+  p.abr.switchBudgetTimes=(p.abr.switchBudgetTimes||[])
+    .filter(at=>atMs-at<3600000).concat(atMs).slice(-6);
   if(reason==='bandwidth cliff') p.abr.lastCliffAtMs=atMs;
   if(p.abr.switches.length>8) p.abr.switches.shift();
   clientLog(Object.assign({level:"warn",event:"quality_switch",reason:"auto",
@@ -221,6 +246,8 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
 }
 function autoCauseEvidence(p,nowMs){
   const maxAge=PlaybackPolicy.AUTO_DEFAULTS.causeMaxAgeMs;
+  if(p&&p.abr&&nowMs<Number(p.abr.stallVerdictUntilMs||0))
+    return {kind:"control-stall-verdict",ageMs:0};
   const episode=p&&p.hlsStartup;
   if(episode&&episode.establishedSuspension
     &&episode.establishedSuspension.attachment===p.mediaAttachment){
@@ -296,6 +323,18 @@ function queueAutoControllerTick(p,urgent){
   });
 }
 function scheduleUrgentAutoControllerTick(p,kbps,now){
+  if(p&&PLAYER===p&&p.abr&&!p.abr.switching&&qualityForce()==='auto'
+    &&SERVER&&SERVER.playback_auto_abr&&SERVER.playback_display_aware_auto
+    &&p.qualityProtocol==='route-v1'&&Array.isArray(p.qualityCandidates)){
+    const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
+    const sample=p.abr.qualityPressureTransfer;
+    if(current&&sample&&sample.attachment===p.mediaAttachment&&now-sample.atMs<=15000
+      &&sample.bps<PlaybackPolicy.qualityPressureCostBps(current,candidateTransferEvidence(p,now),sample.mediaBps)*0.7
+      &&(p.abr.lastUrgentAutoTickAtMs==null||now-p.abr.lastUrgentAutoTickAtMs>=1000)){
+      p.abr.lastUrgentAutoTickAtMs=now;queueAutoControllerTick(p,true);
+    }
+    return;
+  }
   if(!p||PLAYER!==p||!p.abr||p.abr.switching||p.method!=="transcode"
     ||qualityForce()!=="auto"||!(SERVER&&SERVER.playback_auto_abr)) return;
   const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
@@ -424,7 +463,12 @@ async function rescueAutoSupply(causeEvidence){
   p.abr.stallEvents.supply=[];
 }
 async function autoControllerTick(){
-  const p=PLAYER, v=document.getElementById("video");
+  const p=PLAYER, v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
+  if(p&&p.abr&&(document.hidden||v&&v.paused||v&&v.seeking)){
+    if(p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
+    p.abr.upgradeSinceMs=null;
+    return;
+  }
   const attachment=p?.mediaAttachment, session=p?.sessionId, stream=p?.streamId;
   if(!playbackOwnsAttachedMedia(p)) return;
   if(!(SERVER&&SERVER.playback_auto_abr)||!p||!v||!p.abr||qualityForce()!=='auto'||!p.started||v.paused||p.abr.switching) return;
@@ -442,6 +486,11 @@ async function autoControllerTick(){
     p.abr.stallEvents[kind]=(p.abr.stallEvents[kind]||[]).filter(at=>now-at<windowMs);
   }
   const causeEvidence=autoCauseEvidence(p,now);
+  if(SERVER.playback_display_aware_auto&&p.qualityProtocol==='route-v1'
+    &&Array.isArray(p.qualityCandidates)){
+    await candidateAutoControllerTick(p,v,causeEvidence,now);
+    return;
+  }
   if(causeEvidence.kind==="loader-suspended"){
     const resumed=resumeHlsStartup(v,p);
     recordAutoDecision(p,Number(p.autoHeight||v.videoHeight)||null,
@@ -481,6 +530,8 @@ async function autoControllerTick(){
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     lastCliffAtMs:p.abr.lastCliffAtMs,
     upgradeSinceMs:p.abr.upgradeSinceMs,playerHeight:playerPixelHeight(v),
+    switchesThisPlaybackHour:(p.abr.switchBudgetTimes||[])
+      .filter(at=>now-at<3600000).length,
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
   p.abr.previousRunway=runway;
@@ -493,6 +544,148 @@ async function autoControllerTick(){
   }
   const stallFree=p.abr.lastStallAtMs==null||now-p.abr.lastStallAtMs>=windowMs;
   if(stallFree&&now-p.abr.stableSinceMs>=windowMs) rememberAutoRung(currentHeight);
+}
+function candidateQualityContext(p){
+  const caps=currentCapsDocument();
+  return JSON.stringify({video:caps.video,display:caps.display,
+    audio:selectedAudioIndex(p),subtitle:p.curSub,burn:p.burnedSub,offset:p.aoffset});
+}
+async function refreshQualityCandidates(p){
+  const key=candidateQualityContext(p);
+  if(p.abr.candidateContext===key) return true;
+  const now=performance.now();
+  if(p.abr.pendingCandidateContext!==key){
+    p.abr.pendingCandidateContext=key;
+    p.abr.candidateContextChangedAt=now;
+    if(p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
+    if(p.abr.candidateContext!=null) return false;
+  }
+  if(p.abr.candidateContext!=null&&now-p.abr.candidateContextChangedAt<5000) return false;
+  if(p.abr.catalogRefreshing||p.directedChange&&!p.directedChange.settled) return false;
+  p.abr.catalogRefreshing=true;
+  const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
+  try{
+    const decision=await askDecision(p.fileId,qualityForce(),
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0});
+    if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
+      ||candidateQualityContext(p)!==key) return false;
+    p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.abr.candidateContext=key;
+    p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
+    p.abr.requestedCandidateId=null;
+    if(p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
+    return Array.isArray(p.qualityCandidates);
+  }catch(e){ return false; }
+  finally{ p.abr.catalogRefreshing=false; }
+}
+function candidateTransferEvidence(p,now){
+  const transfer=p.abr&&p.abr.qualityTransfer;
+  return transfer&&transfer.attachment===p.mediaAttachment
+    ? {...transfer,age_ms:now-transfer.atMs}:null;
+}
+async function naturalBoundaryQualityCandidate(p,seekIntent){
+  if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto
+    ||p.qualityProtocol!=='route-v1'||!Array.isArray(p.qualityCandidates)) return null;
+  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),1500);
+  const generation=p.controlIntentGeneration;
+  try{
+    const decision=await askDecision(p.fileId,'auto',
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal);
+    if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
+      ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
+    const candidates=decision.quality_candidates;
+    const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
+    const progress=p.abr.qualityPressureTransfer, now=performance.now();
+    const limit=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
+    const blocked=p.abr.candidateState?.blockedCandidates||[];
+    const picked=PlaybackPolicy.selectQualityCandidate({candidates:candidates.filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
+      aspect:current?current.width/current.height:null,
+      transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
+    p.qualityCandidates=candidates;
+    p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
+    p.abr.candidateContext=candidateQualityContext(p);
+    p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
+    p.abr.candidateState={...(p.abr.candidateState||{}),switchTimesMs:[],upgradeSinceMs:null,mildSamples:0};
+    return picked&&picked.id!==p.qualityCandidateId?picked:null;
+  }catch(e){return null;}
+  finally{clearTimeout(timer);}
+}
+async function candidateAutoControllerTick(p,v,causeEvidence,now){
+  if(!await refreshQualityCandidates(p)||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return;
+  now=performance.now();
+  const transfer=candidateTransferEvidence(p,now);
+  const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
+  if(!current) return;
+  let cause='unknown';
+  if(['authority-refused','producer-failed','delivery-refused'].includes(causeEvidence.kind)) cause='authority';
+  else if(['control-stall-verdict','loader-suspended'].includes(causeEvidence.kind)) cause='hold';
+  const link=PlaybackPolicy.qualityTransferBps(transfer);
+  const progress=p.abr.qualityPressureTransfer;
+  const pressureBps=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
+  const conservative=pressureBps>0?Math.min(link||Infinity,pressureBps):link;
+  const demand=PlaybackPolicy.qualityPressureCostBps(current,transfer,pressureBps>0?progress.mediaBps:null);
+  if(cause==='unknown'&&conservative>0&&demand>0&&conservative<demand*1.2) cause='link';
+  // recent_speed includes pacing. Only the new active-production measurement
+  // can attribute an encoder shortage rather than a deliberate producer hold.
+  const speed=p.health&&p.health.active_encode_milli_realtime;
+  if(cause==='unknown'&&current.route==='encode'&&!current.complete_cache
+    &&p.healthObservedAt!=null
+    &&PlaybackPolicy.qualityEncodeProof(p.health,current.id,now-p.healthObservedAt)
+    &&speed<1000) cause='encode';
+  const result=PlaybackPolicy.decideCandidateTransition({
+    state:p.abr.candidateState||{},candidates:p.qualityCandidates,currentId:current.id,
+    aspect:current.width/current.height,target:measuredPresentationTarget(),
+    sample:{now_ms:now,automatic:qualityForce()==='auto',presenting:p.started,
+      paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange||p.abr.switching,
+      cause,cause_age_ms:cause==='link'?(pressureBps>0?now-progress.atMs:transfer.age_ms):(causeEvidence.ageMs||0),
+      link_pressure_bps:pressureBps,link_pressure_media_bps:pressureBps>0?progress.mediaBps:null,link_pressure_age_ms:pressureBps>0?now-progress.atMs:null,
+      runway_ms:bufferRunway(v)*1000,stalled:!!p.waitAt,last_stall_ms:p.abr.lastStallAtMs,
+      natural_boundary:false,transfer}
+  });
+  p.abr.candidateState=result.state;
+  recordAutoDecision(p,current.target_height||current.height,
+    {action:result.candidate?'change':'suppressed',reason:result.reason,
+      evidence:{age_ms:transfer?transfer.age_ms:null}},bufferRunway(v),link>0?link/1000:null);
+  if(result.candidate) await switchAutoCandidate(p,v,current,result);
+}
+async function switchAutoCandidate(p,v,current,decision){
+  if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;
+  const chosen=decision.candidate, previousCandidateId=p.abr.requestedCandidateId||current.id;
+  const copy=chosen.route!=='encode';
+  const recovery=decision.emergency||decision.transition==='recover';
+  const move={from:current.route==='encode'?current.target_height:'Original',
+    to:copy?'Original':chosen.target_height,switchReason:decision.reason,
+    candidateId:chosen.id,previousCandidateId,retainIncumbent:!recovery,
+    emergency:!!decision.emergency};
+  const reopen=()=>{
+    p.abr.requestedCandidateId=chosen.id;
+    const pos=positionForPlaybackIntent(v,p);
+    beginPlaybackControlSeek(p,pos,false);
+    return requestPlaybackMediaChange(p,{method:copy?'remux':'transcode',copyHls:copy,
+      height:copy?null:chosen.target_height,candidateId:chosen.id,reason:'auto-quality',automatic:true,
+      from:move.from,switchReason:decision.reason});
+  };
+  let retained=false;
+  try{
+    if(!preparedHandoffOffered(p)||!directedChangeIncumbentReady(p,v)){
+      if(recovery) return await reopen();
+      return false;
+    }
+    p.abr.requestedCandidateId=chosen.id;
+    p.autoRequestedHeight=null;
+    p.abr.switching=true;
+    const outcome=await requestQualityChange(p,'auto-quality',reopen,move);
+    if(outcome==='prepared'&&p.directedChange&&!p.directedChange.settled){
+      const change=p.directedChange;
+      change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,'commit_timeout'),
+        Math.max(0,10000-(performance.now()-change.tappedAt)));
+      retained=true;
+    }
+    return outcome==='prepared';
+  }finally{
+    if(!retained){p.abr.switching=false;releaseAutoFallback(p);}
+  }
 }
 // Arm the watchdog for a stream we have just (re)started at `fromSec`. Recording
 // the intended position is what makes this work after a *seek*: the old check

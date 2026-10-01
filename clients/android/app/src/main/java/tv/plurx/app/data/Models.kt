@@ -18,6 +18,9 @@ data class Server(
     val version: String? = null,
     val instance_id: String? = null,
     val display_mode_match: Boolean = false,
+    val playback_display_aware_auto: Boolean = false,
+    val playback_auto_abr: Boolean = false,
+    val display_aware_auto_protocol: String? = null,
 )
 
 @Serializable
@@ -558,6 +561,38 @@ data class SourceSummary(
  * quality menu stops hardcoding heights the source cannot reach.
  */
 @Serializable
+data class QualityCandidate(
+    val id: String,
+    val recipe_digest: List<Int>,
+    val route: String,
+    val width: Int,
+    val height: Int,
+    val target_height: Int,
+    val average_bps: Long? = null,
+    val peak_bps: Long? = null,
+    val grade: String,
+    val decoder_compatible: Boolean,
+    val complete_cache: Boolean,
+    val sustainable: Boolean,
+) {
+    val hasValidIdentity: Boolean
+        get() {
+            if (recipe_digest.size != 32 || recipe_digest.any { it !in 0..255 } || width !in 1..16384 ||
+                height !in 1..16384 || target_height !in 0..16384 || route !in listOf("original", "remux", "encode") ||
+                grade !in listOf("sdr", "hdr10")) return false
+            val hash = java.security.MessageDigest.getInstance("SHA-256")
+            hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
+            val expected = hash.digest(recipe_digest.map { it.toByte() }.toByteArray())
+                .take(16).joinToString("") { "%02x".format(it.toInt() and 255) }
+            return id == expected
+        }
+}
+
+fun manualCatalogHeights(candidates: List<QualityCandidate>): List<Int> = candidates.filter {
+    it.hasValidIdentity && it.decoder_compatible && it.route == "encode"
+}.map { it.target_height }.distinct().sortedDescending()
+
+@Serializable
 data class Rung(
     val height: Int,
     val total_kbps: Int = 0,
@@ -581,6 +616,9 @@ data class Decision(
     val selection: DecisionSelection? = null,
     val markers: List<Marker> = emptyList(),
     val ladder: List<Rung> = emptyList(),
+    val quality_candidates: List<QualityCandidate> = emptyList(),
+    val quality_candidate_id: String? = null,
+    val display_aware_auto_protocol: String? = null,
     val audio_offset_ms: Long = 0,
     val declared_offset_ms: Long? = null,
     /**
@@ -656,6 +694,9 @@ data class HlsStart(
     val vod: Boolean = false,
     /** The rungs this source can feed, top first — §5.6's quality menu. */
     val ladder: List<Rung> = emptyList(),
+    val quality_candidates: List<QualityCandidate> = emptyList(),
+    val quality_candidate_id: String? = null,
+    val display_aware_auto_protocol: String? = null,
     /**
      * What *this session* delivers, which overrides the decision's answer the
      * moment the session attaches: a burn or a manually-picked rung forces a
@@ -689,6 +730,11 @@ data class HlsStart(
 /** Live HLS telemetry shared by the web, Apple, and Android stats views. */
 @Serializable
 data class PlaybackSessionStatus(
+    val active_encode_milli_realtime: Int? = null,
+    val active_encode_age_ms: Long? = null,
+    val active_encode_active_ms: Long? = null,
+    val active_encode_segments: Int? = null,
+    val active_encode_candidate_id: String? = null,
     val id: String,
     val file_id: Long? = null,
     val target_height: Long? = null,
@@ -775,8 +821,28 @@ enum class ReopenReason {
  * `explicitNulls = false`, so nulls are genuinely absent on the wire.)
  */
 @Serializable
+data class MediaIntentSelection(
+    val quality: tv.plurx.app.player.QualitySelection,
+    val codec: tv.plurx.app.player.CodecPolicy,
+    val dynamic_range: tv.plurx.app.player.DynamicRangePolicy,
+    val audio_track: Int? = null,
+    val audio_offset_ms: Long,
+    val subtitles: tv.plurx.app.player.SubtitleSelection,
+)
+
+@Serializable
+data class MediaIntentEnvelope(
+    val lifetime_id: String,
+    val recipe_revision: Long,
+    val destination_revision: Long,
+    val transport_revision: Long,
+    val selection: MediaIntentSelection,
+)
+
+@Serializable
 @OptIn(ExperimentalSerializationApi::class)
 data class CreateSessionReq(
+    val intent: MediaIntentEnvelope? = null,
     /** Stable for one player instance; supersession is keyed by it. */
     val playback_id: String,
     /** Fresh per attempt: a replayed create recovers the same session. */

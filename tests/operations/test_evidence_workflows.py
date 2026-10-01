@@ -331,7 +331,18 @@ class EvidenceWorkflowCase(unittest.TestCase):
 
         self.assertIn("return realMediaPositionMs(", android)
         self.assertIn("val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)", android)
-        self.assertIn("transferListener = progressiveMediaOrigin,", android)
+        pipeline = android.split("private fun buildPipeline(", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)", pipeline)
+        self.assertIn("transferListener = autoTransfers,", pipeline)
+        self.assertIn("return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)", pipeline)
+        self.assertIn("autoTransfers.complete(loadEventInfo, mediaLoadData)", pipeline)
+        self.assertIn("mediaLoadData.dataType == C.DATA_TYPE_MEDIA", pipeline)
+        self.assertIn("autoTransfers.discard(loadEventInfo.uri.toString())", pipeline)
+        composite = android.split("internal class AutoTransferEvidence(", 1)[1].split("class BuiltPlayer", 1)[0]
+        for callback in ("onTransferInitializing", "onTransferStart", "onBytesTransferred", "onTransferEnd"):
+            with self.subTest(callback=callback):
+                self.assertIn(f"delegate.{callback}(source, dataSpec, isNetwork", composite)
+        self.assertIn("sample.bodyBytes != load.bytesLoaded", composite)
         self.assertIn("dataSource.setTransferListener(transferListener)", android_builder)
         self.assertIn(".playerInputAdapter(", android_screen)
         self.assertIn("PlayerInputPolicy.route(surface, state(), input)", android_adapter)

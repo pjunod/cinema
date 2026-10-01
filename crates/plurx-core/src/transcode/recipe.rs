@@ -378,6 +378,8 @@ mod tests {
         let (d, f) = (digest(), media());
         let with = |idx, bitmap| {
             let o = TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 subtitle_burn: Some(SubtitleBurn {
                     subtitle_index: idx,
                     bitmap,
@@ -433,6 +435,8 @@ mod tests {
     fn adjacent_fields_cannot_be_confused_for_one_another() {
         let (d, f) = (digest(), media());
         let opts = |h: i64, b: u32| TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: h,
             video_bitrate_kbps: b,
             ..Default::default()
@@ -525,6 +529,8 @@ mod tests {
         let (d, f) = (digest(), media());
         let sdr = TranscodeOptions::default();
         let hdr10 = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             pipeline: Pipeline::Hdr10Passthrough,
             ..Default::default()
         };
@@ -540,6 +546,8 @@ mod tests {
         // broken at exit 0. Refusal is the stronger guarantee, so assert it.
         for dolby in [Pipeline::DoviPassthrough, Pipeline::DoviTonemapx] {
             let o = TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 pipeline: dolby,
                 ..Default::default()
             };
@@ -558,6 +566,8 @@ mod tests {
             .chain(std::iter::once(Pipeline::DoviTonemapx))
         {
             let o = TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 pipeline,
                 ..Default::default()
             };
@@ -584,6 +594,8 @@ mod tests {
         let (d, f) = (digest(), media());
         let hash = |quality| {
             let o = TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 effective_rate_control: EffectiveRateControl::Qvbr { quality },
                 ..Default::default()
             };

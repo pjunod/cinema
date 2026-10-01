@@ -4167,7 +4167,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
         "-show_streams",
         "/dev/fd/3",
     ]
@@ -4463,7 +4463,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,sample_aspect_ratio,bits_per_raw_sample,avg_frame_rate,r_frame_rate,field_order,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_tags=rotate:stream_side_data=side_data_type,rotation,displaymatrix,max_content,max_average,max_luminance",
         "-show_streams",
     ];
     let mut command =
