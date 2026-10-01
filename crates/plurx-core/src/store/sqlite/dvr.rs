@@ -839,6 +839,19 @@ impl DvrStore for SqliteStore {
             .await
     }
 
+    async fn purge_dvr_recording_catalog(&self, id: &str) -> Result<(), StoreError> {
+        let id = id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            for sql in crate::dvr::DVR_PURGE_CATALOG {
+                tx.execute(sql, params![id])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn transition_dvr_recording_with_event(
         &self,
         transition: &DvrTransition<'_>,
@@ -1486,5 +1499,82 @@ impl DvrStore for SqliteStore {
             Ok(changed == 1)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod catalog_purge_tests {
+    use super::*;
+
+    async fn fixture() -> SqliteStore {
+        let store = SqliteStore::open_in_memory().expect("store");
+        store.with_conn(|conn| {
+            conn.execute("INSERT INTO libraries (id,name,kind,paths) VALUES (1,'Recordings','recordings','[]'),(2,'Movies','movies','[]')", [])?;
+            for id in 1..=9 {
+                let library = if id == 7 { 2 } else { 1 };
+                conn.execute("INSERT INTO items (id,library_id,kind,title,sort_title) VALUES (?1,?2,'movie','Recording','recording')", params![id, library])?;
+                conn.execute("INSERT INTO files (id,item_id,path,size,mtime) VALUES (?1,?1,?2,100,1)", params![id, format!("/dvr/{id}.ts")])?;
+                conn.execute("INSERT INTO dvr_recordings (id,origin,channel_id,guide_number,channel_name,airing_start,airing_end,capture_start,capture_end,title,state,path,item_id,file_id,created_at_ms,updated_at_ms) VALUES (?1,'manual','ch','1','Channel',?2,100,1,100,'Recording',?3,?4,?5,?5,1,1)", params![id.to_string(),id, if id == 6 { "done" } else { "deleted" }, if id == 9 { Some("/dvr/9.ts") } else { None }, if id == 9 { None } else { Some(id) }])?;
+            }
+            // Another version of recording 8 must survive, with its item.
+            conn.execute("INSERT INTO files (id,item_id,path,size,mtime) VALUES (10,8,'/dvr/other-version.ts',100,1)", [])?;
+            Ok(())
+        }).await.expect("fixture");
+        store
+    }
+
+    #[tokio::test]
+    async fn purged_recordings_remove_only_their_catalog_entries() {
+        let store = fixture().await;
+        // Five old purged rows reproduce the live failure. Include a live
+        // recording, a non-DVR library, another version and an unlinked scan.
+        for id in 1..=9 {
+            store
+                .purge_dvr_recording_catalog(&id.to_string())
+                .await
+                .expect("purge");
+            store
+                .purge_dvr_recording_catalog(&id.to_string())
+                .await
+                .expect("idempotent");
+        }
+        store.with_conn(|conn| {
+            let ids = |table: &str| -> Result<Vec<i64>, StoreError> {
+                let mut stmt = conn.prepare(&format!("SELECT id FROM {table} ORDER BY id"))?;
+                let rows = stmt.query_map([], |r| r.get(0))?.collect::<Result<Vec<_>,_>>()?;
+                Ok(rows)
+            };
+            assert_eq!(ids("files")?, vec![6,7,10]);
+            assert_eq!(ids("items")?, vec![6,7,8]);
+            let history: i64 = conn.query_row("SELECT COUNT(*) FROM dvr_recordings", [], |r| r.get(0))?;
+            assert_eq!(history, 9);
+            let linked: i64 = conn.query_row("SELECT COUNT(*) FROM dvr_recordings WHERE item_id IS NOT NULL OR file_id IS NOT NULL", [], |r| r.get(0))?;
+            assert_eq!(linked, 1, "only the undeleted recording remains linked");
+            Ok(())
+        }).await.expect("verify");
+    }
+
+    #[tokio::test]
+    async fn failed_catalog_purge_keeps_links_for_retry() {
+        let store = fixture().await;
+        store.with_conn(|conn| {
+            conn.execute_batch("CREATE TRIGGER refuse_item_delete BEFORE DELETE ON items BEGIN SELECT RAISE(ABORT, 'test failure'); END")?;
+            Ok(())
+        }).await.expect("failure trigger");
+        assert!(store.purge_dvr_recording_catalog("1").await.is_err());
+        store
+            .with_conn(|conn| {
+                let count: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM files WHERE id=1", [], |r| r.get(0))?;
+                assert_eq!(count, 1, "file removal rolled back with item removal");
+                let linked: i64 =
+                    conn.query_row("SELECT file_id FROM dvr_recordings WHERE id='1'", [], |r| {
+                        r.get(0)
+                    })?;
+                assert_eq!(linked, 1);
+                Ok(())
+            })
+            .await
+            .expect("verify rollback");
     }
 }
