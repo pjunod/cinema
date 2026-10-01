@@ -139,7 +139,7 @@ object Caps {
             legacyQuery = result,
             audioOutputRoute = audioOutputRoute(context),
             document = capsDocument(
-                video = video,
+                video = if (Session.displayAwareAuto) video else video.copy(decoderEntries = emptyList()),
                 audio = audio,
                 hdrTypes = hdrTypes,
                 decoderDolbyVisionProfiles = dolbyVisionProfiles,
@@ -228,39 +228,104 @@ object Caps {
         30,
     )
 
-    /**
-     * Highest ordinary movie frame each registered decoder proves at 30 fps.
-     * `supportedHeights.upper` alone is not enough: it may describe a narrow
-     * frame that the decoder cannot sustain at the corresponding 16:9 width.
-     */
+    /** Keep every component/profile envelope; codec-wide maxima are legacy only.
+     * Platform profile-level limits intersect the actual component's size/rate
+     * support. They describe advertised support, not physical qualification. */
     private fun videoDecoderLimits(codecs: Array<MediaCodecInfo>): List<VideoDecoderLimit> =
         buildList {
             codecs.filterNot { it.isEncoder }.forEach { info ->
                 info.supportedTypes.forEach typeLoop@{ advertisedType ->
-                    val codec = VIDEO_CODEC_MIMES[advertisedType.lowercase()]
-                        ?: return@typeLoop
-                    val video = try {
-                        info.getCapabilitiesForType(advertisedType).videoCapabilities
-                    } catch (_: Exception) {
-                        null
-                    } ?: return@typeLoop
-                    val maxHeight = VIDEO_PROBE_SIZES.firstOrNull { (width, height) ->
-                        try {
-                            video.areSizeAndRateSupported(width, height, 30.0)
-                        } catch (_: Exception) {
-                            false
-                        }
-                    }?.second ?: return@typeLoop
-                    add(
-                        VideoDecoderLimit(
-                            codec = codec,
-                            maxHeight = maxHeight,
-                            hardwareAccelerated = isHardwareAccelerated(info),
-                        ),
-                    )
+                    val codec = VIDEO_CODEC_MIMES[advertisedType.lowercase()] ?: return@typeLoop
+                    val capabilities = try {
+                        info.getCapabilitiesForType(advertisedType)
+                    } catch (_: Exception) { null } ?: return@typeLoop
+                    val video = capabilities.videoCapabilities ?: return@typeLoop
+                    val hardware = isHardwareAccelerated(info)
+                    val sizes = VIDEO_PROBE_SIZES.filter { hardware || it.second <= SOFTWARE_VIDEO_MAX_HEIGHT }
+                    val levels = capabilities.profileLevels.toList()
+                    // Preserve unknown profile as unknown, with no new geometry claim.
+                    if (levels.isEmpty()) {
+                        val height = sizes.firstOrNull { (width, height) ->
+                            runCatching { video.areSizeAndRateSupported(width, height, 30.0) }.getOrDefault(false)
+                        }?.second ?: return@typeLoop
+                        add(VideoDecoderLimit(codec, height, hardware))
+                    }
+                    levels.forEach levelLoop@{ level ->
+                        val profile = videoProfileName(codec, level.profile)
+                        val profileVideo = runCatching {
+                            MediaCodecInfo.CodecCapabilities.createFromProfileLevel(advertisedType, level.profile, level.level)
+                                ?.videoCapabilities
+                        }.getOrNull()
+                        val size = sizes.firstOrNull { (width, height) ->
+                            runCatching {
+                                video.areSizeAndRateSupported(width, height, 30.0) &&
+                                    (profileVideo?.areSizeAndRateSupported(width, height, 30.0) ?: (profile == null))
+                            }.getOrDefault(false)
+                        } ?: return@levelLoop
+                        // Unlike a successful query at one cadence, the platform
+                        // ranges supply an advertised maximum for this rectangle.
+                        // Intersect the component and profile-level envelopes, then
+                        // round downward to a rational and verify that exact tuple.
+                        val rate = if (profile != null && profileVideo != null) {
+                            runCatching {
+                                val upper = minOf(
+                                    video.getSupportedFrameRatesFor(size.first, size.second).upper,
+                                    profileVideo.getSupportedFrameRatesFor(size.first, size.second).upper,
+                                )
+                                if (!upper.isFinite() || upper <= 0.0 || upper > 1000.0) {
+                                    null
+                                } else {
+                                    val numerator = kotlin.math.floor(upper * 1000.0).toInt()
+                                    val cadence = numerator / 1000.0
+                                    DecoderFrameRate(numerator, 1000).takeIf {
+                                        numerator > 0 &&
+                                            video.areSizeAndRateSupported(size.first, size.second, cadence) &&
+                                            profileVideo.areSizeAndRateSupported(size.first, size.second, cadence)
+                                    }
+                                }
+                            }.getOrNull()
+                        } else { null }
+                        add(VideoDecoderLimit(
+                            codec = codec, maxHeight = size.second, hardwareAccelerated = hardware,
+                            profiles = profile?.let(::listOf).orEmpty(),
+                            maxWidth = size.first.takeIf { rate != null }, maxFrameRate = rate,
+                        ))
+                    }
                 }
             }
         }
+
+    /** Unmapped profiles remain absent instead of becoming a blanket main claim. */
+    private fun videoProfileName(codec: String, profile: Int): String? = when (codec) {
+        "h264" -> when (profile) {
+            MediaCodecInfo.CodecProfileLevel.AVCProfileBaseline -> "baseline"
+            MediaCodecInfo.CodecProfileLevel.AVCProfileMain -> "main"
+            MediaCodecInfo.CodecProfileLevel.AVCProfileHigh -> "high"
+            else -> null
+        }
+        "hevc" -> when (profile) {
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain -> "main"
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+            MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus -> "main10"
+            else -> null
+        }
+        "vp9" -> when (profile) {
+            MediaCodecInfo.CodecProfileLevel.VP9Profile0 -> "profile0"
+            MediaCodecInfo.CodecProfileLevel.VP9Profile2,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR,
+            MediaCodecInfo.CodecProfileLevel.VP9Profile2HDR10Plus -> "profile2"
+            else -> null
+        }
+        "av1" -> when (profile) {
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain8 -> "main"
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10,
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10,
+            MediaCodecInfo.CodecProfileLevel.AV1ProfileMain10HDR10Plus -> "main10"
+            else -> null
+        }
+        else -> null
+    }
 
     /**
      * API 29 made this classification authoritative. Before that, use the

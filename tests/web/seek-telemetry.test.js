@@ -31,7 +31,7 @@ function harness(options={}){
     playbackSeekBufferedRangesMs:()=>[],playbackSeekSeekableRangesMs:()=>null,playbackSeekPublishedRangeMs:()=>null,
     PlaybackPolicy:{seekRoute:({targetMs})=>({route:'local',basis:'direct',atMs:targetMs}),HLS_STARTUP:{seek_deadline_ms:8000}},
     setTimeout:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimeout:()=>{},
-    armStall:()=>{},playerActivity:()=>{},
+    armStall:()=>{},playerActivity:()=>{},qualityForce:()=>'original',
   });
   for(const name of ['dispatchPlaybackSeekTelemetry','playbackSeekTraceRanges',
     'recordPlaybackSeekRoute','finishPlaybackSeekTelemetry','watchPlaybackSeekTelemetry',

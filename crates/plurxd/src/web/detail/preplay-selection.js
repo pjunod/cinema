@@ -31,7 +31,9 @@ function playbackSelection(player, fileId){
 }
 function prePlaySelectionQuery(sel){
   if(!sel) return "";
-  return (sel.audio!=null?"&audio="+sel.audio:"")+(sel.subtitle!=null?"&subtitle="+sel.subtitle:"");
+  return (sel.audio!=null?"&audio="+sel.audio:"")+(sel.subtitle!=null?"&subtitle="+sel.subtitle:"")
+    +(Number.isFinite(sel.audio_offset_ms)&&sel.audio_offset_ms!==0
+      ?"&audio_offset_ms="+Math.max(-15000,Math.min(15000,Math.round(sel.audio_offset_ms))):"");
 }
 // Every `/decision` this app makes, so the selection cannot be wired into some
 // of them and forgotten in the rest. An omitted parameter is load-bearing: a

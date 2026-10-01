@@ -42,6 +42,7 @@
             MediaSessionRequestClaim::Acquired { .. }
         ));
         let request = crate::transcode::SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "guard-lifetime-player".to_owned(),
@@ -215,6 +216,7 @@
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
         let request = crate::transcode::SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "cleanup-shape-player".to_owned(),
@@ -1689,6 +1691,7 @@
             .expect("oversized init");
 
         let context = crate::transcode::HlsContext {
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1729,6 +1732,7 @@
             .expect("unreadable init");
 
         let context = crate::transcode::HlsContext {
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,

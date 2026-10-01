@@ -427,7 +427,8 @@ const CAPS_DOCUMENT_PRELUDE = [
   `const PLAY_CAPS=${JSON.stringify({ vcodec: "hevc", dvprofile: "5,8" })};`,
   "function decodeLimits(){return {};}",
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
-  shippedSource("currentCapsDocument"),
+  "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
 function buildOpenSession(overrides) {
@@ -456,6 +457,7 @@ function buildOpenSession(overrides) {
     "decodeLimits",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -563,6 +565,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     "qualityForce",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -608,6 +611,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -6593,9 +6597,9 @@ test("the Auto-quality fixture's defaults are the browser's own constants", () =
   );
   assert.equal(
     Object.prototype.hasOwnProperty.call(policy.AUTO_DEFAULTS, "switchBudgetPerHour"),
-    false,
-    "switchBudgetPerHour is a proposal (design 3.4, open question 7.3) and " +
-      "must stay in proposed_defaults until a shaped trace justifies it",
+    true,
+    "the combined controller limits voluntary moves to six per hour; " +
+      "emergency and natural recovery do not spend that budget",
   );
   assert.equal(autoQuality.proposed_defaults.switchBudgetPerHour, 6);
 });
@@ -6749,6 +6753,162 @@ test("every controller gate the fixture names is still in the shipped tick", () 
   }
   assert.equal(pinned.size, TICK_GUARDS_SECTION_8_1.length,
     "a fixture gate row names a guard design section 8.1 does not list");
+});
+
+function routeQualityFixture() {
+  const candidate=(digit,route,width,height,target_height,peak_bps,extra={})=>({
+    id:digit.repeat(32),recipe_digest:Array(32).fill(Number.parseInt(digit,16)),
+    route,width,height,target_height,peak_bps,average_bps:peak_bps,
+    grade:"sdr",decoder_compatible:true,sustainable:true,complete_cache:false,...extra});
+  const low=candidate("1","encode",1920,1080,1080,12000000);
+  const middle=candidate("2","encode",2560,1440,1440,18160000);
+  const high=candidate("3","encode",3840,2160,2160,30000000);
+  const original=candidate("4","remux",3840,2160,2160,50000000);
+  const transfer={bytes:12500000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false};
+  const sample={now_ms:120000,automatic:true,presenting:true,paused:false,seeking:false,
+    move_in_flight:false,cause:"unknown",cause_age_ms:0,runway_ms:20000,stalled:false,
+    natural_boundary:false,transfer};
+  return {low,middle,high,original,transfer,sample,target:{width_px:2400,height_px:1600,revision:1}};
+}
+test("route Auto preserves original and fits both axes with exact ten percent enlargement",()=>{
+  const f=routeQualityFixture(), candidates=[f.low,f.middle,f.high];
+  assert.equal(policy.selectQualityCandidate({candidates:[...candidates,f.original],target:f.target,aspect:16/9}).id,f.original.id);
+  assert.equal(policy.selectQualityCandidate({candidates,target:f.target,aspect:16/9}).id,f.middle.id);
+  assert.equal(policy.selectQualityCandidate({candidates,target:{width_px:2112,height_px:1408},aspect:16/9}).id,f.low.id);
+  assert.equal(policy.selectQualityCandidate({candidates,target:{width_px:2113,height_px:1408},aspect:16/9}).id,f.middle.id);
+  assert.equal(policy.selectQualityCandidate({candidates:[...candidates.slice(0,2),{...f.high,complete_cache:true}],target:f.target,aspect:16/9}).id,f.high.id);
+});
+test("route Auto refuses cached paced incomplete and expired transfer proof",()=>{
+  const f=routeQualityFixture();
+  assert.equal(policy.qualityTransferBps(f.transfer),100000000);
+  for(const bad of [{from_cache:true},{producer_paced:true},{completed:false},{age_ms:15001},{age_ms:-1},{elapsed_ms:0}])
+    assert.equal(policy.qualityTransferBps({...f.transfer,...bad}),null);
+  assert.equal(policy.qualityTransferBps({...f.transfer,producer_paced:undefined}),null);
+});
+test("natural boundary recovers original after expired cliff but honors fresh link veto",()=>{
+  const f=routeQualityFixture();
+  const args={state:{lastSwitchMs:119999,switchTimesMs:Array(6).fill(119999)},
+    sample:{...f.sample,natural_boundary:true,transfer:{...f.transfer,bytes:1750000,age_ms:16000}},
+    candidates:[f.low,f.middle,f.high,f.original],currentId:f.low.id,target:f.target,aspect:16/9};
+  assert.equal(policy.decideCandidateTransition(args).candidate.id,f.original.id);
+  assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,
+    transfer:{...args.sample.transfer,age_ms:0}}}).candidate,null);
+});
+test("midplay original trial needs continuous headroom and respects failed trial backoff",()=>{
+  const f=routeQualityFixture();
+  const args={state:{},sample:f.sample,candidates:[f.low,f.middle,f.high,f.original],currentId:f.middle.id,target:f.target,aspect:16/9};
+  const first=policy.decideCandidateTransition(args);
+  assert.equal(first.candidate,null);
+  const next=policy.decideCandidateTransition({...args,state:first.state,sample:{...f.sample,now_ms:165000}});
+  assert.equal(next.candidate.id,f.original.id);
+  assert.equal(next.transition,"prepare");
+  const paused=policy.decideCandidateTransition({...args,state:first.state,sample:{...f.sample,now_ms:150000,paused:true}});
+  assert.equal(policy.decideCandidateTransition({...args,state:paused.state,sample:{...f.sample,now_ms:165000}}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...args,state:{...next.state,failedUntilMs:{[f.original.id]:400000}},
+    sample:{...f.sample,now_ms:200000}}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...args,state:first.state,sample:{...f.sample,now_ms:165000,last_stall_ms:140000}}).candidate,null);
+});
+test("unproved 1440 encode is trial eligible but not an initial playable route",()=>{
+  const f=routeQualityFixture(), candidates=[f.low,{...f.middle,sustainable:false}];
+  assert.equal(policy.selectQualityCandidate({candidates,target:f.target,aspect:16/9}).id,f.low.id);
+  const args={state:{},sample:f.sample,candidates,currentId:f.low.id,target:f.target,aspect:16/9};
+  const first=policy.decideCandidateTransition(args);
+  assert.equal(first.candidate,null);
+  const next=policy.decideCandidateTransition({...args,state:first.state,sample:{...f.sample,now_ms:165000}});
+  assert.equal(next.candidate.id,f.middle.id);
+  assert.equal(next.transition,"prepare");
+  assert.equal(policy.decideCandidateTransition({...args,sample:{...f.sample,natural_boundary:true}}).candidate,null);
+});
+test("active encode proof requires exact route complete intervals and freshness including transit",()=>{
+  const f=routeQualityFixture();
+  const h={active_encode_candidate_id:f.middle.id,active_encode_age_ms:1000,
+    active_encode_active_ms:2000,active_encode_segments:2,active_encode_milli_realtime:1600};
+  assert.equal(policy.qualityEncodeProof(h,f.middle.id,14000),true);
+  assert.equal(policy.qualityEncodeProof(h,f.middle.id,14001),false);
+  assert.equal(policy.qualityEncodeProof(h,f.low.id),false);
+  for(const bad of [{active_encode_active_ms:1999},{active_encode_segments:1},
+    {active_encode_age_ms:-1},{active_encode_milli_realtime:NaN},{active_encode_age_ms:undefined}])
+    assert.equal(policy.qualityEncodeProof({...h,...bad},f.middle.id),false);
+});
+test("unknown source peak requires distinct completed successor segment margins",()=>{
+  const f=routeQualityFixture();
+  const first={...f.transfer,segment_id:"one",media_duration_ms:4000};
+  const second={...first,segment_id:"two"};
+  assert.equal(policy.qualityOriginalTrialMargin([first,second]),true);
+  assert.equal(policy.qualityOriginalTrialMargin([first,first]),false);
+  assert.equal(policy.qualityOriginalTrialMargin([first,{...second,producer_paced:true}]),false);
+  assert.equal(policy.qualityOriginalTrialMargin([first,{...second,age_ms:15001}]),false);
+  assert.equal(policy.qualityOriginalTrialMargin([first,{...second,media_duration_ms:0}]),false);
+  assert.equal(policy.qualityOriginalTrialMargin([first,{...second,elapsed_ms:3000}]),false);
+});
+test("viewer recipe edits do not send an incumbent candidate under new tracks or offset",()=>{
+  const shipped=new Function("selectedAudioIndex",[
+    "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
+    "function playQuality(){return 'auto';}",
+    shippedSource("qualityCatalogSelectionKey"),
+    shippedSource("qualityCatalogSelectionCurrent"),
+    shippedSource("playbackControlSelection"),
+    "return {key:qualityCatalogSelectionKey,selection:playbackControlSelection};"
+  ].join("\n"))(p=>p.audioIndex);
+  const f=routeQualityFixture();
+  const p={audioIndex:0,curSub:-1,burnedSub:null,aoffset:0,
+    qualityCandidates:[f.middle],abr:{requestedCandidateId:f.middle.id}};
+  p.abr.catalogSelectionKey=shipped.key(p);
+  assert.equal(shipped.selection(p).quality.candidate_id,f.middle.id);
+  assert.equal(shipped.selection(p,true).quality.candidate_id,undefined);
+  assert.equal(shipped.selection({...p,qualityProtocol:'route-v1'},true).quality.candidate_id,f.middle.id);
+  for(const change of [{audioIndex:1},{aoffset:250},{curSub:2,burnedSub:2}])
+    assert.equal(shipped.selection({...p,...change}).quality.candidate_id,undefined);
+  const query=new Function(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
+  assert.equal(query({audio:1,audio_offset_ms:250}),"&audio=1&audio_offset_ms=250");
+  assert.equal(query({audio_offset_ms:50000}),"&audio_offset_ms=15000");
+  assert.equal(query({audio_offset_ms:0}),"");
+});
+test("severe route pressure skips intermediate rungs despite voluntary budget",()=>{
+  const f=routeQualityFixture();
+  const result=policy.decideCandidateTransition({state:{switchTimesMs:Array(6).fill(119000),lastSwitchMs:119000},
+    sample:{...f.sample,cause:"link",stalled:true,runway_ms:1000,transfer:{...f.transfer,bytes:1750000}},
+    candidates:[f.low,f.middle,f.high,f.original],currentId:f.original.id,target:f.target,aspect:16/9});
+  assert.equal(result.candidate.id,f.low.id);
+  assert.equal(result.emergency,true);
+});
+
+test("unknown peak original downshifts from fresh demand without inventing upgrade proof",()=>{
+  const f=routeQualityFixture(), original={...f.original,peak_bps:null,average_bps:50000000};
+  const args={state:{},candidates:[f.low,f.middle,original],currentId:original.id,
+    target:f.target,aspect:16/9,sample:{...f.sample,cause:"link",stalled:true,runway_ms:500,
+      transfer:{...f.transfer,bytes:1750000}}};
+  assert.equal(policy.decideCandidateTransition(args).candidate.id,f.low.id);
+  const noAverage={...original,average_bps:null};
+  const measured={...args,sample:{...args.sample,transfer:{...args.sample.transfer,media_duration_ms:280}},
+    candidates:[f.low,f.middle,noAverage]};
+  assert.equal(policy.decideCandidateTransition(measured).candidate.id,f.low.id);
+  assert.equal(policy.decideCandidateTransition({...measured,sample:{...measured.sample,
+    transfer:{...measured.sample.transfer,producer_paced:true}}}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...measured,sample:{...measured.sample,
+    transfer:{...measured.sample.transfer,age_ms:15001}}}).candidate,null);
+  assert.equal(policy.qualityOriginalTrialMargin([measured.sample.transfer]),false);
+  const progress={...args,candidates:[f.low,f.middle,noAverage],sample:{...args.sample,transfer:null,
+    link_pressure_bps:14000000,link_pressure_media_bps:50000000,link_pressure_age_ms:0}};
+  assert.equal(policy.decideCandidateTransition(progress).candidate.id,f.low.id);
+  assert.equal(policy.decideCandidateTransition({...progress,sample:{...progress.sample,
+    link_pressure_age_ms:15001}}).candidate,null);
+});
+
+test("cold original recovery can try an unproved compatible lower route within measured link",()=>{
+  const f=routeQualityFixture(), low={...f.low,sustainable:false}, middle={...f.middle,sustainable:false};
+  const args={state:{},candidates:[low,middle,f.original],currentId:f.original.id,
+    target:f.target,aspect:16/9,sample:{...f.sample,cause:"link",stalled:true,runway_ms:0,
+      transfer:{...f.transfer,bytes:1750000}}};
+  const result=policy.decideCandidateTransition(args);
+  assert.equal(result.candidate.id,low.id);
+  assert.equal(result.transition,"recover");
+  assert.equal(result.candidate.sustainable,false);
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
+    sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
+  assert.equal(policy.selectQualityCandidate({candidates:[low,middle],target:f.target,aspect:16/9}),null);
 });
 
 // Drained last, in registration order, after every synchronous case has run.

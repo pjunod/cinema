@@ -3327,3 +3327,31 @@ source = "clients/apple/Sources/LiveTv.swift"
 source_anchor = "\"encoder_capacity\", \"tuner_unavailable\","
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheStartReducerAnswersEverySharedCase"
+
+# Combined display-aware Auto source-to-regression bridges. Native adapter
+# samples remain unknown unless completion/network/cache/pacing are proved;
+# staged replacements retain exact intent, route and capability revision fences.
+
+[[fixes]]
+id = "apple.auto-completed-transfer-provenance"
+commits = ["424f7d16"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoCompletedTransferBps("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testFreshLinkRejectsStaleCachedPacedAndUnknownProvenance"
+
+[[fixes]]
+id = "apple.auto-candidate-generation-fences"
+commits = ["bd4c4677"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoTrialMayCommit("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testSupersededAutoTrialCannotReplaceIncumbent"
+
+[[fixes]]
+id = "apple.auto-original-downside-only-evidence"
+commits = ["3d1fd53f"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoDownsideCostBps("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence"

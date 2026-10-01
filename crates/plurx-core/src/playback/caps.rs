@@ -52,6 +52,13 @@ pub enum Transfer {
     Unknown,
 }
 
+/// Exact measured frame-rate ceiling on this codec/profile entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DecoderFrameRate {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
 /// One decodable video codec, and the ceilings that apply to it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct VideoCaps {
@@ -67,6 +74,12 @@ pub struct VideoCaps {
     /// The tallest frame this codec (at these profiles) decodes.
     #[serde(default)]
     pub max_height: Option<i64>,
+    /// Nullable measured coded-width limit; absent retains legacy behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<i64>,
+    /// Nullable measured rate at this entry's profiles and dimensions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_rate: Option<DecoderFrameRate>,
     #[serde(default)]
     pub max_bitrate_bps: Option<i64>,
     /// Transfer functions this codec's output can be presented as.
@@ -83,6 +96,46 @@ pub struct VideoCaps {
     pub dv_profiles: Vec<u8>,
 }
 
+impl VideoCaps {
+    /// Check this entry's actual coded/output dimensions and rate. A known
+    /// violation always refuses; incomplete legacy claims remain unknown.
+    /// The caller must separately match this entry's codec/profile/grade.
+    pub fn geometry_admission(
+        &self,
+        width: u32,
+        height: u32,
+        rate: Option<(u32, u32)>,
+    ) -> Option<bool> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let width_limit = self.max_width.filter(|limit| *limit > 0);
+        let height_limit = self.max_height.filter(|limit| *limit > 0);
+        if width_limit.is_some_and(|limit| i64::from(width) > limit)
+            || height_limit.is_some_and(|limit| i64::from(height) > limit)
+        {
+            return Some(false);
+        }
+        let measured_rate = self
+            .max_frame_rate
+            .filter(|limit| limit.numerator > 0 && limit.denominator > 0);
+        let actual_rate =
+            rate.filter(|(numerator, denominator)| *numerator > 0 && *denominator > 0);
+        if let (Some(limit), Some((numerator, denominator))) = (measured_rate, actual_rate) {
+            if u64::from(numerator) * u64::from(limit.denominator)
+                > u64::from(limit.numerator) * u64::from(denominator)
+            {
+                return Some(false);
+            }
+        }
+        (width_limit.is_some()
+            && height_limit.is_some()
+            && measured_rate.is_some()
+            && actual_rate.is_some())
+        .then_some(true)
+    }
+}
+
 /// Facts about the attached output, as distinct from what decodes.
 ///
 /// A display that shows HDR and a decoder that emits it are different
@@ -96,6 +149,9 @@ pub struct DisplayCaps {
     pub dolby_vision: bool,
     #[serde(default)]
     pub max_nits: Option<i64>,
+    /// Active render-container backing pixels, independent of panel grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_target: Option<super::candidate::PresentationTarget>,
 }
 
 /// Which client build sent this. Diagnostic only — it never influences a
@@ -343,6 +399,7 @@ impl DeviceCaps {
                 hdr: legacy.hdr,
                 dolby_vision: legacy.dv || !legacy.dv_profiles.is_empty(),
                 max_nits: None,
+                presentation_target: None,
             }),
             learned_limits: Vec::new(),
             legacy_blanket_dolby_vision: legacy.dv && !legacy.dv_profiles_sent,
@@ -893,5 +950,51 @@ impl LearnedLimit {
             "hlg" => "HLG",
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod display_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn decoder_geometry_limits_remain_per_profile_and_missing_claims_unknown() {
+        let caps: DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v": 2,
+            "video": [
+                {"codec":"hevc","profiles":["main"],"max_width":3840,"max_height":2160,"max_frame_rate":{"numerator":60,"denominator":1}},
+                {"codec":"hevc","profiles":["main10"],"max_width":1920,"max_height":1080,"max_frame_rate":{"numerator":30000,"denominator":1001}}
+            ],
+            "display":{"presentation_target":{"width_px":2400,"height_px":1600,"revision":1}}
+        })).expect("compatible create capabilities");
+        assert_eq!(caps.video[0].geometry_admission(0, 0, Some((30, 1))), None);
+        assert_eq!(
+            caps.video[0].geometry_admission(3840, 2160, Some((60, 1))),
+            Some(true)
+        );
+        assert_eq!(
+            caps.video[1].geometry_admission(3840, 2160, Some((30, 1))),
+            Some(false)
+        );
+        assert_eq!(
+            caps.video[1].geometry_admission(1920, 1080, Some((30, 1))),
+            Some(false)
+        );
+        assert_eq!(
+            caps.video[1].geometry_admission(1920, 1080, Some((30000, 1001))),
+            Some(true)
+        );
+        assert_eq!(
+            VideoCaps::default().geometry_admission(1920, 1080, Some((30, 1))),
+            None
+        );
+        assert_eq!(
+            caps.display
+                .expect("display")
+                .presentation_target
+                .expect("target")
+                .rectangle(),
+            Some((2400, 1600))
+        );
     }
 }

@@ -1,3 +1,4 @@
+import CryptoKit
 import CoreGraphics
 import Foundation
 
@@ -13,6 +14,9 @@ struct ServerInfo: Codable {
     var version: String?
     var build: String?
     var instanceId: String?
+    var playbackDisplayAwareAuto: Bool?
+    var playbackAutoAbr: Bool?
+    var displayAwareAutoProtocol: String?
 }
 
 struct ClusterIngress: Codable {
@@ -757,6 +761,37 @@ struct SubtitleTrack: Codable, Identifiable {
     var isPGSOverlay: Bool { overlay == PGSOverlayPolicy.protocolName }
 }
 
+/// Server-owned route catalog. Missing limits remain unknown.
+struct QualityCandidate: Codable, Identifiable {
+    let id: String
+    let recipeDigest: [UInt8]
+    let route: String
+    let width: Int
+    let height: Int
+    let targetHeight: Int
+    var averageBps: UInt64?
+    var peakBps: UInt64?
+    let grade: String
+    let decoderCompatible: Bool
+    let completeCache: Bool
+    let sustainable: Bool
+
+    var hasValidIdentity: Bool {
+        guard recipeDigest.count == 32, (1...16_384).contains(width), (1...16_384).contains(height),
+              (0...16_384).contains(targetHeight), ["original", "remux", "encode"].contains(route),
+              ["sdr", "hdr10"].contains(grade) else { return false }
+        var bytes = Data("plurx:auto-quality-candidate:v1\0".utf8)
+        bytes.append(contentsOf: recipeDigest)
+        let expected = SHA256.hash(data: bytes).prefix(16).map { String(format: "%02x", $0) }.joined()
+        return id == expected
+    }
+}
+
+func manualCatalogHeights(_ candidates: [QualityCandidate]) -> [Int] {
+    Set(candidates.filter { $0.hasValidIdentity && $0.decoderCompatible && $0.route == "encode" }
+        .map(\.targetHeight)).sorted(by: >)
+}
+
 struct QualityRung: Codable, Identifiable {
     var id: Int { height }
     let height: Int
@@ -818,6 +853,9 @@ struct Decision: Codable {
     var audioOffsetMs: Int?
     var declaredOffsetMs: Int?
     var ladder: [QualityRung]?
+    var qualityCandidates: [QualityCandidate]?
+    var qualityCandidateId: String?
+    var displayAwareAutoProtocol: String?
     /// The dynamic range of the bytes this delivery plan would put on the wire
     /// — `"dolby_vision" | "hdr10" | "hlg" | "sdr"`, the same vocabulary as
     /// `SourceSummary.hdr` plus `"sdr"`, so source and delivered compare by
@@ -851,6 +889,9 @@ struct HlsStart: Codable {
     var encoder: String?
     var vod: Bool?
     var ladder: [QualityRung]?
+    var qualityCandidates: [QualityCandidate]?
+    var qualityCandidateId: String?
+    var displayAwareAutoProtocol: String?
     /// The normalized output height this session actually received — for a
     /// bound stall reopen, the persisted one-rung-down answer, repeated
     /// unchanged when the same `request_id` is replayed. Optional so an older
@@ -885,6 +926,11 @@ struct HlsStart: Codable {
 /// the Apple client too. All changing measurements remain optional because a
 /// session has not necessarily produced its first segment when first polled.
 struct PlaybackSessionStatus: Codable {
+    var activeEncodeMilliRealtime: Int?
+    var activeEncodeAgeMs: Int?
+    var activeEncodeActiveMs: Int?
+    var activeEncodeSegments: Int?
+    var activeEncodeCandidateId: String?
     let id: String
     var targetHeight: Int?
     var encoder: String?
@@ -967,7 +1013,25 @@ struct LoginRequest: Codable {
 /// omitting it selects the server's Auto rung — the rung depends on which
 /// encoder wins, and only the create response knows that — so this client
 /// never names a height at all.
+struct MediaIntentSelection: Codable, Equatable {
+    var quality: QualitySelection
+    var codec: CodecPolicy
+    var dynamicRange: DynamicRangePolicy
+    var audioTrack: Int?
+    var audioOffsetMs: Int
+    var subtitles: SubtitleSelection
+}
+
+struct MediaIntentEnvelope: Codable {
+    var lifetimeId: String
+    var recipeRevision: UInt64
+    var destinationRevision: UInt64
+    var transportRevision: UInt64
+    var selection: MediaIntentSelection
+}
+
 struct CreateSessionRequest: Codable {
+    var intent: MediaIntentEnvelope? = nil
     /// Stable for one player instance; supersession is keyed by it.
     let playbackId: String
     /// Fresh per attempt: makes a replayed create return the same session

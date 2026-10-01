@@ -200,6 +200,12 @@ function rollbackPreparedReplacement(p,state,successor){
   p.sessionId=predecessor.sessionId;
   p.probeUrl=predecessor.probeUrl;
   p.offset=predecessor.offset;
+  p.method=predecessor.method;
+  p.copyHls=predecessor.copyHls;
+  p.autoHeight=predecessor.autoHeight;
+  p.encoder=predecessor.encoder;
+  p.qualityCandidateId=predecessor.qualityCandidateId;
+  p.deliveredRange=predecessor.deliveredRange;
   p.wantsPlayback=predecessor.wantsPlayback;
   p.health=predecessor.health;
   p.healthObservedAt=predecessor.healthObservedAt;
@@ -633,6 +639,11 @@ function supersedePlaybackControlIntent(p,{preserveHlsStartup=false}={}){
   if(!p) return 0;
   const previous=p.controlIntentGeneration||0;
   p.controlIntentGeneration=previous+1;
+  if(p.directedChange&&p.directedChange.autoMove&&!p.directedChange.settled){
+    abandonPreparedReplacement(p,"aborted","viewer intent superseded automatic trial");
+    settleDirectedChange(p,p.directedChange,"superseded");
+  }
+  if(p.abr&&p.abr.candidateState) p.abr.candidateState.upgradeSinceMs=null;
   // Viewer intent cancels an in-flight automatic episode. Automatic recovery
   // begins its seek with `supersedeIntent=false`, so it retains this exact
   // episode while pause, seek, track change and close fence every old callback.
