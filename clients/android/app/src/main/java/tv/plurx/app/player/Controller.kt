@@ -3808,9 +3808,6 @@ class Controller internal constructor(
         val sessionStatus: PlaybackSessionStatus?,
         val sessionStatusObservedAtMs: Long?,
         val establishedPlayback: Boolean,
-        val playWhenReady: Boolean,
-        val playbackParameters: PlaybackParameters,
-        val volume: Float,
     )
 
     /** Retained until a real successor frame makes rollback unnecessary. */
@@ -4200,9 +4197,6 @@ class Controller internal constructor(
             sessionStatus = sessionStatus,
             sessionStatusObservedAtMs = sessionStatusObservedAtMs,
             establishedPlayback = establishedPlayback,
-            playWhenReady = previousPlayWhenReady,
-            playbackParameters = previousPlaybackParameters,
-            volume = previousVolume,
         )
 
         successor.volume = previousVolume
@@ -4365,9 +4359,11 @@ class Controller internal constructor(
         predecessor.sessionId?.let(::startStatusPolling) ?: clearStatusPolling()
         sessionStatus = predecessor.sessionStatus
         sessionStatusObservedAtMs = predecessor.sessionStatusObservedAtMs
-        predecessor.player.volume = predecessor.volume
-        predecessor.player.playbackParameters = predecessor.playbackParameters
-        predecessor.player.playWhenReady = predecessor.playWhenReady
+        // Viewer controls keep their latest values across media rollback.
+        // ON_STOP still suppresses output without replacing standing Play intent.
+        predecessor.player.volume = failedSuccessor.volume
+        predecessor.player.playbackParameters = failedSuccessor.playbackParameters
+        predecessor.player.playWhenReady = effectivePlayWhenReady()
 
         preparedPredecessor = null
         preparedRollbackReopen = reopenAt to "prepared successor rendered no frame"

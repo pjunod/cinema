@@ -392,7 +392,11 @@ class EvidenceWorkflowCase(unittest.TestCase):
         self.assertIn("player = predecessor.player", rollback)
         self.assertIn("preparedRollbackReopen", rollback)
         self.assertIn("predecessor.player.playbackParameters", rollback)
-        self.assertIn("predecessor.player.playWhenReady", rollback)
+        self.assertIn("predecessor.player.volume = failedSuccessor.volume", rollback)
+        self.assertIn("predecessor.player.playbackParameters = failedSuccessor.playbackParameters", rollback)
+        self.assertIn("predecessor.player.playWhenReady = effectivePlayWhenReady()", rollback)
+        for stale in ("predecessor.volume", "predecessor.playbackParameters", "predecessor.playWhenReady"):
+            self.assertNotIn(stale, rollback)
         commit = android.split("private fun commitPreparedReplacement", 1)[1].split(
             "fun collectRetiredPlayer()", 1
         )[0]

@@ -1574,3 +1574,12 @@ readers; rendering does not grant admission or advertise availability.
 
 Pinned Rust 1.97.1 workspace/all-target compilation passed for master and
 child playlist construction. Unit execution remains deferred.
+
+### 10.27 Android rollback retains live viewer controls
+
+A failed prepared handoff now restores the predecessor media with the current
+volume and playback speed from the successor and the standing transport intent
+filtered through the current lifecycle pause. It no longer restores controls
+saved before the switch. The obsolete predecessor control snapshots are removed.
+The existing prepared-authority regression checks these bindings; execution is
+deferred until final qualification.
