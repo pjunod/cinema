@@ -1256,18 +1256,19 @@ pub(super) struct RecentMarkerAmbiguityLedger {
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
 pub(super) async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {
-    let mut entries = tokio::fs::read_dir(dir).await.map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("could not enumerate {}: {error}", dir.display()),
-        )
-    })?;
-    while let Some(entry) = entries.next_entry().await.map_err(|error| {
-        std::io::Error::new(
-            error.kind(),
-            format!("could not enumerate {}: {error}", dir.display()),
-        )
-    })? {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let path = entry.path();
         match tokio::fs::remove_file(&path).await {
             Ok(()) => {}
@@ -1285,8 +1286,17 @@ pub(super) async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<
     // The child/path transition excludes a successor writer, but detached
     // retention cleanup can race this scan. Verify the directory is actually
     // empty before ownership is allowed to reopen under the next attempt.
-    let mut remaining = tokio::fs::read_dir(dir).await?;
-    if let Some(entry) = remaining.next_entry().await? {
+    let mut remaining = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let entry = match remaining.next_entry().await {
+        Ok(entry) => entry,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if let Some(entry) = entry {
         return Err(std::io::Error::other(format!(
             "{} remained after predecessor cleanup",
             entry.path().display()

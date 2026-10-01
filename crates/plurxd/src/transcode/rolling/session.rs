@@ -2601,6 +2601,7 @@ pub(super) async fn session_info(
         "waiting"
     };
     SessionInfo {
+        vod_observation: None,
         id: id.to_owned(),
         presentation: "live-recovery",
         file_id: s.file_id,
@@ -2730,7 +2731,9 @@ pub(super) async fn session_info(
 }
 
 pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
+    let observation = info.observation.as_ref();
     SessionInfo {
+        vod_observation: info.observation.clone(),
         id: info.id,
         presentation: "vod",
         file_id: info.file_id,
@@ -2745,7 +2748,7 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         idle_seconds: info.idle_seconds,
         last_request: "vod",
         lease_mode: "vod",
-        lease_state: "active",
+        lease_state: "unavailable",
         lease_timeout_ms: Some(crate::playback_control::VOD_LEASE_TIMEOUT_MS),
         startup_state: None,
         startup_remaining_ms: None,
@@ -2755,7 +2758,9 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         budget_anchor_sequence: None,
         allowed_end_ms: None,
         carried_surplus_ms: None,
-        demand_observation_age_ms: None,
+        demand_observation_age_ms: observation
+            .and_then(|o| o.control_age_ms)
+            .map(|age| i64::try_from(age).unwrap_or(i64::MAX)),
         staged_bytes: 0,
         playlist_target_ms: None,
         served_revision: None,
@@ -2771,10 +2776,10 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         grace_bytes: 0,
         reserved_bytes: None,
         live_bytes: 0,
-        control_demand: None,
-        reported_position_ms: None,
-        client_runway_ms: None,
-        render_state: None,
+        control_demand: observation.and_then(|o| o.demand()),
+        reported_position_ms: observation.and_then(|o| o.position_ms),
+        client_runway_ms: observation.and_then(|o| o.client_runway_ms),
+        render_state: observation.and_then(|o| o.render()),
         server_ready_state: "unavailable",
         server_ready_anchor_ms: None,
         server_ready_end_ms: None,
@@ -2785,7 +2790,7 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         production_ahead_seconds: None,
         production_target_seconds: None,
         producer_control: None,
-        producer_state: "vod",
+        producer_state: observation.map_or("unknown", |o| o.producer()),
         producer_attempt: None,
         playlist_ready: None,
         published_segment: None,
@@ -2820,7 +2825,48 @@ pub(super) fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) 
         http_wait_segment: None,
         status_generated_unix_ms: crate::media_sessions::unix_ms(),
         readrate: 0.0,
-        suspended: false,
+        suspended: observation.is_some_and(|o| o.producer() == "held"),
         suspend_count: 0,
+    }
+}
+
+#[cfg(test)]
+mod activity_vod_tests {
+    use super::*;
+    #[test]
+    fn vod_activity_projects_real_control_without_rolling_measurements() {
+        let info = crate::vodserve::VodDeliveryInfo {
+            observation: Some(crate::vodserve::VodActivityObservation {
+                control_demand: Some("hold".into()),
+                render_state: Some("rendering".into()),
+                position_ms: Some(12000),
+                client_runway_ms: Some(3000),
+                control_age_ms: Some(99),
+                producer_state: Some("held".into()),
+                producer_hold: Some("ahead".into()),
+            }),
+            id: "test-session".into(),
+            method: crate::delivery::Method::HlsCopy,
+            file_id: 1,
+            item_id: 2,
+            item_title: "fixture".into(),
+            user_name: "viewer".into(),
+            target_height: 720,
+            started_unix: 1,
+            idle_seconds: 0,
+            delivered_bytes: 0,
+            delivered_bps: None,
+            delivered_idle_ms: 100,
+        };
+        let projected = vod_delivery_session_info(info);
+        assert_eq!(projected.control_demand, Some("hold"));
+        assert_eq!(projected.reported_position_ms, Some(12000));
+        assert_eq!(projected.demand_observation_age_ms, Some(99));
+        assert_eq!(projected.producer_state, "held");
+        assert_ne!(projected.lease_state, "active");
+        assert!(projected.speed.is_none());
+        assert!(projected.produced_end_ms.is_none());
+        assert_eq!(projected.delivered_bytes, 0);
+        assert!(projected.delivered_bps.is_none());
     }
 }

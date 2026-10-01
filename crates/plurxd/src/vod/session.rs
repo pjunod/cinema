@@ -563,6 +563,10 @@ pub(super) fn terminal_reason(cause: Terminal) -> &'static str {
         Terminal::AdminStop => "killed",
         Terminal::Revoked => "revoked",
         Terminal::Replaced => "file_replaced",
+        Terminal::AuthorityFenced => "authority_fenced",
+        Terminal::ControlExpired => "control_expired",
+        Terminal::StartupExpired => "startup_expired",
+        Terminal::PauseExpired => "pause_expired",
     }
 }
 
@@ -618,6 +622,7 @@ pub(super) struct Session {
     /// Latest accepted snapshot, used to correlate a session-less shipped
     /// marker beacon and to settle a seek whose transient state was coalesced.
     /// Replays never replace it or emit a second outcome.
+    pub(super) control_observed_at: Option<Instant>,
     pub(super) last_control_snapshot: Option<crate::playback_control::PlaybackDemandSnapshot>,
     /// Exact terminal acknowledgement retained after a client `demand=end`
     /// tombstones the attachment. Other lifecycle causes never populate it.
