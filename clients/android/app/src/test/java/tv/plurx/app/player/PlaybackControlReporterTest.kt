@@ -53,7 +53,7 @@ private fun snapshot(
     playbackRate = 1.0,
     renderState = render,
     selection = ClientSelection(
-        quality = QualitySelection.Auto(),
+        quality = QualitySelection.Auto,
         audioTrack = 0,
         subtitle = SubtitleSelection(SubtitleMode.OFF),
         audioOffsetMs = 0,
@@ -870,7 +870,7 @@ class PlaybackControlWireTest {
 
     @Test
     fun `an auto quality is tagged on mode with no other field`() {
-        val encoded = json.encodeToString(QualitySelection.serializer(), QualitySelection.Auto())
+        val encoded = json.encodeToString(QualitySelection.serializer(), QualitySelection.Auto)
         assertEquals("{\"mode\":\"auto\"}", encoded)
     }
 
@@ -1306,7 +1306,7 @@ class PlaybackControlPreparedReplacementTest {
         renderState = RenderState.RENDERING,
         observedDownloadBps = 42_000_000,
         selection = ClientSelection(
-            quality = QualitySelection.Auto(),
+            quality = QualitySelection.Auto,
             audioTrack = 0,
             subtitle = SubtitleSelection(SubtitleMode.OFF),
             audioOffsetMs = 0,

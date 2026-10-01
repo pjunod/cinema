@@ -274,7 +274,7 @@ enum class ClientErrorCode {
 sealed class QualitySelection {
     @Serializable
     @SerialName("auto")
-    data class Auto(val height: Int? = null) : QualitySelection()
+    data object Auto : QualitySelection()
 
     @Serializable
     @SerialName("original")
@@ -285,11 +285,7 @@ sealed class QualitySelection {
     data class Manual(val height: Int) : QualitySelection()
 
     val isValid: Boolean
-        get() = when (this) {
-            is Auto -> height == null || height in setOf(144, 240, 360, 480, 720, 1080, 1440, 2160)
-            is Manual -> height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
-            Original -> true
-        }
+        get() = this !is Manual || height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
 }
 
 @Serializable

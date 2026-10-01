@@ -15,8 +15,7 @@
     "`web_current` must also carry a `finding`: a disagreement is a result, not a test to",
     "paper over, and every one of them is an input to the build plan.",
     "",
-    "The Android M3 adapter packages this same artifact for runtime defaults; its cases",
-    "remain runner inputs. Runtime controllers do not read `expect` or `web_current`."
+    "This file changes no runtime behaviour. Nothing reads it but tests."
   ],
   "defaults_source": "AUTO_DEFAULTS in crates/plurxd/src/web/playback-policy.js, asserted equal by the runner",
   "defaults": {

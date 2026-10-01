@@ -22,6 +22,12 @@
 > regressions reach the author before merge without spending runner capacity
 > on recurring runtime schedules; no periodic test schedule was added.
 
+> **Coverage amendment, 2026-09-30:** [coverage.yml](../.github/workflows/coverage.yml)
+> refreshes the dated unit coverage badge on pushes to `main`, independently
+> of full CI. It also accepts manual retries on `main`. Coverage runs serialize
+> and measure current `main` when they start; failed runs retain the last
+> successful badge and its UTC measurement date.
+
 
 **Status:** accepted and implemented · **Decider:** Paul · **Written:**
 2026-08-29
@@ -99,9 +105,13 @@ The [`effort-ci.yml`](../.github/workflows/effort-ci.yml) gate runs only:
 | Apple | iOS and tvOS compilation | XCTest and physical-device acceptance |
 | Android | Debug application compilation | JVM tests, lint, emulator tests, and physical-device acceptance |
 
-The aggregate result is named `Effort development gate`. Every new task push
-cancels its superseded run because only the latest task tree can merge. Missing
-scope information fails open into all compile surfaces.
+The aggregate result is named `Effort development gate`. Receipt-bearing
+attempts serialize without automatic cancellation so successful Python units
+cannot lose their evidence. [Once-per-PR Python receipts](ci/PYTHON-UNIT-PR-RECEIPTS.md)
+retain the original test/run/source attribution; retries execute only failed
+or newly discovered IDs. They do not replace current-source compilation,
+history, catalog or static checks. Missing scope information enables all
+compile surfaces; ambiguous PR receipt identity refuses unit execution.
 
 **Compilation being blocking is a reason to compile locally, not a reason to
 let the gate do it.** A session whose checkout has no toolchain can still have

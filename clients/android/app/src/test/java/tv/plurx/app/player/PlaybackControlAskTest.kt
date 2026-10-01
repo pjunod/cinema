@@ -262,7 +262,7 @@ class PlaybackControlAskTest {
         hasStarted = true,
         isLikelyToKeepUp = true,
         selection = ClientSelection(
-            quality = QualitySelection.Auto(),
+            quality = QualitySelection.Auto,
             audioTrack = 0,
             subtitle = SubtitleSelection(SubtitleMode.OFF),
             audioOffsetMs = 0,

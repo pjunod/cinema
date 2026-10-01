@@ -1782,7 +1782,6 @@
             automatic: true,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
             kind: crate::transcode::SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,

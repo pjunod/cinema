@@ -9,8 +9,11 @@ from pathlib import Path
 import re
 from typing import Any
 
+from validation.release_debug import verify_packed_pair
+
 
 SCHEMA = 1
+PACKED_SCHEMA = 2
 BINARIES = ("plurxd", "plurx-cluster-check")
 SUPPORTED_BINARY_SETS = frozenset((("plurxd",), BINARIES))
 GIT_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
@@ -87,6 +90,14 @@ def _require_binary_set(binary_names: tuple[str, ...]) -> tuple[str, ...]:
     return binary_names
 
 
+def _require_pinned_rustc(rustc: str, release: str | None) -> str:
+    if not release or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", release) is None:
+        raise ValueError("packed debug requires the source-pinned Rust release")
+    if not rustc.startswith(f"rustc {release} "):
+        raise ValueError("packed debug compiler does not match the source-pinned Rust release")
+    return release
+
+
 def create(
     directory: Path,
     *,
@@ -96,6 +107,8 @@ def create(
     rustc: str,
     target: str,
     binary_names: tuple[str, ...] = BINARIES,
+    packed_debug: bool = False,
+    rustc_release: str | None = None,
 ) -> dict[str, Any]:
     """Write sidecars and a manifest for the exact shipped binary set."""
 
@@ -119,7 +132,7 @@ def create(
         binaries[name] = {"sha256": digest}
 
     manifest: dict[str, Any] = {
-        "schema": SCHEMA,
+        "schema": PACKED_SCHEMA if packed_debug else SCHEMA,
         "git_tree": git_tree,
         "git_commit": git_commit,
         "build_ref": build_ref,
@@ -127,6 +140,18 @@ def create(
         "target": target,
         "binaries": binaries,
     }
+    if packed_debug:
+        manifest["rustc_release"] = _require_pinned_rustc(rustc, rustc_release)
+        manifest["debug_policy"] = {"debug": "line-tables-only", "split": "packed", "strip": "none"}
+        records = {}
+        for name in binary_names:
+            debug_name = f"{name}.dwp"
+            path = directory / debug_name
+            units = verify_packed_pair(directory / name, path)
+            digest = _digest(path)
+            records[debug_name] = {"sha256": digest, "binary_sha256": binaries[name]["sha256"], "dwo_units": units}
+            (directory / f"{debug_name}.sha256").write_text(f"{digest}  {debug_name}\n", encoding="utf-8")
+        manifest["debug_artifacts"] = records
     (directory / "build-manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -142,6 +167,8 @@ def verify(
     build_ref: str,
     target: str,
     binary_names: tuple[str, ...] = BINARIES,
+    packed_debug: bool = False,
+    rustc_release: str | None = None,
 ) -> dict[str, Any]:
     """Verify identity, sidecars, and bytes before packaging an image."""
 
@@ -156,6 +183,8 @@ def verify(
         *(name for name in binary_names),
         *(f"{name}.sha256" for name in binary_names),
     }
+    if packed_debug:
+        expected_files.update(f"{name}{suffix}" for name in binary_names for suffix in (".dwp", ".dwp.sha256"))
     try:
         actual_files = {path.name for path in directory.iterdir()}
     except OSError as error:
@@ -174,7 +203,7 @@ def verify(
         raise ValueError(f"cannot read release artifact manifest: {error}") from error
     if not isinstance(manifest, dict):
         raise ValueError("release artifact manifest must be a JSON object")
-    if manifest.get("schema") != SCHEMA:
+    if manifest.get("schema") != (PACKED_SCHEMA if packed_debug else SCHEMA):
         raise ValueError("release artifact manifest has an unsupported schema")
 
     expected_identity = {
@@ -217,6 +246,26 @@ def verify(
             raise ValueError(f"cannot read release artifact sidecar for {name}") from error
         if sidecar_value != f"{expected_digest}  {name}\n":
             raise ValueError(f"release artifact sidecar mismatch for {name}")
+    if packed_debug:
+        release = _require_pinned_rustc(manifest["rustc"], rustc_release)
+        if manifest.get("rustc_release") != release or manifest.get("debug_policy") != {"debug": "line-tables-only", "split": "packed", "strip": "none"}:
+            raise ValueError("packed debug toolchain/policy mismatch")
+        records = manifest.get("debug_artifacts")
+        if not isinstance(records, dict) or set(records) != {f"{name}.dwp" for name in binary_names}:
+            raise ValueError("packed debug artifact set mismatch")
+        for name in binary_names:
+            debug_name = f"{name}.dwp"
+            record = records[debug_name]
+            path = directory / debug_name
+            if not isinstance(record, dict) or set(record) != {"sha256", "binary_sha256", "dwo_units"}:
+                raise ValueError("invalid packed debug artifact record")
+            units = verify_packed_pair(directory / name, path)
+            if record["binary_sha256"] != binaries[name]["sha256"] or record["sha256"] != _digest(path):
+                raise ValueError("packed debug digest/binary pairing mismatch")
+            if type(record["dwo_units"]) is not int or record["dwo_units"] != units:
+                raise ValueError("packed debug compilation-unit mismatch")
+            if (directory / f"{debug_name}.sha256").read_text(encoding="utf-8") != f"{record['sha256']}  {debug_name}\n":
+                raise ValueError("packed debug sidecar mismatch")
     return manifest
 
 
@@ -231,6 +280,8 @@ def main() -> int:
         action.add_argument("--build-ref", required=True)
         action.add_argument("--target", required=True)
         action.add_argument("--binary", action="append", required=True)
+        action.add_argument("--packed-debug", action="store_true")
+        action.add_argument("--rustc-release")
         if command == "create":
             action.add_argument("--rustc", required=True)
     args = parser.parse_args()
@@ -239,6 +290,8 @@ def main() -> int:
         "git_commit": args.git_commit,
         "build_ref": args.build_ref,
         "target": args.target,
+        "packed_debug": args.packed_debug,
+        "rustc_release": args.rustc_release,
     }
     if args.command == "create":
         create(

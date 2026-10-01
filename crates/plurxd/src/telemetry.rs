@@ -1936,30 +1936,6 @@ pub fn emit(store: Arc<dyn Store>, event: PlaybackEvent) {
     emit_with_network(store, event, None, None);
 }
 
-/// Called only after public create validates the authoritative predecessor.
-pub(crate) fn adaptive_reopen_event(
-    request: &crate::transcode::SessionRequest,
-    route: &plurx_core::domain::MediaSessionRoute,
-    now_ms: i64,
-) -> Option<PlaybackEvent> {
-    let cause = request.reopen_reason?;
-    if cause == crate::transcode::ReopenReason::Stall {
-        return None;
-    }
-    let height = serde_json::from_str::<serde_json::Value>(&route.response_json)
-        .ok()?
-        .get("height")?
-        .as_i64()?;
-    Some(PlaybackEvent {
-        at_unix_ms: now_ms,
-        user_id: Some(route.user_id),
-        event: "stall".into(),
-        height: Some(height),
-        detail: Some(format!("{}:adaptive_reopen", cause.as_str())),
-        ..PlaybackEvent::default()
-    })
-}
-
 /// Persist the N0 event and, independently when opted in, fold its bounded
 /// network measurement into the matching prior. Keeping the two switches
 /// independent means an operator may retain only the aggregate prior without
@@ -2017,7 +1993,7 @@ pub(crate) fn emit_with_network(
     }
 }
 
-pub(crate) fn prior_observation(
+fn prior_observation(
     event: &PlaybackEvent,
     network: Option<&NetworkIdentity>,
 ) -> Option<NetworkPriorObservation> {
@@ -2025,11 +2001,14 @@ pub(crate) fn prior_observation(
     let credential_generation = network.credential_generation.as_ref()?;
     let user_id = network.user_id?;
     let detail = event.detail.as_deref().unwrap_or_default();
-    // A decode failure, deliberate hold or lost authority says nothing about
+    // CPU encode pressure, decoder failure, deliberate hold or lost authority say nothing about
     // this credential's network. Even accompanying throughput must not turn
     // those observations into a shared quality ceiling.
     let cause = detail.split_once(':').map(|(cause, _)| cause);
-    if matches!(cause, Some("decode" | "hold" | "authority" | "unknown")) {
+    if matches!(
+        cause,
+        Some("encode" | "decode" | "hold" | "authority" | "unknown")
+    ) {
         return None;
     }
     let client_kbps = event
@@ -2046,7 +2025,7 @@ pub(crate) fn prior_observation(
         (None, None) => None,
     };
     let starved = event.event == "stall"
-        && (matches!(cause, Some("link" | "encode"))
+        && (cause == Some("link")
             || detail.contains("supply")
             || detail.contains("network")
             || detail.contains("blocked")
@@ -3218,7 +3197,7 @@ mod tests {
             credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
             user_id: Some(42),
         };
-        for cause in ["link", "encode", "decode", "hold", "authority", "unknown"] {
+        for cause in ["link", "decode", "hold", "authority", "unknown"] {
             let event = PlaybackEvent {
                 event: "stall".into(),
                 height: Some(720),
@@ -3228,12 +3207,32 @@ mod tests {
                 ..PlaybackEvent::default()
             };
             let observation = prior_observation(&event, Some(&network));
-            if matches!(cause, "link" | "encode") {
+            if cause == "link" {
                 assert_eq!(observation.expect(cause).starved_rung_height, Some(720));
             } else {
                 assert!(observation.is_none(), "{cause} is not network evidence");
             }
         }
+    }
+
+    #[test]
+    fn encode_cpu_pressure_never_updates_network_prior() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        let event = PlaybackEvent {
+            event: "stall".into(),
+            height: Some(1440),
+            bandwidth_kbps: Some(100),
+            delivered_bps: Some(100_000),
+            runway_ds: Some(0),
+            detail: Some("encode:adaptive_reopen".into()),
+            ..PlaybackEvent::default()
+        };
+        assert!(prior_observation(&event, Some(&network)).is_none());
     }
 
     /// How the writer called its Store, recorded call by call.

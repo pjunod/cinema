@@ -524,7 +524,7 @@ class PreparedAbandonBodyTest {
                 isLikelyToKeepUp = true,
                 acknowledgement = acknowledgement,
                 selection = ClientSelection(
-                    quality = QualitySelection.Auto(),
+                    quality = QualitySelection.Auto,
                     audioTrack = 0,
                     subtitle = SubtitleSelection(SubtitleMode.OFF),
                     audioOffsetMs = 0,
@@ -703,7 +703,7 @@ class SettlingSnapshotTest {
             isLikelyToKeepUp = false,
             acknowledgement = acknowledgement,
             selection = ClientSelection(
-                quality = QualitySelection.Auto(),
+                quality = QualitySelection.Auto,
                 audioTrack = 0,
                 subtitle = SubtitleSelection(SubtitleMode.OFF),
                 audioOffsetMs = 0,
@@ -784,7 +784,7 @@ class SettlingSnapshotTest {
                     firstFrameUnixMs = 1_788_000_000_000,
                 ),
                 selection = ClientSelection(
-                    quality = QualitySelection.Auto(),
+                    quality = QualitySelection.Auto,
                     audioTrack = 0,
                     subtitle = SubtitleSelection(SubtitleMode.OFF),
                     audioOffsetMs = 0,

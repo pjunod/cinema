@@ -206,7 +206,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
                                 Session.displayModeMatch = recovered.info.display_mode_match
-                                Session.playbackAutoAbr = recovered.info.playback_auto_abr
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -482,7 +481,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
         Session.displayModeMatch = false
-        Session.playbackAutoAbr = false
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -941,7 +939,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
-        Session.playbackAutoAbr = info.playback_auto_abr
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -989,7 +986,6 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (serverInstanceId != info.instance_id) invalidateLibraryPager()
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
-        Session.playbackAutoAbr = info.playback_auto_abr
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }

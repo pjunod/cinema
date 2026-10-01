@@ -2116,7 +2116,6 @@
             automatic: false,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
             kind: SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: false,
@@ -2184,7 +2183,6 @@
             automatic: false,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
             kind: SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: false,
@@ -3164,7 +3162,6 @@
             automatic: false,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
             kind: SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,
