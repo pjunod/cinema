@@ -3889,6 +3889,9 @@ async function main() {
   }
 
 
+  await test("prepared rollback preserves the latest viewer transport intent",
+    preparedRollbackTransportTests);
+
   await test("prepared first-frame proof excludes explicit pause and retains its active bound",
     preparedFirstFramePauseBudgetTests);
 
@@ -6989,6 +6992,31 @@ async function vendoredHlsStartupTests(){
   process.stdout.write("PASS vendored HLS startup, local subtitles, retry ownership and stale-request fences\n");
 }
 
+function preparedRollbackTransportTests(){
+  for(const wantsPlayback of [false,true]){
+    let plays=0,pauses=0,adopted=null;
+    const element={style:{},muted:true,removeAttribute(){},
+      play(){plays++;return Promise.resolve();},pause(){pauses++;}};
+    const predecessor={element,wantsPlayback:!wantsPlayback,sessionId:"incumbent",
+      muted:false,volume:0.6,playbackRate:1,defaultPlaybackRate:1,hls:{}};
+    const state={predecessor,hls:{}};
+    const successor={style:{},setAttribute(){}};
+    const p={wantsPlayback,sessionId:"successor"};
+    const rollback=new Function("resumePreparedIncumbentLoad","restorePreparedOverlap",
+      "adoptPlaybackMediaElement","resetPlaybackTransportEvents","destroyHlsInstance",
+      "disposeRetiredMediaElement","renderPlayerInfo",
+      shippedSource("rollbackPreparedReplacement")+";return rollbackPreparedReplacement;")(
+      ()=>{},()=>{},(_,video)=>{adopted=video;},()=>{},()=>{},()=>{},()=>{});
+    assert.equal(rollback(p,state,successor),true);
+    assert.equal(p.wantsPlayback,wantsPlayback,"rollback retains the latest viewer transport intent");
+    assert.equal(plays,wantsPlayback?1:0,"rollback must not resume a viewer-paused incumbent");
+    assert.equal(pauses,wantsPlayback?0:1,"rollback must not undo a newer Play command");
+    assert.equal(adopted,element);
+    assert.equal(p.sessionId,"incumbent");
+    assert.equal(state.predecessor,null,"the restored media has one owner");
+  }
+}
+
 function preparedFirstFramePauseBudgetTests(){
   const harness=()=>{
     let now=0,next=0,frames=0,timeouts=0;
@@ -7027,7 +7055,9 @@ function preparedFirstFramePauseBudgetTests(){
   assert.equal(presented.state.frameBudgetUpdate,null);
 }
 
-const focused=process.argv.includes('--prepared-first-frame')
+const focused=process.argv.includes('--prepared-rollback')
+  ?Promise.resolve().then(preparedRollbackTransportTests)
+  :process.argv.includes('--prepared-first-frame')
   ?Promise.resolve().then(preparedFirstFramePauseBudgetTests)
   :process.argv.includes('--free-fall')
   ?freeFallPlaybackTests()

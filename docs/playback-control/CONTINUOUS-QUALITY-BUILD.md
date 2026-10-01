@@ -1482,3 +1482,13 @@ stale deadline, actual presented-frame settlement and a decoder pause that must
 still time out. Its focused command is
 `node tests/playback/web-control.test.js --prepared-first-frame`; it has not run.
 Offer, overlap, server and native budgets still need their CQ6 integration.
+
+### 10.20 Prepared rollback retains current transport intent
+
+If the successor fails its first-frame proof, the web rollback restores the
+incumbent media and session metadata while preserving the latest viewer Pause
+or Play. Previously it restored the intent captured before exposure, which
+could resume a paused viewer or undo a newer Play. The authored regression
+covers both directions and checks that the incumbent has one restored owner.
+Its focused command is `node tests/playback/web-control.test.js --prepared-rollback`;
+execution remains deferred to the final fast lane.

@@ -206,7 +206,8 @@ function rollbackPreparedReplacement(p,state,successor){
   p.encoder=predecessor.encoder;
   p.qualityCandidateId=predecessor.qualityCandidateId;
   p.deliveredRange=predecessor.deliveredRange;
-  p.wantsPlayback=predecessor.wantsPlayback;
+  // Transport intent belongs to the viewer, including commands made while
+  // the successor was awaiting its first frame. Rollback restores media only.
   p.health=predecessor.health;
   p.healthObservedAt=predecessor.healthObservedAt;
   p.presentationAdvancedAt=predecessor.presentationAdvancedAt;
@@ -227,7 +228,7 @@ function rollbackPreparedReplacement(p,state,successor){
   restorePreparedOverlap(state);
   adoptPlaybackMediaElement(p,retired);
   resetPlaybackTransportEvents(retired);
-  if(predecessor.wantsPlayback===false){
+  if(p.wantsPlayback===false){
     try{ retired.pause(); }catch(e){}
   }else{
     try{ const resumed=retired.play(); if(resumed&&resumed.catch) resumed.catch(()=>{}); }catch(e){}
