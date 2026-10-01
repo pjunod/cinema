@@ -1463,7 +1463,12 @@ pattern = "terminal_reason"
 # +1 browse reporting reads the terminal reason for a failed analysis badge.
 # +1: the capacity refusal carries a durable terminal reason of its own, so a
 # 503 is distinguishable from an anonymous producer fault.
-expected_occurrences = 33
+# +13 playback stall repair: six references project the existing winning cause
+# into the HLS 410 response (including one empty common DTO initializer).
+# Three define/validate/map its optional ControlErrorBody field; four existing
+# control fixtures explicitly initialize it to None. None writes durable state
+# or chooses a cause: retirement and the playback actor retain ownership.
+expected_occurrences = 46
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1493,7 +1498,10 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"
 pattern = "PendingTakeoverSettlement"
-expected_occurrences = 8
+# K06 original-clock preparation: +1 is the shared scripted fixture's return
+# type, carrying the same original claim and exact mock worker into NEW
+# clock-boundary regressions. No production settlement/recovery owner is added.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-takeover-worker-cleanup-owner"
@@ -3605,7 +3613,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # S11 #690: +1 for the same awaited 250 ms stop-file sleep in feature-only
 # tests/rolling_grid_campaign.rs, reviewed under all-async-sleeps above. Its
 # enclosing test owns/stops the actual session; no independent timer owner.
-expected_occurrences = 1154
+# +1 playback stall repair: the existing VOD inventory regression awaits a
+# 100-ms timeout while holding the manifest lock, proving Activity does not
+# acquire that lock or renew idle life. This is a test-only assertion bound,
+# owned by the fixture; no production timer or recovery owner is added.
+expected_occurrences = 1155
 
 [[module_structures]]
 id = "bare-time-constructor"

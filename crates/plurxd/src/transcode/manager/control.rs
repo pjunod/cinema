@@ -1,6 +1,17 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(crate) async fn cluster_index_available(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        video: plurx_core::transcode::CopyVideoOptions,
+    ) -> bool {
+        self.vod
+            .cluster_index_available(file, video)
+            .await
+            .unwrap_or(false)
+    }
+
     /// Number of active HLS sessions across the public VOD registry and the
     /// test-only historical live registry (for /metrics and activity).
     pub async fn active_sessions(&self) -> usize {
@@ -423,7 +434,10 @@ impl TranscodeManager {
         if operation.identity.matches(control) {
             Ok(Some(operation))
         } else {
-            Err(crate::playback_control::ControlStateError::SessionEnded)
+            // This tombstone is admitted only for the actor's winning End.
+            // A different exchange cannot replay it, but retirement must not
+            // erase the cause once the live worker has been removed.
+            Err(crate::playback_control::RollingTerminalCause::End.control_error())
         }
     }
 
@@ -486,19 +500,14 @@ impl TranscodeManager {
             .get(control.session_id)
             .cloned();
         if let Some(retired) = retired {
-            if retired
+            if let Some(cause) = retired
                 .session
                 .control
                 .snapshot()
                 .await
-                .is_some_and(|lease| {
-                    lease.terminal
-                        == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
-                })
+                .and_then(|lease| lease.terminal)
             {
-                return Some(Err(
-                    crate::playback_control::ControlStateError::PauseExpired,
-                ));
+                return Some(Err(cause.control_error()));
             }
         }
         if let Some(result) = self
@@ -664,16 +673,15 @@ impl TranscodeManager {
             let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
             let _final_transition = session.child_transition.lock().await;
             if session.control.is_retired() && !acknowledged_end {
-                return Err(
-                    if session.control.snapshot().await.is_some_and(|lease| {
-                        lease.terminal
-                            == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
-                    }) {
-                        crate::playback_control::ControlStateError::PauseExpired
-                    } else {
-                        crate::playback_control::ControlStateError::SessionEnded
-                    },
-                );
+                return Err(session
+                    .control
+                    .snapshot()
+                    .await
+                    .and_then(|lease| lease.terminal)
+                    .map_or(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                        crate::playback_control::RollingTerminalCause::control_error,
+                    ));
             }
             if !self
                 .sessions
@@ -693,16 +701,15 @@ impl TranscodeManager {
             )
             .await;
             if session.control.is_retired() && !acknowledged_end {
-                return Err(
-                    if session.control.snapshot().await.is_some_and(|lease| {
-                        lease.terminal
-                            == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
-                    }) {
-                        crate::playback_control::ControlStateError::PauseExpired
-                    } else {
-                        crate::playback_control::ControlStateError::SessionEnded
-                    },
-                );
+                return Err(session
+                    .control
+                    .snapshot()
+                    .await
+                    .and_then(|lease| lease.terminal)
+                    .map_or(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                        crate::playback_control::RollingTerminalCause::control_error,
+                    ));
             }
             if !self
                 .sessions

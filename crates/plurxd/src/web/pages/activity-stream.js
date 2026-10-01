@@ -21,8 +21,25 @@ function activityMethodLabel(method,encoder){
   const name=({direct:"Direct play",remux:"Remux","hls-copy":"HLS copy",transcode:"Transcode"})[method]||method||"";
   return encoder==="cached"?`${name} · cached`:name;
 }
+function activityObservedVodSession(session){
+  if(!session||session.presentation!=="vod"||!session.vod_observation)return session;
+  const o=session.vod_observation;
+  return Object.assign({},session,{control_demand:o.control_demand,render_state:o.render_state,
+    reported_position_ms:o.position_ms,client_runway_ms:o.client_runway_ms,
+    producer_state:o.producer_state,hold_reason:o.producer_hold,suspended:o.producer_state==="held"});
+}
 function activityStreamState(session){
   if(!session) return null;
+  if(session.presentation==="vod"){
+    const o=session.vod_observation;
+    if(!o)return {cls:"idle",label:"Unobserved"};
+    session=activityObservedVodSession(session);
+    if(o.producer_state==="failed")return {cls:"bad",label:"Producer failed"};
+    if(o.render_state==="failed"||o.render_state==="stalled")return {cls:"bad",label:o.render_state==="failed"?"Client failed":"Client stalled"};
+    if(o.control_age_ms==null)return {cls:"idle",label:"Client unobserved",why:o.producer_hold?`producer held · ${o.producer_hold}`:""};
+    if(o.control_age_ms>30000)return {cls:"idle",label:"Client observation stale"};
+    if(o.control_demand!=="hold"&&o.render_state!=="rendering")return {cls:"wait",label:"Client waiting",why:o.producer_hold?`producer held · ${o.producer_hold}`:""};
+  }
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
   // viewer with no actor at all; only the three terminal verdicts are news.
   const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
@@ -84,9 +101,9 @@ function activityStreamMeters(de,session){
   }
   const bps=de.delivered_bps!=null?de.delivered_bps:session&&session.delivered_bps;
   const bytes=de.delivered_bytes!=null?de.delivered_bytes:session&&session.delivered_bytes;
-  if(bps||bytes){
+  if(bps!=null||bytes!=null){
     const idle=session&&session.delivered_idle_ms>15000;
-    out.push({k:"Delivery rate",v:bps?fmtMbps(bps):"—",of:[bytes?fmtBytes(bytes):"",idle?"idle":""].filter(Boolean).join(" · ")});
+    out.push({k:"Delivery rate",v:bps!=null?(bps===0?"0 Mb/s":fmtMbps(bps)):"—",of:[bytes!=null?fmtBytes(bytes):"",idle?"idle":""].filter(Boolean).join(" · ")});
   }
   return out;
 }
@@ -108,6 +125,10 @@ function activityStreamDetails(session){
       :session.resume_below_bytes!=null?`resumes below ${fmtBytes(session.resume_below_bytes)||"0 B"}`:"";
     rows.push(["Hold reason",`${session.hold_reason||"limit"}${release?` · ${release}`:""}`]);
   }
+  if(session.presentation==="vod"&&session.vod_observation){
+    const age=session.vod_observation.control_age_ms;
+    rows.push(["Control observation",age==null?"unobserved":`${Math.round(age/1000)} s ago`]);
+  }
   if(session.render_state) rows.push(["Render state",String(session.render_state).replace(/_/g," ")]);
   if(typeof session.recent_speed==="number") rows.push(["Encode speed",`${session.recent_speed.toFixed(2)}×`]);
   else if(typeof session.speed==="number") rows.push(["Encode speed",`${session.speed.toFixed(2)}× (avg)`]);
@@ -127,9 +148,9 @@ function activityStreamDetails(session){
   if(session.retirement_reason) rows.push(["Retirement",String(session.retirement_reason).replace(/_/g," ")]);
   if(session.maintenance_state) rows.push(["Maintenance",String(session.maintenance_state).replace(/_/g," ")]);
   if(session.rate_estimate_source) rows.push(["Rate source",String(session.rate_estimate_source).replace(/_/g," ")]);
-  if(Number.isSafeInteger(session.advertised_bytes)) rows.push(["Advertised bytes",fmtBytes(session.advertised_bytes)]);
+  if(session.presentation!=="vod"&&Number.isSafeInteger(session.advertised_bytes)) rows.push(["Advertised bytes",fmtBytes(session.advertised_bytes)]);
   if(Number.isSafeInteger(session.grace_bytes)&&session.grace_bytes>0) rows.push(["Grace bytes",fmtBytes(session.grace_bytes)]);
-  if(Number.isSafeInteger(session.live_bytes)) rows.push(["Live scratch",Number.isSafeInteger(session.reserved_bytes)
+  if(session.presentation!=="vod"&&Number.isSafeInteger(session.live_bytes)) rows.push(["Live scratch",Number.isSafeInteger(session.reserved_bytes)
     ?`${fmtBytes(session.live_bytes)} of ${fmtBytes(session.reserved_bytes)}`:fmtBytes(session.live_bytes)]);
   if(Number.isSafeInteger(session.published_segment)) rows.push(["Published segment",String(session.published_segment)]);
   if(Number.isSafeInteger(session.next_media_sequence)) rows.push(["Next sequence",String(session.next_media_sequence)]);
@@ -145,6 +166,8 @@ function activityStreamDetails(session){
 // by the next poll — the same courtesy the analysis table extends.
 function activityStreamCell(de,session,open){
   const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
+  if(!session&&de.presentation==="vod")session={presentation:"vod",vod_observation:de.vod_observation};
+  session=activityObservedVodSession(session);
   const state=activityStreamState(session);
   // `deliveries[]` names the method; the rung and the encoder ride on the
   // session row beside it, so a stream with a session reads them from there.

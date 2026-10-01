@@ -237,10 +237,13 @@
     return immutableCopy({ snapshot, intentGeneration, owner });
   }
 
-  function sameIntent(left, right) {
-    return !!left && !!right && left.intentGeneration === right.intentGeneration
-      && left.owner.lifecycleId === right.owner.lifecycleId
+  function sameAttachment(left, right) {
+    return !!left && !!right && left.owner.lifecycleId === right.owner.lifecycleId
       && left.owner.attachmentGeneration === right.owner.attachmentGeneration;
+  }
+
+  function sameIntent(left, right) {
+    return sameAttachment(left, right) && left.intentGeneration === right.intentGeneration;
   }
 
   function validResponse(bootstrap, request, response) {
@@ -445,7 +448,7 @@
         // the one that acts on this.
         if (request.demand === "end"
             || (response.action.type === "terminal"
-              && sameIntent(requestCapture, this.capture()))) {
+              && sameAttachment(requestCapture, this.capture()))) {
           this.stop();
           return;
         }
@@ -466,7 +469,7 @@
             && this.resetForOwner(reportedError);
           const retryableControl = (status === 425 && reportedError.code === "owner_transition")
             || (status === 429 && reportedError.code === "control_rate_limited")
-            || (status === 503 && reportedError.code === "control_unavailable");
+            || (status === 503 && ["control_unavailable", "serving_fenced"].includes(reportedError.code));
           const retryableTransport = status === 408 || status === 0 || !Number.isFinite(status);
           if (ownerChanged) {
             this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
@@ -475,8 +478,13 @@
             this.retryCapture = requestCapture;
             const fallback = retryableControl ? 500 : this.bootstrap.next_exchange_ms;
             this.nextAllowedAt = this.now() + retryDelay(reportedError, fallback);
-          } else {
+          } else if (status !== 410 || sameAttachment(requestCapture, this.capture())) {
             this.stop();
+          } else {
+            // Definitive death belongs to the old attachment, including any
+            // retry it left queued. The successor keeps its whole capture.
+            this.retryRequest = null;
+            this.retryCapture = null;
           }
         }
       } finally {
