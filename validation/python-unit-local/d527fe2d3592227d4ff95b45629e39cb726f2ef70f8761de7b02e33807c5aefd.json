@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "source_attribution": "Original uncommitted worktree execution, not current-commit evidence. Passing tests are not rerun.",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "f70bbbdcdd891625e32684c45b4156d65afbb711628c25d61dbb351c860a0b4b",
+  "command": "python3 -m unittest tests.validation.test_python_unit_receipts.PythonReceiptCase.test_local_receipt_requires_hash_bound_writer_attestation -v",
+  "output": "test_local_receipt_requires_hash_bound_writer_attestation ... ok; Ran 1 test in 0.002s; OK; exit 0",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_local_receipt_requires_hash_bound_writer_attestation"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  }
+}
