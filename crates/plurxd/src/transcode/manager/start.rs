@@ -38,6 +38,7 @@ impl TranscodeManager {
             playback_id,
             false,
             false,
+            None,
             Priority::Live,
         )
         .await
@@ -420,6 +421,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
+        candidate_profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
@@ -494,6 +496,11 @@ impl TranscodeManager {
             None,
             grade,
         );
+        if let Some(profile) = candidate_profile {
+            opts.auto_quality_rate_profile = Some(profile);
+            opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+            opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+        }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
@@ -614,6 +621,11 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
+        if let Some(profile) = candidate_profile {
+            opts.auto_quality_rate_profile = Some(profile);
+            opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+            opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+        }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
@@ -697,9 +709,10 @@ impl TranscodeManager {
                 return Err(format!("reading frozen presentation probe: {error}"));
             }
         };
-        let frozen_presentation = FrozenHlsPresentation::new(
+        let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                bandwidth: None,
                 file_id,
                 start_seconds,
                 media_origin_seconds: start_seconds,
@@ -708,6 +721,7 @@ impl TranscodeManager {
                 frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
             },
             &session_kind,
+            Some(plan.output_contract()),
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let retry = if encoder == Encoder::Software {
@@ -1460,6 +1474,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
+                bandwidth: None,
                 file_id,
                 start_seconds,
                 media_origin_seconds,

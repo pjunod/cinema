@@ -8826,6 +8826,7 @@ mod tests {
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
         };
         let options = TranscodeOptions {
+            auto_quality_rate_profile: None,
             target_height: 360,
             ..TranscodeOptions::default()
         };

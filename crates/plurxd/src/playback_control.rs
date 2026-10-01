@@ -24854,6 +24854,7 @@ mod tests {
 
     fn session_request(kind: SessionKind) -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id: 5615,
             playback_id: "player-a".to_owned(),
             request_id: None,
@@ -25461,6 +25462,7 @@ mod tests {
 
         fn request(kind: SessionKind, hdr10: bool) -> SessionRequest {
             SessionRequest {
+                candidate_context: None,
                 file_id: 1,
                 playback_id: "player-a".to_owned(),
                 request_id: None,

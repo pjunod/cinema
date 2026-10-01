@@ -125,6 +125,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         .expect("unix mtime")
         .as_secs() as i64;
     let options = TranscodeOptions {
+        auto_quality_rate_profile: None,
         target_height: 144,
         video_bitrate_kbps: 300,
         software_threads: Some(2),

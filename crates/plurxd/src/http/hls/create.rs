@@ -178,6 +178,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,

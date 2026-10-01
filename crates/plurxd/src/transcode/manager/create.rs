@@ -612,6 +612,9 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
+                    req.candidate_context
+                        .as_ref()
+                        .map(|context| context.profile),
                     priority,
                 )
                 .await
@@ -705,7 +708,13 @@ impl TranscodeManager {
             )
         })?;
         let target_height = match req.kind {
-            SessionKind::Transcode { height } if height > 0 => height.min(source_height),
+            SessionKind::Transcode { height } if height > 0 => {
+                if req.candidate_context.is_some() {
+                    height
+                } else {
+                    height.min(source_height)
+                }
+            }
             SessionKind::Copy { .. } => source_height,
             _ => {
                 return Err(vod_refusal_error(
@@ -827,7 +836,7 @@ impl TranscodeManager {
                 format!("{detail}; reanalyze this item before playback"),
             ));
         }
-        let grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
+        let mut grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
             vod_refusal_error(
                 "vod_frame_cadence_unknown",
                 "the source probe has no usable video cadence; rescan the file",
@@ -900,6 +909,11 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
+        if let Some(context) = req.candidate_context.as_ref() {
+            options.auto_quality_rate_profile = Some(context.profile);
+            options.video_bitrate_kbps = context.profile.video_bitrate_kbps();
+            options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+        }
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -929,6 +943,36 @@ impl TranscodeManager {
         let plan = self
             .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
             .await?;
+        if let Some(frame_rate) = plan
+            .output_contract()
+            .normalized_geometry()
+            .and_then(|geometry| geometry.rate_profile.and(geometry.frame_rate))
+        {
+            grid = plurx_core::transcode::VodFrameGrid::new(
+                frame_rate.numerator(),
+                frame_rate.denominator(),
+            )
+            .ok_or_else(|| {
+                vod_refusal_error(
+                    "vod_frame_cadence_unknown",
+                    "the normalized output cadence has no valid immutable grid",
+                )
+            })?;
+        }
+        if let Some(context) = req.candidate_context.as_ref() {
+            let actual = self
+                .candidate_recipe_digest(&plan, req.presentation)
+                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+            if actual != context.recipe_digest
+                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                    != context.candidate_id
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "the resolved source/route no longer matches the selected candidate",
+                ));
+            }
+        }
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(

@@ -209,3 +209,363 @@ mod tests {
         }
     }
 }
+
+/// A complete route identity retained beside the shortened wire lookup key.
+/// Worker proof is specific to the recipe, not to a height or encoder family.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct QualityCandidate {
+    pub id: CandidateId,
+    pub recipe_digest: [u8; 32],
+    pub route: CandidateRoute,
+    pub width: u32,
+    pub height: u32,
+    pub average_bps: Option<u64>,
+    pub peak_bps: Option<u64>,
+    pub grade: crate::transcode::OutputGrade,
+    pub decoder_compatible: bool,
+    pub complete_cache: bool,
+    pub sustainable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateRoute {
+    Original,
+    Remux,
+    Encode,
+}
+
+impl QualityCandidate {
+    pub fn identity_matches(&self) -> bool {
+        self.id == CandidateId::for_recipe_digest(self.recipe_digest)
+    }
+
+    /// Cached bytes avoid encode admission, but never avoid decoder admission.
+    pub fn playable(&self) -> bool {
+        self.identity_matches()
+            && self.width > 0
+            && self.height > 0
+            && self.decoder_compatible
+            && (self.complete_cache || self.sustainable)
+    }
+}
+
+/// A transfer is useful link evidence only when it completed over the network
+/// independently of producer pacing and has not aged out. Legacy aggregate
+/// bandwidth values deliberately cannot construct this proof implicitly.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkTransferEvidence {
+    pub bytes: u64,
+    pub elapsed_ms: u32,
+    pub age_ms: u32,
+    pub completed: bool,
+    pub from_cache: bool,
+    pub producer_paced: bool,
+}
+
+impl NetworkTransferEvidence {
+    pub fn usable_bps(self) -> Option<u64> {
+        if !self.completed
+            || self.from_cache
+            || self.producer_paced
+            || self.bytes == 0
+            || self.elapsed_ms == 0
+            || self.age_ms > 10_000
+        {
+            return None;
+        }
+        self.bytes
+            .checked_mul(8_000)?
+            .checked_div(u64::from(self.elapsed_ms))
+    }
+}
+
+/// One policy shared by initial Auto, menus and runtime transitions. Original
+/// routes retain priority when they can decode sustainably; display fit applies
+/// to produced alternatives and never compels a compatible original downgrade.
+pub fn select_quality_candidate(
+    candidates: &[QualityCandidate],
+    aspect: crate::playback::geometry::DisplayAspect,
+    target: Option<PresentationTarget>,
+    network: Option<NetworkTransferEvidence>,
+) -> Option<&QualityCandidate> {
+    let link_bps = network.and_then(NetworkTransferEvidence::usable_bps);
+    let fits_link = |candidate: &&QualityCandidate| {
+        candidate.playable()
+            && match (candidate.peak_bps, link_bps) {
+                (Some(peak), Some(link)) => peak <= link,
+                // Unknown wire cost or link cannot force a downgrade. It is
+                // not sufficient evidence for a voluntary upgrade either.
+                _ => true,
+            }
+    };
+    if let Some(original) = candidates
+        .iter()
+        .filter(fits_link)
+        .filter(|candidate| candidate.route != CandidateRoute::Encode)
+        .max_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height))
+    {
+        return Some(original);
+    }
+    let mut eligible: Vec<_> = candidates
+        .iter()
+        .filter(fits_link)
+        .filter(|candidate| candidate.route == CandidateRoute::Encode)
+        .collect();
+    eligible.sort_by_key(|candidate| {
+        (
+            u64::from(candidate.width) * u64::from(candidate.height),
+            candidate.peak_bps,
+        )
+    });
+    if let Some(target) = target.filter(|target| target.rectangle().is_some()) {
+        if let Some(candidate) = eligible.iter().find(|candidate| {
+            aspect.covered_by(target, (candidate.width, candidate.height)) == Some(true)
+        }) {
+            return Some(candidate);
+        }
+    }
+    eligible.last().copied()
+}
+
+/// Lookup requires full recipe equality, so a shortened-key collision cannot
+/// authorize another source, grade, track or production profile.
+pub fn find_quality_candidate(
+    candidates: &[QualityCandidate],
+    id: CandidateId,
+    recipe_digest: [u8; 32],
+) -> Option<&QualityCandidate> {
+    candidates.iter().find(|candidate| {
+        candidate.id == id && candidate.recipe_digest == recipe_digest && candidate.playable()
+    })
+}
+
+/// Cause belongs to the observed failure domain. Runway urgency alone never
+/// establishes a link, encode or decoder cause.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoCause {
+    Link,
+    Encode,
+    Decode,
+    Hold,
+    Authority,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoTransition {
+    Hold,
+    Prepare,
+    Recover,
+    NaturalBoundary,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AutoRuntimeState {
+    pub last_switch_ms: Option<u64>,
+    pub upgrade_since_ms: Option<u64>,
+    pub mild_samples: u8,
+    pub switch_times_ms: Vec<u64>,
+    pub blocked_candidates: Vec<CandidateId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AutoRuntimeSample {
+    pub now_ms: u64,
+    pub automatic: bool,
+    pub presenting: bool,
+    pub paused: bool,
+    pub seeking: bool,
+    pub move_in_flight: bool,
+    pub cause: AutoCause,
+    pub cause_age_ms: u32,
+    pub runway_ms: Option<u32>,
+    pub stalled: bool,
+    pub natural_boundary: bool,
+    pub speculative_admission: bool,
+    pub parallel_decoder_safe: bool,
+    /// Active production measurement with input pacing removed. None is
+    /// unknown and cannot prove a speculative encode upgrade.
+    pub active_encode_milli_realtime: Option<u32>,
+    pub transfer: Option<NetworkTransferEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AutoRuntimeDecision {
+    pub candidate_id: Option<CandidateId>,
+    pub transition: AutoTransition,
+    pub cause: AutoCause,
+}
+
+/// Pure route-based reducer. The adapter owns clocks, measurement, presentation
+/// and the prepared-switch exchange; this function owns no timer or resources.
+pub fn decide_auto_transition(
+    state: &mut AutoRuntimeState,
+    sample: AutoRuntimeSample,
+    candidates: &[QualityCandidate],
+    current_id: CandidateId,
+    aspect: crate::playback::geometry::DisplayAspect,
+    target: Option<PresentationTarget>,
+) -> AutoRuntimeDecision {
+    let hold = AutoRuntimeDecision {
+        candidate_id: None,
+        transition: AutoTransition::Hold,
+        cause: sample.cause,
+    };
+    state
+        .switch_times_ms
+        .retain(|at| sample.now_ms.saturating_sub(*at) < 3_600_000);
+    if !sample.automatic
+        || !sample.presenting
+        || sample.paused
+        || sample.seeking
+        || sample.move_in_flight
+        || state.switch_times_ms.len() >= 6
+    {
+        state.upgrade_since_ms = None;
+        state.mild_samples = 0;
+        return hold;
+    }
+    let Some(current) = candidates
+        .iter()
+        .find(|candidate| candidate.id == current_id)
+    else {
+        return hold;
+    };
+    if sample.cause_age_ms > 15_000
+        || matches!(sample.cause, AutoCause::Hold | AutoCause::Authority)
+    {
+        state.upgrade_since_ms = None;
+        return hold;
+    }
+    let current_area = u64::from(current.width) * u64::from(current.height);
+    if sample.cause == AutoCause::Decode {
+        if !state.blocked_candidates.contains(&current_id) {
+            state.blocked_candidates.push(current_id);
+        } else {
+            // A repeated decoder failure belongs to compatibility recovery.
+            return hold;
+        }
+    }
+    let eligible: Vec<_> = candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.playable()
+                && candidate.grade == current.grade
+                && !state.blocked_candidates.contains(&candidate.id)
+        })
+        .cloned()
+        .collect();
+    let picked = select_quality_candidate(&eligible, aspect, target, sample.transfer);
+    let link = sample
+        .transfer
+        .and_then(NetworkTransferEvidence::usable_bps);
+    let severe = sample.cause == AutoCause::Link
+        && match (link, current.peak_bps) {
+            (Some(link), Some(peak)) => u128::from(link) * 10 < u128::from(peak) * 7,
+            _ => false,
+        };
+    let pressure = severe || matches!(sample.cause, AutoCause::Encode | AutoCause::Decode);
+    let chosen = if pressure {
+        let mut lower: Vec<_> = eligible
+            .iter()
+            .filter(|candidate| {
+                u64::from(candidate.width) * u64::from(candidate.height) < current_area
+            })
+            .collect();
+        lower.sort_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height));
+        if severe {
+            lower
+                .iter()
+                .rev()
+                .find(|candidate| match (candidate.peak_bps, link) {
+                    (Some(peak), Some(link)) => peak <= link,
+                    _ => false,
+                })
+                .copied()
+        } else {
+            lower.last().copied()
+        }
+    } else {
+        picked
+    };
+    let Some(chosen) = chosen.filter(|chosen| chosen.id != current_id) else {
+        state.upgrade_since_ms = None;
+        return hold;
+    };
+    let chosen_area = u64::from(chosen.width) * u64::from(chosen.height);
+    let upgrade = chosen_area > current_area
+        || chosen.route != CandidateRoute::Encode && current.route == CandidateRoute::Encode;
+    if upgrade {
+        let link_margin = match (link, chosen.peak_bps) {
+            (Some(link), Some(peak)) => u128::from(link) * 10 >= u128::from(peak) * 18,
+            _ => false,
+        };
+        let encode_margin = chosen.complete_cache
+            || chosen.route != CandidateRoute::Encode
+            || sample
+                .active_encode_milli_realtime
+                .is_some_and(|speed| speed >= 1150);
+        if !link_margin
+            || !encode_margin
+            || !sample.speculative_admission
+            || !sample.parallel_decoder_safe
+            || sample.stalled
+            || sample.runway_ms.is_none_or(|runway| runway < 10_000)
+        {
+            state.upgrade_since_ms = None;
+            return hold;
+        }
+        let since = *state.upgrade_since_ms.get_or_insert(sample.now_ms);
+        if sample.now_ms.saturating_sub(since) < 45_000 {
+            return hold;
+        }
+    } else if !pressure {
+        // A smaller container is advisory; resize recovery waits for a safe
+        // boundary unless the viewer explicitly chose a different quality.
+        if !sample.natural_boundary {
+            return hold;
+        }
+    }
+    if !severe
+        && state
+            .last_switch_ms
+            .is_some_and(|last| sample.now_ms.saturating_sub(last) < 60_000)
+    {
+        return hold;
+    }
+    AutoRuntimeDecision {
+        candidate_id: Some(chosen.id),
+        transition: if sample.natural_boundary {
+            AutoTransition::NaturalBoundary
+        } else if sample.stalled {
+            AutoTransition::Recover
+        } else {
+            AutoTransition::Prepare
+        },
+        cause: sample.cause,
+    }
+}
+
+impl AutoRuntimeState {
+    /// Call only after the presentation owner confirms the switch landed.
+    pub fn committed(&mut self, now_ms: u64) {
+        self.last_switch_ms = Some(now_ms);
+        self.upgrade_since_ms = None;
+        self.mild_samples = 0;
+        self.switch_times_ms.push(now_ms);
+        self.switch_times_ms
+            .retain(|at| now_ms.saturating_sub(*at) < 3_600_000);
+        self.switch_times_ms.truncate(6);
+    }
+
+    pub fn viewer_discontinuity(&mut self) {
+        self.switch_times_ms.clear();
+        self.upgrade_since_ms = None;
+        self.mild_samples = 0;
+    }
+}

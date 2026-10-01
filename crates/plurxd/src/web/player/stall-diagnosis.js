@@ -212,6 +212,8 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
     position:Math.max(0,position||0),target_method:p.method||null,
     target_session_id:targetSessionId||p.sessionId||null,target_attempt_id:p.attemptId||null};
   p.abr.switches.push(entry);
+  p.abr.switchBudgetTimes=(p.abr.switchBudgetTimes||[])
+    .filter(at=>atMs-at<3600000).concat(atMs).slice(-6);
   if(reason==='bandwidth cliff') p.abr.lastCliffAtMs=atMs;
   if(p.abr.switches.length>8) p.abr.switches.shift();
   clientLog(Object.assign({level:"warn",event:"quality_switch",reason:"auto",
@@ -221,6 +223,8 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
 }
 function autoCauseEvidence(p,nowMs){
   const maxAge=PlaybackPolicy.AUTO_DEFAULTS.causeMaxAgeMs;
+  if(p&&p.abr&&nowMs<Number(p.abr.stallVerdictUntilMs||0))
+    return {kind:"control-stall-verdict",ageMs:0};
   const episode=p&&p.hlsStartup;
   if(episode&&episode.establishedSuspension
     &&episode.establishedSuspension.attachment===p.mediaAttachment){
@@ -481,6 +485,8 @@ async function autoControllerTick(){
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     lastCliffAtMs:p.abr.lastCliffAtMs,
     upgradeSinceMs:p.abr.upgradeSinceMs,playerHeight:playerPixelHeight(v),
+    switchesThisPlaybackHour:(p.abr.switchBudgetTimes||[])
+      .filter(at=>now-at<3600000).length,
     blockedHeights:p.abr.failedHeights,causeEvidence
   });
   p.abr.previousRunway=runway;

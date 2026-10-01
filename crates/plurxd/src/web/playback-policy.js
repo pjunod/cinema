@@ -13,6 +13,7 @@
 
   const AUTO_DEFAULTS = Object.freeze({
     sampleMs: 5_000,
+    switchBudgetPerHour: 6,
     // A 5s decision clock plus a prepared successor's first fragments missed
     // the 10s cliff budget even when the handoff itself was seamless.
     decisionMs: 1_000,
@@ -348,6 +349,7 @@
     playerHeight = Infinity,
     blockedHeights = null,
     causeEvidence = null,
+    switchesThisPlaybackHour = 0,
     defaults = AUTO_DEFAULTS,
   }) {
     // Pressure decisions need the complete ladder. Filtering it by the player
@@ -410,6 +412,7 @@
       "authority-refused",
       "loader-suspended",
       "delivery-refused",
+      "control-stall-verdict",
     ].includes(causeKind)
       ? causeKind
       : null;
@@ -432,6 +435,12 @@
         mildSamples: 0,
         upgradeSinceMs: null,
       };
+    }
+
+    if (switchesThisPlaybackHour >= defaults.switchBudgetPerHour) {
+      return {height: current.height, reason: "switch-budget", action: "suppressed",
+        emergency: false, mildSamples: 0, upgradeSinceMs: null,
+        evidence: {kind: causeKind, budget_left: 0}};
     }
 
     const severe = freshBandwidthCliff;

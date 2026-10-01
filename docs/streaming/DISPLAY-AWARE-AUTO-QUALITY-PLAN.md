@@ -1199,3 +1199,91 @@ receipt or combined-feature promotion is inferred. Exact M1 integration all-targ
 90/90 with `hiqlite-store`, decoder selection 59/59, Developer settings 35/35,
 strict protocol conformance 15/15 and docs index 4/4 passed. Normal integration
 commit hook remains pending; older M1 results do not substitute for this tree.
+
+### 9.5 M2 normalized pipeline integration (in progress)
+
+Source work now opts new candidate routes into a conditional upright square-pixel
+presentation contract; legacy requests, FactsDigest and cache recipes retain
+their existing branch. New plan identity carries transformation version, measured
+SAR and rotation. Source ceilings use upright square-pixel presentation coordinates:
+1440×1080 SAR4:3 retains 1920×1080, while an ordinary 1920×1080 source never
+creates a synthetic 1440-high rung. The CPU pipeline, immutable VOD argument
+builder and encoded VOD manifest adapter consume the same resolved raster.
+Unknown geometry refuses only the new normalization claim. Rotated opaque GPU
+graphs are refused until a supported exact transform is proved.
+
+A local FFmpeg9.0.1 synthetic fixture independently measured the display-matrix
+sign: +90 matches `transpose=cclock`, -90 matches `transpose=clock`, and180
+matches `hflip,vflip`. Manual transforms plus output `rotate=0` metadata retained
+the input matrix; clearing the input matrix before manual rotation removed it.
+The new conditional argv therefore includes input `-noautorotate` and
+`-display_rotation 0`, plus one measured manual transform and explicit `setsar=1`.
+Even raster alone does not prove square pixels: a 360×240 SAR64:45 source scaled
+to306×144 retained SAR256:255 without `setsar=1`. These local experiments establish
+CPU behavior only; every actual eligible worker/build still needs exact graph,
+source-grade, fps, concurrency and codec/container proof. No1440 rate profile or
+production candidate admission is claimed yet. Core decoder regressions 62/62 passed after a reviewed correction: scalar
+rotation is insufficient to exclude reflected/sheared display matrices. Both
+production queries now collect full `displaymatrix` and its type; the normalized
+branch validates pure unit quarter-turn coefficients and refuses missing,
+reflected, translated or sheared matrices without changing legacy routes. Rolling
+start/cache now consume the same resolved contract as encoded VOD. New rolling
+masters remain attempt-bound; MPEG-TS does not have an AVC init object, so this
+is not an init-derived codec claim. Manifest adapter regression/compile checks
+are running.
+
+Read-only fleet discovery currently reports FOUR f16be4f22 members: nynuc
+192.168.5.236 and m6 192.168.4.14 voters, nuc4 192.168.4.8 leader/voter, and nuc3
+192.168.4.7 read-worker/learner. Bonjour's two responders were not a complete
+fleet census. Current nynuc UI reports jellyfin-ffmpeg8.1.3, QSV/VAAPI boot graph
+validation, but unavailable held FFprobe identity and explicit decode facts;
+Main10 plain-HDR and DV-HDR10 graphs failed. These are baseline observations,
+not source geometry/tone-map admission proofs or parser-floor deployment receipts.
+Missing bound facts must remain unknown through the new adapter.
+
+### 9.6 User-confirmed execution workflow (2026-09-30)
+
+Implementation now uses the independent clone `/private/tmp/plurx-auto-quality`,
+with no shared Git metadata or further access to the user's original checkout.
+The migration retained all twelve owned source files with exact byte verification
+in an external snapshot. Parser prerequisite PR657 landed as
+`5c99538fd0f6e96a7a6f6d8772f944735c4f33b1` after its final promotion gate.
+
+The user explicitly replaced intermediate task tests, reviews and effort gates
+with batched normal commits, compiler and formatting checks, then one adversarial
+pass when the combined PR is ready for main. Findings are addressed before the
+fast lane and green merge. Broad unrelated unit-failure cleanup is a separate
+process. Physical qualification gaps remain truthful advisory Developer status;
+readiness does not reject Save or override the saved feature choice. Safety and
+compatibility predicates still describe what evidence actually supports.
+
+### 9.7 Current source integration and compiler receipts
+
+The independent clone passed Rust1.97.1 daemon all-target checks after profile,
+manifest and request-context integration. New profile identity is explicit in
+TranscodeOptions; it pins H.264 High level5.0, measured normalized cadence and
+12Mb/s VBR, with actual audio contributing separately to average/peak bandwidth.
+A160kb/s audio budget yields12.16Mb/s average and18.16Mb/s peak. Rolling and VOD
+manifest adapters carry both values. Immutable output grid follows the resolved
+normalized cadence. Candidate execution context is serde-skipped inside the
+legacy SessionRequest; retained outer worker candidate/target/decoder fields
+remain the protocol reconstruction seam. Full recipe equality is checked before
+VOD admission. Catalog/owner/controller integration remains underway.
+
+Create-time Android, iOS and tvOS sources compile, as do web syntax/types with
+the existing baseline unchanged. Target pixels come from the actual player
+container. Android decoder maxima come from advertised component/profile limits;
+Apple/web absent maxima remain unknown. These are compiler receipts, not
+physical smoothness or D3 traces. Existing A-05 ownership is recorded on its
+work-board row and combined with this effort.
+
+The packaged bound probe now uses separately pinned upstreamFFmpeg8.1.3 source
+SHA2567138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3.
+An actual LinuxARM64 Bookworm compile passed; the resulting FFprobe8.1.3 ELF
+has no INTERP or DYNAMIC segment (binary SHA256
+bdd21afcf90f5cff773affb3912cb522e7a711b60e91dbd23330faedc9468326).
+PLURX_BOUND_FFPROBE selects this self-contained parser for held local-file facts;
+general scanning retains Jellyfin FFprobe unchanged. The build checks static
+closure on each target architecture. x86 compilation and production installation
+are not claimed. Receipt files remain under the external task artifact directory
+`/private/tmp/plurx-auto-static-probe/compiled/docs`; no production mutation occurred.

@@ -923,6 +923,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                candidate_context: None,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -2080,6 +2081,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                candidate_context: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2340,6 +2342,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    candidate_context: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),

@@ -739,6 +739,7 @@ pub struct DecodeFacts {
     frame_rate: FrameRate,
     sample_aspect_ratio: Option<Rational>,
     rotation_degrees: Option<i32>,
+    normalization_transform_known: bool,
     field_order: Option<String>,
     interlace_verdict: InterlaceVerdict,
     bit_depth: Option<u8>,
@@ -876,6 +877,7 @@ impl DecodeFacts {
                 Rational::new(numerator.parse().ok()?, denominator.parse().ok()?)
             });
         let rotation_degrees = parse_display_rotation(selected);
+        let normalization_transform_known = pure_display_transform(selected, rotation_degrees);
         let field_order = bounded_token(selected, "field_order")?;
         let bit_depth = parse_bit_depth(selected, pixel_format.as_deref());
         let color_range = bounded_token(selected, "color_range")?;
@@ -934,6 +936,7 @@ impl DecodeFacts {
             frame_rate,
             sample_aspect_ratio,
             rotation_degrees,
+            normalization_transform_known,
             field_order,
             interlace_verdict: InterlaceVerdict::NotChecked,
             bit_depth,
@@ -993,6 +996,12 @@ impl DecodeFacts {
     /// Malformed or conflicting metadata remains unknown rather than guessed.
     pub fn rotation_degrees(&self) -> Option<i32> {
         self.rotation_degrees
+    }
+
+    /// Scalar rotation is insufficient to rule out reflection/shear. New
+    /// normalized routes require a complete pure quarter-turn matrix proof.
+    pub fn normalization_transform_known(&self) -> bool {
+        self.normalization_transform_known
     }
 
     pub fn displayed_aspect(&self) -> Option<crate::playback::geometry::DisplayAspect> {
@@ -1261,6 +1270,64 @@ fn parse_display_rotation(stream: &Value) -> Option<i32> {
     }
     let rotation = rotation.unwrap_or(0);
     matches!(rotation, 0 | 90 | 180 | 270).then_some(rotation)
+}
+
+fn pure_display_transform(stream: &Value, rotation: Option<i32>) -> bool {
+    let Some(rotation) = rotation else {
+        return false;
+    };
+    let matrices = stream
+        .get("side_data_list")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item.get("side_data_type").and_then(Value::as_str) == Some("Display Matrix")
+                || item.get("rotation").is_some()
+                || item.get("displaymatrix").is_some()
+        })
+        .collect::<Vec<_>>();
+    if matrices.is_empty() {
+        return rotation == 0
+            && stream
+                .get("tags")
+                .and_then(|tags| tags.get("rotate"))
+                .is_none_or(|value| value.as_str() == Some("0"));
+    }
+    if matrices.len() != 1 {
+        return false;
+    }
+    let Some(matrix) = matrices[0].get("displaymatrix").and_then(Value::as_str) else {
+        return false;
+    };
+    if matrix.len() > 512 {
+        return false;
+    }
+    let mut coefficients = Vec::new();
+    for row in matrix.lines().filter(|row| !row.trim().is_empty()) {
+        let Some((_, values)) = row.split_once(':') else {
+            return false;
+        };
+        let values = values
+            .split_whitespace()
+            .map(str::parse::<i64>)
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(values) = values else {
+            return false;
+        };
+        if values.len() != 3 {
+            return false;
+        }
+        coefficients.extend(values);
+    }
+    let (a, b, c, d) = match rotation {
+        0 => (65536, 0, 0, 65536),
+        90 => (0, -65536, 65536, 0),
+        180 => (-65536, 0, 0, -65536),
+        270 => (0, 65536, -65536, 0),
+        _ => return false,
+    };
+    coefficients == [a, b, 0, c, d, 0, 0, 0, 1073741824]
 }
 
 fn parse_rational(value: Option<&str>) -> Option<Rational> {
@@ -2032,11 +2099,30 @@ impl ToneMapPeakSource {
 pub struct TranscodeRequest {
     encoder: Encoder,
     options: TranscodeMediaOptions,
+    normalized_geometry: bool,
+    rate_profile: Option<AutoQualityRateProfile>,
 }
 
 impl TranscodeRequest {
     pub fn new(encoder: Encoder, options: TranscodeMediaOptions) -> Self {
-        Self { encoder, options }
+        Self {
+            encoder,
+            options,
+            normalized_geometry: false,
+            rate_profile: None,
+        }
+    }
+
+    /// Opt in only for routes whose complete normalized recipe is supported.
+    pub fn with_normalized_geometry(mut self) -> Self {
+        self.normalized_geometry = true;
+        self
+    }
+
+    pub fn with_auto_quality_rate_profile(mut self, profile: AutoQualityRateProfile) -> Self {
+        self.normalized_geometry = true;
+        self.rate_profile = Some(profile);
+        self
     }
 
     pub fn encoder(&self) -> Encoder {
@@ -2060,6 +2146,76 @@ pub enum SubtitleRendering {
 #[serde(rename_all = "snake_case")]
 pub enum OutputWidthRule {
     PreserveAspectEven,
+    UprightSquareEvenV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OutputBandwidth {
+    pub average_bps: u64,
+    pub peak_bps: u64,
+}
+
+/// Versioned rate policy for a measured output class, not a height-only rung.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoQualityRateProfile {
+    H264Sdr1440P30V1,
+}
+
+impl AutoQualityRateProfile {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::H264Sdr1440P30V1 => "h264-sdr-1440p30-v1",
+        }
+    }
+
+    pub fn video_bitrate_kbps(self) -> u32 {
+        match self {
+            Self::H264Sdr1440P30V1 => 12_000,
+        }
+    }
+
+    /// Wire peak includes the actual resolved audio budget. Input pacing is
+    /// excluded from encode sustainability and never turns this into link proof.
+    pub fn peak_bitrate_bps(self, audio_bitrate_kbps: u32) -> u64 {
+        u64::from(self.video_bitrate_kbps()) * 1500 + u64::from(audio_bitrate_kbps) * 1000
+    }
+
+    pub fn bandwidth(self, audio_bitrate_kbps: u32) -> OutputBandwidth {
+        OutputBandwidth {
+            average_bps: (u64::from(self.video_bitrate_kbps()) + u64::from(audio_bitrate_kbps))
+                * 1000,
+            peak_bps: self.peak_bitrate_bps(audio_bitrate_kbps),
+        }
+    }
+
+    pub fn hls_video_codec(self) -> &'static str {
+        "avc1.640032"
+    }
+}
+
+/// Conditional byte-producing transform; absent for every legacy route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct NormalizedGeometry {
+    pub rotation_degrees: i32,
+    pub sample_aspect_ratio: Rational,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_profile: Option<AutoQualityRateProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frame_rate: Option<Rational>,
+}
+
+impl NormalizedGeometry {
+    /// FFprobe +90 is counter-clockwise, as measured against autorotation.
+    pub fn rotation_filter(self) -> Option<&'static str> {
+        match self.rotation_degrees {
+            0 => None,
+            90 => Some("transpose=cclock"),
+            180 => Some("hflip,vflip"),
+            270 => Some("transpose=clock"),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -2074,6 +2230,10 @@ pub struct PresentationContract {
     output_matrix: String,
     output_primaries: String,
     width_rule: OutputWidthRule,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normalized_geometry: Option<NormalizedGeometry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_present: Option<bool>,
     requested_max_height: u32,
     effective_width: Option<u32>,
     effective_height: Option<u32>,
@@ -2120,6 +2280,33 @@ impl PresentationContract {
 
     pub fn output_primaries(&self) -> &str {
         &self.output_primaries
+    }
+
+    pub fn normalized_geometry(&self) -> Option<NormalizedGeometry> {
+        self.normalized_geometry
+    }
+
+    pub fn output_bandwidth(&self) -> Option<OutputBandwidth> {
+        self.normalized_geometry?.rate_profile.map(|profile| {
+            profile.bandwidth(if self.audio_present == Some(false) {
+                0
+            } else {
+                self.audio_bitrate_kbps
+            })
+        })
+    }
+
+    pub fn hls_codecs(&self) -> Option<String> {
+        let profile = self.normalized_geometry?.rate_profile?;
+        Some(format!(
+            "{}{}",
+            profile.hls_video_codec(),
+            if self.audio_present == Some(false) {
+                ""
+            } else {
+                ",mp4a.40.2"
+            }
+        ))
     }
 
     pub fn width_rule(&self) -> OutputWidthRule {
@@ -2469,8 +2656,45 @@ impl ResolvedTranscode {
             "output_width_rule",
             match presentation.width_rule {
                 OutputWidthRule::PreserveAspectEven => b"preserve_aspect_even",
+                OutputWidthRule::UprightSquareEvenV1 => b"upright_square_even_v1",
             },
         );
+        if let Some(geometry) = presentation.normalized_geometry {
+            feed("normalization_version", b"upright-square-v1");
+            if let Some(profile) = geometry.rate_profile {
+                feed("auto_quality_rate_profile", profile.name().as_bytes());
+            }
+            if let Some(rate) = geometry.frame_rate {
+                feed(
+                    "normalized_output_rate_num",
+                    rate.numerator().to_string().as_bytes(),
+                );
+                feed(
+                    "normalized_output_rate_den",
+                    rate.denominator().to_string().as_bytes(),
+                );
+            }
+            feed(
+                "source_rotation",
+                geometry.rotation_degrees.to_string().as_bytes(),
+            );
+            feed(
+                "source_sar_num",
+                geometry
+                    .sample_aspect_ratio
+                    .numerator()
+                    .to_string()
+                    .as_bytes(),
+            );
+            feed(
+                "source_sar_den",
+                geometry
+                    .sample_aspect_ratio
+                    .denominator()
+                    .to_string()
+                    .as_bytes(),
+            );
+        }
         feed(
             "requested_max_height",
             presentation.requested_max_height.to_string().as_bytes(),
@@ -2756,7 +2980,88 @@ pub fn resolve_transcode(
         request.encoder,
         subtitle_rendering,
     );
-    let effective_geometry = effective_output_geometry(facts, requested_max_height);
+    let normalization = if request.normalized_geometry {
+        if !facts.normalization_transform_known() {
+            return Err(PlanError::InvalidFact("display_matrix"));
+        }
+        let rotation = facts
+            .rotation_degrees()
+            .ok_or(PlanError::InvalidFact("rotation"))?;
+        let sar = facts
+            .sample_aspect_ratio()
+            .ok_or(PlanError::InvalidFact("sample_aspect_ratio"))?;
+        // Manual rotation filters consume software frames. Never silently apply
+        // a CPU transpose to opaque hardware surfaces or change a proved route.
+        if rotation != 0
+            && (backend != DecodeBackend::Software
+                || !matches!(
+                    options.pipeline,
+                    Pipeline::Cpu
+                        | Pipeline::DoviTonemapx
+                        | Pipeline::DoviPassthrough
+                        | Pipeline::Hdr10Passthrough
+                ))
+        {
+            return Err(PlanError::IncompatibleRenderer);
+        }
+        Some(NormalizedGeometry {
+            rotation_degrees: rotation,
+            sample_aspect_ratio: sar,
+            rate_profile: request.rate_profile,
+            frame_rate: request
+                .rate_profile
+                .and_then(|_| facts.frame_rate().value()),
+        })
+    } else {
+        None
+    };
+    let effective_geometry = if let Some(normalization) = normalization {
+        let (width, height) = (
+            facts.width.ok_or(PlanError::InvalidFact("width"))?,
+            facts.height.ok_or(PlanError::InvalidFact("height"))?,
+        );
+        // Square-pixel normalization preserves the source's displayed raster.
+        // Bounding anamorphic width by coded width would discard vertical detail
+        // (1440x1080 SAR4:3 must normalize to 1920x1080, not 1440x810).
+        let width = u32::try_from(
+            u64::from(width) * u64::from(normalization.sample_aspect_ratio.numerator())
+                / u64::from(normalization.sample_aspect_ratio.denominator()),
+        )
+        .map_err(|_| PlanError::InvalidFact("square_pixel_source_width"))?;
+        let (width, height) = if matches!(normalization.rotation_degrees, 90 | 270) {
+            (height, width)
+        } else {
+            (width, height)
+        };
+        Some(
+            facts
+                .displayed_aspect()
+                .ok_or(PlanError::InvalidFact("display_geometry"))?
+                .output_within(width, height.min(requested_max_height))
+                .ok_or(PlanError::InvalidFact("output_geometry"))?,
+        )
+    } else {
+        effective_output_geometry(facts, requested_max_height)
+    };
+    if let Some(profile) = request.rate_profile {
+        let (width, height) =
+            effective_geometry.ok_or(PlanError::InvalidFact("output_geometry"))?;
+        let rate = facts
+            .frame_rate()
+            .value()
+            .ok_or(PlanError::InvalidFact("frame_rate"))?;
+        if output_grade != OutputGrade::Sdr
+            || height != 1440
+            || width > 2560
+            || options.video_bitrate_kbps != profile.video_bitrate_kbps()
+            || options.effective_rate_control != EffectiveRateControl::Vbr
+            || u64::from(rate.numerator()) > 30 * u64::from(rate.denominator())
+            || facts.frame_rate().provenance() == FrameRateProvenance::Nominal
+            || deinterlace != Deinterlace::None
+        {
+            return Err(PlanError::InvalidMediaOption("auto_quality_rate_profile"));
+        }
+    }
     let output_contract = PresentationContract {
         output_grade,
         output_codec: match output_grade {
@@ -2767,7 +3072,11 @@ pub fn resolve_transcode(
         output_encoder: output_encoder.to_owned(),
         output_profile: match output_grade {
             OutputGrade::Hdr10 => Some("main10".to_owned()),
-            OutputGrade::Sdr if request.encoder == Encoder::Software => Some("high".to_owned()),
+            OutputGrade::Sdr
+                if request.encoder == Encoder::Software || request.rate_profile.is_some() =>
+            {
+                Some("high".to_owned())
+            }
             OutputGrade::Sdr => None,
         },
         output_pixel_format: output_grade.pixel_format().to_owned(),
@@ -2775,7 +3084,13 @@ pub fn resolve_transcode(
         output_transfer: output_grade.transfer().to_owned(),
         output_matrix: output_grade.matrix().to_owned(),
         output_primaries: output_grade.primaries().to_owned(),
-        width_rule: OutputWidthRule::PreserveAspectEven,
+        width_rule: if normalization.is_some() {
+            OutputWidthRule::UprightSquareEvenV1
+        } else {
+            OutputWidthRule::PreserveAspectEven
+        },
+        normalized_geometry: normalization,
+        audio_present: normalization.map(|_| options.input_has_audio),
         requested_max_height,
         effective_width: effective_geometry.map(|geometry| geometry.0),
         effective_height: effective_geometry.map(|geometry| geometry.1),

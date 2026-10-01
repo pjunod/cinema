@@ -839,9 +839,10 @@ impl TranscodeManager {
         };
         let cached_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
-        let frozen_presentation = FrozenHlsPresentation::new(
+        let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -850,6 +851,7 @@ impl TranscodeManager {
                 frame_rate: frozen_video_frame_rate(cached_probe_json.as_deref()),
             },
             &cached_kind,
+            Some(plan.output_contract()),
         );
         let control = crate::playback_control::RollingControlHandle::spawn("session-start");
         let failed = Arc::new(AtomicBool::new(false));

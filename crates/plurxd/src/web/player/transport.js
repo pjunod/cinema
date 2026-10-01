@@ -1001,6 +1001,7 @@ function playbackSeekBufferCovers(v,p,targetMs){
 async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
   recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
+  if(viewerInitiated&&PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
   if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){

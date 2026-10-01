@@ -11,7 +11,7 @@ pub struct DisplayAspect {
 }
 
 impl DisplayAspect {
-    /// Missing or unsupported geometry remains unknown. Rotation is clockwise.
+    /// Missing or unsupported geometry remains unknown. Rotation follows FFprobe display-matrix degrees.
     pub fn from_source(
         coded_width: u32,
         coded_height: u32,
@@ -63,6 +63,22 @@ impl DisplayAspect {
         let width = u128::from(height) * u128::from(self.width) / u128::from(self.height);
         let width = u32::try_from(width).ok()? / 2 * 2;
         (width > 0).then_some((width, height))
+    }
+
+    /// Fit an even square-pixel raster within the source's upright square-pixel
+    /// presentation ceiling, rather than incorrectly using anamorphic coded axes.
+    pub fn output_within(self, max_width: u32, max_height: u32) -> Option<(u32, u32)> {
+        let (width, height) = self.output_at_height(max_height)?;
+        if width <= max_width {
+            return Some((width, height));
+        }
+        let width = max_width / 2 * 2;
+        let height =
+            u32::try_from(u128::from(width) * u128::from(self.height) / u128::from(self.width))
+                .ok()?
+                / 2
+                * 2;
+        (width > 0 && height > 0).then_some((width, height))
     }
 }
 

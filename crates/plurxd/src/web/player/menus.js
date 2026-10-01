@@ -263,6 +263,7 @@ function setQuality(q){
   closeMenu();
   toast("Quality: "+qualityLabel());
   if(PLAYER && PLAYER.fileId){
+    if(PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
     clientLog(Object.assign({level:"warn",event:"quality_switch",
       message:`quality ${from} → ${q}`,detail:`from=${from} to=${q}`,reason:"manual"},
       playbackContext()));

@@ -1478,6 +1478,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // 00:01:30 out to 00:02:30.
     let resume_ms = accepted_film_time_ms;
     let staged_request = crate::transcode::SessionRequest {
+        candidate_context: None,
         request_id: Some(staged_incarnation_id.clone()),
         start_seconds: resume_ms as f64 / 1_000.0,
         // A successor is its own generation, not a reopen of the one it

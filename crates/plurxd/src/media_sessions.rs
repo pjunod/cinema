@@ -5426,6 +5426,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         user_id: route.user_id,
         typeless_playlist: true,
         request: SessionRequest {
+            candidate_context: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -5855,6 +5856,7 @@ mod tests {
             typeless_playlist: true,
             library_channel: None,
             request: SessionRequest {
+                candidate_context: None,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6775,6 +6777,7 @@ mod tests {
         let mut vod = base.clone();
         vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
             request: SessionRequest {
+                candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -6919,6 +6922,7 @@ mod tests {
 
         let vod = RemoteStartRequest {
             request: SessionRequest {
+                candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },

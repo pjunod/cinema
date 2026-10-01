@@ -282,17 +282,16 @@ impl TranscodeManager {
         let compatibility = std::env::var("PLURX_HWDECODE").ok();
         let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref())
             .qualifying_artifacts(qualification);
-        transcode::resolve_transcode(
-            &TranscodeRequest::new(
-                encoder,
-                TranscodeMediaOptions::from_options_with_facts(file, options, facts),
-            ),
-            facts,
-            &capabilities,
-            &policy,
-            restrictions,
-        )
-        .map_err(|error| format!("decoder plan refused: {error}"))
+        let request = TranscodeRequest::new(
+            encoder,
+            TranscodeMediaOptions::from_options_with_facts(file, options, facts),
+        );
+        let request = match options.auto_quality_rate_profile {
+            Some(profile) => request.with_auto_quality_rate_profile(profile),
+            None => request,
+        };
+        transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
+            .map_err(|error| format!("decoder plan refused: {error}"))
     }
 
     pub(super) async fn resolve_bound_movie_plan(
@@ -499,6 +498,27 @@ impl TranscodeManager {
         audio_copied: bool,
     ) -> Recipe<'a> {
         Recipe::new(digest, plan, audio_copied)
+    }
+
+    /// Full conditional identity. Delivery namespace is distinct from the
+    /// legacy MPEG-TS cache key even when the encoder recipe is equal.
+    pub(super) fn candidate_recipe_digest(
+        &self,
+        plan: &ResolvedTranscode,
+        presentation: super::Presentation,
+    ) -> Result<[u8; 32], String> {
+        let digest = self
+            .digest()
+            .ok_or_else(|| "candidate recipe identity unavailable".to_owned())?;
+        let recipe = self.effective_recipe(&digest, plan, false).hash();
+        let mut hash = Sha256::new();
+        hash.update(b"plurx:auto-quality-route:v1\0");
+        hash.update(match presentation {
+            super::Presentation::Vod => b"encoded-fmp4-vod".as_slice(),
+            super::Presentation::Live => b"rolling-mpegts".as_slice(),
+        });
+        hash.update(recipe.as_bytes());
+        Ok(hash.finalize().into())
     }
 
     /// Which audio track a session carries, and which subtitle it burns.
@@ -952,6 +972,7 @@ impl TranscodeManager {
         let dovi_reshape = Self::needs_dovi_reshape(file).unwrap_or(false);
         let hdr10 = grade == OutputGrade::Hdr10;
         TranscodeOptions {
+            auto_quality_rate_profile: None,
             target_height,
             software_threads,
             video_bitrate_kbps: bitrate_for_height(target_height),
