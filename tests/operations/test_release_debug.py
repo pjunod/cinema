@@ -45,6 +45,52 @@ def packed_pair(directory: Path, name: str = "plurxd", identity: int = 0x1234567
 
 
 class PackedDebugCase(unittest.TestCase):
+    def test_index_identity_requires_a_valid_matching_compilation_unit(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            for mutation in ("zero", "length", "version", "identity", "abbrev", "form"):
+                packed_pair(root)
+                path = root / "plurxd.dwp"; data = bytearray(path.read_bytes())
+                info, length = Elf(path).sections[".debug_info.dwo"]
+                abbrev, _ = Elf(path).sections[".debug_abbrev.dwo"]
+                if mutation == "zero":
+                    data[info:info + length] = bytes(length)
+                elif mutation == "length":
+                    struct.pack_into("<I", data, info, length)
+                elif mutation == "version":
+                    struct.pack_into("<H", data, info + 4, 3)
+                elif mutation == "identity":
+                    struct.pack_into("<Q", data, info + 12, 0xBAD)
+                elif mutation == "abbrev":
+                    struct.pack_into("<I", data, info + 6, 999999)
+                else:
+                    data[abbrev + 5] = 0x1E  # data16 overruns the root.
+                path.write_bytes(data)
+                with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                    verify_packed_pair(root / "plurxd", path)
+            packed_pair(root)
+            self.assertEqual(verify_packed_pair(root / "plurxd", root / "plurxd.dwp"), 1)
+
+    def test_dwarf5_split_unit_header_and_root_are_checked(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); identity = 0x12345678
+            abbrev = bytes((1, 0x11, 0, 0, 0, 0))
+            def info(kind):
+                unit = struct.pack("<HBBIQB", 5, kind, 8, 0, identity, 1)
+                return struct.pack("<I", len(unit)) + unit
+            elf(root / "plurxd", {".debug_info": info(4), ".debug_abbrev": abbrev,
+                                  ".debug_line": b"line", ".symtab": bytes(24)})
+            index = struct.pack("<4IQI2I4I", 5, 2, 1, 1, identity, 1, 1, 3,
+                                0, 0, len(info(5)), len(abbrev))
+            for kind in (5, 4):
+                elf(root / "plurxd.dwp", {".debug_info.dwo": info(kind),
+                    ".debug_abbrev.dwo": abbrev, ".debug_cu_index": index})
+                if kind == 5:
+                    self.assertEqual(verify_packed_pair(root / "plurxd", root / "plurxd.dwp"), 1)
+                else:
+                    with self.assertRaisesRegex(ValueError, "split compilation"):
+                        verify_packed_pair(root / "plurxd", root / "plurxd.dwp")
+
     def test_selected_profile_c_preserves_unwind_thin_and_default_codegen_policy(self):
         profile = tomllib.loads((ROOT / "Cargo.toml").read_text())["profile"]["release"]
         self.assertEqual((profile["debug"], profile["strip"], profile["split-debuginfo"]),
