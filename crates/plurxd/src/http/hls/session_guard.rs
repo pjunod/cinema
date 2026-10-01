@@ -29,6 +29,10 @@ pub struct StartResponse {
     pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
+    /// Advisory only: durable replays must reacquire live private authority.
+    #[serde(default, skip_serializing_if = "Option::is_none", skip_deserializing)]
+    pub(crate) measured_candidate_outputs:
+        Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,

@@ -729,6 +729,9 @@ pub struct DecisionResponse {
     pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) measured_candidate_outputs:
+        Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>>,
     pub file_id: i64,
     /// Whether this node has a fragment index matching the current file and
     /// the copy-video identity selected by this decision.
@@ -2447,6 +2450,7 @@ pub async fn decision(
     // to Trakt, and a third-party call belongs nowhere near the click path.
     // The media endpoints announce it once delivery is actually happening.
 
+    let mut measured_candidate_outputs = None;
     let quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
@@ -2454,29 +2458,30 @@ pub async fn decision(
         .is_some_and(|value| value.trim() == "1")
     {
         if let Some(caps) = q.caps_v2.as_ref() {
+            let request = crate::media_pool::QualityCatalogRequest {
+                audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                    .ok()
+                    .flatten(),
+                audio_delivery: None,
+                copy_contract: None,
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                caps: caps.clone(),
+                audio_index: selected_audio,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: selected_subtitle.filter(|_| selected_subtitle_requires_burn),
+                presentation: crate::transcode::Presentation::Vod,
+            };
+            let accepted = state
+                .media_pool
+                .quality_candidates(&state, request.clone())
+                .await;
+            measured_candidate_outputs =
+                super::hls::link_receipts::measured_outputs(&state, &file, &request, &accepted)
+                    .await;
             Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        &state,
-                        crate::media_pool::QualityCatalogRequest {
-                            audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
-                                .ok()
-                                .flatten(),
-                            audio_delivery: None,
-                            copy_contract: None,
-                            file_id: file.id,
-                            source_size: file.size,
-                            source_mtime: file.mtime,
-                            caps: caps.clone(),
-                            audio_index: selected_audio,
-                            audio_offset_ms: file.audio_offset_ms,
-                            subtitle_burn: selected_subtitle
-                                .filter(|_| selected_subtitle_requires_burn),
-                            presentation: crate::transcode::Presentation::Vod,
-                        },
-                    )
-                    .await
+                accepted
                     .into_iter()
                     .map(|entry| entry.candidate)
                     .collect::<Vec<_>>(),
@@ -2487,6 +2492,35 @@ pub async fn decision(
     } else {
         None
     };
+    // Keep the public menu/explicit choices. This narrows only this warm Auto
+    // advisory selection, never the feature switch or a manual request.
+    let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
+        if let Some(catalog) = quality_candidates.as_ref() {
+            let catalog = super::hls::link_receipts::filter_catalog(
+                &state,
+                identity.as_ref(),
+                &file,
+                catalog.clone(),
+            )
+            .await;
+            Some(
+                super::hls::link_receipts::positive_catalog(
+                    &state,
+                    identity.as_ref(),
+                    &file,
+                    super::hls::link_receipts::requested_receipt(&headers),
+                    None,
+                    catalog,
+                    measured_candidate_outputs.as_deref(),
+                )
+                .await,
+            )
+        } else {
+            None
+        }
+    } else {
+        quality_candidates.clone()
+    };
     // A negotiated catalog cannot reinterpret coarse legacy supply history
     // as completed-transfer evidence for its candidate recipes.
     let candidate_prior =
@@ -2496,7 +2530,7 @@ pub async fn decision(
         .auto_height_for_request(Some(&file), candidate_prior, q.hdr10t == Some(1))
         .await;
     let display_aspect = state.transcode.quality_display_aspect(&file).await;
-    let quality_candidate_id = quality_candidates.as_ref().and_then(|catalog| {
+    let quality_candidate_id = selection_candidates.as_ref().and_then(|catalog| {
         if decision.method != playback::PlaybackMethod::Transcode {
             catalog
                 .iter()
@@ -2543,6 +2577,7 @@ pub async fn decision(
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         quality_candidate_id,
         quality_candidates,
+        measured_candidate_outputs,
         file_id: id,
         vod_indexed,
         source: source_summary(&file, probe_json.as_deref()),
@@ -4624,6 +4659,7 @@ mod tests {
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,
+                measured_candidate_outputs: None,
                 file_id: 42,
                 vod_indexed: false,
                 decision,

@@ -308,8 +308,10 @@ pub(super) fn settle_streamed_response_completion(
     authorization: crate::transcode::MediaResponseAuthorization,
     complete_object: bool,
     permit: tokio::sync::OwnedSemaphorePermit,
+    observed: Option<link_receipts::CompletionObserver>,
 ) {
     let deadline = response_publication_deadline();
+    let observed_eof = (Instant::now(), unix_ms());
     tokio::spawn(async move {
         let _completion_permit = permit;
         match tokio::time::timeout_at(
@@ -318,7 +320,11 @@ pub(super) fn settle_streamed_response_completion(
         )
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                if let Some(observed) = observed {
+                    observed(observed_eof.0, observed_eof.1);
+                }
+            }
             Ok(Err(rejection)) => tracing::debug!(
                 target: "plurxd::http::hls",
                 session = %crate::transcode::session_log_id(&session),
