@@ -34,6 +34,13 @@ impl Drop for PreparationRun {
 }
 
 impl VodServe {
+    pub(crate) fn preparation_attachment_observation(&self) -> u64 {
+        *self
+            .shared
+            .preparation_attachment
+            .lock()
+            .expect("attachment observation")
+    }
     pub(super) async fn wait_prepared_copy(
         &self,
         mut run: PreparationRun,
@@ -63,7 +70,6 @@ impl VodServe {
                 _ = tokio::time::sleep_until(run.preparation.deadline.into()) =>
                     return Err("copy preparation deadline".to_owned()),
                 _ = &mut progress => {},
-                _ = tokio::time::sleep(crate::transcode::PRODUCER_POLL) => {},
             }
         }
     }

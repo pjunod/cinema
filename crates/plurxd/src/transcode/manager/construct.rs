@@ -962,6 +962,20 @@ impl TranscodeManager {
                 .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    pub(crate) fn copy_preparation_attachment_observation(&self) -> u64 {
+        self.vod.preparation_attachment_observation()
+    }
+
+    pub(crate) fn copy_preparation_still_idle(
+        &self,
+        admission: &FragmentAdmission,
+        observation: u64,
+    ) -> bool {
+        observation != u64::MAX
+            && self.copy_preparation_attachment_observation() == observation
+            && self.fragment_worker_idle(admission)
+    }
+
     /// Whether [`Self::admit_fragment`] would answer right now, evaluated
     /// without taking anything: the pool idle and the shared heavy-worker
     /// gate free. For a worker that has to claim durable work before it can

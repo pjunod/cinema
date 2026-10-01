@@ -9896,55 +9896,67 @@ impl JobManager {
                 }
                 crate::background_jobs::PreparationClaim::Copy(job, active, admission) => {
                     let fence = active.fence();
-                    let result = async {
-                        let payload = job.supported_payload().map_err(|error| error.to_string())?;
-                        let plurx_core::store::background_jobs::JobPayload::CopyOutputPrepare {
-                            file_id,
-                            source_size,
-                            source_mtime,
-                            ..
-                        } = payload
-                        else {
-                            return Err("copy payload unsupported".to_owned());
-                        };
-                        let file = self
-                            .store
-                            .get_file(file_id)
-                            .await
-                            .map_err(|error| error.to_string())?
-                            .filter(|file| file.size == source_size && file.mtime == source_mtime)
-                            .ok_or("copy source row changed")?;
-                        let roots = match self
-                            .store
-                            .get_item(file.item_id)
-                            .await
-                            .map_err(|error| error.to_string())?
-                        {
-                            Some(item) => self
+                    let observation = transcode.copy_preparation_attachment_observation();
+                    let result = {
+                        let operation = async {
+                            let payload =
+                                job.supported_payload().map_err(|error| error.to_string())?;
+                            let plurx_core::store::background_jobs::JobPayload::CopyOutputPrepare {
+                                file_id,
+                                source_size,
+                                source_mtime,
+                                ..
+                            } = payload
+                            else {
+                                return Err("copy payload unsupported".to_owned());
+                            };
+                            let file = self
                                 .store
-                                .get_library(item.library_id)
+                                .get_file(file_id)
                                 .await
                                 .map_err(|error| error.to_string())?
-                                .map(|library| library.paths)
-                                .unwrap_or_default(),
-                            None => Vec::new(),
+                                .filter(|file| {
+                                    file.size == source_size && file.mtime == source_mtime
+                                })
+                                .ok_or("copy source row changed")?;
+                            let roots = match self
+                                .store
+                                .get_item(file.item_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                            {
+                                Some(item) => self
+                                    .store
+                                    .get_library(item.library_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .map(|library| library.paths)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            // Preserve the existing worker's configured-library
+                            // boundary before the independently held source open.
+                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                .await
+                                .ok_or("copy source unavailable on owner")?;
+                            transcode
+                                .produce_copy_output_job(
+                                    &file,
+                                    &job,
+                                    fence.clone(),
+                                    &admission,
+                                    deadline,
+                                )
+                                .await
                         };
-                        // Preserve the existing worker's configured-library
-                        // boundary before the independently held source open.
-                        crate::transcode::pretranscode_source_snapshot(&file, &roots)
-                            .await
-                            .ok_or("copy source unavailable on owner")?;
-                        transcode
-                            .produce_copy_output_job(
-                                &file,
-                                &job,
-                                fence.clone(),
-                                &admission,
-                                deadline,
-                            )
-                            .await
-                    }
-                    .await;
+                        crate::background_jobs::watch_copy_preparation(
+                            &fence,
+                            deadline.into(),
+                            || transcode.copy_preparation_still_idle(&admission, observation),
+                            operation,
+                        )
+                        .await
+                    };
                     match result {
                         Ok(true) => produced += 1,
                         Ok(false) | Err(_) => {
