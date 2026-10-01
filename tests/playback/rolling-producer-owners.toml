@@ -4253,7 +4253,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # owns nothing.
 # +1 cluster probe-batch regression: the synchronous .status() on the
 # test-only /bin/kill -0 liveness command described above. No new producer.
-expected_occurrences = 407
+# +2 B-R1: Axum Response::status() reads in the authenticated local-refusal
+# and public-ingress remote-owner fixtures. Both assert HTTP response codes;
+# neither creates a process/task or changes producer lifecycle ownership.
+# Combined current-main407 plus these two independent response reads =409.
+expected_occurrences = 409
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

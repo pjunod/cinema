@@ -292,6 +292,11 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md](streaming/APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md) | Why Apple and web HLS froze on a pacing hold, and the repair contract. | built |
 | [STUTTER-4K.md](streaming/STUTTER-4K.md) | 4K copy-path stutter: what it is, what it isn't, what to try next. | open |
 | [SEGMENTER-PLAN.md](streaming/SEGMENTER-PLAN.md) | GOP-aware segmenting — zero boundary drops on the copy path. | built |
+| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | How Auto should preserve smooth original playback, choose display-appropriate intermediate transcodes, and recover quality safely across Android, Apple and web. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Adversarial findings on the automatic-quality plan, their disposition, and remaining qualification risks. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | The independent Opus review request and the evidence it must challenge before implementation. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Lifecycle wrapper for the independent Opus review; links to its byte-identical source artifact and reconciliation. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Supplied independent Opus review, preserved byte-for-byte: four P1 and ten P2 findings and source evidence. | done |
 | [ADAPTIVE-QUALITY.md](streaming/ADAPTIVE-QUALITY.md) | The design for bandwidth-aware streaming. | live |
 
 ---
