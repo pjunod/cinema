@@ -805,6 +805,11 @@ impl FrozenHlsCodecFacts {
             Some(delivery) if matches!(delivery.action, AudioAction::None) => {
                 CodecAudioFact::Absent
             }
+            // The copied name does not distinguish AAC-LC from HE-AAC;
+            // this path has no frozen output AudioSpecificConfig yet.
+            Some(delivery) if matches!(&delivery.action, AudioAction::Copy { codec, .. } if codec == "aac") => {
+                CodecAudioFact::Unknown
+            }
             Some(delivery) => super::ladder::audio_sample_type(delivery.codec())
                 .map(|codec| CodecAudioFact::ResolvedOutput(codec.to_owned()))
                 .unwrap_or(CodecAudioFact::Unknown),
@@ -836,6 +841,37 @@ mod frozen_codec_tests {
     use plurx_core::playback::audio::{AudioAction, AudioDelivery};
 
     #[test]
+    fn copied_aac_name_cannot_claim_an_unobserved_audio_object_type() {
+        let copied = AudioDelivery {
+            action: AudioAction::Copy {
+                codec: "aac".to_owned(),
+                channels: 2,
+            },
+            downmix: None,
+            reason: "profile not retained".to_owned(),
+        };
+        let mut facts = FrozenHlsCodecFacts::audio(Some(&copied), true, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        assert_eq!(facts.complete_sdr_codecs(), None);
+        let encoded = AudioDelivery {
+            action: AudioAction::Encode {
+                codec: "aac".to_owned(),
+                channels: 2,
+                layout: None,
+                bitrate_kbps: 160,
+                sample_rate: 48_000,
+            },
+            ..copied
+        };
+        let mut facts = FrozenHlsCodecFacts::audio(Some(&encoded), true, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        assert_eq!(
+            facts.complete_sdr_codecs().as_deref(),
+            Some("avc1.64001F,mp4a.40.2")
+        );
+    }
+
+    #[test]
     fn frozen_codec_components_refuse_unknown_audio_and_preserve_output_provenance() {
         let mut unknown = FrozenHlsCodecFacts::audio(None, true, false);
         assert_eq!(unknown.complete_sdr_codecs(), None);
@@ -852,9 +888,19 @@ mod frozen_codec_tests {
             ("flac", "fLaC"),
         ] {
             let delivery = AudioDelivery {
-                action: AudioAction::Copy {
-                    codec: codec.to_owned(),
-                    channels: 2,
+                action: if codec == "aac" {
+                    AudioAction::Encode {
+                        codec: codec.to_owned(),
+                        channels: 2,
+                        layout: None,
+                        bitrate_kbps: 160,
+                        sample_rate: 48_000,
+                    }
+                } else {
+                    AudioAction::Copy {
+                        codec: codec.to_owned(),
+                        channels: 2,
+                    }
                 },
                 downmix: None,
                 reason: "resolved output".to_owned(),
