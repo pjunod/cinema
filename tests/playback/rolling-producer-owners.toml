@@ -4296,7 +4296,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # The latter starts no process. Existing idle-child fixture callers unchanged.
 # +1 cluster probe-batch regression: the synchronous .status() on the
 # test-only /bin/kill -0 liveness command described above. No new producer.
-expected_occurrences = 410
+# C-05 M2 #655: +1 Response::status() assertion in
+# http/browse.rs::a_detail_render_unpacks_no_index. The authenticated in-process
+# oneshot response is inspected before its body is collected. This adds no
+# process launch, asynchronous task, timer or producer owner.
+expected_occurrences = 411
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
