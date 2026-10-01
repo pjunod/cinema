@@ -1,7 +1,7 @@
 # Clock enforcement — consume proved observations before acquiring authority
 
-**Status:** open — owner unclaimed; runtime not started; measurement evidence
-pending · **Executes:** K-06 enforcement handoff ·
+**Status:** open — E0 pure policy in preparation; active consumers unclaimed;
+measurement evidence pending · **Executes:** K-06 enforcement handoff ·
 **Written:** 2026-09-30 · **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md) and the
@@ -26,6 +26,58 @@ measurement release and its identified fleet receipt; that substantive evidence
 dependency is unchanged. No rollout or clock-step authorization is implied.
 
 ## 2. Current entry points — inspect all irreversible boundaries again
+
+**2026-10-01 coordinator ruling — prepare E0 now, integrate active consumers
+after evidence.** Under Paul's delegated routine-decision authority and newer
+effort/main-at-end workflow, E0 pure policy may be claimed/developed now on
+`codex/k06-pure-clock-policy`, owner `gpt-6.1-sol`, session
+`agent:/root/s14_resume_sol61`. This supersedes §1's before-claim prohibition
+only for preparatory source. Active production refusal consumers still require
+successful identified measurement evidence before effort integration. A
+separately identified measurement-only current-effort artifact observed in an
+owned isolated four-node LAN lab is eligible for that safety bar, not a main
+release or production-fleet qualification. Keep one-hour idle and 60-second
+actual network load, 250/2,000 ms bounds, auth windows, no-switch/no-gate,
+original failures and 24-hour/drill final acceptance intact. No deployment,
+clock step or lab launch is authorized by this source ruling.
+
+E0 owns only core `cluster/clock.rs`: typed acquisition/revalidation policy
+with caller-bound time, exact proved NoPeers, generation/freshness/continuity
+refusals, and completed-positive-round readiness facts. No membership,
+media-session, router or Developer consumer is connected; exported refusal
+metrics remain measurement-only zero. Target exclusion is deferred until its
+actual durable-fence and target-applied/unreachable proof can be represented
+alongside the real removal consumer; boolean assertions are not authority.
+The following consumer milestone must preserve commit-unknown takeover
+reconciliation even when a later clock ticket refuses new acquisition.
+
+### E0 interfaces — local policy without an irreversible operation
+
+The [shared core handle](../../crates/plurx-core/src/cluster/clock.rs) offers
+`acquire() -> Result<ClockAcquisitionTicket<'_>, ClockRefusal>` and
+`revalidate(&ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal>`.
+The acquisition ticket is opaque, borrowed from and bound to that exact
+handle, not a constructible pair of equal-looking generations. Its `now_ms()`
+is the original caller-bound time; revalidation never replaces it. Both
+reads synchronously check local continuity, evidence expiry and the serialized
+policy state. Typed refusals distinguish Unknown, Offset, LocalDiscontinuity
+and GenerationChanged. The existing constructible `ClockDecisionTicket`
+continues to serve measurement, not admission authority.
+
+Replicated NoPeers requires an installed exact empty committed roster and
+expires at the same 25-second monotonic watchdog as samples. Standalone
+provenance is fixed by handle construction and does not masquerade as an
+unfinished replicated discovery. Future-dated, expired or arithmetically
+invalid samples cannot authorize acquisition. `ClockSnapshot.readiness`
+contains a passive `is_unbounded()` fact after two completed positive
+violating rounds; reads never count rounds, and rejected/Unknown/healthy
+rounds, roster changes, expiry, failure and discontinuity reset the streak.
+No `/readyz` consequence or nonzero production-refusal counter is connected.
+
+The E1/E2 consumer audit must still bind this handle to actual current
+membership and revalidate at each final irreversible boundary; a pure local
+ticket cannot prove a durable CAS outcome or a target-removal fence. Do not
+drop commit-unknown reconciliation or synthesize target proof from booleans.
 
 At `f319fa779`, these are existing consumers to audit, not clock enforcement.
 
