@@ -1056,7 +1056,7 @@ playlist, logical/audio/source facts and issued identity; no worker/public
 field or durable recipe alias grants this authority. Ordinary cold playback
 remains uncaptured and playable without a whole-film wait.
 
-Eight new focused IDs have passed individually once so far; failed-only
+Ten new focused IDs have passed individually once so far; failed-only
 retries and precursor source attribution remain in the development receipt.
 Current-base composition, normal hook/compiler and independent review are
 still required. **Still open:** manual-copy preparation and its original

@@ -2,6 +2,7 @@
 //! its admission guard until its child has joined; this module owns only the
 //! durable token, monotonic deadline and cancellation notification.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,43 @@ use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
+
+/// One finite Copy watchdog covers resolution through historical settlement.
+/// Returning drops the owned operation before its caller settles or retires;
+/// cancellation does not assert that an already-dispatched SQL write rolled back.
+pub(crate) async fn watch_copy_preparation(
+    fence: &JobFence,
+    deadline: Instant,
+    still_idle: impl Fn() -> bool,
+    operation: impl std::future::Future<Output = Result<bool, String>>,
+) -> Result<bool, String> {
+    let lost = fence.loss_token();
+    if Instant::now() >= deadline
+        || !still_idle()
+        || (lost.is_cancelled() && !fence.copy_output_completed())
+    {
+        return Err("copy output original admission or deadline unavailable".to_owned());
+    }
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut operation => return result,
+            _ = tokio::time::sleep_until(deadline) =>
+                return Err("copy output original deadline".to_owned()),
+            _ = lost.cancelled(), if !fence.copy_output_completed() => {
+                if !fence.copy_output_completed() {
+                    return Err("copy output lease lost; settlement may be historical".to_owned());
+                }
+            },
+            _ = tokio::time::sleep(crate::transcode::PRODUCER_POLL) => {
+                if !still_idle() {
+                    return Err("copy output foreground attachment or admission".to_owned());
+                }
+            },
+        }
+    }
+}
 
 /// Disposable per-loop pacing. Empty polls never need a durable timestamp.
 pub(crate) struct IdlePoll {
@@ -116,6 +154,8 @@ struct Inner {
     state: Mutex<ClaimState>,
     deadline: watch::Sender<Instant>,
     lost: CancellationToken,
+    /// Historical acknowledged completion only; never artifact authority.
+    copy_output_completed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -269,6 +309,7 @@ impl ActiveBackgroundJob {
             }),
             deadline,
             lost: CancellationToken::new(),
+            copy_output_completed: AtomicBool::new(false),
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -353,6 +394,9 @@ impl Drop for ActiveBackgroundJob {
 }
 
 impl JobFence {
+    pub(crate) fn copy_output_completed(&self) -> bool {
+        self.0.copy_output_completed.load(Ordering::Acquire)
+    }
     pub(crate) fn loss_token(&self) -> CancellationToken {
         self.0.lost.clone()
     }
@@ -597,6 +641,9 @@ impl JobFence {
             result,
             JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
         );
+        if published {
+            self.0.copy_output_completed.store(true, Ordering::Release);
+        }
         metrics::event(
             self.0.kind,
             if published {
@@ -1691,6 +1738,85 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn copy_watchdog_bounds_pending_operation_and_distinguishes_historical_completion() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let (_store, _id, active) = active().await;
+        let fence = active.fence();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let pending = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(true)
+        };
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_millis(20),
+            || true,
+            pending
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "deadline drops private operation before caller settlement"
+        );
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || checks.fetch_add(1, Ordering::Relaxed) == 0,
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(true)
+            }
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "changed observational predicate drops unfinished body"
+        );
+
+        fence.0.lost.cancel();
+        assert!(
+            watch_copy_preparation(
+                &fence,
+                Instant::now() + Duration::from_secs(1),
+                || true,
+                async { Ok(true) }
+            )
+            .await
+            .is_err(),
+            "unacknowledged loss must refuse"
+        );
+        // Model only the watchdog's phase signal, not SQL success or artifact
+        // authority. The real publication consumer independently covers those.
+        fence.0.copy_output_completed.store(true, Ordering::Release);
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || true,
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(true)
+            }
+        )
+        .await
+        .expect("historical completion is not own-lease loss"));
+        active.finish().await;
+    }
 
     async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         active_with_deadline(None).await

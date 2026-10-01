@@ -50,6 +50,11 @@ async fn prepared_copy_source_change_refuses_settlement_and_releases_private_bod
     prepared_copy_consumer(2).await;
 }
 
+#[tokio::test]
+async fn prepared_copy_issued_body_survives_later_successful_foreground_attachment() {
+    prepared_copy_consumer(3).await;
+}
+
 async fn prepared_copy_consumer(control: u8) {
     use plurx_core::store::background_jobs::*;
     let base = crate::test_tempdir().expect("prepared copy consumer");
@@ -159,12 +164,18 @@ async fn prepared_copy_consumer(control: u8) {
         retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
     }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "fixture", supersession_user: "user" },
         "prepared".into()).await.expect("compatible NEW presentation captures prepared body");
+    if control == 3 {
+        create(&serve, &file, "later-foreground", "foreground", &settings()).await;
+    }
     let first = serve.segment("prepared", &segment_name(0)).await.expect("first wire answer");
     assert_eq!(first.owner.retained_output_facts(), Some(facts));
     assert!(first.result.expect("publication").expect("media").retained_lease.is_some());
     assert!(Arc::ptr_eq(serve.shared.sessions.lock().await.get("incumbent").expect("incumbent preserved")
         .rendition.as_ref().expect("incumbent rendition"), &incumbent));
     serve.end("prepared", Terminal::Deleted).await;
+    if control == 3 {
+        serve.end("later-foreground", Terminal::Deleted).await;
+    }
     serve.end("incumbent", Terminal::Deleted).await;
     active.finish().await;
 }
