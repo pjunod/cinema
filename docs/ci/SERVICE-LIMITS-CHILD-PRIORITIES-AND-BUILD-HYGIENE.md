@@ -1198,6 +1198,15 @@ runtime additions are preserved: when its third binary integrates, its
 binary-set contract must also retain that binary's platform debug artifact.
 The workboard is not permission to restore older build behavior.
 
+After main-sync landed, the unpublished source was ported onto actual effort
+`df1e443dab63653131e2851192529eef1457242b`. Fresh main was
+`1da6326d239eb0b809c8a569f36127d58a8efef9`; its removal of the duplicate
+`coverage` job from `ci.yml` is retained explicitly. The effort's newer
+ten-minute preflight and manual-only image publication policy remain intact:
+those unrelated main/effort differences are not reverted by artifact work.
+This current-tree composition is qualified separately from the earlier
+tiny-fixture and old-base receipts above.
+
 The release profile is `debug = "line-tables-only"`, `strip = "none"`,
 `split-debuginfo = "packed"`. Thin LTO, default codegen units, unwind and
 overflow policy are unchanged; these are the

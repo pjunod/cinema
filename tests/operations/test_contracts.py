@@ -1274,6 +1274,7 @@ assert.equal(context.ACT_TIMER, null);
             [
                 "release-bin/plurxd",
                 "release-bin/plurx-cluster-check",
+                "release-bin/*.dwp",
                 "release-bin/build-manifest.json",
                 "release-bin/*.sha256",
             ],
