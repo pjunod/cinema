@@ -478,6 +478,48 @@
             .await
     }
 
+    /// Sanitized measured resume: media before the requested position cannot
+    /// pay the post-position publication reserve. This is an old-policy
+    /// reproduction, not a physical browser timing claim.
+    #[tokio::test]
+    async fn rolling_publication_budget_incident_resume_waits_for_sixth_endpoint() {
+        let directory = crate::test_tempdir().expect("incident publication replay");
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 2_000.0;
+        session.media_origin_seconds = 1_992.035;
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            2_000_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Starting,
+        )
+        .await;
+        let durations = [10.427, 12.804, 7.758, 8.675, 11.303, 7.591];
+        for count in 1..=durations.len() {
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&durations[..count], false),
+            )
+            .await
+            .expect("incident writer snapshot");
+            session
+                .publication_cycle("incident-startup-replay")
+                .await
+                .expect("incident publication cycle");
+            let clock = session.publication.lock().await;
+            if count < 6 {
+                assert!(clock.served.is_none(), "segment {count} must remain staged");
+            } else {
+                let served = clock.served.as_ref().expect("sixth endpoint opens the gate");
+                assert_eq!(served.last_segment, 5);
+                assert_eq!(served.end_ms, 58_558);
+                assert!(served.end_ms - 7_965 >= 48_000);
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_two_x_writer_tracks_one_x_for_one_simulated_hour() {
         let directory = crate::test_tempdir().expect("publication budget");

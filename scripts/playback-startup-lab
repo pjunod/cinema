@@ -1,0 +1,95 @@
+#!/usr/bin/env python3
+"""Serve generated fixed-target media for bounded transport design measurements.
+
+This isolates client reload and native selection. It does not exercise daemon
+admission, scratch accounting, source identity or actor lifetimes.
+"""
+import argparse
+import http.server,json,time,threading,uuid,urllib.parse,pathlib,math
+parser=argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--media-dir',type=pathlib.Path,required=True)
+parser.add_argument('--evidence-dir',type=pathlib.Path,required=True)
+parser.add_argument('--port',type=int,default=8765)
+args=parser.parse_args()
+args.evidence_dir.mkdir(parents=True,exist_ok=True)
+ROOT=args.evidence_dir.resolve()
+MEDIA=args.media_dir.resolve()
+HLS=pathlib.Path(__file__).resolve().parent.parent/'crates/plurxd/src/web/hls.min.js'
+runs={}
+run_locks={}
+runs_lock=threading.Lock()
+def persist(run):
+ # Caller owns the run lock through mutation, snapshot and atomic replacement.
+ target=ROOT/(run['id']+'.json')
+ temporary=target.with_suffix('.json.tmp')
+ temporary.write_text(json.dumps({k:v for k,v in run.items() if k!='start'},indent=2))
+ temporary.replace(target)
+PAGE='''<!doctype html><meta charset="utf-8"><title>Plurx startup transport experiment</title><h1>Generated media startup experiment</h1><p>Generated H264/AAC · 16-second fixed target · completed media only · unqualified harness</p><video muted controls width="480"></video><pre id="status">Starting</pre><script src="/hls.js"></script><script>
+const q=new URLSearchParams(location.search),v=document.querySelector('video'),out=document.querySelector('#status');
+const transport=q.get('transport')||'hlsjs',runway=+(q.get('runway')||32),lead=+(q.get('lead')||7.965),speed=+(q.get('speed')||1.05);
+let id,started=performance.now(),firstFrame=null,samples=0,stalls=0,last=0,progressSeen=false,events=[];
+const record=(event,data={})=>{const entry={event,elapsed_ms:Math.round(performance.now()-started),...data};events.push(entry);if(id)fetch('/report/'+id,{method:'POST',body:JSON.stringify(entry)});};
+v.addEventListener('waiting',()=>{if(progressSeen){stalls++;record('waiting',{position:v.currentTime});}});
+v.addEventListener('error',()=>record('video_error',{code:v.error&&v.error.code}));
+v.addEventListener('loadedmetadata',()=>{record('metadata',{position:v.currentTime});if(transport==='native'&&lead>0)v.currentTime=lead;v.play().catch(e=>record('play_error',{message:e.name}));});
+v.requestVideoFrameCallback(function frame(t,m){if(firstFrame===null){firstFrame=Math.round(performance.now()-started);record('first_frame',{ttff_ms:firstFrame,media_time:m.mediaTime});}v.requestVideoFrameCallback(frame);});
+fetch('/start?'+new URLSearchParams({runway,speed,lead,transport})).then(r=>r.json()).then(r=>{id=r.id;record('attached',{transport,runway,speed,lead});const src='/playlist/'+id+'.m3u8';if(transport==='hlsjs'){const hls=new Hls({startPosition:lead,maxBufferLength:90,backBufferLength:30});hls.on(Hls.Events.ERROR,(_,e)=>record('hls_error',{type:e.type,details:e.details,fatal:e.fatal}));hls.loadSource(src);hls.attachMedia(v);}else v.src=src;});
+setInterval(()=>{const buffered=[];for(let i=0;i<v.buffered.length;i++)buffered.push([v.buffered.start(i),v.buffered.end(i)]);if(v.currentTime>last+.05&&!v.seeking)progressSeen=true;last=v.currentTime;const sample={position:v.currentTime,progress_seen:progressSeen,ready_state:v.readyState,buffered,stalls,first_frame_ms:firstFrame};out.textContent=JSON.stringify({transport,runway,speed,lead,elapsed_seconds:Math.round((performance.now()-started)/1000),...sample,events:events.slice(-8)},null,2);if(++samples<=2000)record('sample',sample);},1000);
+</script>'''
+class Handler(http.server.BaseHTTPRequestHandler):
+ def log_message(self,*args): pass
+ def send(self,data,kind='application/json',status=200):
+  if isinstance(data,str): data=data.encode()
+  self.send_response(status);self.send_header('Content-Type',kind);self.send_header('Content-Length',str(len(data)));self.send_header('Cache-Control','no-store');self.end_headers();self.wfile.write(data)
+ def do_POST(self):
+  run=runs.get(self.path.split('/')[-1]);length=int(self.headers.get('Content-Length','0'))
+  if run is None or length>8192:self.send('{}',status=400);return
+  data=json.loads(self.rfile.read(length))
+  with run_locks[run['id']]:
+   run['client'].append(data)
+   if len(run['client'])>4000:run['client']=run['client'][-4000:]
+   persist(run)
+  self.send('{}')
+ def do_GET(self):
+  u=urllib.parse.urlparse(self.path);q=urllib.parse.parse_qs(u.query);p=u.path
+  if p=='/':self.send(PAGE,'text/html');return
+  if p=='/hls.js':self.send(HLS.read_bytes(),'text/javascript');return
+  if p=='/start':
+   runway=int(q.get('runway',['32'])[0]);speed=float(q.get('speed',['1.05'])[0]);id=uuid.uuid4().hex
+   if runway not in (12,16,24,32,48) or speed not in (.95,1.05,1.2,2):self.send('{}',status=400);return
+   run={'id':id,'start':time.monotonic(),'runway':runway,'speed':speed,'transport':q.get('transport',[''])[0],'lead':float(q.get('lead',['0'])[0]),'client':[],'reloads':[]}
+   with runs_lock:
+    run_locks[id]=threading.Lock()
+    runs[id]=run
+   self.send(json.dumps({'id':id}));return
+  if p.startswith('/playlist/'):
+   id=p.split('/')[-1].removesuffix('.m3u8');run=runs.get(id)
+   if run is None:self.send('{}',status=404);return
+   initial=math.ceil((run['runway']+run['lead'])/16)
+   delay=3+initial*16/8
+   remaining=delay-(time.monotonic()-run['start'])
+   if remaining>0:time.sleep(remaining)
+   elapsed=time.monotonic()-run['start']-delay
+   tick=math.floor(elapsed/8)*8
+   # Complete objects become eligible at their truthful 16/speed period.
+   end=min(120,initial+math.floor(tick*run['speed']/16))
+   first=max(0,end-10)
+   text='#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:16\n#EXT-X-MEDIA-SEQUENCE:'+str(first)+'\n#EXT-X-MAP:URI="/media/init.mp4"\n'
+   for i in range(first,end):text+='#EXTINF:16.000000,\n/media/seg%05d.m4s\n'%i
+   if end==120:text+='#EXT-X-ENDLIST\n'
+   with run_locks[id]:
+    run['reloads'].append({'elapsed_ms':round(elapsed*1000),'first':first,'end':end})
+    persist(run)
+   self.send(text,'application/vnd.apple.mpegurl');return
+  if p.startswith('/media/'):
+   file=MEDIA/p.split('/')[-1]
+   if not file.is_file():self.send('{}',status=404);return
+   self.send(file.read_bytes(),'video/mp4');return
+  if p=='/runs':
+   with runs_lock:current=list(runs.values())
+   snapshots=[]
+   for run in current:
+    with run_locks[run['id']]:snapshots.append({k:v for k,v in run.items() if k not in ('start','client')})
+   self.send(json.dumps(snapshots));return
+  self.send('{}',status=404)
+http.server.ThreadingHTTPServer(('127.0.0.1',args.port),Handler).serve_forever()

@@ -575,7 +575,7 @@ pub(crate) async fn run(state: AppState) {
             });
         tokio::select! {
             () = state.artwork_fetch.wake.notified() => {},
-            () = tokio::time::sleep(pacing.delay(progressed)) => {},
+            () = tokio::time::sleep(pacing.after_completion(progressed)) => {},
         }
     }
 }
@@ -601,23 +601,40 @@ async fn pass(
     if kinds.is_empty() {
         return Ok(false);
     }
+    let mut page = state
+        .store
+        .job_candidates(CandidateQuery {
+            node_id: state.node_id.clone(),
+            kinds,
+            after: cursor.clone(),
+            now_ms: now_ms(),
+            limit: 128,
+        })
+        .await?;
+    page.jobs.retain(|job| match job.supported_payload() {
+        Ok(JobPayload::ArtworkDerivative { .. }) => true,
+        Ok(JobPayload::ArtifactHydrate {
+            artifact_key,
+            target_node_id,
+        })
+        | Ok(JobPayload::ArtifactVerify {
+            artifact_key,
+            target_node_id,
+            ..
+        }) => artifact_key.starts_with("artwork:") && target_node_id == state.node_id,
+        _ => false,
+    });
+    if page.jobs.is_empty() {
+        *cursor = page.next;
+        return Ok(false);
+    }
     let Some(admission) = state.transcode.admit_fragment().await else {
         return Ok(false);
     };
     let Some(_derive) = state.artwork_fetch.derive_permit().await else {
         return Ok(false);
     };
-    let page = state
-        .store
-        .job_candidates(CandidateQuery {
-            node_id: state.node_id.clone(),
-            kinds,
-            after: cursor.take(),
-            now_ms: now_ms(),
-            limit: 128,
-        })
-        .await?;
-    *cursor = page.next;
+
     let local_pipeline = pipeline().await;
     for candidate in page.jobs {
         let kind = match candidate.supported_payload() {
@@ -701,7 +718,8 @@ async fn pass(
                 }
             }
         }
-        if !matches!(result, Ok(true)) {
+        let published = matches!(result, Ok(true));
+        if !published {
             let settlement = if cancel.is_cancelled() {
                 JobSettlement::Yield {
                     not_before_ms: now_ms().saturating_add(5000),
@@ -726,8 +744,10 @@ async fn pass(
         active.finish().await;
         // admission and the derive permit outlive all reads, writers and the
         // joined cancellation collector above.
-        return Ok(true);
+        *cursor = None;
+        return Ok(published);
     }
+    *cursor = page.next;
     Ok(false)
 }
 
