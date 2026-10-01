@@ -79,6 +79,12 @@ pub fn ffprobe_bin() -> String {
     resolve_bin(std::env::var("PLURX_FFPROBE").ok(), &default_bin("ffprobe"))
 }
 
+/// Dedicated self-contained parser for descriptor-bound local source facts.
+/// General scanning keeps its configured FFprobe and codec/network behavior.
+pub fn bound_ffprobe_bin() -> String {
+    resolve_bin(std::env::var("PLURX_BOUND_FFPROBE").ok(), &ffprobe_bin())
+}
+
 /// Pass held source/sidecar capabilities into reserved child FDs. Duplicate
 /// every original before assigning any target: an original may itself be
 /// fd 3 or fd 5. The post-fork closure performs only descriptor syscalls.

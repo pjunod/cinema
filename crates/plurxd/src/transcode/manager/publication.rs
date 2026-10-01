@@ -910,16 +910,24 @@ impl TranscodeManager {
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
                 let grade = encoding.options.pipeline.output_grade();
-                let file = encoded_vod_presentation_file(facts.file, height, grade);
-                let mut codecs = audio_delivery_hls_codecs(
-                    transcoded_hls_codecs(grade, height),
-                    facts.audio_delivery.as_ref(),
+                let file = encoded_vod_presentation_file(
+                    facts.file,
+                    height,
+                    grade,
+                    Some(encoding.plan.output_contract()),
                 );
+                let mut codecs = encoding
+                    .plan
+                    .output_contract()
+                    .hls_codecs()
+                    .unwrap_or_else(|| transcoded_hls_codecs(grade, height));
+                codecs = audio_delivery_hls_codecs(codecs, facts.audio_delivery.as_ref());
                 if file.audio_streams.is_empty() {
                     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
                 }
                 return HlsPresentationResolution::Ready(
                     HlsContext {
+                        bandwidth: encoding.plan.output_contract().output_bandwidth(),
                         file_id: file.id,
                         start_seconds: 0.0,
                         media_origin_seconds: 0.0,
@@ -965,6 +973,7 @@ impl TranscodeManager {
             let codecs = audio_delivery_hls_codecs(codecs, facts.audio_delivery.as_ref());
             return HlsPresentationResolution::Ready(
                 HlsContext {
+                    bandwidth: None,
                     file_id: facts.file.id,
                     start_seconds: 0.0,
                     media_origin_seconds: 0.0,

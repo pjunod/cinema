@@ -571,6 +571,7 @@ pub struct TranscodeManager {
     /// FFprobe build rather than to a mutable pathname.
     decode_facts: crate::decode_facts::DecodeFactCache,
     decode_probe_identity: Option<crate::decode_facts::DecodeProbeIdentity>,
+    candidate_production_proofs: Arc<crate::vodencode::CandidateProductionProofs>,
     /// Validated hot rate-control state. Published only after every usable
     /// family has completed its production-argument probe.
     rate_control: std::sync::RwLock<RateControlSnapshot>,
@@ -781,6 +782,8 @@ use terminal_admission::*;
 // split: begin manager
 #[path = "transcode/manager/cache.rs"]
 mod manager_cache;
+#[path = "transcode/manager/candidates.rs"]
+mod manager_candidates;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]

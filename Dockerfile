@@ -48,6 +48,10 @@ ARG DOVI_TOOL_VERSION=2.3.3
 ARG MKVTOOLNIX_VERSION=74.0.0-1
 ARG DEBIAN_SNAPSHOT=20260928T000000Z
 ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
+# The facts collector seals one executable, so Jellyfin's dynamically linked
+# ffprobe cannot be its trusted input. Build a separate static local-file
+# probe; keep the ordinary Jellyfin probe and hardware encoder intact.
+COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
 #
@@ -87,6 +91,15 @@ RUN sed -i \
         /etc/apt/sources.list.d/debian.sources \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential pkg-config nasm curl ca-certificates xz-utils \
+        zlib1g-dev libbz2-dev liblzma-dev \
+    && sh /usr/local/libexec/build-static-ffprobe \
+        /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe \
+    && apt-get purge -y build-essential pkg-config nasm xz-utils \
+        zlib1g-dev libbz2-dev liblzma-dev \
+    && apt-get autoremove -y \
+    && rm /usr/local/libexec/build-static-ffprobe \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \
@@ -237,6 +250,7 @@ ENV PLURX_BIND=0.0.0.0:32400 \
     PLURX_DATA_DIR=/var/lib/plurx \
     PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg \
     PLURX_FFPROBE=/usr/lib/jellyfin-ffmpeg/ffprobe \
+    PLURX_BOUND_FFPROBE=/usr/local/lib/plurx/ffprobe \
     PLURX_DOVI_TOOL=/usr/local/bin/dovi_tool \
     PLURX_MKVMERGE=/usr/bin/mkvmerge
 

@@ -137,6 +137,33 @@ async function saveLiveTvDeinterlace(btn){
 // F-1: the same replicated switch, moved to Developer. Every readiness row is
 // an observation or a dated qualification receipt; none is read on save or by
 // the player. Enabling remains an operator choice even when rows are red.
+function displayAwareAutoCard(settings){
+  const enabled=!!settings.playback_display_aware_auto;
+  return setCard(`${cardHead("Fit Auto to display","Choose a useful sustainable encode size for the fitted picture.",`<span class="pill" id="daqstate">${enabled?"Enabled":"Disabled"}</span>`)}
+      ${togRow("pdisplayauto","Fit Auto to display","Compatible smooth originals remain preferred. When encoding is needed, use the active render area with at most 10% enlargement. Manual quality stays selectable.",enabled)}
+      <div class="hint">This saved choice is authoritative. Readiness is advisory and never disables this switch or rejects Save.</div>
+      ${devStaticReq("Combined source and runtime qualification","pending","Display-aware candidates, source-grade worker proofs and physical client recovery traces are being built and qualified together.","warn")}
+      ${devGraduation("the combined display-aware Auto effort passes source-grade, device and runtime qualification on its exact candidate.","this control graduates to Playback if a permanent toggle remains useful, otherwise fitting Auto becomes the default.")}
+      <div class="err" id="daqerr" role="alert"></div>${setCardFoot("saveDisplayAwareAuto")}`);
+}
+
+async function saveDisplayAwareAuto(btn){
+  const err=document.getElementById("daqerr"); if(err) err.textContent="";
+  const card=btn&&btn.closest?btn.closest(".setcard"):null;
+  const revision=Number(card&&card.dataset?card.dataset.revision||0:0);
+  const requested=(/** @type {HTMLInputElement} */ (document.getElementById("pdisplayauto"))).checked;
+  if(btn) btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{playback_display_aware_auto:requested}}));
+    if(SERVER) SERVER.playback_display_aware_auto=!!saved.playback_display_aware_auto;
+    if(card&&!card.isConnected) return true;
+    if(card&&Number(card.dataset.revision||0)!==revision){toast("Earlier display Auto choice saved; newer edit remains unsaved");return true;}
+    const toggle=/** @type {HTMLInputElement|null} */ (document.getElementById("pdisplayauto"));if(toggle)toggle.checked=!!saved.playback_display_aware_auto;
+    const state=document.getElementById("daqstate");if(state)state.textContent=saved.playback_display_aware_auto?"Enabled":"Disabled";
+    toast("Display Auto saved");if(btn)setCardSaved(btn);
+  }catch(error){if(err)err.textContent=error.message||String(error);if(btn)btn.disabled=false;}
+}
+
 function autoQualityCard(settings){
   const enabled=!!settings.playback_auto_abr;
   const webController=typeof autoControllerTick==="function";
@@ -411,6 +438,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-auto-quality"><h2>Adaptive Auto quality</h2><p>One authoritative switch and dated qualification evidence for each client.</p></div>${autoQualityCard(settings)}
+      <div class="setsection" id="enable-display-auto"><h2>Fit Auto to display</h2><p>One saved choice with advisory combined qualification evidence.</p></div>${displayAwareAutoCard(settings)}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection" id="enable-pgs-overlay"><h2>PGS subtitle overlay</h2><p>Serve bitmap subtitles separately from the video on capable clients.</p></div>${pgsOverlayCard(settings,readiness)}
