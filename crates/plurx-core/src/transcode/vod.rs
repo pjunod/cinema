@@ -352,68 +352,133 @@ impl AudioClock {
     }
 }
 
-/// Audio-only fMP4 producer for a continuous presentation family. Its recipe
-/// must be resolved with the selected source audio present. Video-only rung
-/// plans use `input_has_audio = false` before resolution instead of stripping
-/// audio from a validated muxed plan after its identity has been computed.
-/// The publisher still owns priming removal and film-global timestamp restore,
-/// exactly as for the existing muxed VOD runner.
+/// Frozen soundtrack semantics. Video shape, bitrate and encoder selection
+/// never enter this digest, so all rungs reuse one audio recipe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSharedAudioRecipe {
+    audio_index: i64,
+    audio_offset_ms: i64,
+    audio_channels: u32,
+    audio_bitrate_kbps: u32,
+    digest: String,
+}
+
+/// One decoder, one filter worker and one AAC encoder worker are reserved.
+pub const VOD_SHARED_AUDIO_CPU_THREADS: usize = 3;
+
+impl VodSharedAudioRecipe {
+    pub fn from_plan(plan: &ResolvedTranscode) -> Option<Self> {
+        use sha2::{Digest, Sha256};
+        let media = plan.options();
+        if !media.input_has_audio
+            || !(1..=8).contains(&media.audio_channels)
+            || !(16..=1024).contains(&media.audio_bitrate_kbps)
+        {
+            return None;
+        }
+        let audio_index = media.audio_index.unwrap_or(0);
+        let mut hash = Sha256::new();
+        for value in [
+            "continuous-shared-aac-lc-48k-v1".to_owned(),
+            plan.cache_identity().as_str().to_owned(),
+            plan.source_facts_digest().to_owned(),
+            audio_index.to_string(),
+            media.audio_offset_ms.to_string(),
+            media.audio_channels.to_string(),
+            media.audio_bitrate_kbps.to_string(),
+        ] {
+            hash.update((value.len() as u64).to_le_bytes());
+            hash.update(value.as_bytes());
+        }
+        Some(Self {
+            audio_index,
+            audio_offset_ms: media.audio_offset_ms,
+            audio_channels: media.audio_channels,
+            audio_bitrate_kbps: media.audio_bitrate_kbps,
+            digest: hex::encode(hash.finalize()),
+        })
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
+        vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps)
+    }
+
+    /// The publisher removes priming and restores the film-global clock.
+    /// Each stage's explicit thread cap matches the admission reservation.
+    pub fn args(
+        &self,
+        execution: &TranscodeExecution,
+        duration_seconds: f64,
+    ) -> Option<Vec<String>> {
+        if !duration_seconds.is_finite()
+            || duration_seconds <= execution.start_seconds
+            || !execution.start_seconds.is_finite()
+            || execution.start_seconds < 0.0
+        {
+            return None;
+        }
+        let clock = AudioClock::new(execution.start_seconds, self.audio_offset_ms);
+        let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
+        Some(vec![
+            "-copyts".into(),
+            "-filter_threads".into(),
+            "1".into(),
+            "-noaccurate_seek".into(),
+            "-ss".into(),
+            format!("{:.9}", clock.seek),
+            "-threads".into(),
+            "1".into(),
+            "-i".into(),
+            execution.source_path.to_string_lossy().into_owned(),
+            "-map".into(),
+            format!("0:a:{}", self.audio_index),
+            "-vn".into(),
+            "-sn".into(),
+            "-dn".into(),
+            "-map_chapters".into(),
+            "-1".into(),
+            "-af".into(),
+            clock.filter(),
+            "-c:a".into(),
+            "aac".into(),
+            "-threads:a".into(),
+            "1".into(),
+            "-profile:a".into(),
+            "aac_low".into(),
+            "-ac".into(),
+            self.audio_channels.to_string(),
+            "-b:a".into(),
+            format!("{}k", self.audio_bitrate_kbps),
+            "-ar".into(),
+            VOD_AUDIO_RATE.to_string(),
+            "-t".into(),
+            format!("{:.9}", duration_seconds - anchor),
+            "-avoid_negative_ts".into(),
+            "disabled".into(),
+            "-use_editlist".into(),
+            "0".into(),
+            "-movflags".into(),
+            "+empty_moov+delay_moov+default_base_moof".into(),
+            "-frag_duration".into(),
+            "2000000".into(),
+            "-f".into(),
+            "mp4".into(),
+            "pipe:1".into(),
+        ])
+    }
+}
+
+/// Compatibility entry point for existing resolved VOD callers.
 pub fn vod_shared_audio_args(
     plan: &ResolvedTranscode,
     execution: &TranscodeExecution,
     duration_seconds: f64,
 ) -> Option<Vec<String>> {
-    let media = plan.options();
-    if !media.input_has_audio
-        || !duration_seconds.is_finite()
-        || duration_seconds <= execution.start_seconds
-        || !execution.start_seconds.is_finite()
-        || execution.start_seconds < 0.0
-    {
-        return None;
-    }
-    let clock = AudioClock::new(execution.start_seconds, media.audio_offset_ms);
-    let anchor = vod_audio_anchor(execution.start_seconds) as f64 / f64::from(VOD_AUDIO_RATE);
-    Some(vec![
-        "-copyts".into(),
-        "-noaccurate_seek".into(),
-        "-ss".into(),
-        format!("{:.9}", clock.seek),
-        "-i".into(),
-        execution.source_path.to_string_lossy().into_owned(),
-        "-map".into(),
-        format!("0:a:{}", media.audio_index.unwrap_or(0)),
-        "-vn".into(),
-        "-sn".into(),
-        "-dn".into(),
-        "-map_chapters".into(),
-        "-1".into(),
-        "-af".into(),
-        clock.filter(),
-        "-c:a".into(),
-        "aac".into(),
-        "-profile:a".into(),
-        "aac_low".into(),
-        "-ac".into(),
-        media.audio_channels.to_string(),
-        "-b:a".into(),
-        format!("{}k", media.audio_bitrate_kbps),
-        "-ar".into(),
-        VOD_AUDIO_RATE.to_string(),
-        "-t".into(),
-        format!("{:.9}", duration_seconds - anchor),
-        "-avoid_negative_ts".into(),
-        "disabled".into(),
-        "-use_editlist".into(),
-        "0".into(),
-        "-movflags".into(),
-        "+empty_moov+delay_moov+default_base_moof".into(),
-        "-frag_duration".into(),
-        "2000000".into(),
-        "-f".into(),
-        "mp4".into(),
-        "pipe:1".into(),
-    ])
+    VodSharedAudioRecipe::from_plan(plan)?.args(execution, duration_seconds)
 }
 
 /// The production encoded fMP4 pipe. Source-clock filters run before the
@@ -719,6 +784,32 @@ mod tests {
         )
         .expect("audio plan");
         assert_ne!(audio_plan.plan_digest(), plan.plan_digest());
+        let soundtrack = VodSharedAudioRecipe::from_plan(&audio_plan).expect("soundtrack");
+        let mut changed_video = audio_plan.options().clone();
+        changed_video.video_bitrate_kbps += 1000;
+        let changed_video_plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(
+                crate::transcode::Encoder::Software,
+                changed_video,
+            ),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("different video rung");
+        assert_ne!(changed_video_plan.plan_digest(), audio_plan.plan_digest());
+        assert_eq!(
+            VodSharedAudioRecipe::from_plan(&changed_video_plan)
+                .expect("same soundtrack")
+                .digest(),
+            soundtrack.digest()
+        );
+        assert_eq!(soundtrack.plan(12_000).timescale, VOD_AUDIO_RATE);
+        assert_eq!(VOD_SHARED_AUDIO_CPU_THREADS, 3);
         let mut restart = execution.clone();
         restart.start_seconds = 10.01;
         let audio_args =
@@ -726,6 +817,9 @@ mod tests {
         assert!(audio_args.windows(2).any(|pair| pair == ["-map", "0:a:2"]));
         assert!(!audio_args.iter().any(|arg| arg == "-vf" || arg == "-c:v"));
         assert!(audio_args.iter().any(|arg| arg == "-vn"));
+        for option in ["-threads", "-threads:a", "-filter_threads"] {
+            assert!(audio_args.windows(2).any(|pair| pair == [option, "1"]));
+        }
         let clock = AudioClock::new(restart.start_seconds, -175);
         assert!(audio_args
             .windows(2)

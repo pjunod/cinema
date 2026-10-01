@@ -1259,3 +1259,18 @@ Actual-init inspection, family identity separation and exact level-boundary
 regressions are authored. Workspace/all-target compilation is the current
 verification; tests remain deferred. Production actor creation, resource
 admission, audio pairing and delivery are still outstanding.
+
+### 10.9 Frozen soundtrack recipe and worker bounds
+
+`VodSharedAudioRecipe` freezes selected audio, correction, channels and rate
+against the held source facts. Its digest excludes video resolution, video
+bitrate and video encoder choice; changing a video rung leaves the soundtrack
+identity intact. The existing shared-audio command entry point now derives
+this recipe, and the recipe owns both its AAC sample-clock plan and argv.
+
+The command caps its decoder, filter worker and AAC encoder to one thread
+each. `VOD_SHARED_AUDIO_CPU_THREADS` names the three-thread pipeline admission
+reservation. Production actor construction still must use that reservation;
+no hardware video slot belongs to this audio producer. The authored recipe
+regression checks identity reuse across changed video bitrate and each argv
+thread cap. Compilation is verification at this stage; tests remain deferred.
