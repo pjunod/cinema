@@ -1543,3 +1543,34 @@ and cancellation dependencies. Unit execution remains deferred. Compiler
 evidence was refreshed against the merged tree: Rust workspace/all-targets,
 iOS production/test sources, tvOS, and Android production/test sources passed.
 No unit tests executed.
+
+### 10.25 Verified shared-audio master construction
+
+Verified presentation families now render a deterministic HLS master with one
+shared soundtrack URI and the actual codec, channel, raster and cadence facts.
+Each variant's peak bandwidth includes its video and soundtrack; an average
+appears only when both component averages are known. The caller supplies
+container-inclusive server budgets. Missing, duplicate or foreign budgets,
+invalid averages, overflow and audio/video identity aliasing are refused.
+Silent families omit the audio group and codec.
+
+The renderer makes no independent-segment or physical presentation claim from
+init facts alone. Parent ownership, admission and bounded child serving remain
+required before advertising these paths. The authored family regression covers
+the above cases; unit execution remains deferred. Attribute construction follows
+[RFC 8216 §§4.3.4.1–4.3.4.2](https://www.rfc-editor.org/rfc/rfc8216.html#section-4.3.4.1).
+
+### 10.26 Immutable role-specific media playlists
+
+Verified video and AAC renditions now render child VOD playlists from their
+own clocks, with immutable init-artifact URLs and bounded segment paths. A
+plan must have the expected role, timescale, consecutive ordinals and complete
+ordinary intervals; video tails keep whole frames, while AAC retains its
+existing final-packet trim. Empty/oversized plans, displaced boundaries and
+understated target durations are refused. Regressions compare the rational
+video interval with the separate AAC interval and exercise malformed plans.
+The serving actor still needs to connect these paths to authorized parent
+readers; rendering does not grant admission or advertise availability.
+
+Pinned Rust 1.97.1 workspace/all-target compilation passed for master and
+child playlist construction. Unit execution remains deferred.

@@ -281,6 +281,17 @@ impl VodVideoRung {
     pub fn video_bitrate_kbps(&self) -> u32 {
         self.video_bitrate_kbps
     }
+
+    pub fn media_playlist(&self, plan: &SegmentPlan) -> Result<String, crate::fmp4::Fmp4Error> {
+        continuous_media_playlist(
+            plan,
+            &self.init_id,
+            self.grid.numerator,
+            self.grid.segment_ticks(),
+            u64::from(self.grid.denominator),
+            PlanEntryKind::Video,
+        )
+    }
 }
 
 /// A stable set of verified rungs. Controlled attachment can demand one at a
@@ -385,6 +396,90 @@ impl VodSharedAudioRendition {
     pub fn bitrate_kbps(&self) -> u32 {
         self.bitrate_kbps
     }
+
+    pub fn media_playlist(&self, plan: &SegmentPlan) -> Result<String, crate::fmp4::Fmp4Error> {
+        continuous_media_playlist(
+            plan,
+            &self.init_id,
+            VOD_AUDIO_RATE,
+            94 * VOD_AAC_FRAME_SAMPLES,
+            VOD_AAC_FRAME_SAMPLES,
+            PlanEntryKind::AudioTail,
+        )
+    }
+}
+
+/// Every role owns its own exact clock; segment ordinals do not pair audio
+/// and video. Init maps retain the verified immutable artifact identity.
+fn continuous_media_playlist(
+    plan: &SegmentPlan,
+    init_id: &str,
+    timescale: u32,
+    span: u64,
+    frame_ticks: u64,
+    kind: PlanEntryKind,
+) -> Result<String, crate::fmp4::Fmp4Error> {
+    use std::fmt::Write;
+    let refuse = || {
+        crate::fmp4::Fmp4Error::Unsupported(
+            "continuous media plan does not match its verified rendition clock".into(),
+        )
+    };
+    if plan.version != SEGPLAN_VERSION
+        || plan.timescale != timescale
+        || plan.entries.is_empty()
+        || plan.entries.len() > 100_000
+        || !(1..=3).contains(&plan.target_duration)
+    {
+        return Err(refuse());
+    }
+    for (ordinal, entry) in plan.entries.iter().enumerate() {
+        let last = ordinal + 1 == plan.entries.len();
+        if entry.index as usize != ordinal
+            || entry.kind != kind
+            || (ordinal as u64).checked_mul(span) != Some(entry.start_ticks)
+            || entry.duration_ticks == 0
+            || entry.duration_ticks > span
+            || (!last && entry.duration_ticks != span)
+            || ((!last || kind == PlanEntryKind::Video)
+                && !entry.duration_ticks.is_multiple_of(frame_ticks))
+            || entry.duration_ticks.div_ceil(u64::from(timescale)) > u64::from(plan.target_duration)
+        {
+            return Err(refuse());
+        }
+    }
+    let mut out = String::with_capacity(256 + plan.entries.len() * 48);
+    out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
+    let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration);
+    out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n");
+    let _ = writeln!(out, "#EXT-X-MAP:URI=\"init/{init_id}.mp4\"");
+    for entry in &plan.entries {
+        let _ = writeln!(
+            out,
+            "#EXTINF:{:.6},\nsegment/{}.m4s",
+            entry.seconds(timescale),
+            entry.index
+        );
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    Ok(out)
+}
+
+/// Server-owned delivery budgets for one immutable rendition, including its
+/// container overhead. An average is optional while a JIT film is incomplete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodRenditionBandwidth {
+    pub rendition_id: String,
+    pub peak_bps: u64,
+    pub average_bps: Option<u64>,
+}
+impl VodRenditionBandwidth {
+    fn valid(&self) -> bool {
+        self.peak_bps > 0
+            && self
+                .average_bps
+                .is_none_or(|average| average > 0 && average <= self.peak_bps)
+    }
 }
 
 /// Pair video with exactly the soundtrack included in its family identity.
@@ -403,9 +498,11 @@ impl VodPresentationFamily {
         if video.rungs.iter().any(|rung| {
             rung.shared_audio_recipe_id.as_deref()
                 != audio.as_ref().map(|audio| audio.recipe_id.as_str())
-                || audio
-                    .as_ref()
-                    .is_some_and(|audio| audio.source_object_version != rung.source_object_version)
+                || audio.as_ref().is_some_and(|audio| {
+                    audio.source_object_version != rung.source_object_version
+                        || audio.rendition_id == rung.rendition_id
+                        || audio.init_id == rung.init_id
+                })
         }) {
             return Err(crate::fmp4::Fmp4Error::Unsupported(
                 "video family and shared soundtrack do not name the same source and recipe".into(),
@@ -421,6 +518,83 @@ impl VodPresentationFamily {
     }
     pub fn audio(&self) -> Option<&VodSharedAudioRendition> {
         self.audio.as_ref()
+    }
+
+    /// Render only verified media identities. The owner must independently
+    /// retain admission and a bounded serving path for every advertised URI.
+    /// Relative paths keep each rendition under the existing parent capability.
+    pub fn master_playlist(
+        &self,
+        video_budgets: &[VodRenditionBandwidth],
+        audio_budget: Option<&VodRenditionBandwidth>,
+    ) -> Result<String, crate::fmp4::Fmp4Error> {
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "continuous master has incomplete or conflicting rendition budgets".into(),
+            )
+        };
+        let budgets: std::collections::BTreeMap<_, _> = video_budgets
+            .iter()
+            .map(|budget| (budget.rendition_id.as_str(), budget))
+            .collect();
+        if video_budgets.len() != self.video.rungs.len()
+            || budgets.len() != video_budgets.len()
+            || video_budgets.iter().any(|budget| !budget.valid())
+            || self
+                .video
+                .rungs
+                .iter()
+                .any(|rung| !budgets.contains_key(rung.rendition_id()))
+            || match (&self.audio, audio_budget) {
+                (None, None) => false,
+                (Some(audio), Some(budget)) => {
+                    !budget.valid() || budget.rendition_id != audio.rendition_id
+                }
+                _ => true,
+            }
+        {
+            return Err(refuse());
+        }
+        let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:7\n");
+        if let Some(audio) = &self.audio {
+            out.push_str(&format!(
+                "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"shared\",NAME=\"Audio\",DEFAULT=YES,AUTOSELECT=YES,CHANNELS=\"{}\",URI=\"audio/{}/index.m3u8\"\n",
+                audio.facts.channels, audio.rendition_id,
+            ));
+        }
+        for rung in &self.video.rungs {
+            let budget = budgets[rung.rendition_id()];
+            let peak = budget
+                .peak_bps
+                .checked_add(audio_budget.map_or(0, |audio| audio.peak_bps))
+                .ok_or_else(refuse)?;
+            out.push_str(&format!("#EXT-X-STREAM-INF:BANDWIDTH={peak}"));
+            let average = match (budget.average_bps, audio_budget) {
+                (Some(video), None) => Some(video),
+                (Some(video), Some(audio)) => audio
+                    .average_bps
+                    .map(|audio| video.checked_add(audio).ok_or_else(refuse))
+                    .transpose()?,
+                _ => None,
+            };
+            if let Some(average) = average {
+                out.push_str(&format!(",AVERAGE-BANDWIDTH={average}"));
+            }
+            let codecs = self.audio.as_ref().map_or_else(
+                || rung.facts.codec.clone(),
+                |audio| format!("{},{}", rung.facts.codec, audio.facts.codec),
+            );
+            let rate = f64::from(rung.grid.numerator) / f64::from(rung.grid.denominator);
+            out.push_str(&format!(
+                ",RESOLUTION={}x{},FRAME-RATE={rate:.3},CODECS=\"{codecs}\"",
+                rung.facts.width, rung.facts.height,
+            ));
+            if self.audio.is_some() {
+                out.push_str(",AUDIO=\"shared\"");
+            }
+            out.push_str(&format!("\nvideo/{}/index.m3u8\n", rung.rendition_id));
+        }
+        Ok(out)
     }
 }
 
@@ -1101,6 +1275,117 @@ mod tests {
         }
         assert!(VodPresentationFamily::new(voiced.clone(), None).is_err());
         assert!(VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone())).is_ok());
+        let paired = VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone()))
+            .expect("paired soundtrack");
+        let budgets = vec![
+            VodRenditionBandwidth {
+                rendition_id: low.rendition_id.clone(),
+                peak_bps: 4_000_000,
+                average_bps: Some(3_000_000),
+            },
+            VodRenditionBandwidth {
+                rendition_id: high.rendition_id.clone(),
+                peak_bps: 8_000_000,
+                average_bps: Some(6_000_000),
+            },
+        ];
+        let audio_budget = VodRenditionBandwidth {
+            rendition_id: soundtrack.rendition_id.clone(),
+            peak_bps: 192_000,
+            average_bps: Some(160_000),
+        };
+        let master = paired
+            .master_playlist(&budgets, Some(&audio_budget))
+            .expect("master");
+        assert_eq!(master.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 1);
+        assert_eq!(master.matches("AUDIO=\"shared\"").count(), 2);
+        assert!(master.contains("BANDWIDTH=4192000,AVERAGE-BANDWIDTH=3160000"));
+        assert!(master.contains("BANDWIDTH=8192000,AVERAGE-BANDWIDTH=6160000"));
+        assert!(master.contains("FRAME-RATE=23.976,CODECS=\"avc1.640032,mp4a.40.2\""));
+        assert!(master.contains("CHANNELS=\"2\""));
+        assert!(
+            master.find("1280x720").expect("low variant")
+                < master.find("1920x1080").expect("high variant")
+        );
+        assert!(
+            !master.contains("#EXT-X-INDEPENDENT-SEGMENTS"),
+            "init verification alone cannot attest all fragment joins"
+        );
+        assert!(paired.master_playlist(&budgets, None).is_err());
+        assert!(paired
+            .master_playlist(&budgets[..1], Some(&audio_budget))
+            .is_err());
+        assert!(paired
+            .master_playlist(
+                &[budgets[0].clone(), budgets[0].clone()],
+                Some(&audio_budget)
+            )
+            .is_err());
+        let mut invalid = budgets.clone();
+        invalid[0].average_bps = Some(invalid[0].peak_bps + 1);
+        assert!(paired
+            .master_playlist(&invalid, Some(&audio_budget))
+            .is_err());
+        invalid[0].average_bps = None;
+        invalid[0].peak_bps = u64::MAX;
+        assert!(paired
+            .master_playlist(&invalid, Some(&audio_budget))
+            .is_err());
+        let mut incomplete = audio_budget.clone();
+        incomplete.average_bps = None;
+        assert!(!paired
+            .master_playlist(&budgets, Some(&incomplete))
+            .expect("incomplete film")
+            .contains("AVERAGE-BANDWIDTH"));
+        incomplete.rendition_id = "a".repeat(64);
+        assert!(paired.master_playlist(&budgets, Some(&incomplete)).is_err());
+        let silent = VodPresentationFamily::new(
+            VodVideoFamily::new(vec![low, high]).expect("silent video"),
+            None,
+        )
+        .expect("silent family");
+        let silent_master = silent
+            .master_playlist(&budgets, None)
+            .expect("silent master");
+        assert!(!silent_master.contains("TYPE=AUDIO"));
+        assert!(!silent_master.contains("mp4a"));
+        assert!(silent_master.contains("BANDWIDTH=4000000,AVERAGE-BANDWIDTH=3000000"));
+        assert!(silent
+            .master_playlist(&budgets, Some(&audio_budget))
+            .is_err());
+
+        let video = &silent.video.rungs[0];
+        let video_plan = video.grid.plan(4_300, 4_000_000);
+        let audio_plan = vod_shared_audio_plan(4_300, 160);
+        let video_playlist = video.media_playlist(&video_plan).expect("video clock");
+        let audio_playlist = soundtrack.media_playlist(&audio_plan).expect("AAC clock");
+        assert!(video_playlist.contains(&format!("init/{}.mp4", video.init_id)));
+        assert!(audio_playlist.contains(&format!("init/{}.mp4", soundtrack.init_id)));
+        assert!(video_playlist.contains("#EXTINF:2.002000,\nsegment/0.m4s"));
+        assert!(audio_playlist.contains("#EXTINF:2.005333,\nsegment/0.m4s"));
+        assert!(video_playlist.ends_with("#EXT-X-ENDLIST\n"));
+        assert!(audio_playlist.ends_with("#EXT-X-ENDLIST\n"));
+        assert!(video.media_playlist(&audio_plan).is_err());
+        assert!(soundtrack.media_playlist(&video_plan).is_err());
+        let mut broken_plan = video_plan.clone();
+        broken_plan.entries[1].start_ticks += 1;
+        assert!(video.media_playlist(&broken_plan).is_err());
+        broken_plan = video_plan.clone();
+        broken_plan.entries[0].duration_ticks -= u64::from(video.grid.denominator);
+        assert!(video.media_playlist(&broken_plan).is_err());
+        broken_plan = video_plan.clone();
+        broken_plan.target_duration = 2;
+        assert!(video.media_playlist(&broken_plan).is_err());
+        broken_plan = video_plan;
+        broken_plan.entries.last_mut().expect("tail").duration_ticks -= 1;
+        assert!(video.media_playlist(&broken_plan).is_err());
+
+        let mut aliased_audio = soundtrack.clone();
+        aliased_audio.rendition_id = voiced.rungs[0].rendition_id.clone();
+        assert!(VodPresentationFamily::new(voiced.clone(), Some(aliased_audio)).is_err());
+        let mut aliased_init = soundtrack.clone();
+        aliased_init.init_id = voiced.rungs[0].init_id.clone();
+        assert!(VodPresentationFamily::new(voiced.clone(), Some(aliased_init)).is_err());
         let mut wrong_source = soundtrack.clone();
         wrong_source.source_object_version = "source-two".into();
         assert!(VodPresentationFamily::new(voiced.clone(), Some(wrong_source)).is_err());
