@@ -861,7 +861,7 @@ historical measured outcomes as current evidence.
 |---|---|---|---|
 | Upstream ownership | PR #669, main `91917940e`; integrated tree `7c2a950ef` | Forgejo merged receipt and upstream completed status, 2026-10-01; pinned `cargo check --workspace --locked --all-targets` | Dependency released; integrated source compiles |
 | CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
-| CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; client integration and durable terminal receipt remain |
+| CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; web caller implemented; durable terminal receipt remains |
 | CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap being closed |
 | CQ2 | — | — | Not run |
 | CQ3 | — | — | Not run |
@@ -1062,7 +1062,7 @@ retain-current/admission policy. It does not yet provide an independent
 cancel-by-intent extension or continuous rendition protocol. The existing
 incumbent-wait cleanup takes registered successors but misses planning
 candidates; CQ1 closes that gap through the same pending-candidate owner.
-The upstream start advertisement cannot negotiate independent cancellation without changing strict reader shapes. The cancellation-only extension therefore uses a separate versioned, capability-authenticated quality-control route (API §10), with an exact-auth owner RPC and old-owner 404 fallback. Existing owner resolution is reused; there is no competing Auto reducer. Cancellation currently acknowledges initiation only; durable terminal receipts and client retention settlement remain unfinished. Final adversarial
+The upstream start advertisement cannot negotiate independent cancellation without changing strict reader shapes. The cancellation-only extension therefore uses a separate versioned, capability-authenticated quality-control route (API §10), with an exact-auth owner RPC and old-owner 404 fallback. Existing owner resolution is reused; there is no competing Auto reducer. Cancellation currently acknowledges initiation only. The web caller caches support by session/generation/epoch, holds the previous recipe on the wire during negotiation while keeping transport reports live, and verifies exact client/lifetime/recipe identity before cancelling. Its strict response, owner-change, old-ingress, coalesced-discovery and stale-intent regressions are authored but unrun. Durable terminal receipts and client retention settlement remain unfinished. Final adversarial
 review follows the workflow below; no intermediate review or unit run.
 
 **Workflow supersession, 2026-09-30:** Paul directed normal commits in the

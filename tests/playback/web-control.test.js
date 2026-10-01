@@ -39,6 +39,15 @@ function shippedConst(name) {
 }
 
 
+// Keep negotiation/cancellation dependencies alongside every sliced owner.
+// These harnesses use their existing reporter/fetch seams; the cancellation
+// protocol itself is exercised by quality-cancellation.test.js.
+function qualityCancellationSources(){
+  return ["qualityControlOwnerKey","qualityControlSupported","validQualityControlIdentity",
+    "exchangeQualityControl","discoverQualityControl","cancelUnappendedQualityIntent"]
+    .map(shippedSource).join("\n");
+}
+
 // The playback surface presenter is the subject of `web-policy.test.js`, which
 // runs the shipped reducer and the shipped render against every fixture case.
 // In THIS file it is a seam: these harnesses slice owner code that raises typed
@@ -175,7 +184,7 @@ function fullOpenHarness() {
     shippedConst("PREPARED_OFFER_CADENCE_MS"),
     shippedSource("preparedOfferSuperseded"),
     shippedSource("awaitPreparedOffer"),
-    shippedSource("requestQualityChange"),
+    qualityCancellationSources(), shippedSource("requestQualityChange"),
     shippedSource("fallBackDirectedChange"),
     shippedSource("settleDirectedChange"),
     shippedSource("resetMediaSource"),
@@ -781,7 +790,7 @@ async function main() {
       shippedSource("playbackControlBufferedRange"),
       shippedSource("playbackControlObservationOverride"),
       shippedSource("playbackControlHlsFatal"),
-      shippedSource("playbackControlSnapshot"),
+      qualityCancellationSources(), shippedSource("playbackControlSnapshot"),
       "let PLAYER=null;",
       shippedSource("notifyPlaybackControl"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
@@ -1114,7 +1123,7 @@ async function main() {
       shippedConst("PREPARED_OFFER_CADENCE_MS"),
       shippedSource("preparedOfferSuperseded"),
       shippedSource("awaitPreparedOffer"),
-      shippedSource("requestQualityChange"),
+      qualityCancellationSources(), shippedSource("requestQualityChange"),
       shippedSource("fallBackDirectedChange"),
       shippedSource("settleDirectedChange"),
       shippedSource("setQuality"),shippedSource("setSync"),
@@ -1290,7 +1299,7 @@ async function main() {
       shippedSource("applyPlaybackTransportIntent"),
       // `teardownHls` retires a directed change: the stream it was asked
       // against is the one ending.
-      shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
+      shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
       shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
@@ -4037,7 +4046,7 @@ async function main() {
         shippedSource("detachPreparedOverlapListeners"),
         shippedSource("restorePreparedOverlap"),
         // The directed change the commit and its failure now settle.
-        shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
+        shippedSource("settleDirectedChange"), qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("fallBackDirectedChange"),
         shippedSource("deferPreparedPredecessorRetirement"),
         shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
@@ -4051,7 +4060,7 @@ async function main() {
         shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
         shippedSource("rememberPlaybackTransportIntent"),
         shippedSource("pausePlaybackInternally"),
-        shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
+        shippedSource("settleDirectedChange"),qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
         // ---- the directed change, end to end -----------------------------
         "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
@@ -4074,10 +4083,10 @@ async function main() {
         shippedSource("preparedOfferSuperseded"),
         shippedSource("preparedOfferBuilt"),
         shippedSource("awaitPreparedOffer"),
-        shippedSource("requestQualityChange"),
+        qualityCancellationSources(), shippedSource("requestQualityChange"),
         shippedSource("fallBackDirectedChange"),
         shippedSource("settleDirectedChange"),
-        shippedSource("supersedeDirectedChange"),
+        qualityCancellationSources(), shippedSource("supersedeDirectedChange"),
         shippedSource("directedChangeIncumbentReady"),
         shippedSource("claimAutoFallback"),
         shippedSource("releaseAutoFallback"),

@@ -181,6 +181,14 @@ async function requestQualityChange(p,reason,fallback,autoMove){
     fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
     outcome:null,outcomeAt:null};
   p.directedChange=change;
+  // Keep transport reports live while learning the owner's strict-reader
+  // floor. Publish the new recipe only after this negotiation turn settles.
+  const previous=p.controlLastRequest&&p.controlLastRequest.selection;
+  if(previous) p.qualityNegotiatingSelection={change,selection:previous};
+  try{ await discoverQualityControl(p); }
+  finally{ if(p.qualityNegotiatingSelection&&p.qualityNegotiatingSelection.change===change) p.qualityNegotiatingSelection=null; }
+  if(p.directedChange!==change||(p.controlIntentGeneration||0)!==change.intentGeneration) return "superseded";
+  change.qualityIntent=qualityControlSupported(p)?qualityMediaIntent(p):null;
   let outcome="timed_out";
   try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
   if(p.directedChange===change){ change.outcome=outcome; change.outcomeAt=performance.now(); }
@@ -211,6 +219,12 @@ function fallBackDirectedChange(p,change,why){
     const move=change.autoMove, now=performance.now();
     const staged=preparedState(p);
     if(staged) abandonPreparedReplacement(p,"aborted","auto_trial_failed");
+    const cancellation=cancelUnappendedQualityIntent(p,change);
+    if(cancellation&&cancellation.then) cancellation.then(outcome=>{
+      change.cancellationOutcome=outcome;
+      clientLog(Object.assign({level:"info",event:"quality_cancellation",detail:outcome,
+        message:"Optional quality target cancellation: "+outcome},playbackContext()));
+    });
     p.autoRequestedHeight=null;
     if(p.abr){
       p.abr.requestedCandidateId=move.previousCandidateId||null;
@@ -294,7 +308,10 @@ function settleDirectedChange(p,change,why,detail){
 // A viewer command, a teardown, a stream replacement. The ask is retired and
 // nothing owes it a reopen.
 function supersedeDirectedChange(p){
-  return settleDirectedChange(p,p&&p.directedChange,"superseded");
+  const change=p&&p.directedChange;
+  const settled=settleDirectedChange(p,change,"superseded");
+  if(settled&&change.qualityIntent) cancelUnappendedQualityIntent(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+  return settled;
 }
 // The server cancels a preparation the moment the incumbent reports `waiting`
 // or `stalled`, so an automatic move made from a stalled picture would spend
