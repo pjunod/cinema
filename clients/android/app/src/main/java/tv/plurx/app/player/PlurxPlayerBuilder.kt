@@ -62,7 +62,15 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         }
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val player = ExoPlayer.Builder(context)
-            .setLoadControl(playbackLoadControl(context, live = role == PlayerRole.LiveTv))
+            .setLoadControl(playbackLoadControl(
+                context,
+                live = role == PlayerRole.LiveTv,
+                role = when (role) {
+                    PlayerRole.Successor -> BufferRole.Successor
+                    PlayerRole.LiveTv -> BufferRole.Live
+                    else -> BufferRole.Incumbent
+                },
+            ))
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
