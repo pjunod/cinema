@@ -117,10 +117,10 @@ fn clock_measurement(state: &AppState) -> DeveloperEnableItem {
     };
     DeveloperEnableItem { id: "cluster_clock", title: "Cluster clock observation", enabled: None, setting: None,
         requirements: vec![
-            DeveloperRequirement { id: "contract", title: "Clock contract", status: RequirementStatus::Met, evidence: "measurement-only; no acquisition or readiness consumer in this binary".to_owned() },
+            DeveloperRequirement { id: "contract", title: "Clock contract", status: RequirementStatus::Unknown, evidence: "preparatory readiness consumer; takeover, membership and fenced-target enforcement still await implementation and the identified measurement receipt".to_owned() },
             DeveloperRequirement { id: "coverage", title: "Observation coverage", status, evidence: coverage },
             DeveloperRequirement { id: "upper_bound", title: "Worst observed upper bound", status: if worst.is_some() { status } else { RequirementStatus::Unobservable }, evidence: worst.map_or_else(|| "No peer offset observation applies".to_owned(), |value| format!("{} ms among bounded observations; unknown peers have no numeric offset", value as f64 / 1_000.0)) },
-            DeveloperRequirement { id: "consequence", title: "Readiness consequence", status: RequirementStatus::Met, evidence: format!("Advisory only; compiled future refusal bound {CLOCK_OFFSET_REFUSAL_MS} ms. Enforcement waits for the identified measurement fleet receipt") },
+            DeveloperRequirement { id: "consequence", title: "Readiness consequence", status: RequirementStatus::Met, evidence: format!("Read-only advisory facts; /readyz refuses after two completed positive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms, never for Unknown alone. Existing maintenance, quorum and Store failures retain precedence. This panel changes no setting") },
         ] }
 }
 
