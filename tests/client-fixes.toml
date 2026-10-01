@@ -3491,6 +3491,25 @@ source_anchor = "internal fun autoStagedEmpiricalMargin(samples: List<AutoComple
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline()"
 
+# Native original-boundary source-to-current-test bridges. These two methods
+# passed once on exact a82 source; no historical fd74 execution is implied.
+[[fixes]]
+id = "android.auto-prepared-viewer-boundary-owner-and-budget"
+commits = ["fd74cebe", "a82f48a5e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoViewerTransport(delegate: Player"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline()"
+
+[[fixes]]
+id = "apple.auto-prepared-viewer-boundary-original-budget"
+commits = []
+supplements = "android.auto-prepared-viewer-boundary-owner-and-budget"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoViewerBoundaryBudget"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal"
+
 [[fixes]]
 id = "player.ten-and-thirty-second-controls"
 commits = ["270231322"]
