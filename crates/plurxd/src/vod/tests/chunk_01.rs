@@ -815,6 +815,7 @@ use crate::queue_fixture::QueueFixture;
             completed_cache_budget: 50 << 30,
             materialize_budget: Duration::from_secs(30),
             manifest: Mutex::new(Manifest::new(plan.clone())),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),

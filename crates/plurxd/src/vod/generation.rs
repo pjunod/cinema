@@ -742,6 +742,30 @@ pub(super) async fn credit_marker_prewarm_publication(
 }
 
 impl vodgen::Sink for RenditionSink {
+    async fn completed_output(&self) {
+        let manifest = self.rendition.manifest.lock().await;
+        if self.rendition.gen_epoch.load(Relaxed) == self.epoch
+            && !self.rendition.closed.load(Relaxed)
+        {
+            let mut measurement = self
+                .rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock");
+            measurement.complete(
+                self.epoch,
+                !manifest.is_empty() && manifest.next_gap(0).is_none(),
+            );
+            if let Some(rates) = measurement.complete_rates() {
+                tracing::debug!(target: "plurxd::vodserve",
+                    output_identity = %hex::encode(rates.identity),
+                    wire_bytes = rates.wire_bytes, duration_micros = rates.duration_micros,
+                    average_bps = rates.average_bps, rfc_peak_bps = rates.rfc_peak_bps,
+                    segment_burst_bps = rates.segment_burst_bps,
+                    "complete full-mux VOD measurement; retained wire consumer not issued");
+            }
+        }
+    }
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
         if self.rendition.closed.load(Relaxed) {
             // The quiet teardown: `NotFound` is how vodgen learns the session
@@ -786,6 +810,7 @@ impl vodgen::Sink for RenditionSink {
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
         let len = bytes.len() as u64;
+        let init = self.rendition.identity.lock().await.identity.clone();
         {
             let mut manifest = self.rendition.manifest.lock().await;
             // Checked under the manifest lock, so a driver bumping the epoch
@@ -798,6 +823,13 @@ impl vodgen::Sink for RenditionSink {
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
                 .await?;
+            if let Some(init) = init.as_ref() {
+                self.rendition
+                    .output_measurement
+                    .lock()
+                    .expect("output measurement lock")
+                    .observe(&self.rendition, init, self.epoch, entry, len);
+            }
             // Publication and provenance linearize under the same manifest
             // lock. A skip can therefore observe neither fact or both, never
             // real prewarm bytes with a missing credit.

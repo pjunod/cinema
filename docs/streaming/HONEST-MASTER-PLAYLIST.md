@@ -777,6 +777,28 @@ its predecessor. Partial coverage, conflicting duplicates, invalid durations,
 gaps or checked-arithmetic overflow remain unknown, not a measured bound.
 No duplicate payload buffers or new scheduler are needed.
 
+**2026-10-01 actual-source retention boundary:** the bounded reducer and
+successful full-mux VOD observer are implemented; their completed-output
+notification comes only after a real trailer and successful final/tail writes,
+not `Outcome::Ran` (which also describes a killed pipe). Observations use the
+exact six-decimal playlist durations and source/recipe/init/execution identity.
+Metadata is capped at 8192 entries and 131072 examined RFC windows. Adopted
+unobserved objects, duplicate publication or a changed execution stay unknown;
+ordinary legacy playback is not refused because measurement is unavailable.
+
+The frozen **consumer remains open**. Failed renditions can be replaced under
+the same recipe directory, and older session GETs still open that directory's
+paths. A recipe match or collector nonce cannot make replacement bytes part
+of an older measured artifact. Before exposing a complete-retained receipt,
+bind GETs and replacement to a proven generation-distinct artifact retention
+boundary, then capture the eligible receipt once at new-session attachment.
+Earlier sessions keep None. Contradictory regeneration must be refused before
+mutation without destroying the incumbent or rewriting its master. Until that
+seam is proved, the observer does not publish measured bandwidth on the wire.
+This is a finite implementation remainder, not device evidence alone or a
+reason to reject cold titles. Existing normalized predictive classes remain
+unchanged and must not be relabelled as measured title output.
+
 RFC 8216 §4.1 defines peak over contiguous windows whose total duration is
 0.5–1.5 target durations. Average is total media bits divided by total wire
 `EXTINF` duration, not the unweighted mean of segment rates. The stronger
