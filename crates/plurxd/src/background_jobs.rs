@@ -43,6 +43,20 @@ impl IdlePoll {
             jitter: uuid::Uuid::new_v4().as_u128() as u64,
         }
     }
+    /// Only callers with an acknowledged per-pass publication may use the
+    /// burst delay. Claims, retries and yields are not productive outcomes.
+    pub(crate) fn after_completion(&mut self, published: bool) -> Duration {
+        if !published {
+            return self.delay(false);
+        }
+        self.idle_rounds = 0;
+        self.jitter = self
+            .jitter
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1);
+        Duration::from_millis(100 + self.jitter % 151)
+    }
+
     pub(crate) fn delay(&mut self, progressed: bool) -> Duration {
         if progressed {
             self.idle_rounds = 0;
@@ -1713,6 +1727,27 @@ mod tests {
         // Finish still retires this exact attempt after the physical worker is
         // gone; losing dispatch authority never forbids ownership cleanup.
         active.finish().await;
+    }
+
+    #[test]
+    fn publication_pacing_keeps_refusal_retry_and_yield_on_idle_backoff() {
+        let mut pacing = IdlePoll {
+            idle_rounds: 0,
+            jitter: 7,
+        };
+        // A claimed job that yields, retries, or loses publication is still
+        // unproductive. None may reset the accumulated idle backoff.
+        for _outcome in ["claim_refused", "yield", "retry", "publication_fenced"] {
+            assert!(pacing.after_completion(false) >= Duration::from_secs(5));
+        }
+        assert!(pacing.after_completion(false) >= Duration::from_secs(25));
+        for _ in 0..100 {
+            let delay = pacing.after_completion(true);
+            assert!((Duration::from_millis(100)..=Duration::from_millis(250)).contains(&delay));
+        }
+        assert!(pacing.after_completion(false) <= Duration::from_secs(10));
+        // Claim-based legacy callers do not acquire the fast publication path.
+        assert!(pacing.delay(true) >= Duration::from_secs(5));
     }
 
     #[test]

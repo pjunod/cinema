@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Poll the M4's runner health; offer the M3 Apple slot only during an outage."""
+import argparse
+import fcntl
+import json
+import signal
+import subprocess
+import threading
+from pathlib import Path
+
+
+class Standby:
+    def __init__(self, config, spawn=subprocess.Popen, log=print):
+        self.config = config
+        self.spawn = spawn
+        self.log = log
+        self.child = None
+        self.draining = False
+        self.failures = 0
+        self.recoveries = 0
+        self.health = None
+
+    def drain(self, reason="primary recovered"):
+        if self.child is not None and not self.draining:
+            self.log("%s: draining backup; active job may finish" % reason, flush=True)
+            self.child.terminate()
+            self.draining = True
+
+    def step(self, healthy):
+        if self.child is not None and self.child.poll() is not None:
+            self.log("backup daemon exited: %s" % self.child.returncode, flush=True)
+            self.child = None
+            self.draining = False
+        if healthy != self.health:
+            self.log("primary health: %s" % ("available" if healthy else "unavailable"), flush=True)
+            self.health = healthy
+        if healthy:
+            self.failures = 0
+            self.recoveries += 1
+            if self.recoveries >= self.config["recovery_checks"]:
+                self.drain()
+        else:
+            self.recoveries = 0
+            self.failures += 1
+            if self.child is None and self.failures >= self.config["failure_checks"]:
+                self.log("primary unavailable: starting backup daemon", flush=True)
+                self.child = self.spawn(
+                    self.config["runner_command"],
+                    cwd=self.config["runner_directory"],
+                )
+
+    def close(self):
+        if self.child is not None:
+            self.drain("controller stopping")
+            # The runner's nonzero shutdown_timeout bounds its own drain. Do
+            # not send a second signal or kill its job process group.
+            self.child.wait()
+
+
+def probe(config):
+    try:
+        result = subprocess.run(
+            config["probe_command"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=config["probe_timeout_seconds"],
+            check=False,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def load_config(path):
+    config = json.loads(Path(path).read_text())
+    for key in ("probe_command", "runner_command"):
+        command = config[key]
+        if not isinstance(command, list) or not command or not all(
+            isinstance(arg, str) and arg for arg in command
+        ):
+            raise ValueError("%s must be a nonempty argv array" % key)
+    for key in ("interval_seconds", "probe_timeout_seconds", "failure_checks", "recovery_checks"):
+        if not isinstance(config[key], int) or isinstance(config[key], bool) or config[key] <= 0:
+            raise ValueError("%s must be a positive integer" % key)
+    if not Path(config["runner_directory"]).is_dir():
+        raise ValueError("runner_directory must exist")
+    return config
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", required=True)
+    parser.add_argument("--probe", action="store_true", help="check primary health without starting jobs")
+    args = parser.parse_args()
+    config = load_config(args.config)
+    if args.probe:
+        healthy = probe(config)
+        print("primary available" if healthy else "primary unavailable")
+        return 0 if healthy else 1
+    stopped = threading.Event()
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, lambda *_: stopped.set())
+    standby = Standby(config)
+    with (Path(config["runner_directory"]) / "apple-standby.lock").open("a") as lock:
+        # A manual invocation must not duplicate the launchd controller.
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            while not stopped.is_set():
+                healthy = probe(config)
+                if not stopped.is_set():
+                    standby.step(healthy)
+                stopped.wait(config["interval_seconds"])
+        finally:
+            standby.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
