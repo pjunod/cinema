@@ -353,12 +353,23 @@ Prepared video-only switches retain actual producer audio, while incompatible
 audio changes require reopen. No concrete pan, limiter, new client claim,
 readiness/layout feature gate, or count-to-speaker-map inference is enabled.
 
-Verification is in progress on the draft. The current-source freshness audit
-identified main #627 startup snapshots/timings and concurrent #657 parser-floor
-context; their behavior must be retained on the main-synced effort before
-final compile/test evidence or publication. This statement is not a claim
-that an older-source check qualifies that eventual tree. M4 content/listening
-and M3/M5 device-route acceptance remain open.
+The continuation in [draft #665](http://192.168.4.7:3000/noirr/plurx/pulls/665)
+composes effort `ec79f4b34` with main `5c99538fd`: startup settings snapshots
+and phase timings, worker accounting, and the landed #657 parser floor are
+retained. Initial transcodes carry the canonical claim until the actual
+rolling or encoded producer selects its route. A retained producer snapshot
+then takes precedence over that claim and refreshed source facts; encoded
+VOD refuses an incompatible retained snapshot rather than replacing it.
+The actual options-owner regressions exercise rolling and VOD argv plus
+plan/recipe identity with retained AAC six-channel audio and current stereo
+facts. Restoring the old resolution order fails both; the fixed owners pass.
+The pinned Rust 1.97.1 locked workspace/all-target check passed on the composed
+source. Seven focused core tests, eleven daemon tests (including both actual
+owners and three parser-floor cases), two real-backend offline tests, nine
+retained numeric/docs-index checks and the ownership census passed. The draft
+records the committed-tree check and normal hook separately. No older
+checkpoint qualifies a newer source tree. M4 content/listening and M3/M5
+device-route acceptance remain open.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -503,3 +514,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review disposition | [#418 comment #3296](http://192.168.4.7:3000/noirr/plurx/pulls/418#issuecomment-3296) | Separated decoder/sink/passthrough authority; source/sink sample rates now fail closed; recipe v4 keys the 48 kHz decision; flat `achannels` is bounded at the request; progressive AAC remux is fixed at 48 kHz. Hardware, layout and downmix evidence remain blocked honestly. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 source-layout prerequisite | Draft continuation on current effort `ffbbc16ce` | Claimed only optional source facts and backend round trips. `AudioStream.channel_layout` retains trimmed, opaque ffprobe spelling, bounded to 256 UTF-8 bytes; `5.1` and `5.1(side)` remain distinct. Empty, unknown/N/A, control-bearing and malformed non-string values mean no claim; unsupported bounded spellings remain opaque, not supported speaker maps. No inference from channel count. Absent/null legacy JSON remains absent on serialization, with no migration/backfill. Raw probe JSON retains rejected facts. Focused parser/serde and real SQLite plus feature-enabled three-voter Hiqlite round trips are required before push. No pan, gain, argv, recipe, client, runtime or surround-output change; M2 remains partial and M3–M5 acceptance remains owed. Current effort/focused-test workflow supersedes the older task-to-main/broad-suite instructions for this continuation. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M2 propagation and sole-review disposition | [#665](http://192.168.4.7:3000/noirr/plurx/pulls/665) | Typed audio reaches actual producer options/argv, plan/recipe identity, manifests/budgets, remote responses, durable offline snapshots and prepared successors. Sole review #28/comment #6752 identified retained rolling/encoded audio being re-resolved; actual owner regressions fail with the old claim-first behavior and pass with retained authority. Initial rolling negotiation remains route-specific; legacy absence and the v4 golden remain pinned. Composed effort `ec79f4b34` / main `5c99538fd`: pinned workspace check, core7, daemon11, real SQLite/three-voter offline2, numeric/docs9 and ownership census passed; final committed-tree/hook receipts are in the draft. Numeric failures and physical/content/listening limits are retained; M3–M5 remain open. |

@@ -1160,7 +1160,13 @@ pub(crate) async fn resolve_plan(
         if let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind {
             *aac = delivery.transcodes();
         }
-        request.audio_delivery = Some(delivery);
+        // The transcode route is provisional here: encoded VOD may fall back
+        // to rolling HLS. Its actual producer resolves the canonical claim.
+        // Only copy has selected its final route; retained transcode answers
+        // arrive later from the producer's StartResponse.
+        if matches!(request.kind, crate::transcode::SessionKind::Copy { .. }) {
+            request.audio_delivery = Some(delivery);
+        }
     }
     Ok(ResolvedPlan {
         request,
@@ -1299,6 +1305,19 @@ async fn create_with_purpose(
     // costs a viewer their selection with nothing to point at.
     // `None` for a body that carried no ask: a playback with nothing recorded
     // must still activate, or the first play of every title would be refused.
+    // A parser-floor create must not reinterpret a future route as ordinary
+    // Auto or persist acceptance of a candidate it cannot dispatch.
+    if req.intent.as_ref().is_some_and(|intent| {
+        matches!(
+            intent.selection.quality,
+            plurx_core::playback::DesiredQuality::Auto {
+                candidate_id: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(ApiError::BadRequest("candidate_unsupported".to_owned()));
+    }
     let mut recorded_ask_revision: Option<i64> = None;
     if let Some(intent) = req.intent.as_ref() {
         intent
@@ -1668,6 +1687,9 @@ async fn create_with_purpose(
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
+        candidate_id: None,
+        presentation_target: None,
+        decoder_caps: None,
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,

@@ -2082,3 +2082,97 @@
         request.audio_claim.as_mut().expect("sink claim").sinks[0].max_channels = 2;
         assert_ne!(request.intent_fingerprint("paul"), claimed);
     }
+
+    async fn retained_audio_consumer_case(encoded: bool) {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let mut file = profile5_file();
+        file.hdr = None;
+        file.hdr_format = None;
+        file.video_codec = Some("h264".into());
+        file.video_profile = None;
+        file.bit_depth = Some(8);
+        file.audio_streams = vec![plurx_core::domain::AudioStream {
+            index: 0, codec: "truehd".into(), channels: Some(2), sample_rate: Some(48_000),
+            channel_layout: Some("stereo".into()), language: None, title: None, default: true,
+        }];
+        let claim = AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink {
+            codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000],
+        }] };
+        let retained = AudioDelivery { action: AudioAction::Encode {
+            codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000,
+        }, downmix: None, reason: "retained actual producer".into() };
+        let mut request = SessionRequest {
+            control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,
+            automatic: false, previous_session_id: None, reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
+            audio_index: Some(0), audio_delivery: Some(retained.clone()), audio_claim: Some(claim.clone()),
+            subtitle_burn: None, audio_offset_ms: 0, hdr10: false,
+            presentation: Default::default(), block_budget_secs: None, transport: None,
+        };
+        let base = mgr.live_lookup_options(mgr.rate_control_snapshot(), Encoder::Software, &file,
+            720, 0.0, Some(0), None, None, OutputGrade::Sdr);
+        let actual = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("AAC lattice")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), request.audio_claim.as_ref(), request.audio_delivery.as_ref())
+        };
+        assert_eq!(actual.audio.as_ref().expect("producer audio").byte_identity(), retained.byte_identity());
+        let plan = mgr.resolve_movie_plan(&file, &actual, Encoder::Software).await.expect("actual plan");
+        let execution = TranscodeExecution::from_options(&file, &actual, Pacing::unpaced(), "/tmp/retained-audio").expect("execution");
+        let argv = if encoded {
+            transcode::vod_pipe_args(&file, &plan, &execution,
+                transcode::VodFrameGrid::new(24_000, 1_001).expect("film cadence"), 1.0)
+        } else {
+            transcode::hls_args(&plan, &execution)
+        };
+        for pair in [["-c:a", "aac"], ["-ac", "6"], ["-b:a", "320k"], ["-ar", "48000"], ["-channel_layout:a", "5.1"]] {
+            assert!(argv.windows(2).any(|args| args[0] == pair[0] && args[1] == pair[1]), "missing {pair:?}: {argv:?}");
+        }
+        request.audio_delivery = None;
+        let current = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("initial encoded")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), Some(&claim), None)
+        };
+        assert_eq!(current.audio_channels, 2);
+        let current_plan = mgr.resolve_movie_plan(&file, &current, Encoder::Software).await.expect("current plan");
+        assert_ne!(plan.plan_digest(), current_plan.plan_digest(), "retained six channels must key different bytes from current stereo");
+        assert_ne!(recipe_hash_for_options(&mgr, &file, &actual, Encoder::Software).await,
+            recipe_hash_for_options(&mgr, &file, &current, Encoder::Software).await);
+        request.audio_claim = None;
+        let legacy = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("legacy encoded")
+        } else {
+            mgr.rolling_start_audio_options(&file, base.clone(), None, None)
+        };
+        assert_eq!(legacy, base, "absent legacy claim retains the original options");
+        file.audio_streams[0].channels = Some(6);
+        request.audio_claim = Some(AudioClaim { decoders: vec!["aac".into(), "eac3".into()], sinks: vec![claim.sinks[0].clone(), AudioSink {
+            codec: "eac3".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000],
+        }] });
+        let initial = if encoded {
+            mgr.encoded_start_audio_options(&request, &file, base.clone()).expect("initial VOD AAC")
+        } else {
+            mgr.rolling_start_audio_options(&file, base, request.audio_claim.as_ref(), None)
+        };
+        assert!(matches!(&initial.audio.expect("route audio").action,
+            AudioAction::Encode { codec, channels: 6, .. } if codec == if encoded { "aac" } else { "eac3" }));
+        if encoded {
+            request.audio_delivery = Some(AudioDelivery { action: AudioAction::Encode {
+                codec: "eac3".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 640, sample_rate: 48_000,
+            }, downmix: None, reason: "retained rolling producer".into() });
+            assert!(mgr.encoded_start_audio_options(&request, &file, TranscodeOptions::default()).is_err(), "incompatible retained audio must refuse rather than re-resolve");
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_producer_retains_audio_despite_refreshed_source_and_unchanged_claim() {
+        retained_audio_consumer_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn encoded_producer_retains_audio_despite_refreshed_source_and_unchanged_claim() {
+        retained_audio_consumer_case(true).await;
+    }

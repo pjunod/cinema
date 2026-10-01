@@ -503,6 +503,8 @@ pub struct SessionRequest {
     pub audio_index: Option<i64>,
     /// Server-resolved audio bytes, frozen across cluster ownership, offline
     /// production and prepared successors. No public create field accepts it.
+    /// Initial transcodes carry only `audio_claim` until the actual producer
+    /// chooses its route; this field then carries the retained producer answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

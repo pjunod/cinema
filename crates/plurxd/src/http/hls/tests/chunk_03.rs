@@ -364,6 +364,9 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                candidate_id: None,
+                presentation_target: None,
+                decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id,
                 user_id: route.user_id,
@@ -616,6 +619,9 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    candidate_id: None,
+                    presentation_target: None,
+                    decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
                     user_id: route.user_id,
@@ -646,6 +652,8 @@
                 delivered: delivered.clone(),
                 delivered_bps: Some(10_000_000),
                 capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    presentation_target: None,
+                    decoder_caps: None,
                     platform: crate::playback_control::ClientPlatform::Apple,
                     max_height: 2160,
                     codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -699,6 +707,8 @@
         first.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
         first.observed_download_bps = Some(100_000_000);
         first.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            presentation_target: None,
+            decoder_caps: None,
             platform: crate::playback_control::ClientPlatform::Web,
             max_height: 2160,
             codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -812,6 +822,8 @@
         first.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
         first.observed_download_bps = Some(100_000_000);
         first.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            presentation_target: None,
+            decoder_caps: None,
             platform: crate::playback_control::ClientPlatform::Web,
             max_height: 2160,
             codecs: vec![crate::playback_control::CodecPolicy::H264],

@@ -2411,7 +2411,7 @@
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -2422,6 +2422,8 @@
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -2499,6 +2501,9 @@
             transport: None,
         };
         let predecessor_recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: user.id,
