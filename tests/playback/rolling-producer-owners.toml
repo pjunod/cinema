@@ -1349,7 +1349,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-driven-local-body-owner"
 pattern = "driven_local_body"
-# Landed 63cc43f3a removes the duplicate constructor and its two production
+# Landed 847c1bfe0 removes the duplicate constructor and its two production
 # callers (plus the old direct-constructor fixture). The one remaining reference
 # is the historical terminal-failure regression's name, not another owner.
 expected_occurrences = 1
@@ -1357,7 +1357,7 @@ expected_occurrences = 1
 [[module_symbols]]
 id = "m4-bounded-local-body-channel"
 pattern = "LOCAL_MEDIA_BODY_CHANNEL_CAPACITY"
-# Landed 63cc43f3a retains the two production channels and their constant;
+# Landed 847c1bfe0 retains the two production channels and their constant;
 # the additional occurrence is the shared pump fixture's bounded channel.
 expected_occurrences = 4
 
