@@ -1075,3 +1075,26 @@ not claimed passing. Escalation resolved all seven loopback socket errors and
 four pgrep-related failures from the first sandboxed run. The general docs
 status audit and unrelated operations fixtures remain unchanged; Linux
 preflight is still required.
+
+
+### 9.2.2 Authoritative-main refresh — 2026-09-30
+
+While PR657's corrected preflight passed, authoritative main advanced from
+`28964229cdb4a70aa0872a49e78fdb096ecf4083` to
+`f16be4f22296f98a6bce9f2a38b76b2411759e53` (worker Activity/admitted throughput,
+cluster probe batching and DVR/Activity contract inventories). This refresh
+is fetched-main evidence, distinct from the earlier planning snapshots. The
+only merge conflict was the process-shaped sentinel: main407 plus the two
+reviewed B-R1 HTTP status reads gives409; both independent explanations remain.
+
+Rechecked source seams: strict playback/control/intent/create/replay boundaries
+and decode_facts production probe query are unchanged by this main delta.
+Manager construction now integrates bounded source-probe job capacity; retain
+that ownership rather than introducing an independent probe/cache lifecycle.
+Existing results against28964229 remain historical evidence. Compilation,
+focused parser/relay/replay/digest regressions and static contracts were rerun
+on this actual merged tree: pinned all-target check passed; core playback87,
+parser3, actual owner/refusal1, durable replay/remote-path1 and actual response
+relay1 passed; validation253 (one skip) and affected operations85 passed.
+No old-base result qualifies it. The sole reviewed conflict was rechecked with
+no blockers; final normal hook/commit checks remain recorded separately.

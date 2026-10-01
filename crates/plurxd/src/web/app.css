@@ -3416,6 +3416,47 @@
 .boot-sentinel{position:fixed;z-index:10000;left:16px;right:16px;top:16px;padding:14px 18px;border:1px solid #a64b58;border-radius:10px;background:#28171c;color:#fff;box-shadow:0 8px 30px #0008;font:600 15px/1.4 system-ui,sans-serif}
 .boot-sentinel button{margin-left:12px;padding:6px 12px;border:1px solid #fff6;border-radius:7px;background:#fff1;color:#fff;font:inherit;cursor:pointer}
 
+/* Cluster work: capacity and assignments stay together, including on phones. */
+.cluster-worker-totals { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin:16px 0; }
+.cluster-worker-totals>div { padding:14px; border:1px solid var(--line); border-radius:10px; }
+.cluster-worker-totals b { display:block; font-size:24px; }
+.cluster-worker-totals span { font-size:12px; color:var(--muted); }
+.cluster-worker-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr)); gap:12px; }
+.cluster-worker-node { min-width:0; overflow-wrap:anywhere; }
+.cluster-worker-node>.row { justify-content:space-between; flex-wrap:wrap; }
+.cluster-worker-slots { display:flex; gap:6px; margin-top:12px; flex-wrap:wrap; }
+.cluster-worker-slot { padding:6px 12px; border-radius:6px; border:1px solid var(--line); font-size:12px; }
+.cluster-worker-slot.busy { border-color:var(--accent); }
+.cluster-worker-slot.available { border-color:var(--good, #51a884); }
+.cluster-worker-slot.blocked { border-style:dashed; color:var(--muted); }
+.cluster-worker-assignments>div { padding:8px 0; border-top:1px solid var(--line); }
+.cluster-worker-assignments span,.cluster-worker-assignments small { display:block; }
+.cluster-worker-node>small { display:block; margin-top:12px; }
+
+/* Activity: two bounded workspaces; watching remains above both tabs. */
+.activity-tabs { display:flex; gap:16px; border-bottom:1px solid var(--line); margin:18px 0; }
+.activity-tabs button[aria-selected=true],.activity-tabs button[aria-pressed=true] { border-bottom:2px solid var(--accent); color:var(--accent); }
+.activity-section { border-top:1px solid var(--line); padding:14px 0; }
+.activity-section>summary { font-weight:600; }
+.activity-node-matrix small { display:block; margin-top:4px; }
+.activity-jobs-layout { display:grid; grid-template-columns:210px minmax(0,1fr); gap:18px; align-items:start; }
+.activity-job-types { display:grid; gap:6px; }
+.activity-job-types button { text-align:left; white-space:normal; }
+.activity-job-types small { display:block; font-size:11px; color:var(--muted); }
+.activity-job-types button[aria-pressed=true] { background:var(--panel2); color:var(--accent); }
+.activity-job-list { min-width:0; }
+.activity-job-list>.card>.row { flex-wrap:wrap; }
+.activity-work-inspector { width:min(480px,100%); max-height:calc(100dvh - 40px); margin:20px 20px 20px auto; padding:20px; border:1px solid var(--line); border-radius:12px; background:var(--bg); color:var(--text); overflow:auto; }
+.activity-work-inspector::backdrop { background:rgb(0 0 0 / .4); }
+.activity-inspector-head { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; }
+.activity-facts { display:grid; grid-template-columns:110px minmax(0,1fr); gap:10px 12px; }
+.activity-facts dt { color:var(--muted); }
+.activity-facts dd { margin:0; overflow-wrap:anywhere; }
+.activity-attempt { padding:12px 0; border-bottom:1px solid var(--line); }
+@media(max-width:700px) { .activity-jobs-layout { grid-template-columns:minmax(0,1fr); } .activity-job-types { display:flex; flex-wrap:wrap; } .activity-job-types h3,.activity-job-types>.hint { width:100%; } .activity-work-inspector { margin:10px; width:calc(100% - 20px); max-height:calc(100dvh - 20px); } }
+
+.activity-job-list .tbl{max-height:460px;overflow:auto}
+.activity-job-list .tbl thead{position:sticky;top:0;background:var(--panel);z-index:1}
 /* Durable work stays compact while the live activity above it refreshes. */
 .durable-queue{margin:24px 0;padding:0;min-width:0}
 .durable-queue>summary{cursor:pointer;padding:20px 24px;list-style-position:inside}

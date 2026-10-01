@@ -67,6 +67,8 @@ const REPLACEMENT_WAIT_PREFIX: &str =
 /// What a client should wait before re-posting. One cooperative window: by
 /// then the previous start has either let go or been reclaimed.
 pub(crate) const REPLACEMENT_WAIT_RETRY_AFTER_SECS: u64 = 3;
+/// Physical heavy-background admission, shared by all durable media workers.
+pub(crate) const BACKGROUND_HEAVY_LIMIT: usize = 1;
 /// Longer than any legitimate hold of a player's key.
 ///
 /// The key is held from provisional creation through the durable activation
