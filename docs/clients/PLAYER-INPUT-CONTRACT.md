@@ -267,6 +267,12 @@ coverage. The Close button always cleans up the active interaction then exits.
 
 ## 3. Controls — the row grammar
 
+Playback offers four skip buttons: back 30 seconds, back 10 seconds,
+forward 10 seconds, and forward 30 seconds, with play/pause in the middle.
+The same controls appear on web, Apple, and Android, including downloaded
+playback. Each uses the existing relative seek path and clamps to the title
+bounds. Media keys and desktop arrow shortcuts retain their 10-second step.
+
 Three rows, top to bottom. The timeline row contains exactly one focusable
 thing. That single constraint is what makes horizontal input on the bar
 safe to mean "scrub": there is nothing beside it to be unreachable.
@@ -277,7 +283,7 @@ safe to mean "scrub": there is nothing beside it to be unreachable.
  │ title · badges · context           │          │ title · badges       │
  │                        [Skip intro]│  marker  │            [Skip …]  │
  │ 0:42:10 ━━━━━━━━●──────── 1:59:00  │  timeline│ 0:42 ━━━●──── 1:59   │
- │ ⟲10  ▶  ⟳10        🔊 CC ◆ ⚙ ⓘ ◲ ✕ │  transport│   ⟲10   ▶   ⟳10      │
+ │ ⟲30 ⟲10 ▶ ⟳10 ⟳30   🔊 CC ◆ ⚙ ⓘ │  transport│ ⟲30 ⟲10 ▶ ⟳10 ⟳30  │
  └────────────────────────────────────┘          │ 🔊  CC  ◆  ⚙  ⓘ  ◲ ✕ │
                                                  └──────────────────────┘
 ```
@@ -291,7 +297,7 @@ _Generated from [`tests/playback/player-input-contract.json`](../../tests/playba
 | `bar` | `airplay` · `close` | `desktop` · `touch` | all | A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there — top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button. `close` when touch and desktop only — a ten-foot player exits with `back` · `airplay` when web, and only while the browser reports an AirPlay target |
 | `marker` | `skip_marker` | all | all | Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything. |
 | `timeline` | `time_elapsed` · `timeline` · `time_total` | all | `timeline` | Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek. |
-| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `title_info` · `pip` · `larger` · `fullscreen` | all | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `title_info` when web only, wide watch or fullscreen; compact has an always-on side panel · `fullscreen` when web only — a native player is already full screen · `larger` when web only, non-narrow watch browser; absent from the DOM on narrow web `desktop` renders `info` at position 0 of the `bar` row |
+| `transport` | `skip_back_30` · `skip_back` · `play_pause` · `skip_forward` · `skip_forward_30` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `title_info` · `pip` · `larger` · `fullscreen` | all | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement; portrait fullscreen uses another options line to preserve touch target sizes. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `title_info` when web only, wide watch or fullscreen; compact has an always-on side panel · `fullscreen` when web only — a native player is already full screen · `larger` when web only, non-narrow watch browser; absent from the DOM on narrow web `desktop` renders `info` at position 0 of the `bar` row |
 
 **`settings` holds:** `autoplay_next` · `auto_skip` · `audio_sync` · `playback_speed_reserved`.
 
