@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 11;
+const SIDECAR_SCHEMA_VERSION: i64 = 12;
 pub(crate) const NETWORK_PRIOR_LINK_COLUMNS: &str = "
 ALTER TABLE network_priors ADD COLUMN link_worst_rung_height INTEGER;
 ALTER TABLE network_priors ADD COLUMN link_starved_at_ms INTEGER;";
@@ -617,6 +617,7 @@ impl NodeLocalTelemetry {
                 migration.push_str(NETWORK_PRIOR_LINK_COLUMNS);
                 migration.push('\n');
             }
+            migration.push_str(crate::store::candidate_link::SCHEMA);
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -690,6 +691,22 @@ impl NodeLocalTelemetry {
         observation: NetworkPriorObservation,
     ) -> Result<NetworkPrior, StoreError> {
         self.with_conn(move |conn| observe_prior(conn, &observation))
+            .await
+    }
+
+    pub(crate) async fn observe_candidate_link(
+        &self,
+        value: crate::domain::CandidateLinkObservation,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        self.with_conn(move |conn| crate::store::candidate_link::observe(conn, &value, now))
+            .await
+    }
+    pub(crate) async fn candidate_link_prior(
+        &self,
+        binding: crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError> {
+        self.with_conn(move |conn| crate::store::candidate_link::get(conn, &binding))
             .await
     }
 

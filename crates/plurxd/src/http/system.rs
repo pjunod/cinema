@@ -687,6 +687,8 @@ pub struct ClientLog {
     /// historically call this `session`; the alias keeps that field additive.
     #[serde(alias = "session")]
     pub session_id: Option<String>,
+    /// Exact local completed-body claim; never inferred from bandwidth or detail.
+    pub(crate) link_sample: Option<super::hls::link_receipts::ClientLinkSample>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
     /// Client-reported last accepted protocol state preceding this event.
@@ -859,7 +861,7 @@ pub async fn client_log(
     State(state): State<AppState>,
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
-    Json(ev): Json<ClientLog>,
+    Json(mut ev): Json<ClientLog>,
 ) -> StatusCode {
     let suppressed = match CLIENT_LOG_LIMITER.lock() {
         Ok(mut limiter) => limiter.admit(user.id, std::time::Instant::now()),
@@ -910,6 +912,31 @@ pub async fn client_log(
             user.created_at,
             &user.password_hash,
         ));
+    }
+    if let (Some(sample), Some(identity)) = (ev.link_sample.take(), network.clone()) {
+        let proof_state = state.clone();
+        let proof_session = ev.session_id.clone();
+        tokio::spawn(async move {
+            let enabled = proof_state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|value| value.trim() == "1");
+            if enabled {
+                if let Some(value) = proof_state
+                    .link_receipts
+                    .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
+                    .await
+                {
+                    let _ = proof_state
+                        .store
+                        .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                        .await;
+                }
+            }
+        });
     }
     #[cfg(test)]
     let capture_hook = {
@@ -6326,6 +6353,7 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            link_sample: None,
             control: None,
             control_trigger: None,
             delivered_range: None,

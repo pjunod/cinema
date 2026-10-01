@@ -698,6 +698,7 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    pub(crate) link_receipts: Arc<crate::http::hls::link_receipts::LinkReceipts>,
     /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
@@ -1146,6 +1147,7 @@ impl AppState {
         );
         AppState {
             store,
+            link_receipts: Default::default(),
             cache_only_admin_proofs,
             login_throttle: Default::default(),
             password_capacity: Default::default(),
