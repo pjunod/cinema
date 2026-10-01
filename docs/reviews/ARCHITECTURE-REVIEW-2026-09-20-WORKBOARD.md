@@ -136,6 +136,16 @@ control authentication/accepted-actor/staged registration, typed recovery and
 physical acceptance remain explicitly open; see combined plan §9.10. Missing
 observational proof remains Unknown, never an ordinary-playback enable gate.
 
+The local prepared-observation follow-up supplies optional independently
+authenticated HTTP context, exact accepted-actor desired lifetime and a separate
+actual stage-writer lifetime token. Registration follows successful local prime;
+staged positives concern their own completed response, not incumbent bytes.
+Bounded read-only queries preserve capability responses, strict control/relay
+JSON, commit authority and original deadlines. Web/Apple/Android adapters carry
+only per-call or exact staged-attachment receipts. See combined plan §9.11;
+formal review, current-source gate and physical/typed-recovery acceptance remain
+separate and open.
+
 ## How to claim, work and finish a plan
 
 **P-02 post-merge evidence continuation, 2026-10-01 (gpt-6.1-sol,

@@ -1,5 +1,44 @@
     use super::*;
 
+    #[tokio::test]
+    async fn a05_real_rolling_staged_observation_is_not_commit_authority_and_refuses_retirement() {
+        let base = crate::test_tempdir().expect("base");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(base.path(), &session_id).await;
+        activate_control_route(fixture.store.as_ref(), &session_id, &generation, &fixture.state.node_id).await;
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Web);
+        snapshot.request_fingerprint = Some("origin".into());
+        let desired = snapshot.selection.desired().digest();
+        let client = uuid::Uuid::new_v4().to_string();
+
+        let accepted = fixture.state.transcode.hls_session_control(crate::playback_control::LocalControlRequest {
+            session_id: &session_id, generation: &generation, owner_node_id: &fixture.state.node_id, owner_epoch: 1,
+            client_instance_id: &client, sequence: 1, snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+        }).await.expect("rolling worker").expect("accepted");
+        assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+
+        let gate = fixture.state.transcode.session_preparation_gate(&session_id).await.expect("real rolling gate");
+        let identity = crate::playback_control::AcceptedControlIdentity {
+            generation: generation.clone(), owner_epoch: 1, client_instance_id: client.clone(),
+            sequence: 1, fingerprint: "origin".into(), desired_digest: desired.clone(),
+        };
+        let proof = gate.accepted_observation(identity).await.expect("real accepted actor origin");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let deadline = crate::media_sessions::unix_ms() + 60_000;
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "reservation absent");
+        assert!(gate.stage_preparation_for_owner(staged.clone(), generation.clone(), deadline, 1, Some(desired)).await);
+        assert!(!gate.may_commit_preparation_for_owner(&staged, 1).await, "no commit reservation");
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_some(), "real Staged is observable before commit");
+        assert!(gate.begin_abort_preparation_for_owner(&staged, 1).await);
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "aborting is not observation authority");
+        assert!(fixture.state.transcode.stop_session(&session_id, "deleted").await);
+        assert!(!gate.observation_is_current(proof).await, "retired exact attachment cannot be followed");
+
+    }
+
     #[test]
     fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
         let metrics = CodecQualificationMetrics::default();

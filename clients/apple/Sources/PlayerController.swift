@@ -2504,6 +2504,9 @@ final class PlayerController: ObservableObject {
                             observedMediaDurationMs: observedMediaDuration
                         )
                         if staged {
+                            if let action = self.preparedReplacement.activeAction {
+                                self.reportStagedLinkSample(sample, action: action, item: item)
+                            }
                             self.autoStagedTransfers.removeAll { $0.segmentId == sample.segmentId }
                             self.autoStagedTransfers.append(sample)
                             if self.autoStagedTransfers.count > 4 { self.autoStagedTransfers.removeFirst() }
@@ -9944,6 +9947,10 @@ extension PlayerController {
                 authorize: { request in Session.shared.authorize(&request) }
             ),
             observe: { [weak self] in self?.playbackControlObservation() },
+            linkReceipt: { [weak self] in
+                guard let self, self.sessionId == hls.sessionId else { return nil }
+                return self.currentLinkReceipt()
+            },
             onSubtitleReady: { [weak self] in
                 self?.retryNativeSubtitleAfterReadiness()
             },
@@ -10231,6 +10238,25 @@ extension PlayerController {
             autoUpgradeSinceMs = nil
             recipeRevision.change()
         }
+    }
+
+    private func reportStagedLinkSample(_ sample: AutoCompletedTransfer, action: PreparedReplacementAction, item: AVPlayerItem) {
+        let now = PlaybackControlSession.monotonicMs()
+        guard preparedItem === item, preparedReplacement.activeAction?.sessionId == action.sessionId,
+              sample.statusCode == 200, sample.networkLoad, !sample.fromLocalCache,
+              autoTransferOriginCurrent(sample), sample.producerPaced == false,
+              sample.ageMs(nowMs: now) <= 15_000, sample.bodyBytes > 0,
+              let duration = sample.bodyDurationSeconds, duration > 0, duration <= 120,
+              let receipt = sample.receipt, UUID(uuidString: receipt)?.uuidString.lowercased() == receipt,
+              let etag = sample.etag, !etag.isEmpty,
+              let url = URL(string: sample.segmentId), url.pathComponents.contains(action.sessionId),
+              autoLinkClaims[receipt] == nil, autoLinkClaims.count < 32 else { return }
+        postClientLog(AppleCandidateLinkLog(session_id: action.sessionId, link_sample: .init(
+            receipt: receipt, object_name: url.lastPathComponent, etag: etag,
+            body_bytes: sample.bodyBytes, body_duration_ms: Int((duration * 1000).rounded()),
+            age_ms: sample.ageMs(nowMs: now), negative: false,
+            media_duration_ms: sample.observedMediaDurationMs, presenting: false, stalled: false, runway_ms: 0)))
+        autoLinkClaims[receipt] = (sample.completedAtMs, false)
     }
 
     private func autoStagedOriginalAllowsCommit(_ action: PreparedReplacementAction) -> Bool {

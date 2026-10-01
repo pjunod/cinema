@@ -2733,6 +2733,7 @@
             fixture.state.clone(),
             PendingCandidateGuard::begin(&playback_id, &digest),
             PreparationCandidateInputs {
+                accepted_observation: None,
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
@@ -2878,6 +2879,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -3109,4 +3111,140 @@
             StatusCode::SERVICE_UNAVAILABLE,
             "the unreachable remote owner is tried after the point, and the release deferred"
         );
+    }
+    #[tokio::test]
+    async fn a05_prepared_http_observation_is_optional_auth_not_capability_authority() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback = unique_playback_id("a05-optional-observation-auth");
+        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let request = preparing_control_request(&route);
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Plurx-Link-Receipt", uuid::Uuid::new_v4().to_string().parse().expect("A05 prepared fixture"));
+        headers.insert("authorization", "Bearer invalid-observation-token".parse().expect("A05 prepared fixture"));
+        let remote = Some("192.0.2.8:12345".parse().expect("A05 prepared fixture"));
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + Duration::from_millis(100)).await.is_none());
+        let response = super::control::control(State(fixture.state.clone()), AxPath(session),
+            headers.clone(), crate::http::network::RemoteAddress(remote),
+            Bytes::from(serde_json::to_vec(&request).expect("A05 prepared fixture"))).await;
+        let (status, _) = control_body(response).await;
+        assert_eq!(status, StatusCode::OK, "invalid observation credentials do not reject valid capability control");
+        let token = "a05-prepared-observation-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), route.user_id, None).await.expect("A05 prepared fixture");
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("A05 prepared fixture"));
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + Duration::from_millis(100)).await.is_some());
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now()).await.is_none(), "expired original deadline is not renewed");
+        headers.remove("X-Plurx-Link-Receipt");
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + Duration::from_millis(100)).await.is_none());
+    }
+    #[tokio::test]
+    async fn a05_staged_intake_uses_own_eof_and_refuses_aborted_actor_without_claim() {
+        a05_staged_intake_fixture(0).await;
+    }
+
+    #[tokio::test]
+    async fn a05_staged_intake_timeout_is_unknown_and_preserves_raw_claim_retry() {
+        a05_staged_intake_fixture(1).await;
+    }
+
+    #[tokio::test]
+    async fn a05_staged_intake_abort_during_final_route_await_invalidates_token_without_claim() {
+        a05_staged_intake_fixture(2).await;
+    }
+
+    async fn a05_staged_intake_fixture(mode: u8) {
+        use plurx_core::domain::{MediaSessionActivation, NetworkPriorCause, CredentialGeneration};
+        use super::link_receipts::ClientLinkSample;
+        use plurx_core::playback::candidate::CandidateRoute;
+        let dir = crate::test_tempdir().expect("A05 prepared fixture");
+        let playback = unique_playback_id("a05-staged-intake");
+        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let request = preparing_control_request(&route);
+        accepted_exchange(&fixture, &route, &request).await;
+        let gate = fixture.state.transcode.session_preparation_gate(&session).await.expect("A05 prepared fixture");
+        let desired = request.selection.desired().digest();
+        let fence = gate.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+            generation: request.generation.clone(), owner_epoch: request.control_epoch,
+            client_instance_id: request.client_instance_id.clone(), sequence: request.sequence,
+            fingerprint: request.fingerprint().expect("A05 prepared fixture"), desired_digest: desired.clone(),
+        }).await.expect("A05 prepared fixture");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let now = unix_ms();
+        let deadline = now + 60_000;
+        assert!(gate.stage_preparation_for_owner(incarnation.clone(), request.generation.clone(),
+            deadline, i64::try_from(request.control_epoch).expect("A05 prepared fixture"), Some(desired)).await);
+        let activation = MediaSessionActivation {
+            incarnation_id: incarnation.clone(), session_id: staged.clone(), user_id: route.user_id,
+            playback_id: playback.clone(), recovery_epoch: String::new(), expected_predecessor_incarnation_id: None,
+            fence_predecessor: false, request_id: None, request_fingerprint: "a".repeat(64),
+            owner_node_id: fixture.state.node_id.clone(), recipe_json: "{}".into(), response_json: "{}".into(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0, now_ms: now, lease_expires_at_ms: deadline, expected_desired_revision: None,
+        };
+        assert!(fixture.store.activate_media_session(&activation).await.expect("A05 prepared fixture").is_some());
+        let user = fixture.store.get_user(route.user_id).await.expect("A05 prepared fixture").expect("A05 prepared fixture");
+        let network = crate::telemetry::NetworkIdentity {
+            user_id: Some(user.id), credential_generation: Some(CredentialGeneration::derive(user.id, user.created_at, &user.password_hash)),
+            client_class: "web".into(), network_fingerprint: "192.0.2.0/24".into(),
+        };
+        let file = fixture.store.get_file(fixture.file_id()).await.expect("A05 prepared fixture").expect("A05 prepared fixture");
+        let source = super::link_receipts::binding(&network, &file, [7;32], CandidateRoute::Encode).await.expect("A05 prepared fixture");
+        let binding = super::link_receipts::SessionBinding { source, session: staged.clone(), incarnation: incarnation.clone(), owner_epoch: 1 };
+        fixture.state.link_receipts.register_staged(binding, super::prepared_link::StagedProof {
+            stage: gate.staged_observation_is_current(fence.clone(), incarnation.clone(), deadline).await.expect("A05 prepared fixture"),
+            gate: Arc::clone(&gate), fence, incarnation: incarnation.clone(), owner_epoch: 1,
+            deadline_unix_ms: deadline, cancelled: tokio_util::sync::CancellationToken::new(),
+        });
+        let (nonce, eof) = fixture.state.link_receipts.mint(&staged, "seg00001.m4s", "etag", 4096, Some(4000), true).expect("A05 prepared fixture");
+        let mut sample = ClientLinkSample { receipt: nonce, object_name: "seg00001.m4s".into(), etag: "etag".into(),
+            body_bytes:4096, body_duration_ms:1000, age_ms:0, network_load:Some(true), from_cache:Some(false),
+            producer_paced:Some(false), cause:NetworkPriorCause::Link, negative:false, media_duration_ms:Some(4000),
+            presenting:false, stalled:false, runway_ms:0 };
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(), "header without own EOF is not proof");
+        eof(std::time::Instant::now(), now);
+        struct StalledObservation;
+        impl crate::playback_control::PreparationGate for StalledObservation {
+            fn stage_preparation_for_owner<'a>(&'a self, _: String, _: String, _: i64, _: i64, _: Option<String>) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn may_commit_preparation_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn begin_abort_preparation_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn reject_preparation_commit_for_owner<'a>(&'a self, _: &'a str, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn settle_preparation_for_owner<'a>(&'a self, _: &'a str, _: bool, _: i64) -> crate::playback_control::GateAnswer<'a> { Box::pin(async { false }) }
+            fn observation_is_current<'a>(&'a self, _: crate::playback_control::AcceptedControlFence)
+                -> crate::playback_control::GateAnswer<'a> {
+                Box::pin(std::future::pending())
+            }
+        }
+        if mode == 2 {
+            let pause = fixture.state.link_receipts.pause_final_stage_route_for_test();
+            let intake = fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample);
+            tokio::pin!(intake);
+            let held = tokio::select! {
+                held = pause.reached() => held,
+                _ = &mut intake => panic!("intake must suspend inside final route result await"),
+            };
+            assert!(gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(request.control_epoch).expect("A05 prepared fixture")).await);
+            held.release();
+            assert!(intake.await.is_none(), "same desired digest cannot rescue an aborted stage token");
+            assert!(!fixture.state.link_receipts.raw_claimed_for_test(&sample.receipt), "refusal cannot consume raw claim");
+            return;
+        }
+        if mode == 1 {
+            fixture.state.link_receipts.replace_staged_gate_for_test(&staged, Arc::new(StalledObservation));
+            let query_started = std::time::Instant::now();
+            assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(),
+                "unresponsive optional observational query is bounded Unknown");
+            assert!(query_started.elapsed() < Duration::from_millis(500));
+            fixture.state.link_receipts.replace_staged_gate_for_test(&staged, Arc::clone(&gate));
+        }
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_some(), "own completed body is observable before commit");
+        assert!(fixture.state.link_receipts.current_positive(&fixture.state, &network, &file, Some(&sample.receipt), Some(&playback), Some(&fixture.state.node_id)).await.is_none(), "staged proof cannot lend incumbent admission");
+        let (second, complete) = fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "etag2", 4096, Some(4000), true).expect("A05 prepared fixture");
+        complete(std::time::Instant::now(), now);
+        sample.receipt = second; sample.object_name = "seg00002.m4s".into(); sample.etag = "etag2".into();
+        assert!(gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(request.control_epoch).expect("A05 prepared fixture")).await);
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(), "aborted actor refuses its still-completed body");
     }

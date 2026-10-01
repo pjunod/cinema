@@ -6,6 +6,54 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 prepared control sends only its explicit per-call nonce", async () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/prepared-switch-measurement.js","utf8");
+  const begin=source.indexOf("async function sendPlaybackControl(");
+  const end=source.indexOf("\nfunction ",begin+1);
+  const calls=[];
+  const context=vm.createContext({TOKEN:"ordinary-token",fetch:async(url,request)=>{
+    calls.push(request); return {ok:true,json:async()=>({})}; }});
+  vm.runInContext(source.slice(begin,end),context);
+  const nonce="00000000-0000-0000-0000-000000000001";
+  await context.sendPlaybackControl("/control",{sequence:1},null,nonce);
+  await context.sendPlaybackControl("/control",{sequence:2},null);
+  await context.sendPlaybackControl("/control",{sequence:3},null,"invalid");
+  assert.equal(calls[0].headers["X-Plurx-Link-Receipt"],nonce);
+  assert.equal(calls[1].headers["X-Plurx-Link-Receipt"],undefined);
+  assert.equal(calls[2].headers["X-Plurx-Link-Receipt"],undefined);
+  assert.equal(calls[0].headers.authorization,"Bearer ordinary-token");
+  assert.deepEqual(JSON.parse(calls[0].body),{sequence:1},"observation does not enter control JSON");
+});
+
+test("a05 staged completed body reports only its own attachment nonce", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/prepared-replacement.js","utf8");
+  const begin=source.indexOf("function notePreparedHlsFragmentLoaded(");
+  const end=source.indexOf("\nfunction ",begin+1);
+  const player={},stage={sessionId:"staged-session"},sent=[];
+  let active=stage, proof={receipt:"own-nonce",etag:"own-etag",bytes:4096,elapsed_ms:1000,atMs:100,
+    object_name:"seg00001.m4s",server_media_duration_ms:4001};
+  let actualBytes;
+  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:{qualityTransferBps:()=>1000},
+    performance:{now:()=>200},preparedState:()=>active,attachedPreparedHls:()=>false,
+    candidateTransferOriginCurrent:()=>true,completedQualityTransfer:(response,url,loading,now,bytes)=>{
+      actualBytes=bytes; return proof; },clientLog:row=>sent.push(row),notePreparedBuffer:()=>{}});
+  vm.runInContext(source.slice(begin,end),context);
+  const data={frag:{type:"main",url:"/hls/staged-session/seg00001.m4s",duration:999,
+    stats:{loaded:4096,loading:{start:0,end:100}}},networkDetails:{}};
+  context.notePreparedHlsFragmentLoaded(player,stage,data);
+  context.notePreparedHlsFragmentLoaded(player,stage,data);
+  assert.equal(sent.length,1,"nonce raw claim is bounded and idempotent");
+  assert.equal(actualBytes,4096,"completed loader actual body bytes are passed");
+  assert.equal(sent[0].session_id,"staged-session");
+  assert.equal(sent[0].link_sample.media_duration_ms,4001,"server duration, not guessed fragment duration");
+  assert.equal(sent[0].link_sample.presenting,false);
+  proof={...proof,receipt:"cross-session"};
+  context.notePreparedHlsFragmentLoaded(player,stage,{...data,frag:{...data.frag,url:"/hls/incumbent/seg00001.m4s"}});
+  active={sessionId:"replacement"};
+  context.notePreparedHlsFragmentLoaded(player,stage,data);
+  assert.equal(sent.length,1,"other session or retired attachment cannot lend completion");
+});
+
 test("a05 completed response join refuses ambiguous bodies and preserves EOF age", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
   const start=source.indexOf("function completedQualityTransfer(");

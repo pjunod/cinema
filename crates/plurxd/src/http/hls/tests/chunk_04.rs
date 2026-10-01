@@ -26,6 +26,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
                 desired_digest: None,
             },
@@ -749,6 +750,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -821,6 +823,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1071,6 +1074,7 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    prepared_proof: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: Some("the-first-ask".to_owned()),
                 },
@@ -1253,6 +1257,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                prepared_proof: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1422,6 +1427,7 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    prepared_proof: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: None,
                 },

@@ -149,6 +149,7 @@ use status::*;
 // split: begin hls-response
 #[path = "hls/link_receipts.rs"]
 pub(crate) mod link_receipts;
+mod prepared_link;
 #[path = "hls/response.rs"]
 mod response;
 use response::*;
