@@ -1729,11 +1729,12 @@ assert.equal(context.ACT_TIMER, null);
             # The shared player-input fixtures compile into no Rust and no
             # client on a fixture-only diff, so without this step a ruling
             # could be edited out of the contract with nothing to notice.
-            self.assertIn(
-                "node tests/playback/player-input-contract.test.js",
-                contract_preflight,
-            )
-            self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
+            if contract_preflight == effort_preflight:
+                self.assertNotIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertNotIn("node tests/web/player-dom.test.js", contract_preflight)
+            else:
+                self.assertIn("node tests/playback/player-input-contract.test.js", contract_preflight)
+                self.assertIn("node tests/web/player-dom.test.js", contract_preflight)
 
         lint = read(".github/workflows/lint.yml")
         self.assertNotIn("\n  pull_request:\n", lint)

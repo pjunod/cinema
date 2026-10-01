@@ -66,6 +66,15 @@ original attributable journal before retrying; do not delete receipt artifacts
 to manufacture a first run. A process stopped between success and durable
 publication leaves an incomplete attempt and requires evidence recovery.
 
+Non-method fixture errors (module/class setup, teardown or cleanup) remain
+explicit unresolved evidence even when every method already succeeded. A
+retry refuses those journals and reports the originating run and fixture ID;
+zero pending methods cannot turn a failed fixture green. Recovery needs
+attributable failed-fixture-only diagnostic/correction evidence while retaining
+all method successes. Do not delete journals, reset PR scope or rerun successful
+methods to clear the blocker. If exact fixture reconstruction is impossible,
+report it; this mechanism has no generic recovery bypass.
+
 **How to read output:** `discovered` is the current inventory,
 `historical-passes` counts retained successful IDs, and `pending` counts the
 only tests executed. A receipt refusal identifies the ambiguous run or
@@ -108,6 +117,9 @@ not cache compiler or static checks, alter main qualification, or mutate a
 runner service. Legacy runs without sufficiently attributable per-ID evidence
 are not automatically labelled successful.
 
-This PR is deliberately Python-preflight-only. Existing Node player-input,
-player-DOM and `web-check` unit execution is not changed or represented as
-once-only by this receipt mechanism; that policy surface remains separate.
+The receipt mechanism is Python-only. Duplicate effort-preflight player-input
+and player-DOM executions are removed; both remain in the unchanged mandatory
+`web-check` lane. That broad Node lane may run once on the first attempt, but
+after a Node success the gate must not be dispatched again until the separate
+static-only follow-up or attributable recovery preserves that success. These
+Python receipts do not claim to cache Node tests or exempt their contracts.
