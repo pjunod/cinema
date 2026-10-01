@@ -67,6 +67,14 @@ impl QualityInterval {
             && self.byte_length > 0
             && self.byte_length <= MAX_QUALITY_PINNED_BYTES
     }
+    /// Artifact identity is SHA-256 of the immutable media payload. Init
+    /// identity remains a separate verified rendition-family fact.
+    pub fn matches_bytes(&self, bytes: &[u8]) -> bool {
+        use sha2::{Digest, Sha256};
+        self.valid()
+            && self.byte_length == bytes.len() as u64
+            && self.artifact_id == hex::encode(Sha256::digest(bytes))
+    }
     fn contains(&self, tick: u64) -> bool {
         self.from_tick <= tick && tick < self.through_tick
     }

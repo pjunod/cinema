@@ -1312,3 +1312,26 @@ use the same check when decoding the ledger. Duplicate/oversized requests,
 wrong sequences and attachments and false retained-current receipts have an
 authored regression. HTTP/peer delivery and physical reservation verification
 still need integration; this validator alone does not expose the feature.
+
+### 10.12 Reserved bytes at publication
+
+Producer publication now holds the same exact-rendition gate used by
+retention and the forthcoming reservation writer. It reads dependencies
+outside the manifest lock with a one-second lookup budget. A reserved entry
+can be regenerated only with its exact whole-entry clock, byte length and
+SHA-256 payload digest. Different bytes cannot replace its immutable URI.
+Identical regeneration remains available, and unreserved neighboring entries
+remain independent. Artifact IDs name the media payload; verified init
+identity is a separate family fact.
+
+The gate remains held through the existing atomic file/manifest publication
+and is released before producer progress notifications. Source continuity
+is checked again after dependency lookup. Unknown retention facts refuse
+publication rather than overwriting a dependency; cached GETs do not wait on
+that store lookup. This adds one bounded dependency query per publication,
+which must be included in the final sustained-production qualification.
+
+Exact regeneration, changed equal-length payload, wrong clock, partial
+interval, neighboring publication and disposal release are covered by an
+authored regression. The physical schedule writer and shared-cache pins
+remain outstanding; this publication fence is not their completion.

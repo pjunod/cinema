@@ -757,6 +757,42 @@ pub(super) async fn credit_marker_prewarm_publication(
     publication
 }
 
+/// An already reserved URI cannot acquire different bytes on regeneration.
+/// The caller holds the same exact-key gate as reservation and eviction.
+pub(super) fn verify_reserved_publication(
+    plan: &plurx_core::segplan::SegmentPlan,
+    entry: u32,
+    bytes: &[u8],
+    dependencies: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> io::Result<()> {
+    let planned = plan.entry(entry).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "publication is outside the media plan",
+        )
+    })?;
+    for dependency in dependencies {
+        if !dependency.valid() || dependency.timescale != plan.timescale {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "reserved media clock is unverifiable",
+            ));
+        }
+        if dependency.from_tick < planned.end_ticks()
+            && planned.start_ticks < dependency.through_tick
+            && (dependency.from_tick != planned.start_ticks
+                || dependency.through_tick != planned.end_ticks()
+                || !dependency.matches_bytes(bytes))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "regenerated media differs from its reserved immutable artifact",
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl vodgen::Sink for RenditionSink {
     async fn materialize(&self, entry: u32, bytes: Vec<u8>) -> io::Result<()> {
         if self.rendition.closed.load(Relaxed) {
@@ -801,6 +837,43 @@ impl vodgen::Sink for RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
+        let dependency_guard = self
+            .shared
+            .rendition_build_gate(&self.rendition.key)
+            .lock_owned()
+            .await;
+        let dependencies = tokio::time::timeout(
+            Duration::from_secs(1),
+            self.shared
+                .store
+                .quality_reserved_intervals(&self.rendition.key),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "reserved media verification exceeded one second",
+            )
+        })?
+        .map_err(|error| {
+            io::Error::other(format!("reserved media verification failed: {error}"))
+        })?;
+        verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
+        if self
+            .rendition
+            .source
+            .as_ref()
+            .is_some_and(|source| !source.unchanged())
+        {
+            let cause = "source changed while verifying reserved media".to_owned();
+            record_failure(
+                &self.shared,
+                &self.rendition,
+                crate::playback_control::ProducerDecisionReason::SourceChanged,
+                cause.clone(),
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
+        }
         let len = bytes.len() as u64;
         {
             let mut manifest = self.rendition.manifest.lock().await;
@@ -827,6 +900,7 @@ impl vodgen::Sink for RenditionSink {
             }
             self.rendition.clear_demand(entry);
         }
+        drop(dependency_guard);
         self.rendition.slot.produced(entry).await;
         if let (Some(encoding), Some(planned)) = (
             &self.rendition.recipe.encoding,

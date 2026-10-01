@@ -3528,6 +3528,35 @@
     }
 
     #[test]
+    fn reserved_publication_refuses_changed_bytes_before_materialization() {
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let plan = grid.plan(6_000, 1_000_000);
+        let entry = plan.entry(1).expect("middle");
+        let bytes = b"immutable-media";
+        let interval = plurx_core::playback::continuous_quality::QualityInterval {
+            artifact_id: hex::encode(Sha256::digest(bytes)), rendition_id: "b".repeat(64),
+            timescale: plan.timescale, from_tick: entry.start_ticks,
+            through_tick: entry.end_ticks(), byte_length: bytes.len() as u64,
+        };
+        verify_reserved_publication(&plan, 1, bytes, std::slice::from_ref(&interval))
+            .expect("identical regeneration is safe");
+        assert!(verify_reserved_publication(&plan, 1, b"different-media",
+            std::slice::from_ref(&interval)).is_err());
+        assert!(verify_reserved_publication(&plan, 1, b"short",
+            std::slice::from_ref(&interval)).is_err());
+        verify_reserved_publication(&plan, 0, b"unreserved-neighbor",
+            std::slice::from_ref(&interval)).expect("neighbor remains independent");
+        let mut wrong = interval.clone();
+        wrong.timescale = 48_000;
+        assert!(verify_reserved_publication(&plan, 1, bytes, &[wrong]).is_err());
+        let mut partial = interval;
+        partial.from_tick += 1;
+        assert!(verify_reserved_publication(&plan, 1, bytes, &[partial]).is_err());
+        verify_reserved_publication(&plan, 1, b"new-after-disposal", &[])
+            .expect("exact disposal releases the immutable dependency");
+    }
+
+    #[test]
     fn durable_dependency_windows_protect_exact_intervals_from_eviction() {
         let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
         let plan = grid.plan(6_000, 1_000_000);
