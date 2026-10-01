@@ -354,7 +354,8 @@ audio changes require reopen. No concrete pan, limiter, new client claim,
 readiness/layout feature gate, or count-to-speaker-map inference is enabled.
 
 The continuation in [draft #665](http://192.168.4.7:3000/noirr/plurx/pulls/665)
-composes effort `ec79f4b34` with main `5c99538fd`: startup settings snapshots
+composes effort `ec79f4b34` with runtime main `5c99538fd` and the later
+CI-only main `e82e36d62`: startup settings snapshots
 and phase timings, worker accounting, and the landed #657 parser floor are
 retained. Initial transcodes carry the canonical claim until the actual
 rolling or encoded producer selects its route. A retained producer snapshot
@@ -366,8 +367,10 @@ facts. Restoring the old resolution order fails both; the fixed owners pass.
 The pinned Rust 1.97.1 locked workspace/all-target check passed on the composed
 source. Seven focused core tests, eleven daemon tests (including both actual
 owners and three parser-floor cases), two real-backend offline tests, nine
-retained numeric/docs-index checks and the ownership census passed. The draft
-records the committed-tree check and normal hook separately. No older
+retained numeric/docs-index checks and the ownership census passed. The normal
+hook passed catalog/formatting, workspace/all-target Clippy with denied warnings
+and all seventy served JavaScript syntax checks. The draft records the final
+committed-tree check separately. No older
 checkpoint qualifies a newer source tree. M4 content/listening and M3/M5
 device-route acceptance remain open.
 
