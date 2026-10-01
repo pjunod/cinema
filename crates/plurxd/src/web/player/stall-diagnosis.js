@@ -604,10 +604,11 @@ async function refreshQualityCandidates(p){
   const attachment=p.mediaAttachment, intent=p.controlIntentGeneration;
   try{
     const decision=await askDecision(p.fileId,qualityForce(),
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0});
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},null,p);
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
     p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
@@ -620,7 +621,56 @@ async function refreshQualityCandidates(p){
 function candidateTransferEvidence(p,now){
   const transfer=p.abr&&p.abr.qualityTransfer;
   return transfer&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     ? {...transfer,age_ms:now-transfer.atMs}:null;
+}
+function candidateLinkReceipt(p,fileId,now=performance.now()){
+  if(!p||PLAYER!==p||p.fileId!==fileId||qualityForce()!=='auto'
+    ||!playbackOwnsAttachedMedia(p)) return null;
+  const sample=candidateTransferEvidence(p,now);
+  return sample&&candidateTransferOriginCurrent(sample)&&sample.linkPositiveReported&&sample.etag
+    &&typeof sample.receipt==='string'
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(sample.receipt)
+    &&sample.age_ms>=0&&sample.age_ms<=15000&&PlaybackPolicy.qualityTransferBps(sample)>0
+    ? sample.receipt:null;
+}
+function candidateTransferOriginCurrent(sample){
+  try{
+    return typeof sample?.origin==='string'&&sample.origin===new URL(location.href).origin;
+  }catch(e){ return false; }
+}
+function measuredCandidateOutput(p,candidate){
+  const outputs=p.measuredCandidateOutputs;
+  if(!candidate||!Array.isArray(outputs)||outputs.length>64
+    ||!/^[0-9a-f]{32}$/.test(candidate.id)||!['original','remux','encode'].includes(candidate.route)
+    ||!Array.isArray(candidate.recipe_digest)||candidate.recipe_digest.length!==32
+    ||!candidate.recipe_digest.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)) return null;
+  const matches=outputs.filter(row=>row&&row.candidate_id===candidate.id&&row.route===candidate.route
+    &&Array.isArray(row.recipe_digest)&&row.recipe_digest.length===32
+    &&row.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(row.artifact_id)
+    &&/^[0-9a-f]{64}$/.test(row.output_identity)&&row.qualification==='complete_full_mux_rfc8216_v1'
+    &&Number.isSafeInteger(row.average_bps)&&row.average_bps>0
+    &&Number.isSafeInteger(row.peak_bps)&&row.peak_bps>=row.average_bps);
+  return matches.length===1?matches[0]:null;
+}
+function measuredCandidateCatalog(p,candidates){
+  return (candidates||[]).map(candidate=>{
+    const output=measuredCandidateOutput(p,candidate);
+    return {...candidate,average_bps:output?.average_bps??null,peak_bps:output?.peak_bps??null};
+  });
+}
+function candidatePositiveMargin(p,candidate,transfer){
+  const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
+  return !!(output&&candidateTransferOriginCurrent(transfer)&&transfer?.receipt&&transfer.etag&&transfer.attachment===p.mediaAttachment
+    &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
+    &&link>0&&link>=output.peak_bps*1.8);
+}
+function candidateAdmissionCatalog(p,candidates,current,transfer){
+  return measuredCandidateCatalog(p,candidates).filter(candidate=>candidate.id===current.id
+    ||candidate.width*candidate.height<=current.width*current.height
+      &&!(current.route==='encode'&&candidate.route!=='encode')
+    ||candidatePositiveMargin(p,candidate,transfer));
 }
 async function naturalBoundaryQualityCandidate(p,seekIntent){
   if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto
@@ -629,15 +679,18 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
   const generation=p.controlIntentGeneration;
   try{
     const decision=await askDecision(p.fileId,'auto',
-      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal);
+      {audio:selectedAudioIndex(p),subtitle:p.curSub>=0?p.curSub:-1,audio_offset_ms:p.aoffset||0},controller.signal,p);
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
     const candidates=decision.quality_candidates;
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
     const progress=p.abr.qualityPressureTransfer, now=performance.now();
     const limit=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
     const blocked=p.abr.candidateState?.blockedCandidates||[];
-    const picked=PlaybackPolicy.selectQualityCandidate({candidates:candidates.filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
+    const picked=PlaybackPolicy.selectQualityCandidate({candidates:current
+      ?candidateAdmissionCatalog(p,candidates,current,candidateTransferEvidence(p,now)).filter(row=>!blocked.includes(row.id))
+      :measuredCandidateCatalog(p,candidates).filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
       aspect:current?current.width/current.height:null,
       transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
     p.qualityCandidates=candidates;
@@ -653,7 +706,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
   if(!await refreshQualityCandidates(p)||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return;
   now=performance.now();
   const transfer=candidateTransferEvidence(p,now);
-  const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
+  const current=measuredCandidateCatalog(p,p.qualityCandidates).find(candidate=>candidate.id===p.qualityCandidateId);
   if(!current) return;
   let cause='unknown';
   if(['authority-refused','producer-failed','delivery-refused'].includes(causeEvidence.kind)) cause='authority';
@@ -671,8 +724,9 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     &&p.healthObservedAt!=null
     &&PlaybackPolicy.qualityEncodeProof(p.health,current.id,now-p.healthObservedAt)
     &&speed<1000) cause='encode';
+  reportCandidateLinkSample(p,v,cause,now);
   const result=PlaybackPolicy.decideCandidateTransition({
-    state:p.abr.candidateState||{},candidates:p.qualityCandidates,currentId:current.id,
+    state:p.abr.candidateState||{},candidates:candidateAdmissionCatalog(p,p.qualityCandidates,current,transfer),currentId:current.id,
     aspect:current.width/current.height,target:measuredPresentationTarget(),
     sample:{now_ms:now,automatic:qualityForce()==='auto',presenting:p.started,
       paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange||p.abr.switching,
@@ -686,6 +740,29 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     {action:result.candidate?'change':'suppressed',reason:result.reason,
       evidence:{age_ms:transfer?transfer.age_ms:null}},bufferRunway(v),link>0?link/1000:null);
   if(result.candidate) await switchAutoCandidate(p,v,current,result);
+}
+function reportCandidateLinkSample(p,v,cause,now){
+  const sample=p.abr&&p.abr.qualityTransfer;
+  if(!sample||!sample.receipt||!sample.etag||sample.attachment!==p.mediaAttachment
+    ||sample.session_id!==p.sessionId||sample.candidate_id!==p.qualityCandidateId
+    ||PLAYER!==p||!playbackOwnsAttachedMedia(p)||qualityForce()!=='auto'
+    ||!sample.completed||sample.from_cache!==false||sample.producer_paced!==false
+    ||now-sample.atMs<0||now-sample.atMs>15000
+    ||['encode','decode','hold','authority'].includes(cause)) return;
+  // A completed acquisition reports raw Link evidence once. A later actual
+  // low-runway Link stall may claim this same body, without refreshing it.
+  const negative=!!sample.linkPositiveReported;
+  if(negative&&(sample.linkNegativeReported||cause!=='link'||!p.started||v.paused
+    ||v.seeking||p.controlSeek||p.pendingMediaChange||!p.waitAt||bufferRunway(v)>1.5
+    ||!(sample.server_media_duration_ms>0&&sample.elapsed_ms>sample.server_media_duration_ms))) return;
+  clientLog({event:'candidate_link_sample',message:'Completed candidate body',session_id:p.sessionId,
+    link_sample:{receipt:sample.receipt,object_name:sample.object_name,etag:sample.etag,
+      body_bytes:sample.bytes,body_duration_ms:Math.round(sample.elapsed_ms),age_ms:Math.round(now-sample.atMs),
+      network_load:true,from_cache:false,producer_paced:false,cause:'link',negative,
+      media_duration_ms:sample.server_media_duration_ms??null,presenting:!!p.started,
+      stalled:!!p.waitAt,runway_ms:Math.max(0,Math.round(bufferRunway(v)*1000))}});
+  if(negative) sample.linkNegativeReported=true;
+  else sample.linkPositiveReported=true;
 }
 async function switchAutoCandidate(p,v,current,decision){
   if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;

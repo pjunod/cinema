@@ -1,6 +1,40 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Current once-passed A05 bridges, not historical execution claims. Native
+# adapter compile evidence and physical device acceptance remain separate.
+[[fixes]]
+id = "apple.a05-exact-completed-body-receipt"
+commits = ["9161485793d0907eb8a3e3aa5fb59658ea25ce30"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "receipt: response?.value(forHTTPHeaderField: \"X-Plurx-Link-Receipt\")"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 genuine completed body carries the response receipt without cache promotion"
+
+[[fixes]]
+id = "apple.a05-qualified-full-output-margin"
+commits = ["05f8b90c11eb2aa1e894a54be1d85b66a6ca62cc"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs)"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 qualified full-output sidecar is required for positive candidate margin"
+
+[[fixes]]
+id = "apple.a05-retired-attachment-evidence-refusal"
+commits = ["40ceb6e681bf2a487a3f9df7d0a99636b65443f8"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func currentLinkReceipt() -> String?"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 positive margin refuses bare metrics and retired candidate attachment"
+
+[[fixes]]
+id = "apple.a05-per-call-incumbent-receipt"
+commits = ["14c5b75eea72b14d26f79daa09d16b44f585c6c4"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "PlaybackLinkRequestContext.$receipt.withValue(currentLinkReceipt())"
+test = "tests/playback/current-main-effort-quality.test.js"
+test_anchor = "a05 request header uses only this installed incumbent nonce"
+
 # Original A05 height controller was removed before landing because PR669 owns
 # the combined route-v1 controller. This anchors its historical client commit
 # to the current removal contract, not to an adapter claimed to be shipped.

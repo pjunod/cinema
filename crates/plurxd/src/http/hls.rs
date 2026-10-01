@@ -147,6 +147,8 @@ use status::*;
 // split: end hls-status
 
 // split: begin hls-response
+#[path = "hls/link_receipts.rs"]
+pub(crate) mod link_receipts;
 #[path = "hls/response.rs"]
 mod response;
 use response::*;

@@ -1,5 +1,10 @@
 import Foundation
 
+/// One requesting controller's incumbent proof; never an app-global latest header.
+enum PlaybackLinkRequestContext {
+    @TaskLocal static var receipt: String?
+}
+
 enum APIError: Error, LocalizedError {
     case badURL
     /// A non-2xx answer with no legible `{code, message}` body — and every
@@ -130,6 +135,12 @@ struct PlurxAPI {
         using session: URLSession? = nil
     ) async throws -> T {
         var req = try jsonRequest(path, query: query, body: body)
+        if path.hasPrefix("files/"),
+           path.hasSuffix("/decision") || path.hasSuffix("/hls/sessions"),
+           let receipt = PlaybackLinkRequestContext.receipt,
+           UUID(uuidString: receipt)?.uuidString.lowercased() == receipt {
+            req.setValue(receipt, forHTTPHeaderField: "X-Plurx-Link-Receipt")
+        }
         Session.shared.authorize(&req)
         return try await run(req, using: session)
     }
