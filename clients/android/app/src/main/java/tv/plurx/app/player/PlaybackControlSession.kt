@@ -32,7 +32,7 @@ class PlaybackControlTransport(
     private val client: OkHttpClient = Net.client,
     private val json: Json = Net.json,
 ) {
-    suspend fun send(path: String, request: ControlRequest): ControlResponse {
+    suspend fun send(path: String, request: ControlRequest, linkReceipt: String? = null): ControlResponse {
         // The bootstrap's url is server-relative and already shape-checked, so
         // joining it to this origin cannot reach another host. Re-checking here
         // means no caller can hand this an address the reporter never approved.
@@ -42,7 +42,11 @@ class PlaybackControlTransport(
         val url = origin.trimEnd('/') + path
         val body = json.encodeToString(ControlRequest.serializer(), request)
             .toRequestBody("application/json".toMediaType())
-        val call = Request.Builder().url(url).post(body).build()
+        val builder = Request.Builder().url(url).post(body)
+        if (linkReceipt != null && Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(linkReceipt)) {
+            builder.header("X-Plurx-Link-Receipt", linkReceipt)
+        }
+        val call = builder.build()
         return withContext(Dispatchers.IO) {
             val response = try {
                 client.newCall(call).execute()
@@ -391,6 +395,7 @@ class PlaybackControlSession(
     fun begin(
         bootstrap: ControlBootstrap,
         observe: () -> PlayerControlObservation?,
+        linkReceipt: () -> String? = { null },
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
         /** The server has given up on the selected track, not merely not got to it. */
@@ -430,7 +435,7 @@ class PlaybackControlSession(
             clientInstanceId = clientInstanceId,
             owner = owner,
             capture = { latest.get()?.takeIf { it.owner == owner } },
-            send = { path, request -> transport.send(path, request) },
+            send = { path, request -> transport.send(path, request, linkReceipt()) },
             pace = { kotlinx.coroutines.delay(it) },
             now = { System.currentTimeMillis() },
             // The return path. Until now this defaulted to a no-op, so the

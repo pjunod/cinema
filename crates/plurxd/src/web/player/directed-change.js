@@ -458,7 +458,8 @@ function startPlaybackControl(v,p,bootstrap){
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
       clientInstanceId:CONTROL_CLIENT_ID,
       capture,
-      send:sendPlaybackControl,
+      send:(url,body,signal)=>sendPlaybackControl(url,body,signal,
+        p.controlReporter===reporter&&p.mediaAttachment===attachment?candidateLinkReceipt(p,p.fileId):null),
       onExchange:({request,response,error,capture:captured})=>{
         if(continueStoppingPlaybackControl(p,reporter,v,request,response,captured)) return;
         if(!playbackOwnsAttachedMedia(p)||p.controlReporter!==reporter

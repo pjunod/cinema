@@ -1391,3 +1391,32 @@ but must prove its own staged response before positive commit. Capability UUIDs
 are not credential/network authority; remote/unknown proof stays Unknown.
 Physical 14-versus-20 admission, typed recovery and complete A-05 qualification
 remain open; synthetic comparator cases and source builds do not satisfy them.
+
+### 9.11 A-05 local prepared observation (2026-10-01)
+
+The prepared follow-up carries an optional explicit per-call incumbent receipt
+in the HTTP header, never control JSON, relay envelopes or intent fingerprints.
+Independent ordinary authentication supplies its credential namespace; the
+control capability UUID does not. Without trusted-proxy evidence this ingress
+uses the actual remote address and ignores forwarding headers. A proxy namespace
+mismatch is Unknown, not a control refusal. Every optional query is bounded by
+its original exchange or preparation deadline and a short observation budget.
+
+Only an actually accepted local actor exchange can mint a private observational
+origin. Same-intent later polls retain that origin; desired-lifetime, owner or
+attachment changes invalidate it. The actual stage writer alone mints a separate
+stage-lifetime token, invalidated on abort, commit, replacement or retirement.
+VOD tombstone and locked registry-removal seams explicitly invalidate both
+observational lifetimes, even while an old incarnation snapshot remains held.
+Read-only queries neither reserve commit nor renew either lifetime. Registration
+follows successful local owner prime; final intake rechecks both tokens, physical
+source, serving route and original monotonic EOF after its last awaited read.
+
+The incumbent's fresh Link and independently qualified full-output cost can
+support an upward trial, but web/Apple/Android positive stage evidence comes only
+from that stage's own completed response, nonce, ETag and server duration. Remote
+or absent proof remains Unknown; ordinary manual, recovery and Auto enablement
+are unchanged. Real actor/intake regressions and source compilation establish
+these bounded contracts, not physical 14-versus-20, decoder, typed-recovery or
+complete A-05 acceptance. Formal review and the current effort gate remain
+separate from author development evidence.

@@ -637,6 +637,12 @@ pub(super) struct Session {
 }
 
 impl Session {
+    pub(super) fn invalidate_observational_attachment(&self) {
+        self.control
+            .lock()
+            .expect("control lock")
+            .invalidate_observational_attachment();
+    }
     /// Release this session's rendition from any handoff its preparation no
     /// longer backs (abort, rejection, settlement, tombstone, or a newer
     /// successor staged in its place).
@@ -669,6 +675,7 @@ impl Session {
     pub(super) fn abort_staged_preparation(&self) {
         {
             let mut control = self.control.lock().expect("control lock");
+            control.invalidate_observational_attachment();
             if let Some(staged) = control.staged_incarnation_id().map(str::to_owned) {
                 control.abort_preparation(&staged);
             }
@@ -755,6 +762,59 @@ impl VodPreparationGate {
 }
 
 impl crate::playback_control::PreparationGate for VodPreparationGate {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+    ) -> crate::playback_control::StagedObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            session
+                .control
+                .lock()
+                .ok()
+                .and_then(|state| state.staged_observation_token(&fence, &incarnation, deadline))
+        })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        identity: crate::playback_control::AcceptedControlIdentity,
+    ) -> crate::playback_control::ObservationAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = self.bound(&mut sessions)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            let answer = session.control.lock().ok()?.accepted_observation(identity);
+            answer
+        })
+    }
+
+    fn observation_is_current<'a>(
+        &'a self,
+        fence: crate::playback_control::AcceptedControlFence,
+    ) -> crate::playback_control::GateAnswer<'a> {
+        Box::pin(async move {
+            let mut sessions = self.shared.sessions.lock().await;
+            let Some(session) = self.bound(&mut sessions) else {
+                return false;
+            };
+            if session.tombstone.is_some() {
+                return false;
+            }
+            session
+                .control
+                .lock()
+                .map(|state| state.observation_is_current(&fence))
+                .unwrap_or(false)
+        })
+    }
     fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,

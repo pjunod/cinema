@@ -2803,7 +2803,63 @@ impl TerminalCommitReceipt {
 pub(crate) type GateAnswer<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>>;
 
+/// Private observational origin; never serialized or used as control authority.
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedControlIdentity {
+    pub generation: String,
+    pub owner_epoch: u64,
+    pub client_instance_id: String,
+    pub sequence: u64,
+    pub fingerprint: String,
+    pub desired_digest: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AcceptedControlFence {
+    identity: AcceptedControlIdentity,
+    desired_lifetime: u64,
+    live: Arc<AtomicBool>,
+}
+
+impl AcceptedControlFence {
+    pub(crate) fn still_live(&self) -> bool {
+        self.live.load(Ordering::Acquire)
+    }
+}
+
+pub(crate) type ObservationAnswer<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<AcceptedControlFence>> + Send + 'a>>;
+
+#[derive(Clone, Debug)]
+pub(crate) struct StagedObservationFence(Arc<AtomicBool>);
+impl StagedObservationFence {
+    pub(crate) fn still_live(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+pub(crate) type StagedObservationAnswer<'a> = std::pin::Pin<
+    Box<dyn std::future::Future<Output = Option<StagedObservationFence>> + Send + 'a>,
+>;
+
 pub(crate) trait PreparationGate: Send + Sync {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        _fence: AcceptedControlFence,
+        _incarnation: String,
+        _deadline: i64,
+    ) -> StagedObservationAnswer<'a> {
+        Box::pin(async { None })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        _identity: AcceptedControlIdentity,
+    ) -> ObservationAnswer<'a> {
+        Box::pin(async { None })
+    }
+
+    fn observation_is_current<'a>(&'a self, _fence: AcceptedControlFence) -> GateAnswer<'a> {
+        Box::pin(async { false })
+    }
     #[cfg(test)]
     fn stage_preparation<'a>(
         &'a self,
@@ -2886,6 +2942,55 @@ pub(crate) trait PreparationGate: Send + Sync {
 }
 
 impl PreparationGate for RollingControlHandle {
+    fn staged_observation_is_current<'a>(
+        &'a self,
+        fence: AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+    ) -> StagedObservationAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            if self
+                .enqueue_command(RollingControlCommand::StagedObservationIsCurrent {
+                    fence,
+                    incarnation,
+                    deadline,
+                    reply,
+                })
+                .await
+                .is_err()
+            {
+                return None;
+            }
+            response.await.ok().flatten()
+        })
+    }
+    fn accepted_observation<'a>(
+        &'a self,
+        identity: AcceptedControlIdentity,
+    ) -> ObservationAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            self.enqueue_command(RollingControlCommand::AcceptedObservation { identity, reply })
+                .await
+                .ok()?;
+            response.await.ok().flatten()
+        })
+    }
+
+    fn observation_is_current<'a>(&'a self, fence: AcceptedControlFence) -> GateAnswer<'a> {
+        Box::pin(async move {
+            let (reply, response) = tokio::sync::oneshot::channel();
+            if self
+                .enqueue_command(RollingControlCommand::ObservationIsCurrent { fence, reply })
+                .await
+                .is_err()
+            {
+                return false;
+            }
+            response.await.unwrap_or(false)
+        })
+    }
     fn stage_preparation_for_owner<'a>(
         &'a self,
         staged_incarnation_id: String,
@@ -3372,6 +3477,10 @@ pub(crate) struct PersistDesired {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ControlState {
+    observational_stage_live: Arc<AtomicBool>,
+    // Exhaustion is permanently Unknown; desired lifetimes must never wrap.
+    observational_desired_lifetime: Option<u64>,
+    observational_live: Arc<AtomicBool>,
     generation: Option<String>,
     owner_epoch: u64,
     client_instance_id: Option<uuid::Uuid>,
@@ -3472,6 +3581,9 @@ pub(crate) struct ControlState {
 impl Default for ControlState {
     fn default() -> Self {
         Self {
+            observational_stage_live: Arc::new(AtomicBool::new(false)),
+            observational_desired_lifetime: Some(0),
+            observational_live: Arc::new(AtomicBool::new(true)),
             generation: None,
             owner_epoch: 0,
             client_instance_id: None,
@@ -3714,6 +3826,70 @@ pub(crate) fn accept_step(
 }
 
 impl ControlState {
+    pub(crate) fn invalidate_observational_attachment(&mut self) {
+        self.advance_observational_lifetime();
+    }
+    pub(crate) fn staged_observation_token(
+        &self,
+        fence: &AcceptedControlFence,
+        incarnation: &str,
+        deadline: i64,
+    ) -> Option<StagedObservationFence> {
+        (self.staged_observation_is_current(fence, incarnation, deadline)
+            && self.observational_stage_live.load(Ordering::Acquire))
+        .then(|| StagedObservationFence(Arc::clone(&self.observational_stage_live)))
+    }
+    pub(crate) fn staged_observation_is_current(
+        &self,
+        fence: &AcceptedControlFence,
+        incarnation: &str,
+        deadline: i64,
+    ) -> bool {
+        self.observation_is_current(fence)
+            && self.preparation_quality_current()
+            && matches!(&self.preparation, PreparationSlot::Staged { staged_incarnation_id, deadline_ms, desired_digest, .. }
+                if staged_incarnation_id == incarnation && *deadline_ms == deadline
+                    && *deadline_ms > crate::media_sessions::unix_ms()
+                    && desired_digest.as_deref() == Some(fence.identity.desired_digest.as_str()))
+    }
+    fn advance_observational_lifetime(&mut self) {
+        self.observational_stage_live
+            .store(false, Ordering::Release);
+        self.observational_live.store(false, Ordering::Release);
+        self.observational_desired_lifetime = self
+            .observational_desired_lifetime
+            .and_then(|n| n.checked_add(1));
+        self.observational_live = Arc::new(AtomicBool::new(
+            self.observational_desired_lifetime.is_some(),
+        ));
+    }
+
+    pub(crate) fn accepted_observation(
+        &self,
+        identity: AcceptedControlIdentity,
+    ) -> Option<AcceptedControlFence> {
+        let fence = AcceptedControlFence {
+            identity,
+            desired_lifetime: self.observational_desired_lifetime?,
+            live: Arc::clone(&self.observational_live),
+        };
+        (self.last_sequence == fence.identity.sequence
+            && self.prior_request_fingerprint.as_deref()
+                == Some(fence.identity.fingerprint.as_str())
+            && self.observation_is_current(&fence))
+        .then_some(fence)
+    }
+
+    pub(crate) fn observation_is_current(&self, fence: &AcceptedControlFence) -> bool {
+        fence.still_live()
+            && self.observational_desired_lifetime == Some(fence.desired_lifetime)
+            && self.generation.as_deref() == Some(fence.identity.generation.as_str())
+            && self.owner_epoch == fence.identity.owner_epoch
+            && self.client_instance_id.map(|id| id.to_string()).as_deref()
+                == Some(fence.identity.client_instance_id.as_str())
+            && self.last_sequence >= fence.identity.sequence
+            && self.desired_digest.as_deref() == Some(fence.identity.desired_digest.as_str())
+    }
     /// Apply the second, owner-local fence after ingress or relay has proved
     /// the same tuple against the durable route. Advancing an epoch resets the
     /// client sequence space; an older epoch can never renew the new owner.
@@ -3823,6 +3999,8 @@ impl ControlState {
                 None
             };
             if let Some(staged_incarnation_id) = &inherited {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Aborting {
                     staged_incarnation_id: staged_incarnation_id.clone(),
                 };
@@ -3840,6 +4018,7 @@ impl ControlState {
             // action identity must survive too. Clearing only the binding
             // would let the same staged incarnation mint a second action id.
             self.last_selection = None;
+            self.advance_observational_lifetime();
             self.desired_digest = None;
             self.dispatched_digest = None;
             // Not cleared on an epoch rollover, deliberately. A new owner
@@ -3934,6 +4113,9 @@ impl ControlState {
         // wrong-instance packet was never accepted, and a rejected packet must
         // not be able to move what the viewer is understood to want.
         if let Some(desired_digest) = desired_digest {
+            if self.desired_digest.as_ref() != Some(&desired_digest) {
+                self.advance_observational_lifetime();
+            }
             self.desired_digest = Some(desired_digest);
         }
         let terminal_directive = rollover_preparation.or_else(|| {
@@ -4314,6 +4496,9 @@ impl ControlState {
             .last_capabilities
             .clone()
             .filter(|caps| caps.decoder_caps.is_some() || caps.presentation_target.is_some());
+        self.observational_stage_live
+            .store(false, Ordering::Release);
+        self.observational_stage_live = Arc::new(AtomicBool::new(true));
         self.preparation = PreparationSlot::Staged {
             staged_incarnation_id,
             predecessor_incarnation_id,
@@ -4366,6 +4551,8 @@ impl ControlState {
             return false;
         }
         let already = matches!(self.preparation, PreparationSlot::Aborting { .. });
+        self.observational_stage_live
+            .store(false, Ordering::Release);
         self.preparation = PreparationSlot::Aborting {
             staged_incarnation_id: staged_incarnation_id.to_owned(),
         };
@@ -4405,6 +4592,8 @@ impl ControlState {
                     .zip(self.desired_digest.as_ref())
                     .is_none_or(|(staged_for, wanted)| staged_for == wanted) =>
             {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Committing {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                     deadline_ms: *deadline_ms,
@@ -4468,6 +4657,8 @@ impl ControlState {
                 staged_incarnation_id: staged,
                 ..
             } if staged == staged_incarnation_id => {
+                self.observational_stage_live
+                    .store(false, Ordering::Release);
                 self.preparation = PreparationSlot::Aborting {
                     staged_incarnation_id: staged_incarnation_id.to_owned(),
                 };
@@ -4517,6 +4708,8 @@ impl ControlState {
         if self.preparation.staged_incarnation_id() != Some(staged_incarnation_id) {
             return false;
         }
+        self.observational_stage_live
+            .store(false, Ordering::Release);
         self.preparation = PreparationSlot::Empty;
         // Keep the action binding as a tombstone until the next successor is
         // staged. A client may acknowledge the Prepare after deadline cleanup
@@ -8131,6 +8324,20 @@ struct OwnedLocalControlRequest {
 }
 
 enum RollingControlCommand {
+    StagedObservationIsCurrent {
+        fence: AcceptedControlFence,
+        incarnation: String,
+        deadline: i64,
+        reply: tokio::sync::oneshot::Sender<Option<StagedObservationFence>>,
+    },
+    AcceptedObservation {
+        identity: AcceptedControlIdentity,
+        reply: tokio::sync::oneshot::Sender<Option<AcceptedControlFence>>,
+    },
+    ObservationIsCurrent {
+        fence: AcceptedControlFence,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     #[cfg(test)]
     Renew {
         kind: &'static str,
@@ -8346,6 +8553,9 @@ impl RollingControlCommand {
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
             Self::Snapshot { .. } => Some(6),
+            Self::AcceptedObservation { .. }
+            | Self::ObservationIsCurrent { .. }
+            | Self::StagedObservationIsCurrent { .. } => None,
             Self::ClaimExpiry { .. } => Some(7),
             Self::Terminal { .. } => Some(8),
         }
@@ -11978,6 +12188,7 @@ impl RollingControlActor {
             );
         }
         self.retired = true;
+        self.control.advance_observational_lifetime();
         self.terminal = Some(cause);
         // A disconnect does not imply a commit. Whatever ended this playback --
         // an explicit end, a fence, or the lease simply expiring -- a successor
@@ -12529,6 +12740,35 @@ impl RollingControlActor {
                         },
                     );
                     let _ = reply.send(outcome);
+                }
+                RollingControlCommand::StagedObservationIsCurrent {
+                    fence,
+                    incarnation,
+                    deadline,
+                    reply,
+                } => {
+                    let answer = (!self.retired
+                        && published_at < self.snapshot_at(published_at).deadline)
+                        .then(|| {
+                            self.control
+                                .staged_observation_token(&fence, &incarnation, deadline)
+                        })
+                        .flatten();
+                    let _ = reply.send(answer);
+                }
+                RollingControlCommand::AcceptedObservation { identity, reply } => {
+                    let answer = (!self.retired
+                        && published_at < self.snapshot_at(published_at).deadline)
+                        .then(|| self.control.accepted_observation(identity))
+                        .flatten();
+                    let _ = reply.send(answer);
+                }
+                RollingControlCommand::ObservationIsCurrent { fence, reply } => {
+                    let _ = reply.send(
+                        !self.retired
+                            && published_at < self.snapshot_at(published_at).deadline
+                            && self.control.observation_is_current(&fence),
+                    );
                 }
                 RollingControlCommand::Snapshot { reply } => {
                     // A snapshot is an actor command, not an advisory timestamp
@@ -15219,6 +15459,86 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a05_prepared_observation_survives_same_intent_poll_but_not_away_back_or_epoch_reset() {
+        let mut state = ControlState::default();
+        let client = uuid::Uuid::new_v4().to_string();
+        let selected = selection_at(QualitySelection::Auto {
+            height: Some(720),
+            candidate_id: None,
+        });
+        let away = selection_at(QualitySelection::Auto {
+            height: Some(1080),
+            candidate_id: None,
+        });
+        let started = Instant::now();
+        let accept = |state: &mut ControlState,
+                      sequence,
+                      epoch,
+                      selection: &ClientSelection,
+                      fingerprint: &str| {
+            state
+                .accept_at(
+                    started + Duration::from_secs(sequence),
+                    "incarnation",
+                    epoch,
+                    &client,
+                    sequence,
+                    ControlAcceptance::new(Some(ClientPlatform::Web), None)
+                        .asking(selection)
+                        .fingerprinted(fingerprint),
+                )
+                .expect("accepted")
+        };
+        assert_eq!(
+            accept(&mut state, 1, 1, &selected, "original").0,
+            ControlDisposition::Accepted
+        );
+        let identity = AcceptedControlIdentity {
+            generation: "incarnation".into(),
+            owner_epoch: 1,
+            client_instance_id: client.clone(),
+            sequence: 1,
+            fingerprint: "original".into(),
+            desired_digest: selected.desired().digest(),
+        };
+        let proof = state
+            .accepted_observation(identity.clone())
+            .expect("exact origin");
+        accept(&mut state, 2, 1, &selected, "poll-position");
+        assert!(
+            state.observation_is_current(&proof),
+            "new Poll fingerprint is not a new attachment"
+        );
+        assert!(
+            state.accepted_observation(identity.clone()).is_none(),
+            "old origin cannot be newly minted"
+        );
+        accept(&mut state, 3, 1, &away, "away");
+        accept(&mut state, 4, 1, &selected, "back");
+        assert!(
+            !state.observation_is_current(&proof),
+            "same digest cannot resurrect an old lifetime"
+        );
+        let latest = state
+            .accepted_observation(AcceptedControlIdentity {
+                sequence: 4,
+                fingerprint: "back".into(),
+                ..identity
+            })
+            .expect("new lifetime");
+        accept(&mut state, 1, 2, &selected, "new-owner");
+        assert!(!state.observation_is_current(&latest));
+        assert!(!ControlState::default().observation_is_current(&latest));
+        state.observational_desired_lifetime = Some(u64::MAX);
+        state.advance_observational_lifetime();
+        state.advance_observational_lifetime();
+        assert_eq!(
+            state.observational_desired_lifetime, None,
+            "overflow is permanently Unknown"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn terminal_commit_retry_starts_before_but_not_at_or_after_exact_expiry() {

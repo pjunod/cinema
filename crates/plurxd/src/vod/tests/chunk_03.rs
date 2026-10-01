@@ -1,4 +1,48 @@
 
+
+    #[tokio::test]
+    async fn a05_real_vod_staged_observation_is_not_commit_authority_and_cannot_follow_replacement() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = local_serve(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Web);
+        snapshot.request_fingerprint = Some("origin".into());
+        let desired = snapshot.selection.desired().digest();
+        let client = uuid::Uuid::new_v4().to_string();
+
+        let accepted = serve.control(crate::playback_control::LocalControlRequest {
+            session_id: &session_id, generation: &generation, owner_node_id: "node-a", owner_epoch: 1,
+            client_instance_id: &client, sequence: 1, snapshot,
+            prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+        }).await.expect("VOD worker").expect("accepted");
+        assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+
+        let gate = serve.preparation_gate(&session_id).await.expect("real VOD gate");
+        let identity = crate::playback_control::AcceptedControlIdentity {
+            generation: generation.clone(), owner_epoch: 1, client_instance_id: client.clone(),
+            sequence: 1, fingerprint: "origin".into(), desired_digest: desired.clone(),
+        };
+        let proof = gate.accepted_observation(identity).await.expect("real accepted actor origin");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let deadline = crate::media_sessions::unix_ms() + 60_000;
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "reservation absent");
+        assert!(gate.stage_preparation_for_owner(staged.clone(), generation.clone(), deadline, 1, Some(desired)).await);
+        assert!(!gate.may_commit_preparation_for_owner(&staged, 1).await, "no commit reservation");
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_some(), "real Staged is observable before commit");
+        assert!(gate.begin_abort_preparation_for_owner(&staged, 1).await);
+        assert!(gate.staged_observation_is_current(proof.clone(), staged.clone(), deadline).await.is_none(), "aborting is not observation authority");
+        serve.shared.sessions.lock().await.remove(&session_id);
+        insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
+        assert!(!gate.observation_is_current(proof).await, "retired exact attachment cannot be followed");
+
+    }
+
     #[tokio::test]
     async fn resolved_vod_owner_cannot_commit_after_tombstone_or_reattachment() {
         let base = crate::test_tempdir().expect("base");
@@ -3643,4 +3687,65 @@
         assert!(serve.reopen_facts("sess-a").await.is_none());
         assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
         assert!(serve.frontier_ms("sess-x").await.is_none());
+    }
+    #[tokio::test]
+    async fn a05_real_vod_terminal_or_idle_removal_during_route_result_await_invalidates_observation() {
+        for terminal in [true, false] {
+            let base = crate::test_tempdir().expect("base");
+            let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            activate_control_route(store.as_ref(), &session_id, &generation).await;
+            let serve = local_serve(base.path().to_path_buf(), store.clone());
+            let rendition = synthetic_rendition(base.path()).await;
+            insert_control_session(&serve, &session_id, rendition, Instant::now()).await;
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(crate::playback_control::ClientPlatform::Web);
+            snapshot.request_fingerprint = Some("vod-origin".into());
+            let desired = snapshot.selection.desired().digest();
+            let client = uuid::Uuid::new_v4().to_string();
+            let accepted = serve.control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id, generation: &generation, owner_node_id: "node-a", owner_epoch: 1,
+                client_instance_id: &client, sequence: 1, snapshot,
+                prepared_successor: crate::playback_control::PreparedSuccessorObservation::NotRequested,
+            }).await.expect("VOD worker").expect("accepted");
+            assert_eq!(accepted.disposition, crate::playback_control::ControlDisposition::Accepted);
+            let gate = serve.preparation_gate(&session_id).await.expect("real VOD gate");
+            let origin = gate.accepted_observation(crate::playback_control::AcceptedControlIdentity {
+                generation: generation.clone(), owner_epoch: 1, client_instance_id: client,
+                sequence: 1, fingerprint: "vod-origin".into(), desired_digest: desired.clone(),
+            }).await.expect("accepted origin");
+            let staged = uuid::Uuid::new_v4().to_string();
+            let deadline = crate::media_sessions::unix_ms() + 60_000;
+            assert!(gate.stage_preparation_for_owner(staged.clone(), generation, deadline, 1, Some(desired)).await);
+            let stage = gate.staged_observation_is_current(origin.clone(), staged, deadline).await.expect("actual stage token");
+            let held_incarnation = Arc::clone(&serve.shared.sessions.lock().await.get(&session_id).expect("session").incarnation);
+            let read_ready = tokio::sync::Notify::new();
+            let release = tokio::sync::Notify::new();
+            let route_result = async {
+                let route = store.media_session_route(&session_id).await.expect("real route query").expect("route");
+                read_ready.notify_one();
+                release.notified().await;
+                route
+            };
+            tokio::pin!(route_result);
+            tokio::select! {
+                () = read_ready.notified() => {},
+                _ = &mut route_result => panic!("final route result must remain awaited"),
+            }
+            if terminal {
+                assert!(serve.begin_end_detached(&session_id, Terminal::Deleted).await);
+            } else {
+                *serve.shared.sessions.lock().await.get(&session_id).expect("live session").last_touch.lock().expect("touch") =
+                    Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+                serve.maintain().await;
+                assert!(!serve.shared.sessions.lock().await.contains_key(&session_id));
+            }
+            release.notify_one();
+            let old_route = route_result.await;
+            assert_eq!(old_route.state, "active", "the already-read durable response still looks active");
+            assert!(Arc::strong_count(&held_incarnation) >= 1, "old weak identity can still upgrade");
+            assert!(!stage.still_live(), "actual VOD terminal/removal invalidates stage before claim");
+            assert!(!origin.still_live(), "actual VOD attachment retirement invalidates desired origin");
+            assert!(!gate.observation_is_current(origin).await);
+        }
     }

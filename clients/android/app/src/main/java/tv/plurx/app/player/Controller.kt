@@ -2721,6 +2721,7 @@ class Controller internal constructor(
             playbackControl.begin(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
+                linkReceipt = { if (playbackControlBootstrapFence.isCurrent(claim, sessionId)) currentLinkReceipt() else null },
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
             onSubtitleUnavailable = {
                 raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
@@ -4216,6 +4217,25 @@ class Controller internal constructor(
                     action.sessionId ?: return, desired.id)) return
             val peak = tv.plurx.app.data.measuredCandidatePeak(desired, autoMeasuredOutputs) ?: return
             val now = monotonicNowMs()
+            autoTransfersByPlayer[successor]?.recent().orEmpty().forEach { sample ->
+                val receipt = sample.receipt
+                val duration = sample.bodyDurationMs
+                val uri = android.net.Uri.parse(sample.segmentId)
+                if (preparedPlayer === successor && preparedLedger.action === action &&
+                    sample.pipelineIdentity === autoTransfersByPlayer[successor] && receipt != null &&
+                    Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt) &&
+                    uri.pathSegments.contains(action.sessionId) && !sample.etag.isNullOrEmpty() &&
+                    sample.statusCode == 200 && autoTransferOriginCurrent(sample) &&
+                    autoCompletedTransferBps(sample, now, 15_000L) != null && duration != null &&
+                    !autoLinkClaims.containsKey(receipt) && autoLinkClaims.size < 32) {
+                    postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+                        message = "Completed staged candidate body", ua = "Android Media3", sessionId = action.sessionId,
+                        linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), sample.etag!!,
+                            sample.bodyBytes, duration, sample.ageMs(now), true, false, false, "link", false,
+                            sample.observedMediaDurationMs, false, false, 0)))
+                    autoLinkClaims[receipt] = Triple(sample.completedAtMs, false, desired.id)
+                }
+            }
             val margin = autoTransfersByPlayer[successor]?.recent().orEmpty().any { sample ->
                 sample.segmentId.contains("/${action.sessionId ?: return}/") && sample.receipt != null && sample.etag != null &&
                 autoTransferOriginCurrent(sample) &&
