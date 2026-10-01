@@ -132,6 +132,19 @@ to that retained node ID and recheck the canonical proof; source/config labels
 and the existing binary/build checks remain additional checks, not substitutes.
 No tag fallback, store reconfiguration or weaker source-only acceptance exists.
 
+The only accepted image volume declaration is `/var/lib/plurx` (or none).
+The original argv already covered that known path with a 16 MiB tmpfs; it did
+not allocate an anonymous volume for the selected artifact. Same-review
+hardening additionally refuses other declarations, adds `noexec` to both
+temporary mounts, and checks exact `HostConfig.Tmpfs` bounds: `/tmp` 128 MiB
+and `/var/lib/plurx` 16 MiB, both `rw,nosuid,nodev,noexec`. Docker's
+[`--tmpfs` representation](https://docs.docker.com/engine/storage/tmpfs/)
+is retained in HostConfig; if an engine also reports tmpfs Mounts entries,
+the complete two-path inventory must match. The actual Mounts inventory
+permits only one RW bind from the exact owned root to `/data`, plus those
+optional tmpfs entries. Anonymous/named volumes, extra binds, partial tmpfs
+inventories or changed bounds refuse start, recovery and cleanup validation.
+
 ## 3. Claim controller ownership, then enter the authorized window
 
 ```bash
