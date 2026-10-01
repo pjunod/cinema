@@ -4413,6 +4413,193 @@ struct Boundaries {
     starts: Vec<u64>,
 }
 
+/// Cuts a verified, film-global AAC sample stream on its own immutable plan.
+/// Callers remove encoder priming and restore absolute `tfdt` before pushing.
+/// A video boundary never participates in this soundtrack's publication.
+#[derive(Debug)]
+pub struct PlannedAudioSegmenter {
+    init: Init,
+    plan: crate::segplan::SegmentPlan,
+    entry: usize,
+    next_tick: u64,
+    pending: Vec<Fragment>,
+    pending_bytes: usize,
+}
+
+impl PlannedAudioSegmenter {
+    pub fn new(
+        init: Init,
+        plan: crate::segplan::SegmentPlan,
+        start_entry: u32,
+    ) -> Result<Self, Fmp4Error> {
+        let refuse = || {
+            Fmp4Error::Unsupported(
+                "shared AAC requires one 48kHz track and a contiguous sample-clock plan".into(),
+            )
+        };
+        if init.tracks.len() != 1
+            || init.tracks[0].kind != TrackKind::Audio
+            || init.tracks[0].timescale != 48_000
+            || plan.timescale != 48_000
+            || plan.version != crate::segplan::SEGPLAN_VERSION
+            || plan.entries.is_empty()
+            || plan.entries.len() > 100_000
+        {
+            return Err(refuse());
+        }
+        let mut next = 0;
+        for (index, entry) in plan.entries.iter().enumerate() {
+            let final_entry = index + 1 == plan.entries.len();
+            if entry.index as usize != index
+                || entry.kind != crate::segplan::PlanEntryKind::AudioTail
+                || entry.start_ticks != next
+                || entry.start_ticks % 1_024 != 0
+                || entry.duration_ticks == 0
+                || entry.duration_ticks > 480_000
+                || (!final_entry && entry.duration_ticks % 1_024 != 0)
+            {
+                return Err(refuse());
+            }
+            next = next.checked_add(entry.duration_ticks).ok_or_else(refuse)?;
+        }
+        let next_tick = plan.entry(start_entry).ok_or_else(refuse)?.start_ticks;
+        Ok(Self {
+            init,
+            plan,
+            entry: start_entry as usize,
+            next_tick,
+            pending: Vec::new(),
+            pending_bytes: 0,
+        })
+    }
+
+    /// Fully validate the incoming sample run before changing publication
+    /// state. Gaps and overlaps are refused rather than absorbed into an AAC
+    /// sample duration by the general-purpose fragment merger.
+    pub fn push(&mut self, fragment: Fragment) -> Result<Vec<Published>, Fmp4Error> {
+        let refuse =
+            || Fmp4Error::Malformed("shared AAC sample bounds or clock continuity failed".into());
+        if fragment.tracks.len() != 1
+            || fragment.len() > 4 * 1024 * 1024
+            || fragment.tracks[0].track_id != self.init.tracks[0].id
+            || fragment.tracks[0].base_decode_time != self.next_tick
+            || fragment.tracks[0].sample_count() == 0
+            || fragment.tracks[0].sample_count() > 2_048
+        {
+            return Err(refuse());
+        }
+        let end = self
+            .plan
+            .entries
+            .last()
+            .expect("validated plan")
+            .end_ticks();
+        let track = &fragment.tracks[0];
+        let mut tick = self.next_tick;
+        let mut planned_entry = self.entry;
+        let mut interval_bytes = self.pending_bytes;
+        let mut payloads = Vec::with_capacity(track.sample_count());
+        for run in &track.runs {
+            let mut offset = run.data_offset;
+            for sample in &run.samples {
+                let through = offset
+                    .checked_add(sample.size as usize)
+                    .ok_or_else(refuse)?;
+                if sample.duration == 0
+                    || sample.duration > 1_024
+                    || sample.size == 0
+                    || sample.cto != 0
+                    || offset < fragment.mdat_payload.start
+                    || through > fragment.mdat_payload.end
+                    || through > fragment.bytes.len()
+                    || (sample.duration != 1_024 && tick + u64::from(sample.duration) != end)
+                {
+                    return Err(refuse());
+                }
+                let next = tick
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(refuse)?;
+                if next > end {
+                    return Err(refuse());
+                }
+                let entry = self.plan.entries.get(planned_entry).ok_or_else(refuse)?;
+                if next > entry.end_ticks() {
+                    return Err(refuse());
+                }
+                interval_bytes = interval_bytes
+                    .checked_add(sample.size as usize)
+                    .ok_or_else(refuse)?;
+                if interval_bytes > 16 * 1024 * 1024 {
+                    return Err(Fmp4Error::Unsupported(
+                        "shared AAC interval exceeds its publication byte allowance".into(),
+                    ));
+                }
+                if next == entry.end_ticks() {
+                    planned_entry += 1;
+                    interval_bytes = 0;
+                }
+                payloads.push((tick, *sample, fragment.bytes[offset..through].to_vec()));
+                tick = next;
+                offset = through;
+            }
+        }
+        let mut published = Vec::new();
+        for (tick, mut sample, bytes) in payloads {
+            let entry = self.plan.entries.get(self.entry).ok_or_else(refuse)?;
+            let next = tick + u64::from(sample.duration);
+            if next > entry.end_ticks() {
+                return Err(refuse());
+            }
+            self.pending_bytes += bytes.len();
+            if self.pending_bytes > 16 * 1024 * 1024 {
+                return Err(Fmp4Error::Unsupported(
+                    "shared AAC interval exceeds its publication byte allowance".into(),
+                ));
+            }
+            sample.size_at = None;
+            self.pending.push(Fragment {
+                mdat_payload: 0..bytes.len(),
+                bytes,
+                tracks: vec![TrackFragment {
+                    track_id: self.init.tracks[0].id,
+                    base_decode_time: tick,
+                    runs: vec![Run {
+                        data_offset: 0,
+                        data_offset_at: None,
+                        samples: vec![sample],
+                    }],
+                }],
+            });
+            self.next_tick = next;
+            if next == entry.end_ticks() {
+                let segment = merge(&self.pending, &self.init, entry.index + 1)?;
+                if segment.stats.tfdt_adjustments != 0 {
+                    return Err(refuse());
+                }
+                published.push(Published {
+                    index: u64::from(entry.index),
+                    segment,
+                    reason: if self.entry + 1 == self.plan.entries.len() {
+                        CutReason::EndOfStream
+                    } else {
+                        CutReason::Clean
+                    },
+                    seconds: entry.duration_ticks as f64 / 48_000.0,
+                });
+                self.entry += 1;
+                self.pending.clear();
+                self.pending_bytes = 0;
+            }
+        }
+        Ok(published)
+    }
+
+    /// A killed or truncated producer cannot publish a partial promised URI.
+    pub fn complete(&self) -> bool {
+        self.entry == self.plan.entries.len() && self.pending.is_empty()
+    }
+}
+
 /// Accumulates fragments and publishes segments that start on clean keyframes.
 ///
 /// Pure by design: the daemon feeds it fragments and writes what comes back
@@ -5129,6 +5316,141 @@ mod tests {
     use std::process::Command;
 
     use crate::testfixtures::{ffmpeg, ffprobe, pipe, pipe_path, run};
+
+    fn shared_audio_init() -> Init {
+        Init {
+            bytes: vec![],
+            tracks: vec![Track {
+                id: 1,
+                kind: TrackKind::Audio,
+                timescale: 48_000,
+                codec: None,
+                dolby_vision_config: false,
+                nal_length_size: 0,
+                default_sample_duration: 1_024,
+                default_sample_size: 4,
+                default_sample_flags: 0,
+            }],
+        }
+    }
+
+    fn shared_audio_fragment(
+        start_sample: u32,
+        count: u32,
+        final_duration: Option<u32>,
+    ) -> Fragment {
+        let bytes = (start_sample..start_sample + count)
+            .flat_map(u32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let samples = (0..count)
+            .map(|index| Sample {
+                duration: if index + 1 == count {
+                    final_duration.unwrap_or(1_024)
+                } else {
+                    1_024
+                },
+                size: 4,
+                size_at: None,
+                flags: 0,
+                cto: 0,
+            })
+            .collect();
+        Fragment {
+            mdat_payload: 0..bytes.len(),
+            bytes,
+            tracks: vec![TrackFragment {
+                track_id: 1,
+                base_decode_time: u64::from(start_sample) * 1_024,
+                runs: vec![Run {
+                    data_offset: 0,
+                    data_offset_at: None,
+                    samples,
+                }],
+            }],
+        }
+    }
+
+    #[test]
+    fn shared_audio_publication_preserves_every_sample_across_fragment_and_restart_boundaries() {
+        let init = shared_audio_init();
+        let plan = crate::transcode::vod_shared_audio_plan(4_100, 160);
+        let mut cutter = PlannedAudioSegmenter::new(init.clone(), plan.clone(), 0).expect("cutter");
+        assert!(cutter
+            .push(shared_audio_fragment(0, 60, None))
+            .expect("first")
+            .is_empty());
+        let mut published = cutter
+            .push(shared_audio_fragment(60, 80, None))
+            .expect("middle");
+        assert_eq!(published.len(), 1);
+        assert!(!cutter.complete());
+        published.extend(
+            cutter
+                .push(shared_audio_fragment(140, 53, Some(192)))
+                .expect("tail"),
+        );
+        assert!(cutter.complete());
+        assert_eq!(published.len(), 3);
+        let mut actual = Vec::new();
+        for (index, item) in published.iter().enumerate() {
+            assert_eq!(item.index, index as u64);
+            assert_eq!(item.segment.stats.tfdt_adjustments, 0);
+            let mut reader = FragmentReader::new();
+            reader.init_done = true;
+            reader.tracks = init.tracks.clone();
+            reader.push(&item.segment.bytes);
+            let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("published fragment")
+            else {
+                panic!("published audio did not parse");
+            };
+            assert_eq!(
+                fragment.tracks[0].base_decode_time,
+                plan.entries[index].start_ticks
+            );
+            assert_eq!(
+                fragment.tracks[0].duration(),
+                plan.entries[index].duration_ticks
+            );
+            actual.extend(track_samples(&fragment, 1));
+        }
+        assert_eq!(
+            actual,
+            (0u32..193)
+                .map(|sample| sample.to_be_bytes().to_vec())
+                .collect::<Vec<_>>()
+        );
+        let mut restart = PlannedAudioSegmenter::new(init, plan, 1).expect("restart");
+        let middle = restart
+            .push(shared_audio_fragment(94, 94, None))
+            .expect("restart interval");
+        assert_eq!(middle[0].segment.bytes, published[1].segment.bytes);
+    }
+
+    #[test]
+    fn shared_audio_gap_overlap_and_partial_packets_cannot_change_the_publication_frontier() {
+        let mut cutter = PlannedAudioSegmenter::new(
+            shared_audio_init(),
+            crate::transcode::vod_shared_audio_plan(4_100, 160),
+            0,
+        )
+        .expect("cutter");
+        cutter
+            .push(shared_audio_fragment(0, 60, None))
+            .expect("prerun");
+        assert!(cutter.push(shared_audio_fragment(61, 34, None)).is_err());
+        assert!(cutter.push(shared_audio_fragment(59, 34, None)).is_err());
+        assert!(cutter
+            .push(shared_audio_fragment(60, 34, Some(512)))
+            .is_err());
+        assert_eq!(cutter.next_tick, 60 * 1_024);
+        assert_eq!(cutter.entry, 0);
+        let published = cutter
+            .push(shared_audio_fragment(60, 34, None))
+            .expect("correct retry");
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].index, 0);
+        assert!(!cutter.complete());
+    }
 
     /// Everything a feed produces, in order.
     fn read_all(feed: &[u8]) -> (Init, Vec<Fragment>, bool) {

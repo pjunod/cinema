@@ -1171,3 +1171,26 @@ command construction alone is not publication or join qualification.
 The encoder regression is authored in the existing VOD recipe test and
 compiled without execution. Playback actor integration and decoded media
 qualification remain outstanding.
+
+### 10.5 Audio-only publication path
+
+`vod_shared_audio_plan` supplies the soundtrack's own 48 kHz clock: each
+ordinary interval has 94 AAC frames, and the last interval carries the
+remaining declared samples. This grid is independent of every video rung.
+The new `PlannedAudioSegmenter` accepts exactly one audio track, checks
+contiguous absolute sample times and payload bounds before publication,
+refuses gaps or overlaps, and keeps incomplete intervals unpublished.
+Publication memory has a 16 MiB interval allowance and a 4 MiB incoming
+fragment allowance; refusal does not evict an already published interval.
+
+The existing VOD generation runner now recognizes an encoded audio-only
+plan, applies its existing AAC priming removal, restores the absolute film
+clock and passes samples to that cutter. Completed intervals use the usual
+sink. A trailer that ends short of the promised final interval fails typed;
+a killed producer leaves the pending interval unmaterialized.
+
+Sample-preservation, identical restart publication and gap/overlap refusal
+regressions are authored and compile. They have not been executed. Family
+creation, audio admission/resource accounting, durable media pins and
+playlist routing still need integration before this becomes a served
+continuous presentation.

@@ -15,6 +15,43 @@ pub fn vod_audio_anchor(start_seconds: f64) -> u64 {
     samples / VOD_AAC_FRAME_SAMPLES * VOD_AAC_FRAME_SAMPLES
 }
 
+/// Shared AAC has its own clock: each ordinary interval contains 94 complete
+/// AAC frames (2.005333 seconds), with only the final packet duration trimmed.
+/// Video rung boundaries never duplicate or reset these audio intervals.
+pub fn vod_shared_audio_plan(duration_ms: i64, bitrate_kbps: u32) -> SegmentPlan {
+    let duration = (duration_ms.max(0) as u64).saturating_mul(u64::from(VOD_AUDIO_RATE)) / 1_000;
+    let span = 94 * VOD_AAC_FRAME_SAMPLES;
+    let mut entries = Vec::new();
+    let mut start = 0;
+    while start < duration {
+        let ticks = span.min(duration - start);
+        entries.push(PlanEntry {
+            index: entries.len() as u32,
+            kind: PlanEntryKind::AudioTail,
+            start_ticks: start,
+            duration_ticks: ticks,
+            est_bytes: u64::from(bitrate_kbps)
+                .saturating_mul(1_000)
+                .saturating_mul(ticks)
+                .saturating_mul(3)
+                / (u64::from(VOD_AUDIO_RATE) * 16),
+            cut: if start + ticks == duration {
+                PlanCut::EndOfStream
+            } else {
+                PlanCut::Clean
+            },
+            fragments: 0,
+        });
+        start += ticks;
+    }
+    SegmentPlan {
+        version: SEGPLAN_VERSION,
+        timescale: VOD_AUDIO_RATE,
+        target_duration: if entries.is_empty() { 0 } else { 3 },
+        entries,
+    }
+}
+
 /// The declared OUTPUT cadence, not a claim that the input is constant-rate.
 /// FFmpeg's fps filter samples the source clock onto this grid, including VFR.
 /// The nearest whole number of frames to two seconds forms a closed GOP:

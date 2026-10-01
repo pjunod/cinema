@@ -180,6 +180,7 @@ where
         warned_memory: false,
         encoded_entry,
         encoded_init: None,
+        audio_segmenter: None,
     };
     let mut buf = vec![0u8; READ_CHUNK];
 
@@ -265,6 +266,7 @@ struct GenerationRun<'a, S> {
     warned_memory: bool,
     encoded_entry: u32,
     encoded_init: Option<Init>,
+    audio_segmenter: Option<plurx_core::fmp4::PlannedAudioSegmenter>,
 }
 
 impl<S: Sink> GenerationRun<'_, S> {
@@ -284,6 +286,30 @@ impl<S: Sink> GenerationRun<'_, S> {
                 self.video_id = served.video().map(|video| video.id);
                 if self.generation.index.is_none() {
                     self.encoded_init = Some(served.clone());
+                }
+                if self.generation.index.is_none()
+                    && served.video().is_none()
+                    && !self.generation.plan.entries.is_empty()
+                    && self
+                        .generation
+                        .plan
+                        .entries
+                        .iter()
+                        .all(|entry| entry.kind == PlanEntryKind::AudioTail)
+                {
+                    if self.generation.encoded_audio_anchor.is_none() {
+                        return Err(landing_failed(
+                            "shared AAC generation has no film-clock anchor".into(),
+                        ));
+                    }
+                    self.audio_segmenter = Some(
+                        plurx_core::fmp4::PlannedAudioSegmenter::new(
+                            served.clone(),
+                            self.generation.plan.clone(),
+                            self.generation.start_entry,
+                        )
+                        .map_err(|error| landing_failed(error.to_string()))?,
+                    );
                 }
                 if self.generation.convert_dolby_vision {
                     match crate::dvpipe::Converter::for_init(&served) {
@@ -327,6 +353,32 @@ impl<S: Sink> GenerationRun<'_, S> {
         // stream.
         let mut fragment = fragment;
         self.place_encoded_audio(&mut fragment)?;
+        if let Some(segmenter) = self.audio_segmenter.as_mut() {
+            if fragment.tracks.is_empty() {
+                return Ok(());
+            }
+            // place_encoded_audio uses the same relative origin as muxed VOD;
+            // the independent soundtrack cutter requires absolute film ticks.
+            let origin = self
+                .generation
+                .plan
+                .entry(self.generation.start_entry)
+                .expect("audio plan validated at init")
+                .start_ticks;
+            for track in &mut fragment.tracks {
+                track.base_decode_time = track
+                    .base_decode_time
+                    .checked_add(origin)
+                    .ok_or_else(|| landing_failed("shared AAC film clock overflow".into()))?;
+            }
+            let published = segmenter
+                .push(fragment)
+                .map_err(|error| landing_failed(error.to_string()))?;
+            for segment in published {
+                self.deliver(segment).await?;
+            }
+            return Ok(());
+        }
         if let Some(converter) = self.converter.as_mut() {
             let before = converter.report().source_profile;
             if let Err(refused) = converter.convert(&mut fragment) {
@@ -636,6 +688,16 @@ impl<S: Sink> GenerationRun<'_, S> {
     /// End of pipe: land whatever is still undecided, then publish the tail
     /// if — and only if — ffmpeg's trailer says the film really ended.
     async fn finish(&mut self, complete: bool) -> Outcome {
+        if let Some(segmenter) = self.audio_segmenter.take() {
+            if complete && !segmenter.complete() {
+                return landing_failed(
+                    "shared AAC ended before its promised sample interval".into(),
+                );
+            }
+            return Outcome::Ran {
+                produced_through: self.produced_through,
+            };
+        }
         if self.served.is_none() && self.segmenter.is_none() {
             return Outcome::Failed(Failure::Stream(
                 "the pipe ended before its moov arrived".into(),
