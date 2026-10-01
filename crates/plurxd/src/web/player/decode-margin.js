@@ -446,6 +446,8 @@ function rememberPlaybackTransportIntent(v,p){
 function applyPlaybackTransportIntent(v,p){
   if(!v||!p||PLAYER!==p) return;
   rememberPlaybackTransportIntent(v,p);
+  const proof=p.preparedCommitting;
+  if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
   if(p.wantsPlayback){
     const events=playbackTransportEvents(v), token={};
     if(v.paused) events.play.push(token);
@@ -462,6 +464,8 @@ function handlePlaybackTransportEvent(v,p,event){
     if(!v.paused) return; // queued native edge superseded by a newer Play
     if(v.ended||v.error) return;
     p.wantsPlayback=false;
+    const proof=p.preparedCommitting;
+    if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=false;
     supersedePlaybackControlIntent(p);
@@ -480,6 +484,8 @@ function handlePlaybackTransportEvent(v,p,event){
     if(playbackTransportEvents(v).play.shift()) return;
     if(v.paused) return; // queued native edge superseded by a newer Pause
     p.wantsPlayback=true;
+    const proof=p.preparedCommitting;
+    if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=true;
     supersedePlaybackControlIntent(p);

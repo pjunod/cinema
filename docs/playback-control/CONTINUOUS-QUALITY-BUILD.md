@@ -1467,3 +1467,18 @@ Parent ownership, bounded child attachment and playlist routing remain.
 
 Pinned workspace/all-target compilation passed. Physical reservation preflight
 also checks the source object retained by the verified rung directly.
+
+### 10.19 Prepared first-frame active-wall budget
+
+The web prepared first-frame deadline now excludes explicit viewer Pause and
+resumes with the remaining active budget. Decoder pauses and stalls while Play
+is wanted still spend the deadline. Transport intent updates the deadline
+owner directly, including a Play whose media promise fails without a native
+event. Revision fencing rejects a queued older deadline; settlement and every
+teardown release the deadline closure and presentation callback.
+
+The authored regression covers a long explicit pause, remaining-budget resume,
+stale deadline, actual presented-frame settlement and a decoder pause that must
+still time out. Its focused command is
+`node tests/playback/web-control.test.js --prepared-first-frame`; it has not run.
+Offer, overlap, server and native budgets still need their CQ6 integration.

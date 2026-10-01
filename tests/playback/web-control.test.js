@@ -3889,6 +3889,9 @@ async function main() {
   }
 
 
+  await test("prepared first-frame proof excludes explicit pause and retains its active bound",
+    preparedFirstFramePauseBudgetTests);
+
   // ---- the second pipeline, the alignment, and the switch ------------------
   //
   // `PLAYER.hls` is a scalar and `attachHls` opens by destroying, so a prepared
@@ -6986,7 +6989,47 @@ async function vendoredHlsStartupTests(){
   process.stdout.write("PASS vendored HLS startup, local subtitles, retry ownership and stale-request fences\n");
 }
 
-const focused=process.argv.includes('--free-fall')
+function preparedFirstFramePauseBudgetTests(){
+  const harness=()=>{
+    let now=0,next=0,frames=0,timeouts=0;
+    const timers=new Map(),cancelled=[];
+    const p={wantsPlayback:true},state={};
+    const element={paused:false,requestVideoFrameCallback(fn){this.frame=fn;return 7;},
+      cancelVideoFrameCallback(id){cancelled.push(id);}};
+    const watch=new Function("performance","setTimeout","clearTimeout","streamHasVideo",
+      "PREPARED_FIRST_FRAME_MS",shippedSource("preparedFirstFrame")+";return preparedFirstFrame;")(
+      {now:()=>now},(fn,ms)=>{const id=++next;timers.set(id,{fn,at:now+ms});return id;},
+      id=>timers.delete(id),()=>true,8000);
+    watch(p,state,element,()=>frames++,()=>timeouts++);
+    return {p,state,element,timers,cancelled,get frames(){return frames;},get timeouts(){return timeouts;},
+      intent(wants){p.wantsPlayback=wants;state.frameBudgetUpdate?.();},
+      advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};
+  };
+  const h=harness();
+  h.advance(3000);
+  const stale=[...h.timers.values()][0].fn;
+  h.intent(false);h.advance(60_000);
+  assert.equal(h.timeouts,0,"explicit pause does not spend presentation time");
+  assert.equal(h.timers.size,0,"pause parks the deadline rather than polling");
+  h.intent(true);stale();
+  assert.equal(h.timeouts,0,"an already queued older deadline cannot expire a resumed proof");
+  h.advance(4999);assert.equal(h.timeouts,0);
+  h.advance(1);assert.equal(h.timeouts,1,"resume spends only the remaining active budget");
+  assert.deepEqual(h.cancelled,[7],"timeout cancels its pending presentation callback");
+  assert.equal(h.state.frameBudgetUpdate,null);
+  const stalled=harness();stalled.element.paused=true;
+  stalled.advance(8000);
+  assert.equal(stalled.timeouts,1,"a decoder pause while Play is wanted remains bounded");
+  const presented=harness();presented.intent(false);presented.advance(60_000);
+  presented.element.frame();
+  assert.equal(presented.frames,1,"an actual presented frame settles even during explicit pause");
+  assert.equal(presented.timers.size,0);
+  assert.equal(presented.state.frameBudgetUpdate,null);
+}
+
+const focused=process.argv.includes('--prepared-first-frame')
+  ?Promise.resolve().then(preparedFirstFramePauseBudgetTests)
+  :process.argv.includes('--free-fall')
   ?freeFallPlaybackTests()
   :process.argv.includes('--hls-startup')?vendoredHlsStartupTests():main();
 focused.catch((error) => {

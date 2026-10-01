@@ -299,6 +299,9 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     if(settled||state.frameCancelled) return;
     settled=true;
     if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    state.frameBudgetUpdate=null;
+    if(state.frameCallbackId!=null&&typeof element.cancelVideoFrameCallback==="function")
+      try{ element.cancelVideoFrameCallback(state.frameCallbackId); }catch(e){}
     if(state.frameListener){
       try{ element.removeEventListener("timeupdate",state.frameListener); }catch(e){}
       state.frameListener=null;
@@ -308,7 +311,31 @@ function preparedFirstFrame(p,state,element,onFrame,onTimeout){
     state.frameElement=null;
     run();
   };
-  state.frameTimer=setTimeout(()=>finish(onTimeout),PREPARED_FIRST_FRAME_MS);
+  // Spend active wall time only while the viewer wants playback. A decoder
+  // pause or stall still spends the bound; an explicit viewer Pause does not.
+  // Transport intent calls this owner directly, including a Play whose media
+  // promise rejects without producing a native play event.
+  let remaining=PREPARED_FIRST_FRAME_MS,at=performance.now();
+  let active=p.wantsPlayback!==false,budgetRevision=0;
+  const updateBudget=()=>{
+    if(settled||state.frameCancelled) return;
+    const now=performance.now();
+    if(active) remaining=Math.max(0,remaining-Math.max(0,now-at));
+    at=now;
+    active=p.wantsPlayback!==false;
+    const revision=++budgetRevision;
+    if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+    if(!active) return;
+    if(remaining<=0){ finish(onTimeout); return; }
+    state.frameTimer=setTimeout(()=>{
+      if(revision!==budgetRevision||settled||state.frameCancelled) return;
+      if(p.wantsPlayback===false){ updateBudget(); return; }
+      remaining=0;
+      finish(onTimeout);
+    },remaining);
+  };
+  state.frameBudgetUpdate=updateBudget;
+  updateBudget();
   const done=()=>finish(()=>onFrame(Date.now()));
   // Prefer the frame callback. Older engines expose a monotonic presented or
   // decoded-frame counter instead; an increment after the local switch is
@@ -388,6 +415,7 @@ function freePreparedReplacement(p,state){
   const spare=preparedVideoElement();
   restorePreparedOverlap(state);
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  state.frameBudgetUpdate=null;
   if(state.exposeFrameTimer!=null){ clearTimeout(state.exposeFrameTimer); state.exposeFrameTimer=null; }
   if(spare&&state.exposeFrameCallbackId!=null&&typeof spare.cancelVideoFrameCallback==="function")
     try{ spare.cancelVideoFrameCallback(state.exposeFrameCallbackId); }catch(e){}
@@ -482,6 +510,7 @@ function cancelPreparedFirstFrame(p){
   p.preparedCommitting=null;
   state.frameCancelled=true;
   if(state.frameTimer!=null){ clearTimeout(state.frameTimer); state.frameTimer=null; }
+  state.frameBudgetUpdate=null;
   if(state.framePollTimer!=null){ clearTimeout(state.framePollTimer); state.framePollTimer=null; }
   const spare=state.frameElement||document.getElementById("video");
   if(state.frameListener&&spare){
