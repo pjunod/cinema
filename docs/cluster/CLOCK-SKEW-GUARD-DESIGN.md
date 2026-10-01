@@ -1,6 +1,6 @@
 # Clock-skew guard — measure the offset, bound it, and refuse the dangerous side
 
-**Status:** open — original design accepted; runtime handoffs unclaimed · **Executes:** S9 / F-sc-10 from
+**Status:** open — original design accepted; measurement implementation claimed · **Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
 `9deb58a2`
@@ -11,11 +11,13 @@
 K-06 architecture issue remains open. Section 5's required separately owned
 [measurement](CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) and
 [enforcement](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md) implementation plans
-retain the release/evidence boundaries. Their future owners are unclaimed.
-The accepted no-enable-switch design below conflicts with Paul's current
-explicit Developer-switch instruction for unfinished features. The human
-ruling is pending; these handoffs neither rewrite that accepted decision nor
-authorize production implementation before its resolution.
+retain the release/evidence boundaries. Measurement is assigned to
+`gpt-6.1-sol`, session `agent:/root/k06_runtime_sol61`; enforcement remains
+unclaimed pending measurement fleet evidence. Paul clarified on 2026-09-30
+that switches apply only where manual on/off is meaningful, rather than to
+every unfinished feature. K-06 therefore retains the accepted no-switch
+design, read-only Developer facts and separate releases. Runtime work is now
+authorized; production rollout and clock-step drills remain separate actions.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
 there with its current line. Then §3, which is a design, not a diff — it
@@ -805,7 +807,8 @@ cargo test -p plurxd clock_offset::tests::four_timestamp_contract
 cargo test -p plurxd clock_offset::tests::step_resets_minimum_delay_window
 cargo test -p plurxd clock_offset::tests::zero_then_one_ms_recovers
 cargo test -p plurxd clock_offset::tests::expired_minimum_cannot_poison_window
-cargo test -p plurxd clock_offset::tests::local_discontinuity_invalidates_generation
+cargo test -p plurx-core --features hiqlite-store \
+  cluster::clock::tests::local_discontinuity_invalidates_generation
 ```
 
 The second test seeds a low-delay sample, advances the peer by 15 seconds,

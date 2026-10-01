@@ -731,14 +731,8 @@
     #[tokio::test]
     async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
-        let (accepted, rejected) = tokio::sync::oneshot::channel();
-        sender
-            .send(DrivenLocalChunk {
-                bytes: Bytes::from_static(b"stale-chunk"),
-                accepted,
-            })
-            .await
-            .expect("body receiver");
+        let (chunk, accepted_bytes) = test_resident_chunk(Bytes::from_static(b"stale-chunk"));
+        sender.send(chunk).await.expect("body receiver");
         let terminal = StreamedBodyTerminal::new();
         terminal.fail(
             std::io::ErrorKind::TimedOut,
@@ -746,7 +740,7 @@
         );
         drop(sender);
 
-        let mut body = driven_local_body(
+        let mut body = resident_local_body(
             receiver,
             terminal,
             tokio::time::Instant::now() + Duration::from_secs(60),
@@ -758,10 +752,7 @@
             .expect_err("the driven body must expose the producer failure");
         assert!(error.to_string().contains("body deadline expired"));
         assert!(body.frame().await.is_none());
-        assert!(
-            rejected.await.is_err(),
-            "stale bytes must not be acknowledged"
-        );
+        assert_eq!(accepted_bytes(), 0, "stale bytes must not be acknowledged");
     }
 
     #[test]
