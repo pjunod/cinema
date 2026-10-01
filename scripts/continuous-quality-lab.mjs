@@ -92,6 +92,40 @@ async function verifyMedia() {
   console.log(`Independent segment decode: ${rows.length}; rational-grid alignment=${aligned}; encoded audio gaps=${audioGaps}`);
   if (!aligned || audioGaps) throw new Error('fixture alignment failed');
 }
+async function verifyJoins() {
+  const dir = path.join(OUT, 'joins'); await fs.mkdir(dir, { recursive: true });
+  const verification = JSON.parse(await fs.readFile(path.join(OUT, 'media-verification.json'), 'utf8'));
+  const rows = verification.rows.filter(r => r.rung === '720').sort((a,b) => a.segment-b.segment);
+  const lines = ['#EXTM3U', '#EXT-X-VERSION:7', '#EXT-X-TARGETDURATION:3', '#EXT-X-MEDIA-SEQUENCE:0', '#EXT-X-PLAYLIST-TYPE:VOD', '#EXT-X-INDEPENDENT-SEGMENTS'];
+  const elementary = [];
+  for (const row of rows) {
+    const rung = row.segment % 2 ? '1080' : '720';
+    lines.push(`#EXT-X-MAP:URI="../media/${rung}/init-${rung}.mp4"`, `#EXTINF:${(row.count*1001/24000).toFixed(6)},`, `../media/${rung}/seg${row.segment}.m4s`);
+    const piece = path.join(dir, 'piece.mp4'), annex = path.join(dir, 'piece.h264');
+    await fs.writeFile(piece, Buffer.concat([await fs.readFile(path.join(MEDIA,rung,`init-${rung}.mp4`)),await fs.readFile(path.join(MEDIA,rung,`seg${row.segment}.m4s`))]));
+    command('ffmpeg',['-v','error','-y','-i',piece,'-map','0:v','-c:v','copy','-bsf:v','h264_mp4toannexb','-f','h264',annex]);
+    elementary.push(await fs.readFile(annex));
+  }
+  lines.push('#EXT-X-ENDLIST');
+  const playlist=path.join(dir,'alternating.m3u8'); await fs.writeFile(playlist,lines.join('\n')+'\n');
+  const fmp4 = spawnSync('ffmpeg',['-v','error','-xerror','-allowed_extensions','ALL','-i',playlist,'-vf','scale=1280:720','-fps_mode','passthrough','-f','null','-'],{encoding:'utf8',maxBuffer:1024*1024});
+  const joined=path.join(dir,'alternating.h264'); await fs.writeFile(joined,Buffer.concat(elementary));
+  const frameFile=path.join(dir,'annexb.framemd5');
+  command('ffmpeg',['-v','error','-xerror','-y','-f','h264','-i',joined,'-vf','scale=1280:720','-fps_mode','passthrough','-f','framemd5',frameFile]);
+  const frameCount=(await fs.readFile(frameFile,'utf8')).split('\n').filter(line=>line && !line.startsWith('#')).length;
+  const expectedFrames=rows.reduce((n,row)=>n+row.count,0);
+  const decoded=JSON.parse(command('ffprobe',['-v','error','-f','h264','-i',joined,'-show_frames','-select_streams','v','-show_entries','frame=width,height,key_frame','-of','json'])).frames;
+  const expectedHeights=rows.flatMap(row=>Array(row.count).fill(row.segment%2?1080:720));
+  const shapesMatch=decoded.length===expectedHeights.length && decoded.every((frame,i)=>frame.height===expectedHeights[i]);
+  const resolutionTransitions=decoded.slice(1).filter((frame,i)=>frame.height!==decoded[i].height).length;
+  const report={ fixture:JSON.parse(await fs.readFile(path.join(OUT,'fixture.json'),'utf8')), ffmpeg:command('ffmpeg',['-version']).split('\n')[0], boundaries:rows.length-1, expectedFrames,
+    fmp4MapChange:{status:fmp4.status===0?'decoded':'failed',exitCode:fmp4.status,diagnostic:(fmp4.stderr||'').split('\n').slice(0,12),meaning:'FFmpeg HLS demuxer/map-change experiment only; not a browser incompatibility verdict'},
+    annexB:{status:frameCount===expectedFrames?'decoded':'frame-count-mismatch',frames:frameCount,shapesMatch,resolutionTransitions,meaning:'24 alternating independently initialized segments decode through one elementary H.264 pipeline with SPS/PPS. Elementary extraction does not preserve MP4 sample timestamps.'},
+    limitations:['browser/display/audio capture not measured','burned frame identities not recognized','fMP4 map-change result must be separated from Annex-B decoder reconfiguration','not production-media acceptance']};
+  await fs.writeFile(path.join(OUT,'join-verification.json'),JSON.stringify(report,null,2));
+  for(const name of ['piece.mp4','piece.h264']) await fs.rm(path.join(dir,name),{force:true});
+  console.log(JSON.stringify({boundaries:report.boundaries,expectedFrames,fmp4MapChange:report.fmp4MapChange.status,annexB:report.annexB.status,decodedFrames:frameCount,shapesMatch,resolutionTransitions}));
+}
 async function server() {
   const requests = [];
   const srv = http.createServer(async (req, res) => {
@@ -191,8 +225,9 @@ async function main() {
   await fs.mkdir(OUT,{recursive:true}); const [cmd='help',browser='chrome',...cases]=process.argv.slice(2);
   if(cmd==='fixture') await fixture();
   else if(cmd==='verify-media') await verifyMedia();
+  else if(cmd==='verify-joins') await verifyJoins();
   else if(cmd==='run') await run(browser,cases.length?cases:['baseline','switch','cancel-before-append','cancel-after-append','denied','long-buffer']);
   else if(cmd==='serve') { const s=await server(); console.log(s.url); }
-  else console.log('node scripts/continuous-quality-lab.mjs fixture | verify-media | serve | run chrome|safari [case ...]');
+  else console.log('node scripts/continuous-quality-lab.mjs fixture | verify-media | verify-joins | serve | run chrome|safari [case ...]');
 }
 if(process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) main().catch(e=>{console.error(e.message);process.exitCode=1;});

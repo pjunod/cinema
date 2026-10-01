@@ -6,13 +6,15 @@
 <tr><td>Same-player Chrome probe</td><td>720p ↔ 1080p; one audio buffer; no quality-driven buffer removal.</td></tr>
 <tr><td>Cancellation</td><td>Before append retains current. After append, committed target still presents before latest choice.</td></tr>
 <tr><td>Long prebuffer</td><td>Target presentation about 31.1 seconds after selection. Appended media remains scheduled.</td></tr>
+<tr><td>Alternating joins</td><td>H.264 elementary pipeline decodes 1,151 frames and 23 resolution changes. FFmpeg HLS fMP4 init-map changes fail; engine-specific constraint retained.</td></tr>
 <tr><td>Encoded fixture</td><td>48 separately decoded video segments align at 24000/1001 fps. Shared AAC timestamps have no gaps.</td></tr>
-<tr><td>Checks already retained</td><td>Nine receipt checks; pinned Rust formatting/Clippy; docs and web checks passed. No unit reruns during building.</td></tr>
-<tr><td>Safari</td><td>WebDriver session timed out. Native media behavior remains unmeasured; investigating direct local UI reproduction.</td></tr>
+<tr><td>Checks already retained</td><td>Nine receipt checks; pinned Rust formatting/Clippy; docs and web checks passed. No unit reruns during building. Normal commit <code>c16e515e1</code> retained the initial prototype.</td></tr>
+<tr><td>Safari</td><td>WebDriver session timed out. Native media behavior remains unmeasured; direct local UI reproduction is also blocked because the Mac is locked. No native-media result is claimed.</td></tr>
 <tr><td>Audio/display capture</td><td>Not measured. Frame callbacks and screenshots are diagnostic evidence.</td></tr>
 <tr><td>Upstream</td><td>“Check Cinema transcoding resolutions” remains active. Native integration and final review/test/merge are outstanding; shared surfaces are not released.</td></tr>
 <tr><td>CQ2a–CQ8</td><td>Not started. Landing and ownership reconciliation precede shared production edits.</td></tr>
 </table>
 <h2>Delivery decisions</h2><p>Normal commits, batched into one larger PR. Adversarial review at main readiness, then the fast lane. The single new script is registered under the existing playback catalog owner. No feature readiness gates. No fleet deployment.</p>
+<h2>Current limits</h2><p>The Mac is locked, blocking direct Safari UI capture. Native Safari automation session creation timed out. Shared production surfaces still belong to the active upstream task; no takeover or fleet deployment is authorized.</p>
 <h2>Read the evidence</h2><p><a href="CONTINUOUS-QUALITY-BUILD.md">Build contract and experiment ledger</a> · <a href="CONTINUOUS-QUALITY-REVIEW.md">Retained review</a></p>
 <p class="muted">Range-growth inference does not prove sample-level overwrite exclusion. Separately decoded segments do not qualify every alternating-rendition join. This page reports partial progress, not completion.</p></html>

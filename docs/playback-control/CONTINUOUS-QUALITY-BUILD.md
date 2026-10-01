@@ -84,7 +84,11 @@ is made that its owner agreed to transfer work.
 
 **Immediate build allowance:** CQ0 may start now in this effort's independent
 clone. Own new investigative files only: `scripts/continuous-quality-lab.mjs`
-and `tests/playback/continuous-quality/`, plus this build/review record. Use
+and `tests/playback/continuous-quality/`, plus this build/review record.
+The user-authorized allowance extension on 2026-09-30 also permits the exact
+additive path `scripts/continuous-quality-lab.mjs` under the existing
+`playback.pipeline` owner in `validation/points.toml`, and the requested
+indexed status page. Preserve every unrelated catalog entry. Use
 read-only copies of the vendored library and generated media under this
 clone's `target/continuous-quality/`. Do not edit the shared playback lab,
 existing fixtures, production Rust/JS/Swift/Kotlin, settings, or the other
@@ -882,6 +886,7 @@ production must reuse the repository's actual segment planner.
 ```bash
 node scripts/continuous-quality-lab.mjs fixture
 node scripts/continuous-quality-lab.mjs verify-media
+node scripts/continuous-quality-lab.mjs verify-joins
 node scripts/continuous-quality-lab.mjs run chrome \
   baseline switch cancel-before-append cancel-after-append denied long-buffer
 CQ_RECEIPTS=target/continuous-quality \
@@ -961,10 +966,26 @@ and 66.7 ms for post-append supersession. These are callback diagnostics,
 not display-gap qualification. The prototype never starts live producers;
 no claim is made about maximum live encoders or server cleanup.
 
+**Follow-up encoded-join experiment:** `verify-joins` alternates all 24
+segments between 720p and 1080p, preserving each rung's immutable init.
+FFmpeg 9.0.1's HLS demuxer fails strict decoding when the playlist changes
+fMP4 init maps; decoder errors are retained in `join-verification.json`.
+This is a demuxer-specific failed experiment, not evidence that hls.js or
+native Safari behaves the same way. After extraction with
+`h264_mp4toannexb`, one elementary H.264 decoding pipeline accepts all 1,151
+frames across 23 boundaries. Decoded source heights match every expected
+rung and expose 23 resolution transitions. The elementary conversion
+includes SPS/PPS but does not preserve MP4 sample timestamps, so this result
+qualifies neither fMP4 timestamp joins nor audible/display continuity.
+Burned frame recognition remains open. The earlier independent-segment and
+Chrome results retain their `c16e515e1` source identity; the follow-up runner
+has a separate `join-source-evidence.json` content/commit receipt.
+
 **Native Safari failed experiment:** actual `/usr/bin/safaridriver` starts,
 but `POST /session` times out after 15 seconds on this host. The blocked
 receipt records that operation; no preference or automation authorization
-was changed. Native HLS media, autonomous rung reselection and runtime
+was changed. A direct Safari UI attempt was also blocked: the Mac is locked
+and the computer-use tool could not unlock it. Native HLS media, autonomous rung reselection and runtime
 exact-quality selection are **not measured**. The native page intentionally
 exposes no invented exact-height API; its candidate limitation requires a
 real runtime/native adapter experiment before CQ7 design is accepted.
@@ -985,12 +1006,15 @@ A narrow read-only check on 2026-09-30 found the named upstream chat still
 `active`, with its current turn `inProgress` and shared production edits in
 progress. Its surfaces are not released. CQ2a/CQ1 and every shared
 production edit remain blocked until upstream landing, authoritative-main
-integration, ownership reconciliation and adversarial integration review.
+integration and ownership reconciliation. Adversarial review follows the
+user-directed main-readiness timing recorded below.
 No message was sent to the upstream chat and no scope transfer was inferred.
 
 **Workflow supersession, 2026-09-30:** Paul directed normal commits in the
 independent clone, batched into one larger PR, with adversarial review only
-when ready for main, followed by the fast lane. Per-task PRs, intermediate
+when ready for main, followed by the fast lane. This also supersedes the older full
+effort-promotion test timing for this session; missing device/media evidence
+stays explicit. Per-task PRs, intermediate
 focused-unit runs and the pre-integration adversarial review are superseded
 for this session. Existing experiments and review remain historical evidence;
 no new unit suites run during building. Compiler feedback and the normal
