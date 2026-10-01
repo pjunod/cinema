@@ -1219,6 +1219,7 @@ impl TranscodeManager {
         );
 
         Ok(StartInfo {
+            retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
@@ -1857,6 +1858,7 @@ impl TranscodeManager {
         .await;
 
         Ok(StartInfo {
+            retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,

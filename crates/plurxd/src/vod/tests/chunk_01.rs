@@ -582,7 +582,7 @@ use crate::queue_fixture::QueueFixture;
 
     /// A `VodServe` with an empty store, for tests that drive internals
     /// directly against a hand-built rendition.
-    fn bare_serve(base: &Path) -> Arc<VodServe> {
+    pub(super) fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         local_serve(base.to_path_buf(), store)
     }
@@ -673,6 +673,7 @@ use crate::queue_fixture::QueueFixture;
             session_id.to_owned(),
             Session {
                 rendition: Some(rendition),
+                retained_output: None,
                 rendition_key,
                 file,
                 playback_id: "vod-control".into(),
@@ -721,6 +722,7 @@ use crate::queue_fixture::QueueFixture;
             session_id.to_owned(),
             Session {
                 rendition: None,
+                retained_output: None,
                 rendition_key,
                 file,
                 playback_id: "vod-terminal".into(),
@@ -774,7 +776,7 @@ use crate::queue_fixture::QueueFixture;
 
     /// A rendition built by hand — no driver, no store, no producer — for
     /// tests that exercise one internal mechanism deterministically.
-    async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
+    pub(super) async fn synthetic_rendition(base: &Path) -> Arc<Rendition> {
         let index = synthetic_index(240);
         let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
         let ms = index_video_ms(&index);
@@ -794,6 +796,7 @@ use crate::queue_fixture::QueueFixture;
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
+                measured_candidate: None,
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
                aac: true,

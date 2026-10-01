@@ -1,7 +1,68 @@
 use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
+pub(super) fn copy_candidate_grade(file: &plurx_core::domain::MediaFile) -> OutputGrade {
+    match transcode::routing_hdr(file) {
+        Some("hlg" | "hdr10" | "hdr10plus" | "dolby_vision") => OutputGrade::Hdr10,
+        _ => OutputGrade::Sdr,
+    }
+}
+
+/// Catalog and dispatch share the exact pre-existing canonical copy identity.
+/// This is a recipe equality check, not measured-output authority.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn copy_candidate_recipe_digest(
+    file: &plurx_core::domain::MediaFile,
+    audio: Option<i64>,
+    audio_offset_ms: i64,
+    subtitle: Option<i64>,
+    copy: (bool, bool, bool),
+    source_version: Option<&str>,
+    executable: Option<&str>,
+    runtime_engine: Option<&str>,
+    raster: (u32, u32),
+) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"plurx:auto-quality-copy-fmp4:v1\0");
+    hash.update(
+        serde_json::to_vec(&serde_json::json!([
+            file.id,
+            file.size,
+            file.mtime,
+            &file.video_codec,
+            &file.video_profile,
+            audio,
+            audio_offset_ms,
+            subtitle,
+            copy.0,
+            copy.1,
+            copy.2,
+            file.dolby_vision,
+            source_version,
+            executable,
+            runtime_engine,
+            raster.0,
+            raster.1,
+            transcode::routing_hdr(file),
+        ]))
+        .expect("bounded candidate source identity is serializable"),
+    );
+    hash.finalize().into()
+}
+
 impl TranscodeManager {
+    pub(crate) async fn measured_candidate_cost(
+        &self,
+        candidate: &QualityCandidate,
+        request: &SessionRequest,
+    ) -> Option<crate::vodserve::retained::MeasuredCandidateCostProof> {
+        let file = self.store.get_file(request.file_id).await.ok()??;
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await
+            .ok()?;
+        self.vod
+            .measured_candidate_cost(candidate, request, &source)
+    }
     /// Resolve the same output contracts used at dispatch. This never reserves
     /// capacity: incomplete cache verification and unknown production remain
     /// unknown, and a later owner must resolve and compare the full recipe.
@@ -79,34 +140,19 @@ impl TranscodeManager {
                         })
                 });
             if compatible {
-                let mut hash = Sha256::new();
-                hash.update(b"plurx:auto-quality-copy-fmp4:v1\0");
-                hash.update(
-                    serde_json::to_vec(&serde_json::json!([
-                        file.id,
-                        file.size,
-                        file.mtime,
-                        &file.video_codec,
-                        &file.video_profile,
-                        audio,
-                        audio_offset_ms,
-                        subtitle,
-                        copy_audio,
-                        copy_dv,
-                        copy_conversion,
-                        file.dolby_vision,
-                        copy_source.as_ref().map(|source| source.object_version()),
-                        copy_engine.as_ref().map(|engine| engine.digest.as_str()),
-                        copy_runtime_engine
-                            .as_ref()
-                            .map(|engine| engine.digest.as_str()),
-                        width,
-                        height,
-                        transcode::routing_hdr(file),
-                    ]))
-                    .expect("bounded candidate source identity is serializable"),
+                let recipe_digest = copy_candidate_recipe_digest(
+                    file,
+                    audio,
+                    audio_offset_ms,
+                    subtitle,
+                    (copy_audio, copy_dv, copy_conversion),
+                    copy_source.as_ref().map(|source| source.object_version()),
+                    copy_engine.as_ref().map(|engine| engine.digest.as_str()),
+                    copy_runtime_engine
+                        .as_ref()
+                        .map(|engine| engine.digest.as_str()),
+                    (width, height),
                 );
-                let recipe_digest: [u8; 32] = hash.finalize().into();
                 result.push(QualityCandidate {
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
@@ -117,11 +163,7 @@ impl TranscodeManager {
                     target_height: height,
                     average_bps: file.bitrate.and_then(|value| u64::try_from(value).ok()),
                     peak_bps: None,
-                    grade: if transfer == plurx_core::playback::Transfer::Sdr {
-                        OutputGrade::Sdr
-                    } else {
-                        OutputGrade::Hdr10
-                    },
+                    grade: copy_candidate_grade(file),
                     decoder_compatible: true,
                     complete_cache: false,
                     sustainable: true,
@@ -300,6 +342,49 @@ impl TranscodeManager {
                 sustainable,
             });
         }
+        // The catalog can expose a complete retained measurement, but its
+        // serialized numbers never carry authority. Dispatch still resolves
+        // the actual recipe and reacquires an exact private artifact.
+        for candidate in &mut result {
+            let kind = match candidate.route {
+                CandidateRoute::Remux => SessionKind::Copy {
+                    aac: copy_audio,
+                    preserve_dolby_vision: copy_dv,
+                    convert_dolby_vision: copy_conversion,
+                },
+                CandidateRoute::Encode => SessionKind::Transcode {
+                    height: i64::from(candidate.target_height),
+                },
+                CandidateRoute::Original => continue,
+            };
+            let request = SessionRequest {
+                candidate_context: Some(Self::candidate_context(candidate)),
+                file_id: file.id,
+                playback_id: String::new(),
+                request_id: None,
+                control_sequence: None,
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind,
+                start_seconds: 0.0,
+                audio_index: audio,
+                audio_delivery: retained_audio.cloned(),
+                audio_claim: audio_claim.clone(),
+                subtitle_burn: subtitle,
+                audio_offset_ms,
+                hdr10: candidate.grade == OutputGrade::Hdr10,
+                presentation,
+                block_budget_secs: None,
+                transport: None,
+            };
+            if let Some(proof) = self.measured_candidate_cost(candidate, &request).await {
+                let measured = proof.public_descriptor();
+                candidate.average_bps = Some(measured.average_bps);
+                candidate.peak_bps = Some(measured.peak_bps);
+                candidate.complete_cache = true;
+            }
+        }
         result
     }
 
@@ -415,6 +500,7 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            retained_output: None,
             owner_node_id: None,
             candidate_id: candidate.id,
             recipe_digest: candidate.recipe_digest,

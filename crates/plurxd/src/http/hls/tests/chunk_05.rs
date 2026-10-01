@@ -633,7 +633,9 @@
         delivery: std::sync::Arc<crate::meter::Meter>,
     ) -> crate::vodserve::SegmentReady {
         crate::vodserve::SegmentReady {
+            observed_media_duration_ms: None,
             delivery,
+            retained_lease: None,
             file: tokio::fs::File::open(path)
                 .await
                 .expect("open VOD response object"),

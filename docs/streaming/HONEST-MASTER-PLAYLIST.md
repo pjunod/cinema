@@ -1020,6 +1020,39 @@ fleet.
 
 ## Execution log
 
+**2026-10-01 retained VOD implementation boundary:** the candidate now retains
+complete successful full-mux output under generation-distinct private hardlink
+names, including init and tail. A session captures its receipt once; earlier
+`None` stays `None`. Init/media GETs and streamed bodies hold the artifact,
+not mutable recipe paths. Missing names may be repaired only from exact
+source/execution/init identity and byte digests; a conflicting repair refuses
+that artifact without poisoning an ordinary producer or rebinding an old
+master. A new presentation may use a separately completed receipt.
+
+Retention has one pre-clone assembly reservation, at most 64 artifacts,
+8,192 entry metadata records and the reducer's 131,072 examined-window cap.
+An OS file lease owns the private namespace. Bounded orphan/GC batches keep
+unknown or failed cleanup charged; unowned, symlinked or unresolved namespaces
+make measurement unavailable, not ordinary playback unavailable. No second
+scheduler, payload copy, whole-title cold wait or startup media scan is added.
+The private lease coordinates cooperating builds; it does not establish that
+an older daemon respects a shared-cache rollout or certify deployed images.
+Fresh bounded node advertisements negotiate receipt metadata in both
+directions; old/unknown peers receive the old strict envelope. Durable restore
+requires the exact issued artifact; legacy absence cannot acquire later facts.
+
+Actual candidate cost is a private retained proof, bound to accepted full
+candidate/digest, source version, selected audio, grade, actual recipe and
+complete output incarnation. Reader and dispatch reacquire this identity.
+Planned ladder budgets and `complete_cache` alone are not measured cost. A
+bounded optional public HTTP sidecar carries advisory complete-full-mux RFC
+cost provenance; core candidate identity and strict worker wire stay unchanged.
+Its public response/client integration belongs to the coordinated A05
+continuation. This implementation candidate still needs its remaining focused
+consumer/compatibility checks and independent review. Rolling-copy/PUT,
+persisted arbitrary cold-copy preparation and original fleet/device/corpus
+acceptance remain open; this is not complete M5 qualification.
+
 **2026-10-01 M3 continuation:** the earlier M3–M6 evidence-only classification
 did not establish the encoder qualification code. This continuation owns
 bounded node-local profile/level/cadence experiments and frozen SDR identity,

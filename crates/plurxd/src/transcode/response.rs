@@ -766,6 +766,30 @@ pub struct HlsContext {
 pub(crate) struct FrozenHlsCodecFacts {
     video: Option<(String, CodecVideoOrigin)>,
     audio: CodecAudioFact,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retained_output: Option<RetainedOutputFacts>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RetainedOutputFacts {
+    pub(crate) artifact_id: String,
+    pub(crate) output_identity: String,
+    pub(crate) average_bps: u64,
+    pub(crate) peak_bps: u64,
+}
+
+impl RetainedOutputFacts {
+    pub(crate) fn valid(&self) -> bool {
+        uuid::Uuid::parse_str(&self.artifact_id).is_ok()
+            && self.output_identity.len() == 64
+            && self
+                .output_identity
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            && self.average_bps > 0
+            && self.peak_bps > 0
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -819,7 +843,25 @@ impl FrozenHlsCodecFacts {
             None if legacy_aac_encode => CodecAudioFact::LegacyAacEncode,
             None => CodecAudioFact::Unknown,
         };
-        Self { video: None, audio }
+        Self {
+            video: None,
+            audio,
+            retained_output: None,
+        }
+    }
+
+    pub(crate) fn with_retained_output(mut self, facts: Option<RetainedOutputFacts>) -> Self {
+        self.retained_output = facts;
+        self
+    }
+
+    pub(super) fn retained_bandwidth(&self) -> Option<plurx_core::transcode::OutputBandwidth> {
+        self.retained_output
+            .as_ref()
+            .map(|facts| plurx_core::transcode::OutputBandwidth {
+                average_bps: facts.average_bps,
+                peak_bps: facts.peak_bps,
+            })
     }
 
     pub(crate) fn bind_output_avc_init(&mut self, codec: String) {

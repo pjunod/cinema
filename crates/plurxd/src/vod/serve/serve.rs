@@ -92,6 +92,10 @@ impl VodServe {
         // so a crash cannot erase the only durable key needed to collect the
         // node-local database row.
         self.shared.reconcile_obsolete_encoded_generations().await;
+        self.shared
+            .retained_artifacts
+            .collect(&self.shared.base)
+            .await;
 
         let terminal_cleanups = {
             let sessions = self.shared.sessions.lock().await;
@@ -319,8 +323,15 @@ impl VodServe {
                 .map(Arc::clone)
                 .collect()
         };
+        let mut offered = false;
         for rendition in renditions {
             rendition.kick();
+            if !offered {
+                offered = crate::vodserve::retained::RetainedArtifactRegistry::offer(
+                    &self.shared,
+                    &rendition,
+                );
+            }
         }
         self.shared.prune_session_lifecycles();
         self.shared.prune_rendition_builds();
@@ -578,7 +589,10 @@ impl VodServe {
         )
         .await
         {
-            Ok(ready) => Ok(Some(ready)),
+            Ok(mut ready) => {
+                ready.observed_media_duration_ms = plan_media_duration_ms(rendition, index);
+                Ok(Some(ready))
+            }
             // The manifest lied — treat as planned; reconcile repairs it.
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(VodError::Io(error)),

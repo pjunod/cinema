@@ -98,7 +98,7 @@ impl TranscodeManager {
             None,
             None,
             None,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
         )
         .await
         .map(|creation| creation.info)
@@ -120,7 +120,37 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Live,
+            (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
+        )
+        .await
+    }
+
+    /// Start a provisional make-before-break worker only from spare capacity.
+    pub(crate) async fn create_cluster_session_for_receiver(
+        &self,
+        request: (&SessionRequest, Option<u8>, Option<&RetainedOutputFacts>),
+        recovery: &SessionRecoveryIdentity,
+        user_name: &str,
+        deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
+    ) -> Result<ClusterSessionStart, String> {
+        let capture = if request.1 == Some(1) {
+            request
+                .2
+                .cloned()
+                .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                    crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                })
+        } else {
+            crate::vodserve::RetainedOutputCapture::ReceiverUnavailable
+        };
+        self.create_cluster_session_with_priority(
+            request.0,
+            recovery,
+            user_name,
+            deadline,
+            admitted_serving_generation,
+            (Priority::Live, capture),
         )
         .await
     }
@@ -143,7 +173,10 @@ impl TranscodeManager {
             user_name,
             deadline,
             admitted_serving_generation,
-            Priority::Speculative,
+            (
+                Priority::Speculative,
+                crate::vodserve::RetainedOutputCapture::New,
+            ),
         )
         .await
     }
@@ -155,7 +188,7 @@ impl TranscodeManager {
         user_name: &str,
         deadline: tokio::time::Instant,
         admitted_serving_generation: u64,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<ClusterSessionStart, String> {
         let user_id = recovery.user_id;
         let serving_admission = ClusterServingAdmission {
@@ -265,7 +298,10 @@ impl TranscodeManager {
             Some(deadline),
             Some(takeover),
             None,
-            Priority::Live,
+            (
+                Priority::Live,
+                crate::vodserve::RetainedOutputCapture::ReceiverUnavailable,
+            ),
         )
         .await
         .map(|creation| creation.info)
@@ -453,8 +489,9 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
-        priority: Priority,
+        priority: (Priority, crate::vodserve::RetainedOutputCapture),
     ) -> Result<SessionCreation, String> {
+        let (priority, retained_capture) = priority;
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
@@ -472,18 +509,27 @@ impl TranscodeManager {
             ));
         }
         let claim = match req.request_id.as_deref() {
-            Some(key) => match self.claim_request(key, req, supersession_user).await? {
-                Claimed::Recovered(info) => {
-                    if let Some(admission) = serving_admission {
-                        self.require_cluster_serving_authority(admission)?;
+            Some(key) => {
+                match self.claim_request(key, req, supersession_user).await? {
+                    Claimed::Recovered(info) => {
+                        if matches!(
+                            retained_capture,
+                            crate::vodserve::RetainedOutputCapture::ReceiverUnavailable
+                        ) && info.retained_output.is_some()
+                        {
+                            return Err(vod_refusal_error("retained_artifact_unavailable", "a legacy receiver cannot rebind an already issued retained artifact"));
+                        }
+                        if let Some(admission) = serving_admission {
+                            self.require_cluster_serving_authority(admission)?;
+                        }
+                        return Ok(SessionCreation {
+                            info: *info,
+                            created: false,
+                        });
                     }
-                    return Ok(SessionCreation {
-                        info: *info,
-                        created: false,
-                    });
+                    Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
                 }
-                Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
-            },
+            }
             None => None,
         };
         let normalized;
@@ -530,6 +576,7 @@ impl TranscodeManager {
                     replacement_deadline,
                     takeover.is_some(),
                     serving_admission,
+                    retained_capture,
                 )
                 .await;
             tracing::info!(
@@ -1122,6 +1169,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
         serving_admission: Option<ClusterServingAdmission>,
+        retained_capture: crate::vodserve::RetainedOutputCapture,
     ) -> Result<StartInfo, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
@@ -1181,7 +1229,95 @@ impl TranscodeManager {
                 encoding.options.pipeline,
             )
         });
+        let measured_candidate = if let Some(context) = req.candidate_context.as_ref() {
+            use plurx_core::playback::candidate::{CandidateId, CandidateRoute};
+            let actual_grade = encoding.as_ref().map_or_else(
+                || super::manager_candidates::copy_candidate_grade(&file),
+                |encoding| encoding.options.pipeline.output_grade(),
+            );
+            let (actual, route) = if let Some(encoding) = &encoding {
+                (
+                    self.candidate_recipe_digest(&encoding.plan, req.presentation)?,
+                    CandidateRoute::Encode,
+                )
+            } else if let SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } = req.kind
+            {
+                let source = crate::fragment_index_cluster::open_source_fence(&file, None).await?;
+                let executable = crate::ffmpeg::EncodedExecutable::capture()
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let engine = crate::ffmpeg::EncodedEngine::capture(None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let raster = file
+                    .width
+                    .and_then(|value| u32::try_from(value).ok())
+                    .zip(file.height.and_then(|value| u32::try_from(value).ok()))
+                    .ok_or_else(|| {
+                        vod_refusal_error("candidate_recipe_changed", "copy geometry is unknown")
+                    })?;
+                let actual = super::manager_candidates::copy_candidate_recipe_digest(
+                    &file,
+                    req.audio_index,
+                    file.audio_offset_ms,
+                    req.subtitle_burn,
+                    (aac, preserve_dolby_vision, convert_dolby_vision),
+                    Some(source.object_version()),
+                    Some(&executable.digest),
+                    Some(&engine.digest),
+                    raster,
+                );
+                if !source.unchanged() {
+                    return Err(vod_refusal_error(
+                        "candidate_recipe_changed",
+                        "copy source changed during equality validation",
+                    ));
+                }
+                (actual, CandidateRoute::Remux)
+            } else {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "no actual candidate route",
+                ));
+            };
+            if actual != context.recipe_digest
+                || CandidateId::for_recipe_digest(actual) != context.candidate_id
+                || actual_grade != context.grade
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "actual execution differs from the accepted candidate",
+                ));
+            }
+            Some(crate::vodserve::RetainedCandidateBinding {
+                candidate_id: context.candidate_id,
+                recipe_digest: actual,
+                file_id: file.id,
+                audio_index: req.audio_index,
+                audio_offset_ms: file.audio_offset_ms,
+                subtitle_burn: req.subtitle_burn,
+                grade: context.grade,
+                route,
+            })
+        } else {
+            None
+        };
         let prepared = crate::vodserve::VodRecipeRequest {
+            measured_candidate,
+            retained_capture: match retained_capture {
+                crate::vodserve::RetainedOutputCapture::New => req
+                    .candidate_context
+                    .as_ref()
+                    .and_then(|context| context.retained_output.clone())
+                    .map_or(crate::vodserve::RetainedOutputCapture::New, |facts| {
+                        crate::vodserve::RetainedOutputCapture::Restore(Some(facts))
+                    }),
+                existing => existing,
+            },
             request: req,
             encoding,
         };
@@ -1257,6 +1393,11 @@ impl TranscodeManager {
             self.record_codec_qualification_session(encoder, grade, Some(pipeline));
         }
         Ok(StartInfo {
+            retained_output: self
+                .vod
+                .hls_facts(&start.session_id)
+                .await
+                .and_then(|facts| facts.response_owner.retained_output_facts()),
             audio_delivery: self
                 .vod
                 .hls_facts(&start.session_id)
@@ -1560,6 +1701,10 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        measured_candidate: None,
+                        retained_capture: crate::vodserve::RetainedOutputCapture::Restore(
+                            remote.retained_output.clone(),
+                        ),
                         request: &req,
                         encoding,
                     },

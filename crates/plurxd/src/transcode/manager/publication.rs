@@ -907,6 +907,14 @@ impl TranscodeManager {
             Err(_) => return HlsPresentationResolution::StateChanged,
         };
         if let Some(facts) = vod_facts {
+            let retained_output = facts.response_owner.retained_output_facts();
+            let measured_bandwidth =
+                retained_output
+                    .as_ref()
+                    .map(|facts| plurx_core::transcode::OutputBandwidth {
+                        average_bps: facts.average_bps,
+                        peak_bps: facts.peak_bps,
+                    });
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
                 let grade = encoding.options.pipeline.output_grade();
@@ -923,8 +931,12 @@ impl TranscodeManager {
                 }
                 return HlsPresentationResolution::Ready(
                     HlsContext {
-                        codec_facts: Some(FrozenHlsCodecFacts::encoded(&encoding.plan)),
-                        bandwidth: encoding.plan.output_contract().output_bandwidth(),
+                        codec_facts: Some(
+                            FrozenHlsCodecFacts::encoded(&encoding.plan)
+                                .with_retained_output(retained_output),
+                        ),
+                        bandwidth: measured_bandwidth
+                            .or_else(|| encoding.plan.output_contract().output_bandwidth()),
                         file_id: file.id,
                         start_seconds: 0.0,
                         media_origin_seconds: 0.0,
@@ -970,12 +982,15 @@ impl TranscodeManager {
             let codecs = audio_delivery_hls_codecs(codecs, facts.audio_delivery.as_ref());
             return HlsPresentationResolution::Ready(
                 HlsContext {
-                    codec_facts: Some(FrozenHlsCodecFacts::audio(
-                        facts.audio_delivery.as_ref(),
-                        !facts.file.audio_streams.is_empty(),
-                        facts.aac,
-                    )),
-                    bandwidth: None,
+                    codec_facts: Some(
+                        FrozenHlsCodecFacts::audio(
+                            facts.audio_delivery.as_ref(),
+                            !facts.file.audio_streams.is_empty(),
+                            facts.aac,
+                        )
+                        .with_retained_output(retained_output),
+                    ),
+                    bandwidth: measured_bandwidth,
                     file_id: facts.file.id,
                     start_seconds: 0.0,
                     media_origin_seconds: 0.0,

@@ -449,6 +449,7 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
+            measured_candidate: prepared.measured_candidate,
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
@@ -498,7 +499,30 @@ impl VodServe {
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
+        let retained_output = match prepared.retained_capture {
+            RetainedOutputCapture::Restore(Some(ref expected)) => Some(
+                self.shared
+                    .retained_artifacts
+                    .acquire_expected(expected, &rendition)
+                    .ok_or_else(|| {
+                        crate::transcode::vod_refusal_error(
+                            "retained_artifact_unavailable",
+                            "the issued output artifact cannot be exactly reacquired",
+                        )
+                    })?,
+            ),
+            RetainedOutputCapture::Restore(None) | RetainedOutputCapture::ReceiverUnavailable => {
+                None
+            }
+            RetainedOutputCapture::New => rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock")
+                .complete_rates()
+                .and_then(|rates| self.shared.retained_artifacts.acquire(&rates.identity)),
+        };
         let replacement = Session {
+            retained_output,
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),

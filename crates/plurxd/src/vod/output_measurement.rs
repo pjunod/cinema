@@ -17,6 +17,22 @@ struct OutputObservation {
     served_init: String,
     reducer: FullOutputMeasurement,
     complete_tail: bool,
+    members: Vec<Option<ObservedOutputMember>>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ObservedOutputMember {
+    pub(super) bytes: u64,
+    pub(super) digest: [u8; 32],
+    pub(super) publication: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct CompleteOutputObservation {
+    pub(super) rates: CompleteOutputRates,
+    pub(super) epoch: u64,
+    pub(super) served_init: String,
+    pub(super) members: Vec<ObservedOutputMember>,
 }
 
 impl Default for PublishedOutputMeasurement {
@@ -39,8 +55,9 @@ impl PublishedOutputMeasurement {
         init: &InitIdentity,
         epoch: u64,
         entry: u32,
-        bytes: u64,
+        member: ObservedOutputMember,
     ) {
+        let bytes = member.bytes;
         if self.refused {
             return;
         }
@@ -59,6 +76,9 @@ impl PublishedOutputMeasurement {
             observation
                 .reducer
                 .observe(observation.origin, entry as usize, bytes);
+            if let Some(slot) = observation.members.get_mut(entry as usize) {
+                *slot = Some(member);
+            }
             return;
         }
         let mut hash = Sha256::new();
@@ -107,6 +127,7 @@ impl PublishedOutputMeasurement {
                     &durations,
                 ),
                 complete_tail: false,
+                members: vec![None; durations.len()],
             });
         }
         if let Some(observation) = self.observation.as_mut() {
@@ -115,6 +136,9 @@ impl PublishedOutputMeasurement {
                 return;
             }
             observation.reducer.observe(origin, entry as usize, bytes);
+            if let Some(slot) = observation.members.get_mut(entry as usize) {
+                *slot = Some(member);
+            }
         }
     }
 
@@ -134,5 +158,28 @@ impl PublishedOutputMeasurement {
         }
         let observation = self.observation.as_ref()?;
         observation.reducer.rates(observation.complete_tail).ok()
+    }
+
+    pub(super) fn complete_observation(&self) -> Option<CompleteOutputObservation> {
+        let rates = self.complete_rates()?;
+        let observation = self.observation.as_ref()?;
+        Some(CompleteOutputObservation {
+            rates,
+            epoch: observation.epoch,
+            served_init: observation.served_init.clone(),
+            members: observation
+                .members
+                .iter()
+                .cloned()
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+
+    pub(super) fn matches_origin(&self, identity: &[u8; 32], epoch: u64, init: &str) -> bool {
+        self.observation.as_ref().is_some_and(|observation| {
+            &observation.origin == identity
+                && observation.epoch == epoch
+                && observation.served_init == init
+        })
     }
 }
