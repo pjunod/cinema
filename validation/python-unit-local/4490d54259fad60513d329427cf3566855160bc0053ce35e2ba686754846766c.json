@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/k06-mixed-store-identity",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_k06_owned_lab_identity.py",
+  "test_file_sha256": "46f664d9fb3142ffd3846dc7ea98ed6a99bc6ccdb1697a124af328256af0b311",
+  "test_ids": ["test_k06_owned_lab_identity.OwnedClockLabIdentityTests.test_mixed_store_preflight_binds_exact_config_layers_and_node_identity"],
+  "command": "python3 -m unittest tests.operations.test_k06_owned_lab_identity.OwnedClockLabIdentityTests.test_mixed_store_preflight_binds_exact_config_layers_and_node_identity -v",
+  "output": "test_mixed_store_preflight_binds_exact_config_layers_and_node_identity (tests.operations.test_k06_owned_lab_identity.OwnedClockLabIdentityTests.test_mixed_store_preflight_binds_exact_config_layers_and_node_identity) ... ok\n\nRan 1 test in 0.001s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}
