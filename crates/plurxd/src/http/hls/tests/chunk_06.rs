@@ -412,6 +412,44 @@
         assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
     }
 
+    #[tokio::test]
+    async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let state = resolver_state();
+        let library = state.store.create_library(&NewLibrary {
+            name: "A05 geometry promotion".into(), kind: LibraryKind::Movies,
+            paths: vec![], anime: false,
+        }).await.expect("library");
+        let item = state.store.insert_item(&NewItem {
+            library_id: library.id, kind: ItemKind::Movie, parent_id: None,
+            title: "geometry promotion".into(), year: None,
+            season_number: None, episode_number: None,
+        }).await.expect("item");
+        let id = state.store.upsert_file(item, "/media/a05-geometry.mkv", 1000, 1, &ProbeResult {
+            video_codec: Some("h264".into()), width: Some(3840), height: Some(2160),
+            bit_depth: Some(8), raw_json: Some(serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                "width":3840,"height":2160,"pix_fmt":"yuv420p",
+                "sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"
+            }]}).to_string()), ..Default::default()
+        }).await.expect("file");
+        let source = state.store.get_file(id).await.expect("file read").expect("source");
+        let body = CreateSession {
+            playback_id: "geometry-auto".into(), copy: Some(true), quality_auto: Some(true),
+            caps: Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{
+                "codec":"h264","max_width":1920,"max_height":1080
+            }]})).expect("bounded decoder caps")), ..bare_create()
+        };
+        assert!(!body.candidate_auto_policy(), "the original wire copy was not candidate Auto");
+        let resolved = resolve_plan(PlanInputs {
+            state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None,
+        }, None, body).await.expect("geometry-promoted plan");
+        assert!(matches!(resolved.request.kind, crate::transcode::SessionKind::Transcode { .. }));
+        assert!(resolved.candidate_auto_policy, "response policy must follow actual normalized Auto");
+        assert_eq!(resolved.intent_fingerprint, resolved.request.durable_intent_fingerprint(7),
+            "the private resolved policy field does not alter request identity");
+    }
+
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
         let body = CreateSession {
             playback_id: "player-a".into(),
