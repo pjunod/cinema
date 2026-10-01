@@ -51,6 +51,26 @@ alongside the real removal consumer; boolean assertions are not authority.
 The following consumer milestone must preserve commit-unknown takeover
 reconciliation even when a later clock ticket refuses new acquisition.
 
+**2026-10-01 private consumer preparation:** coordinator `agent:/root`
+owns `codex/k06-consumer-preparation-20261001`, based on actual effort
+`11ad24fb` plus the additive current-main preservation composition `4fef53b9`.
+Under Paul's delegated routine-decision instruction, preparation now extends
+to E1 consumer source while the owned measurement window is unavailable.
+This supersedes the E0-only preparation limit, not the successful-measurement
+requirement before enforcement enters the effort. No push, rollout, production
+clock step or qualification is implied. Keep this source private until the
+identified receipt exists and the complete consumer scope has one review,
+focused evidence and the current gate.
+
+The first working slice connects completed-positive-round readiness to
+`/readyz` and the existing Store-free operations projection. Maintenance,
+quorum and Store failures retain precedence; Unknown is not positive clock
+violation, scraping never counts rounds, and liveness is unchanged. Typed
+consumer admission counters have exactly three decisions by four refusal
+causes; pure policy inspections and scrapes remain uncounted. Takeover,
+membership, fenced-target removal and the final enforcing Developer facts
+are still pending, so this is not complete enforcement or a merge candidate.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

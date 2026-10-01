@@ -94,6 +94,13 @@ The later 24-hour enforcing observation and explicitly approved disposable
 clock-step drill remain final acceptance. There is no enablement switch or
 gate, and this ruling authorizes no deployment, lab launch or clock step.
 
+**2026-10-01 private preparation extension:** coordinator `agent:/root`
+prepares E1 consumer source on `codex/k06-consumer-preparation-20261001`,
+as recorded in the [enforcement plan](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md).
+This extends preparatory source beyond E0 only; successful identified
+measurement evidence remains mandatory before enforcement effort integration.
+There is no new switch, reduced acceptance or deployment authorization.
+
 Board id **K-06**. A node that steps its clock must not be able to steal
 every session in the fleet, and an operator must be able to see the offset
 before it does. Concretely: each node continuously measures its clock offset
