@@ -1,0 +1,907 @@
+# Continuous quality — build uninterrupted resolution changes
+
+**Status:** adversarially reviewed; ready for isolated CQ0; production work
+waits for the upstream dependency in §1.2 · **Written:** 2026-09-30 ·
+**Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
+· **Effort:** `effort/continuous-quality`
+
+This is the implementation contract for Paul's request to remove the pause,
+flash and audio seam during quality changes on every client, starting with
+the web. Read §2–§5 before building, execute §9 in order, and keep the evidence
+in §10. The September 16
+[continuity build](QUALITY-SWITCH-CONTINUITY-BUILD.md) explains how prepared
+replacements became reachable; this document supersedes its mandatory
+reopen-on-failure policy, its Apple item-swap constraint, and its exclusion
+of multivariant HLS **for this effort**. Existing production behavior remains
+as implemented until the corresponding milestone lands.
+
+Companions: [adaptive quality](../streaming/ADAPTIVE-QUALITY.md),
+[lifecycle coverage](PLAYBACK-LIFECYCLE-COVERAGE.md),
+[web asset layout](../clients/WEB-SHELL-LAYOUT.md),
+[development pipeline](../DEVELOPMENT_PIPELINE.md), and the
+[adversarial review](CONTINUOUS-QUALITY-REVIEW.md). Re-verify source symbols
+at build time; the source has moved since the older continuity documents.
+
+## 1. Outcome — changing quality must not restart healthy playback
+
+The viewer can select a resolution or remain in Auto while the film keeps
+moving and audio keeps playing. The requested quality can take time to
+arrive. A failed optional change leaves healthy playback running and gives
+a truthful, nonblocking result. The quality shown as delivered changes only
+when that rendition is actually presented.
+
+There are two delivery mechanisms:
+
+1. **Continuous rendition switching** within a compatible HLS presentation.
+   Keep the player, media attachment, audio rendition and film timeline;
+   switch video segments at an independently decodable boundary.
+2. **Prepared pipeline replacement** when the delivery family changes, such
+   as source-copy to transcode or a codec/HDR/audio change. Keep the current
+   picture until the destination has real presentation evidence. This remains
+   a separately measured path and earns no automatic claim of continuity.
+
+The order is deliberate: instrument and repair existing web behavior first,
+then build continuous HLS, then adopt it on the native clients. Completing
+web work does not close the native acceptance rows.
+
+### 1.1 Scope and guardrails
+
+| In scope | Boundary and reason |
+|---|---|
+| VOD manual quality and Auto rung changes | The reported issue; preserve existing selection and recovery authority. |
+| Web hls.js, native Safari HLS, iOS, tvOS, Android phone and TV | Each engine requires its own evidence. Playwright WebKit is not physical Safari evidence. |
+| Compatible bitrate/resolution changes | Start with H.264 SDR and shared AAC audio; extend to compatible HEVC/HDR families only with the same tests. |
+| Existing prepared path | Repair failure policy and presentation ownership across all clients. |
+| Server rendition ownership, admission, cancellation and telemetry | A playlist alone does not supply an on-demand encoder. |
+| Live TV, DRM, offline downloads, audio-track changes, burn-track changes | Preserve behavior and run regressions; do not convert them into the first continuous ladder. |
+| HDMI output-mode changes | Measure separately. Codec/HDR/frame-rate output changes can require a display renegotiation; no promise that a software fade removes it. |
+| Native Auto policy rewrite | Out of scope. Integrate with the existing policy and the [native quality design](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md), rather than replacing its authority accidentally. |
+
+No CSS fade, still-frame cover, zero dropped-frame counter or successful HTTP
+response is evidence that moving pictures and audio continued.
+
+### 1.2 Concurrent work — consume display-aware Auto, do not rebuild it
+
+Paul explicitly required non-overlap with **Check Cinema transcoding
+resolutions**, session `01a0f484-4b71-76d2-acfe-0b0975249d9c`. Its live work
+was inspected on 2026-09-30 in the independent clone
+`/private/tmp/plurx-auto-quality`, branch `codex/display-aware-auto-quality`,
+HEAD `424f7d1625ddab2556cb18e84579164c08008f0b`, with additional uncommitted
+implementation. That source is a moving dependency, not a branch to edit or
+cherry-pick selectively. Its `DISPLAY-AWARE-AUTO-QUALITY-PLAN.md` §4.2 and
+§7 own voluntary handoff safety, admission, candidate routing and native Auto.
+Its latest updates explicitly describe failed-upgrade retention and spare-slot
+admission fixes in progress. No message was sent to that session and no claim
+is made that its owner agreed to transfer work.
+
+| Responsibility | Owner / rule for this effort |
+|---|---|
+| Display fit, 1440/intermediate rungs, candidate identities, recipe/rate and manifest bandwidth correctness | Existing display-aware Auto session. Consume its resolved candidates; do not create another ladder or redo those fixes. |
+| Auto reducers, transfer telemetry, original restoration, cooldowns, voluntary-upgrade retain-current and spare-capacity admission | Existing session. CQ1 verifies its landing and adds only any still-missing manual-change/continuous-media behavior. |
+| Strict parser floor, route negotiation, target/capability revisions and existing prepared ownership | Existing session. CQ2a first reuses its landed contracts; extend only the independently missing cancellation/rendition semantics. No competing discovery/negotiation stack. |
+| Same-player video-segment changes, shared audio, append provenance, bounded rendition serving, presentation capture | This effort's new scope. Production integration waits for the dependency boundary below. |
+| Existing player, server, policy and fixture files edited by both plans | Serialize after the existing session lands and releases those surfaces. An isolated branch prevents accidental edits, but does not prevent duplicated work. |
+
+**Immediate build allowance:** CQ0 may start now in this effort's independent
+clone. Own new investigative files only: `scripts/continuous-quality-lab.mjs`
+and `tests/playback/continuous-quality/`, plus this build/review record. Use
+read-only copies of the vendored library and generated media under this
+clone's `target/continuous-quality/`. Do not edit the shared playback lab,
+existing fixtures, production Rust/JS/Swift/Kotlin, settings, or the other
+session's checkout during this phase. The new lab is a disposable/integrable
+feasibility probe, not a second production acceptance oracle; its captures
+must later be wired into the existing playback lab.
+
+**Dependency boundary before production edits:** read that session's current
+status and source diff again, identify its completed landing commit(s), fetch
+authoritative main, and record the integrated base and ownership map in §10.
+The upstream implementation must be landed and no longer actively editing
+our shared surfaces, or the user must explicitly reassign a concrete scope.
+Do not infer completion from a green compile or a clean checkout. Reconcile
+CQ1/CQ2a against the landed behavior, remove duplicate tasks, and obtain an
+adversarial delta review of that integration before CQ2a or other production
+work begins. This is dependency serialization, not a feature enable gate.
+
+If the dependency is still active after CQ0, finish the independently owned
+prototype, retain its results and report the exact dependency; do not start
+parallel versions of upstream fixes just to keep producing code. Starting the
+Sol session does not authorize taking over the existing task. Do not send it
+messages without direct user authorization to message that task.
+
+## 2. Current code — the remaining seams are real
+
+The following findings were checked in the source, not reproduced on the
+user's devices. They are an investigation baseline, not a fleet verdict.
+
+| Surface | Anchor | Consequence |
+|---|---|---|
+| Server master | [`master_playlist_with_shape`](../../crates/plurxd/src/http/hls/playlist_text.rs) emits one `EXT-X-STREAM-INF` | The JSON ladder does not give the playback engine multiple video variants. |
+| Web offer and fallback | [`requestQualityChange` / `fallBackDirectedChange`](../../crates/plurxd/src/web/player/directed-change.js) | A failed offer/alignment goes to a reopen, including while the incumbent is healthy. |
+| Web exposure | [`commitPreparedReplacement` / `exposePreparedReplacementAtFrame`](../../crates/plurxd/src/web/player/prepared-replacement.js) | Two independent video/audio clocks; `PREPARED_ALIGN_SLACK_MS=250`; presentation proof then DOM layer/audio ownership swap. |
+| Web retirement and measurement | [`prepared-switch-measurement.js`](../../crates/plurxd/src/web/player/prepared-switch-measurement.js) | Delayed teardown already exists; do not propose it as missing. Dropped counters are insufficient for a held or black frame. |
+| Apple commit | [`commitPreparedSuccessor`](../../clients/apple/Sources/PlayerController.swift) | Removes the prepared item from its staging player, then calls `replaceCurrentItem` on the visible player. Preparation is not preservation of the display pipeline. |
+| Android commit | [`commitPreparedReplacement`](../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt) and [`PlayerScreen`](../../clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt) | Pauses the predecessor and repoints `PlayerView` before the successor can report its first frame on that surface. |
+| Wire | [`playback_control.rs`](../../crates/plurxd/src/playback_control.rs) | Strict enum/field validation, retained capabilities, sequence/epoch fencing; adding a field is not universally safe. |
+| Producer | [`vodencode.rs`](../../crates/plurxd/src/vodencode.rs), [`vodserve.rs`](../../crates/plurxd/src/vodserve.rs) | Reuse rational frame-grid, immutable artifact publication and existing admission. Do not add another unmanaged FFmpeg launcher. |
+
+Existing wire vocabulary, copied from the source in abridged form:
+
+```rust
+enum QualitySelection {
+    Auto { height: Option<i64>, candidate_id: Option<CandidateId> },
+    Original,
+    Manual { height: i64 },
+}
+// DynamicCapabilities uses deny_unknown_fields.
+// ControlAction::Prepare is advertised as "prepare_replacement".
+// delivery.preparation is exactly "staging" | "offered" | "none".
+```
+
+Do not overload `candidate_id`: it already belongs to negotiated playback
+route identity. Do not add a fourth `delivery.preparation` string. A new
+rendition transaction must have independently negotiated vocabulary.
+
+## 3. Decisions — continuous media and one decision owner
+
+1. **Use multivariant HLS for compatible changes.** Keep one media element
+   or native player item. The server may own several rendition producers,
+   but the viewer still owns one playback session and one timeline.
+2. **Keep audio continuous.** A video-only quality change references the same
+   audio playlist, init and sample sequence. Independently encoding AAC for
+   each video rung risks different priming, padding and clocks.
+3. **Preserve the existing adaptation policy first.** In the hls.js path,
+   Plurx chooses the rung and hls.js schedules the media switch. Do not run
+   independent native ABR and Plurx Auto controllers against each other.
+   Native engines that cannot expose equivalent control get an explicit
+   adapter contract and feasibility result, not a guessed equivalent.
+4. **Protect healthy playback from failed optional changes.** Failure is
+   `retained_current`, not an automatic reopen. Genuine supply/decode failure
+   still follows the existing recovery policy and budgets.
+5. **Do not advertise cold work as ready.** Variant availability and selected
+   fragment readiness are different facts. A controlled client prepares the
+   target range before selecting the variant. An autonomous engine needs a
+   proven bounded producer policy; listing all rungs is not that policy.
+6. **No unbounded ladder fan-out.** Per playback, at most two active video
+   rendition producers and one shared audio producer when needed. Controlled
+   clients normally need one video producer outside overlap. An autonomous
+   two-rung master instead reserves delivery capacity for both rungs for its
+   entire attachment (§5.4); it cannot borrow optional capacity and promise
+   arbitrary future selection. Count audio, decoder, GPU and source-reader
+   costs explicitly.
+7. **Separate requested, scheduled and presented quality.** Neither a menu
+   tap nor a fetched segment changes the delivered badge or active producer
+   attribution prematurely.
+
+```text
+ selection / Auto decision
+            │
+            ▼
+ one quality intent owner ──▶ prepare target film interval
+            │                         │
+            │ failure                 │ media ready + intent still current
+            ▼                         ▼
+ retain current playback       schedule compatible video segments
+                                      │
+                              first target frame presented
+                                      │
+                              settle + retire old demand
+
+ incompatible presentation ──▶ prepared pipeline replacement
+ unhealthy incumbent ────────▶ existing recovery owner and budget
+```
+
+## 4. Intent and failure contract — every request settles once
+
+### 4.1 One transaction spans preparation through presentation
+
+Add a shared test fixture for the following state vocabulary, with adapters
+in JS, Swift and Kotlin. These are proposed states, not existing wire names:
+
+```text
+requested → preparing → ready → scheduled → appended → presented
+     └────────────┴────────┴───────┤                │
+                    retained_current / superseded │
+                                                  └→ observation_unknown
+ actual playback failure ────────────────────────────▶ recovery_owned
+```
+
+`scheduled` reserves a boundary but has not appended target media.
+`appended` is an irreversible local media commitment: the player may display
+those bytes even if the viewer changes their mind. Every append records the
+rendition, transaction, exact film interval and buffer/attachment identity.
+Keep this provenance until the interval is consumed or demonstrably removed
+by an independent seek/teardown. Superseding the newest **intent** does not
+cancel reality already committed to the playback buffer.
+
+Identity is `(playback_id, generation, control_epoch, intent_revision,
+transaction_id)`. Revision increments on each new viewer/Auto command;
+transport retries reuse the transaction. Existing request sequencing remains
+independent. Capture current source position at use time, never reuse the
+tap position as a reopen/seek position.
+
+Keep three facts independently:
+
+- **Preference:** saved Auto / Original / Manual height; remains the viewer's
+  choice even if a particular attempt cannot be fulfilled.
+- **Pending target:** this transaction's requested rendition and state.
+- **Presented:** actual media rendition at the current film time.
+
+Only a transaction with no target bytes appended may settle
+`retained_current` or cancel all of its dependencies. After append, a newer
+choice stops further old-target requests, but the existing interval remains
+scheduled. The new choice starts at the next uncommitted boundary. The UI
+may therefore briefly report an earlier scheduled rendition while showing a
+newer pending choice. Presentation updates are ordered by film-time interval
+and attachment, not simply by the newest intent revision.
+
+A three-rung change can leave bytes from three renditions buffered without
+three live producers. Release producer demand for intervals already fully
+materialized, retain their artifact/reader pins, and admit at most two live
+video producers. If that bound cannot be met, defer the newest request or
+retain the currently scheduled media; never drop its pins to admit a third
+encoder. Bound queued provenance to the existing forward-buffer byte/time
+limits and refuse new scheduling rather than evict unresolved entries.
+
+On `retained_current`, clear pending selection and the wire change trigger
+without silently changing the saved preference. Otherwise every reporter
+tick restages the same failed choice. A later explicit Retry/new selection
+gets a new revision. Auto clears its switching latch and resumes the existing
+cooldown/evidence policy; it cannot retry the same failed target every tick.
+
+### 4.2 Failure routing is decided from current evidence
+
+| Event | Healthy incumbent | Unhealthy incumbent |
+|---|---|---|
+| No offer, admission refusal, target timeout | Cancel target; retain current; manual choice receives a small nonblocking explanation and Retry. | Hand control to existing recovery policy once; use its cause, rung floor and reopen budget. |
+| Target corrupt, incompatible or cannot align | Retain current; mark this attempt failed; never invent a capability opt-out. | Same recovery owner; no second fallback owner. |
+| Target frame fails after visual exposure | Roll back only if the predecessor is still viable and aligned; otherwise recovery owns it. | Recovery owns it. Do not send `presented` for a black successor. |
+| New choice | Supersede unappended work only; preserve committed intervals and schedule the latest choice after the append frontier. | The recovery owner receives the latest preference. |
+| Seek, stop, navigation, end of title | The independent transport action owns buffer removal/attachment teardown and can release discarded intervals after it completes. No abandoned quality fallback. | The newer command owns the result. |
+| Pause / resume / rate / mute / background | Preserve current transport intent; invalidate stale timing decisions. A paused switch may buffer, but cannot claim a newly presented moving frame. | Preserve existing lifecycle and recovery behavior. |
+
+Use existing playback-surface and supply/decode evidence; **quality-target
+failure is never evidence that the incumbent failed**. Health changes while
+waiting are handled at that moment. Unknown health does not authorize an
+optional destructive reopen. Expose a deliberate "Apply with restart" action
+for a manual request that cannot transition continuously; show its cost and
+sample the then-current playhead. Do not silently repurpose Retry as restart.
+
+The present 12,000 ms offer budget is retained for optional preparation.
+Before append, a 30,000 ms active-time control budget bounds scheduling and
+revalidation. Missing that budget safely retains the already scheduled
+playback and cancels only the unappended target. Before appending, compute
+and record the expected presentation time from boundary PTS, current PTS
+and playback rate. Healthy prebuffer may make that time more than 30 seconds
+from the tap; report the actual expected delay rather than promising a false
+30-second presentation bound or flushing playable media.
+
+After append, the observation deadline is expected boundary presentation
+plus 2,000 ms of active wall time, recalculated on rate changes. Missing it
+means `observation_unknown` or genuine recovery, never `retained_current`.
+Continue observing committed provenance without restaging the request; a
+late frame can still resolve its presentation receipt. Pause suspends this
+observation clock. Producer leases remain finite: paused playback renews
+bounded artifact retention through the parent lifecycle and does not keep
+encoding indefinitely. End-of-title before any append settles
+`retained_current/no_remaining_boundary`; if bytes are already appended,
+end-of-title records whether their interval was consumed and closes it.
+
+### 4.3 Cancellation must work before an offer exists
+
+The old reopen incidentally superseded the predecessor and canceled its
+speculative producer. Retaining the incumbent removes that cancellation edge.
+Therefore CQ2a supplies an explicit cancel-by-intent operation, negotiated
+with the owner, before CQ1 consumes it. It covers planning, reservation,
+queued admission, priming, offered and scheduled-but-unappended work.
+Cancellation is idempotent and cannot cancel a newer revision or release
+committed media dependencies. For an appended transaction it cancels only
+future unappended work and returns the committed intervals it retained.
+An old owner must not resurrect work after an epoch change.
+
+For old servers without this operation, restore the accepted control
+selection to the incumbent and stop repeating the failed ask; use an action
+abort when an offer exists. Do not claim one legacy deadline covers all
+work: the durable 330-second deadline starts during staging, while detached
+planning precedes it. Legacy cleanup retains its existing behavior. Test a
+late planning completion after incumbent selection has been restored; record
+any lingering work honestly. Immediate cancel-before-offer requires the
+negotiated CQ2a owner implementation.
+
+## 5. Media contract — one presentation, aligned renditions
+
+### 5.1 Compatibility is more than matching file and height
+
+The server resolves a presentation family from actual output facts:
+source revision · video codec/sample-entry family · dynamic range and color
+metadata · bit depth · rational frame grid · timeline/edit origin · audio
+track/codec/layout/sample rate/delay · subtitle mode and burn identity ·
+encryption identity, if any. Width, height and video bitrate vary inside the
+family. Encoder-specific parameter sets may vary where the player supports
+reconfiguration; they are not assumed byte-identical.
+
+M3 starts with H.264 SDR video and a shared AAC audio track. Silent media is
+a separate tested case. HEVC, HDR, VFR normalization and source-copy join are
+separate compatibility rows; an unverified join is not silently classified
+as compatible based on extensions or MIME type. Keep original source quality
+and existing audio capabilities on presentations outside the initial family.
+
+### 5.2 Exact encoded-media invariants
+
+- Use the existing rational frame grid and segment planner. Never hardcode
+  a remembered two- or four-second segment length.
+- A rendition's segment N covers the same source-time interval as segment N
+  in every compatible rendition. Validate decoded PTS as well as manifest
+  durations; `start_number` alone proves nothing.
+- Every advertised switching boundary starts with independently decodable
+  video. Verify closed-GOP/random-access behavior for each encoder; inspect
+  SPS/PPS or equivalent sample entries, DTS/PTS, B-frame offsets, sample
+  durations and first/last frame identities across the join.
+- Keep immutable, rendition-specific init URLs. Resolution-dependent init
+  bytes must never overwrite an earlier init at the same URL.
+- Preserve HLS media sequence, discontinuity sequence, film-time origin and
+  VOD duration across renditions. A discontinuity is not an excuse to reset
+  timestamps during an otherwise compatible quality change.
+- The shared audio playlist publishes each sample once on its own exact
+  sample clock. AAC priming, encoder delay, padding and final trimming must
+  remain consistent; the video switch cannot restart the audio encoder.
+- Preserve subtitle timing, A/V offset, chapters, playback rate and seek
+  coordinates. Burn changes leave this family and use replacement.
+
+Encode deterministic fixtures with numbered moving frames and a continuous
+audio reference. Decode joins at every supported boundary, including a cold
+start in the middle, non-zero source timestamps, 24000/1001 fps, B-frames,
+the final short segment and a seek followed immediately by a quality choice.
+
+### 5.3 Parent session, child renditions and route identity
+
+Extend the existing session/producer ownership model rather than turning
+every rung into another public playback session. One parent keeps the
+viewer lease, watch progress, resume state, authorization and control epoch.
+Children own immutable artifact/recipe identity, producer lease and demand.
+Reuse the current Store and actor conventions; durable publication requires
+epoch fencing, whereas the loaded client buffer is not durable state.
+
+Proposed negotiated route shape (new routes, not claims about existing API):
+
+```text
+/api/v1/hls/{parent}/master.m3u8
+/api/v1/hls/{parent}/video/{rendition}/index.m3u8
+/api/v1/hls/{parent}/video/{rendition}/init/{artifact}.mp4
+/api/v1/hls/{parent}/video/{rendition}/segment/{number}.m4s
+/api/v1/hls/{parent}/audio/{audio_rendition}/index.m3u8
+```
+
+`rendition` is an opaque server-issued identifier bound to the family and
+recipe, not a client-supplied arbitrary height/path. Child routes inherit
+parent authorization; possessing a cache key grants no read access. Range
+requests, relay, cancellation, cache hits and HEAD follow existing media
+authorization. Never put a bearer, source path or full credential URL in
+logs or retained evidence. Old single-rendition routes remain valid.
+
+One control reporter renews parent playback; child media requests renew only
+the demand they actually create. Browser prefetch/download is not proof of
+presentation. Child cancellation never retires the parent or another
+viewer's shared artifact. Retention pins cover the incumbent's playable
+interval and every committed target interval until it is consumed or removed
+by a completed transport action. Cancellation releases only uncommitted
+ranges; presentation of the first target frame alone does not unpin the
+rest of its buffered interval.
+
+### 5.4 JIT preparation has bounded ownership and honest availability
+
+For controlled switches, the client reports its **append frontier**, the end
+of video already committed to the playback buffer, separately from playhead
+and buffered runway. The server primes the target from the next valid
+boundary at or beyond that frontier, through at least two complete segments.
+The client rechecks coverage if loading advanced while priming. If the
+boundary is now stale, move preparation forward within the original budget;
+do not seek backward, erase healthy buffer or keep chasing without a bound.
+
+The manifest enumerates a stable compatible family for controlled clients.
+Only the client-selected, prepared rendition may drive a controlled load;
+disable the competing hls.js ABR selector. Every enumerated URI still needs
+a real bounded media-serving path for initial selection, retries and seeks.
+No empty/fake playlist, permanent 404, or unbounded HTTP wait for cold media.
+
+Autonomous engines may fetch any advertised variant and need a distinct
+policy. M0 must demonstrate what native Safari/AVPlayer actually requests,
+including initial selection, seeks, upgrade, downgrade and resource denial.
+Dynamic master refresh cannot be assumed; do not depend on removing an
+unready variant from a master the player already cached. Start autonomous
+experiments with two real renditions and warm media around current demand.
+An autonomous stable master must retain admission entitlement and renewable
+demand coverage for **both** advertised rungs for the entire attachment,
+including seeks and later reselection. Workers may idle behind sufficient
+runway, but capacity cannot be released as speculative work five seconds
+after the first switch. Account for both video entitlements and shared audio
+before attaching this master. These are foreground delivery commitments;
+new foreground demand cannot silently preempt the inactive advertised rung.
+This can reduce concurrent viewers and must be measured and documented.
+
+If this capacity cannot be admitted up front, choose the existing prepared
+presentation before attachment and report the reason. If infrastructure
+failure breaks an admitted entitlement later, route it as playback recovery,
+not a claimed harmless optional refusal. CQ0 tests pressure **after** the
+first switch, then reselection and a seek into a cold interval. A cached
+master remains a delivery obligation. Runtime delivery inability is distinct
+from advisory qualification status and never changes the saved setting.
+
+Per-parent producer bounds:
+
+| Resource | Limit / settlement |
+|---|---|
+| Controlled active video work | At most two producers; third choices cancel unappended work or wait. Materialized committed intervals can outlive their producer. |
+| Autonomous video work | Admission for both advertised rungs lasts until presentation teardown; at most two producers, with normal demand pacing. |
+| Shared audio work | At most one audio producer for the selected audio identity; count its CPU/source-reader admission separately. |
+| Optional preparation | 12,000 ms from intent to media ready; cancel rather than extend on retries. |
+| Controlled old video after switch | Release producer demand once all promised intervals are materialized and in-flight reads settle; at most 5,000 ms cleanup grace after that point. Preserve committed interval/shared-reader pins independently. |
+| Autonomous old video after switch | Do not apply the five-second release rule: it remains advertised and its admission/demand coverage lasts for the attachment. |
+| Lost client / lost acknowledgement | Parent/child lease expiry bounds work; no permanent warm ladder. |
+| Foreground contention | Controlled unappended preparation is preemptible before incumbent/audio; appended obligations survive. Autonomous advertised rungs are reserved foreground commitments. No contention result changes the saved switch. |
+
+Readiness checks media bytes and sustainable supply for the requested
+interval, not just reservation of a GPU slot. In failure tests verify that
+the second encode does not starve the first, even with a shared source reader
+or a software decoder bottleneck. Do not pre-encode the whole library.
+
+## 6. Wire and settlement — extending strict readers safely
+
+### 6.1 Negotiate before sending new fields
+
+After §1.2's dependency boundary, CQ2a reconciles the landed display-aware
+Auto parser/advertisement/cancellation infrastructure and adds only missing
+cancel-by-intent semantics. Reuse its negotiation entry point and deploy
+floor rather than adding a parallel mechanism. CQ1 consumes that contract;
+CQ2 later adds continuous-media transaction support. Cancellation support must be available
+for ordinary prepared replacements outside compatible rendition families.
+
+`ControlBootstrap`, `ControlRequestV1`, `ControlResponseV1` and
+`DynamicCapabilities` are strict readers. Do not send an additive field to an
+old one and assume it ignores it. The preferred discovery surface is the upstream negotiated owner/start
+advertisement. If it cannot safely express independent cancellation support,
+CQ2a proposes a versioned authenticated feature-discovery route in its delta
+review; an old server's 404 means unsupported. Either mechanism must resolve
+the active owner and return the intersection of ingress and owner support,
+bound to playback/generation/control epoch. It advertises
+`quality_cancel_v1` separately from `continuous_quality_v1`. Freeze the exact
+reused/extended route and schema in CQ2a and document implemented changes in
+the API reference.
+
+Only a client with discovery support sends the negotiated opt-in header on
+bootstrap/control requests, e.g. `Plurx-Control-Extensions: quality_cancel_v1`.
+Only mutually opted-in responses include the new bootstrap/envelope fields;
+old clients receive byte-compatible existing shapes. Relay must preserve the
+opt-in and verify the owner's support. A control epoch/owner change
+invalidates cached support before any further extended request; rediscover
+against the new owner. Unsupported ingress or owner produces a safe legacy
+response, never forwarding an unknown field into a strict old parser.
+
+CQ2a tests old/new client × old/new ingress × old/new owner, direct and
+relayed routes, feature-discovery failure, epoch change between discovery
+and use, and replay. The extension is rejected as unsupported before legacy
+parsing if support races away. Unsupported never damages the parent stream.
+
+Proposed bootstrap and control payloads; M2 freezes their exact schema in
+cross-language fixtures before implementing producers:
+
+```json
+{
+  "continuous_quality": {
+    "version": 1,
+    "mode": "client_selected",
+    "family_id": "opaque-family",
+    "renditions": [{"id": "opaque-rung", "height": 720}]
+  }
+}
+```
+
+```json
+{
+  "quality_transition": {
+    "version": 1,
+    "transaction_id": "opaque-transaction",
+    "intent_revision": 7,
+    "operation": "prepare",
+    "target_rendition_id": "opaque-rung",
+    "append_frontier_ms": 142000
+  }
+}
+```
+
+`operation` is `prepare | cancel_unappended | scheduled | appended |
+presented | recovery_owned`. Existing playback/generation/epoch/sequence
+fields fence the envelope. `scheduled` reserves the selected boundary and
+range before append; `appended` reports the actual committed film interval,
+rendition and attachment identity after append completes; `presented` adds
+first presented film PTS and observation time. Reserving pins before append
+prevents an acknowledgement race from deleting newly buffered media.
+Unknown version/operation is rejected for that operation without damaging
+the parent. Size and integer bounds follow existing validation style.
+
+| State | Authority and response on retry |
+|---|---|
+| `requested` | Client-local until the owner accepts `prepare`. |
+| `preparing`, `ready` | Owner response with identity, reason and verified ready interval. Replayed requests do not allocate again. |
+| `scheduled` | Client proposes, owner acknowledges range/pin reservation before append. No claim that pixels changed. |
+| `appended` | Client media fact; owner acknowledges receipt and preserves committed dependencies. Lost acknowledgement retries the same fact. |
+| `presented` | Client observation; owner stores an idempotent receipt. Replay returns `presented` and its original identity, never a new preparation. |
+| `retained_current`, `superseded` | Owner-acknowledged terminal cancellation only when no target interval was appended. A superseded intent with committed intervals returns `appended` plus `intent_superseded=true`. |
+| `observation_unknown` | Client-local measurement result after append; owner retains `appended` until presentation, transport disposal or session closure settles it. |
+| `recovery_owned` | Recovery coordinator takes transport authority; owner acknowledges and releases only dependencies the recovery actually discards. |
+
+This is a new negotiated object, not `delivery.preparation` and not an
+unadvertised `ControlAction`. CQ2a uses a smaller independently negotiated
+cancel envelope keyed by the accepted quality-intent revision; it need not
+implement rendition media. The server must not independently stage a
+`prepare_replacement` for a selection already owned by a rendition transaction.
+Keep bounded durable receipts using the existing control replay horizon;
+never evict an unresolved appended interval to make room. Backpressure new
+scheduling if needed. CQ2 freezes count/byte/retention bounds with tests.
+
+Required race fixture: append completes while cancellation is in flight and
+the `appended` acknowledgement is lost. The client cancellation carries its
+latest committed-interval facts even if the owner last acknowledged only
+`scheduled`. The owner conservatively retains the reserved interval until
+append absence or transport disposal is established; a cancel response may
+not release it based solely on its older acknowledged state. Retry/owner
+failover must preserve the same dependency and never allocate again.
+
+### 6.2 Commit is presentation, not a manifest request
+
+Server state distinguishes target demand, scheduled future demand, and
+presented rendition. Keep producing enough incumbent media until the target
+range is deliverable and the client has scheduled it. Do not wait forever for
+presentation before permitting more target segments; that would deadlock
+consumption. Do not release incumbent pins just because target downloads
+started. Retried settlements are idempotent. An earlier appended interval
+may truthfully present after a newer intent arrives: record that media fact
+without changing the newer desired choice or starting old work again. Closing playback after scheduling still releases all owned
+children even if no frame was presented.
+
+`effective_selection` must remain truthful to its documented meaning; add
+explicit target and client-observed presentation fields instead of making
+one existing height alternately mean requested, encoded and displayed. A
+native player with no precise presentation callback reports unknown until
+its supported observation establishes the fact; bytes served alone cannot
+claim the screen changed.
+
+Owner failover fences new work with the new epoch while already authorized
+immutable reads and playable client buffer remain useful. Rebuild missing
+child demand from durable parent/recipe state and fresh requests. A replayed
+old owner's completion must not publish a new rendition or release current
+pins. Test both Store backends and the actual relay path.
+
+## 7. Client implementation — web first, platform facts preserved
+
+### 7.1 Existing web handoff
+
+Replace the fixed 250 ms acceptance tolerance with a frame-duration-derived
+criterion. Compare presented media PTS, mapped to film time, and expected
+display time where available. Account for playback rate; nearest acceptable
+successor frame is at most one source-frame interval away. Merely lowering
+the constant can increase fallback failures, so keep the retain-current
+policy and use a bounded future rendezvous if chasing seeks cannot align.
+
+Keep both composited pictures at final geometry, prove advancing target
+frames, then expose at the presentation boundary. Respect browsers that
+throttle an occluded element. No second `play()` unless that engine requires
+it; preserve mute/rate/volume and handle rejected unmute/play promises.
+Retain the existing deferred predecessor retirement and revalidate rollback
+against the latest viewer intent. A dual-element audio swap is measured as
+a separate seam; do not introduce a permanent Web Audio graph merely to
+obtain a green diagnostic.
+
+### 7.2 hls.js continuous path
+
+The inspected vendored version is **1.6.16**. Work against that version;
+upgrading it is not a prerequisite or a hidden part of this project.
+[Its quality API](https://github.com/video-dev/hls.js/blob/v1.6.16/docs/API.md#quality-switch-control-api)
+distinguishes immediate buffer-flushing switches from selection of future
+loads. Use the future-load mechanism after preparation; verify its actual
+buffer and event behavior in the vendored implementation.
+
+Keep the same `<video>`, Hls instance, MediaSource and audio SourceBuffer
+through an eligible switch. Do not call `play()`, `loadSource`, `detachMedia`,
+`currentLevel`'s immediate setter, `currentTime=…`, or destroy the instance
+as the normal quality-change action. Adapt the existing Auto decision into
+an explicit scheduled level; one decision owner governs manual and Auto.
+
+M0 must establish a loader/scheduler seam that pauses **future incumbent
+video requests** at the selected boundary without pausing audio or playback.
+No global `stopLoad()` to manufacture that boundary. If hls.js cannot hold
+that frontier through public APIs, implement and test the narrowest loader
+adapter against 1.6.16; do not build a second demuxer or patch minified code.
+Cancellation resumes incumbent requests before its playable runway is spent.
+
+Observe actual active fragments together with frame callbacks. A level
+selection or `FRAG_LOADED` alone is not presentation. Update subtitle, stats,
+watch progress and recovery consumers so they keep the parent identity and
+read the presented rendition separately. Preserve existing native Safari
+selection rather than forcing it onto MSE without device evidence.
+
+### 7.3 Native Safari and Apple
+
+AVPlayer's bitrate/resolution preferences must not be treated as an exact
+manual-rung contract. Inspect the supported OS APIs and prove behavior with
+the M0 fixture. Do not relabel an exact manual choice as a ceiling without a
+documented product decision. Native Safari exposes different control than
+hls.js and needs its own adapter result.
+
+For a supported continuous mode, retain the AVPlayer/AVPlayerItem and layer;
+use the compatible multivariant presentation with one quality-policy owner.
+For manual modes that cannot select an exact variant in place, keep the
+prepared path and build a two-player/two-layer handoff: the target must
+render on its own layer before taking the picture. Do not transfer its item
+into the incumbent player. Integrate observers, audio session, remote
+commands, PiP/AirPlay, subtitle overlays and view identity with player
+ownership; make the old player recoverable until commit.
+
+Use a frame-boundary cut for aligned pictures; a crossfade may hide black
+but can show two different film instants. Any audio overlap must be aligned,
+bounded and measured for both silence and double sound. Devices unable to
+run both decoders retain current playback or offer explicit restart, rather
+than becoming black during an optimistic attempt.
+
+### 7.4 Android
+
+For compatible media, keep the ExoPlayer, MediaItem, MediaSession and attached
+surface. Select the prepared track through Media3 track-selection APIs;
+verify decoder adaptive support on the actual device and ensure another
+selector is not simultaneously undoing the choice.
+[Media3 track selection](https://developer.android.com/media/media3/exoplayer/track-selection)
+supports constraints and exact track overrides; track identity must be
+re-resolved when groups change.
+
+For replacement, keep a target surface attached while preparing if the
+platform supports it. Do not park the visible predecessor before target
+presentation evidence. Treat SurfaceView and TextureView compositor behavior
+separately; changing every device to TextureView carries power/HDR costs and
+is not an unmeasured shortcut. Transfer media-session and listener ownership
+at the real commit, with pause/background/close races tested.
+
+## 8. Settings, telemetry and acceptance — prove what the viewer sees
+
+### 8.1 Settings lifecycle
+
+Use an explicit `continuous_quality_switching` setting in Settings →
+Developer while the feature is unfinished, default off for the new path.
+Keep the existing prepared-handoff setting and saved values intact. Readiness
+describes missing platform evidence, media-family support and resource cost;
+it never disables a switch, rejects Save, or overrides a saved opt-in.
+Runtime media incompatibility/admission refusal is an attempt result, not a
+silent configuration change. Graduate the control when the work is complete,
+following [the Developer lifecycle](../features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
+
+### 8.2 Every switch produces one redacted record
+
+Capture transaction and build identity, platform/OS/device/browser, family,
+requested/presented rendition, manual/Auto/recovery cause, mechanism,
+preparation and scheduling times, boundary PTS, first presented target PTS,
+retained/fallback reason, cancellation/cleanup outcome and measurement coverage.
+Also capture parent/child producer counts, queue wait, encode speed, buffer
+runway and source-reader pressure before/during/after the switch.
+
+Use four clocks explicitly: source media PTS, player-local media time,
+client monotonic observation time and server monotonic elapsed time. Never
+subtract unrelated host clocks to report a latency. Persist correlation IDs,
+not full credential URLs. Metrics use bounded reason/platform labels; IDs go
+in redacted event records, not metric label cardinality.
+
+### 8.3 Acceptance is a per-switch result, not an average
+
+Proposed product targets, to be measured rather than asserted as current:
+
+| Measurement | Acceptance for healthy compatible switches |
+|---|---|
+| Playback surface | Zero black/empty frames, zero preparing overlays. |
+| Video continuity | No backward step or skipped source frames at the join; no switch-induced excess frame gap greater than one nominal display interval over the pre-switch cadence. |
+| Audio continuity | No introduced silence or overlap longer than 20 ms; no click/pop or audible seam in the captured reference. |
+| Player identity | Same element/item and attachment for continuous switches; zero reopen/seek/reset calls. |
+| Presentation result | Requested exact manual rung is observed, or a truthful retained/unsupported result; never a false success. |
+| Lifetime | One terminal outcome; no leaked producer, child lease, media observer or pending callback. |
+| Latency | Report tap → ready → scheduled boundary → presented, including buffer delay; 12 s optional preparation and §4 presentation bound are enforced. |
+
+A retained-current outcome is a safe failure, **not a successful continuous
+switch**. The success series requires 20 consecutive completed transitions
+per platform and tested family, alternating up/down and including at least
+five Auto changes where Auto exists. Record safe refusals separately and
+do not silently retry until twenty successes are collected. A failure ends
+that series; fix and run a new fully identified series.
+
+Synthetic media has burned-in frame numbers, moving nonblack patterns and
+continuous known audio, allowing independent capture to detect freeze,
+black, repeats, skips, silence and duplicate audio. Capture at sufficient
+cadence and calibrate the capture itself with a no-switch baseline; record
+capture drops. Browser frame callbacks and dropped-frame counters are useful
+diagnostics, but cannot alone prove pixels reached the display. Access-log
+stall counters cannot prove sample-level audio continuity. Use test-only
+audio capture or external loopback/HDMI capture rather than rewiring normal
+production audio solely for measurement. Missing capture is `not measured`.
+
+Required matrix: Chrome and Firefox desktop; Safari macOS native HLS; Safari
+iOS; iOS app; tvOS physical device; Android phone and TV. Test normal and
+fullscreen, muted/unmuted, subtitles, 0.5×/1×/2× rate, long prebuffer, rapid
+choices, pause/resume, seek collision, background/foreground and end-of-title.
+Measure decoder-limited and network-cliff cases separately from healthy
+quality changes. Add one real high-bitrate title and one low-end device to
+avoid qualifying only the synthetic fixture on the fastest machine.
+
+## 9. Milestones — reviewable tasks on one effort branch
+
+File ownership below is an execution map, **not** a disjoint-file exception.
+Tasks overlap and must branch from the latest effort, merge serially into
+it, and reverify after integration. No task goes directly to main.
+
+| Task | Owned surfaces | Deliverable and acceptance |
+|---|---|---|
+| CQ0 — baseline and feasibility | Playback lab, fixtures, this document/evidence; temporary isolated prototypes | Capture current web failures and distinguish prepared/fallback. Prove 1.6.16 same-element two-rung switch with shared audio, bounded append-frontier control, real Safari behavior and native selection semantics. Record encoded joins and denied-admission behavior. This is a runnable prototype, not a literature review. |
+| CQ2a — reconcile cancellation negotiation | Landed upstream strict parsers/owner advertisement, relay and readers | After §1.2, reuse the existing negotiation stack; add only missing independent cancel-before-offer semantics. Prove the mixed-version/owner-change matrix. |
+| CQ1 — verify upstream safety and fill manual gaps | Landed prepared coordinators and their existing fixtures | Consume upstream voluntary-upgrade retention/admission fixes. Implement only missing manual-change behavior and continuous-media integration; verify recovery owns failure once and cancellation cannot restage/leak. Do not duplicate upstream reducers or tests. |
+| CQ2 — protocol and ownership | Playback control, session bootstrap/relay, media-session ownership, client parsers | Versioned opt-in, parent/child identity, transitions and mixed-version fixtures. Prove unsupported peers receive no new strict fields and old epochs cannot settle new work. Freeze schema before CQ4. |
+| CQ3 — compatible media and shared audio | VOD encode/serve, recipe/cache identity, playlist construction, FFmpeg fixture tests | Two real H.264 SDR rungs, shared audio, immutable init maps and rational-grid joins. Verify decoded boundary media, seek/tail/VFR cases and no cache collisions. |
+| CQ4 — bounded JIT rendition serving | HLS routes, VOD demand, admission, Store/relay, cancellation | Prime at append frontier; one incumbent plus one target, shared audio accounted; denial retains current. Test rapid selection, disconnect, late producer completion, node loss and source-reader contention. |
+| CQ5 — web continuous switching | Web player/session/menus/Auto, served-asset registration if needed, browser harness | Same element/Hls/MediaSource/audio buffer; future-load selection; no competing ABR; request versus presented UI. Complete 20-switch Chrome/Firefox series and keep separate Safari result. |
+| CQ6 — prepared presentation repair | Web prepared exposure, Swift player/layer ownership, Kotlin player/surface ownership | Frame-derived alignment and target presentation before exposure; safe rollback, audio measurement and lifecycle tests. No change claimed complete using only mocked callbacks. |
+| CQ7 — native continuous adapters | Apple and Android quality/session/control adapters, native tests and settings | Adopt continuous mode only with actual runtime/API support; exact manual semantics preserved. Complete native Safari, iOS/tvOS and Android evidence; unresolved API limitations remain explicit incomplete rows. |
+| CQ8 — qualification and graduation | Docs/reference updates, settings graduation, validation scope, final evidence | Freeze task merges, integrate current main, run exact-tree Main promotion gate and retain qualification receipt plus all required device evidence. Only then promote and claim complete. |
+
+Execution order is CQ0 → CQ2a → CQ1 → CQ2 → CQ3 → CQ4 → CQ5 → CQ6 →
+CQ7 → CQ8, with §1.2's upstream landing/reconciliation boundary between CQ0
+and CQ2a. CQ0 may discover an API constraint that changes CQ2–CQ7. Resolve that by
+amending this document and obtaining an adversarial delta review before
+implementing the affected design. Continue independently owned CQ0 measurement work; CQ1 production edits
+remain behind §1.2's dependency boundary. Do not turn an unsupported native mode into a claimed completed task.
+There is no permission checkpoint for routine implementation decisions.
+
+### 9.1 Concrete source entry points
+
+Server: [`http/hls`](../../crates/plurxd/src/http/hls.rs) and its
+[`preparation`](../../crates/plurxd/src/http/hls/preparation.rs),
+[`control`](../../crates/plurxd/src/http/hls/control.rs),
+[`playlist`](../../crates/plurxd/src/http/hls/playlist.rs),
+[`playlist text`](../../crates/plurxd/src/http/hls/playlist_text.rs),
+[`relay`](../../crates/plurxd/src/http/hls/relay.rs) modules;
+[`media sessions`](../../crates/plurxd/src/media_sessions.rs),
+[`transcode ladder`](../../crates/plurxd/src/transcode/ladder.rs),
+[`VOD serving`](../../crates/plurxd/src/vodserve.rs),
+[`VOD encoding`](../../crates/plurxd/src/vodencode.rs), and
+[`core transcode`](../../crates/plurx-core/src/transcode/mod.rs).
+
+Clients: use the anchors in §2 and
+[`menus.js`](../../crates/plurxd/src/web/player/menus.js),
+[`session.js`](../../crates/plurxd/src/web/player/session.js),
+[`player.js`](../../crates/plurxd/src/web/player/player.js),
+[`PreparedReplacement.swift`](../../clients/apple/Sources/PreparedReplacement.swift),
+[`PlayerView.swift`](../../clients/apple/Sources/PlayerView.swift),
+[`PreparedReplacement.kt`](../../clients/android/app/src/main/java/tv/plurx/app/player/PreparedReplacement.kt).
+New web scripts require file, `WEB_ASSETS`, shell tag and layout-table row in
+one commit, in plain shared scope; no imports/exports.
+
+Test anchors: [`web-control.test.js`](../../tests/playback/web-control.test.js),
+[`preparation-measurement.test.js`](../../tests/playback/preparation-measurement.test.js),
+[`web-policy.test.js`](../../tests/playback/web-policy.test.js),
+[`playback-lab`](../../scripts/playback-lab),
+[`PreparedReplacementTests.swift`](../../clients/apple/Tests/PreparedReplacementTests.swift),
+[`PreparedReplacementTest.kt`](../../clients/android/app/src/test/java/tv/plurx/app/player/PreparedReplacementTest.kt),
+HLS module tests and VOD encode tests. Extend behavior seams; do not add
+string-presence tests as proof of media continuity.
+
+### 9.2 Compiler and merge workflow
+
+Before editing Rust, verify `rustc --version` is **1.97.1** and establish a
+working loop. If unavailable locally, follow the
+[source-only compile loop](../ci/AGENT-COMPILE-LOOP.md): archive committed
+source, transfer neither `.git` nor credentials, keep `target/` warm, and
+verify the exact integrated branch again before pushing.
+
+Existing commands, selected according to changed surfaces:
+
+```bash
+rustc --version                                  # Verify the repository pin.
+cargo fmt --all --check                           # Check formatting.
+cargo check --workspace --locked --all-targets    # Compile affected integration.
+cargo clippy --workspace --locked --all-targets -- -D warnings
+node --test tests/playback/web-control.test.js \
+  tests/playback/preparation-measurement.test.js \
+  tests/playback/web-policy.test.js                # Current focused web seams.
+python3 -m unittest tests.operations.test_docs_index
+make web-check                                   # Served syntax/contracts.
+make unit-core                                   # Includes hiqlite-store.
+make apple-build                                 # iOS and tvOS compilation.
+make android                                     # Android debug compilation.
+```
+
+The existing playback lab already has a `quality-cycle` case in
+[`cases.json`](../../tests/playback/cases.json), plus 100 ms p95 / 250 ms max
+video-gap checks and an explicit missing-audio warning. After §1.2's boundary,
+extend that harness; do not create a parallel success oracle. Immediate CQ0
+writes only the new investigative files allowed by §1.2, and does not edit
+that harness or its existing cases. Its current Original↔720p case
+crosses delivery families and cannot stand in for compatible 720p↔1080p
+switches. Retain that distinction in case names and evidence.
+
+```bash
+scripts/playback-lab doctor --browser chrome
+scripts/playback-lab plan --suite full --case quality-cycle
+# After upstream integration, port CQ0 probes into compatible-rung cases.
+```
+
+Add exact focused regression commands per task; broad compilation is not a
+regression. Core storage tests must use `make unit-core` or
+`--features hiqlite-store`. Run the relevant native unit tests and physical
+tests in addition to compilation. The new browser scenario and fixture
+commands are deliverables of CQ0 and must be written into §10 once real;
+do not invent passing invocations now.
+
+Install the tracked hook with `make hooks` in a normal checkout. In a linked
+worktree, `.git` is a file: install the same `scripts/pre-commit` at the path
+returned by `git rev-parse --git-path hooks/pre-commit` if not already present;
+do not bypass it or change its checks. Commit normally, and use `fix(`
+or `perf(` for every user-observable behavior change. Every task PR names
+one actual test per `Regression-Test: <path>::<test name>` line and records
+its local command. Preserve those lines in the landing commit, including
+`MergeMessageField` for Forgejo API merges. Attach every created PR to the
+building session. `Effort development gate` blocks task integration;
+`Main promotion gate` plus the exact-candidate receipt blocks promotion.
+Requalify if main or the effort moves. Do not use CI as a compiler.
+
+## 10. Evidence ledger — empty rows are unfinished work
+
+The implementation session maintains this ledger and stores redacted machine
+receipts in the existing evidence area. Every new prose document needs an
+index row in the same commit. Update the earlier continuity plan/results and
+adaptive-quality Phase 3 to point here as their successor, without rewriting
+historical measured outcomes as current evidence.
+
+| Milestone | Commit/tree | Focused command / device run | Result |
+|---|---|---|---|
+| Upstream ownership | `424f7d162` + dirty work in the named session | Read-only scope inspection, 2026-09-30 | Active dependency; no shared production edits authorized yet |
+| CQ0 | — | — | Not run |
+| CQ2a | — | — | Not run |
+| CQ1 | — | — | Not run |
+| CQ2 | — | — | Not run |
+| CQ3 | — | — | Not run |
+| CQ4 | — | — | Not run |
+| CQ5 | — | — | Not run |
+| CQ6 | — | — | Not run |
+| CQ7 | — | — | Not run |
+| CQ8 | — | — | Not run |
+
+Each platform series records total attempts, presented switches, safe
+refusals, recovery-owned outcomes, visible failures, capture coverage,
+worst frame gap, audio discontinuity, maximum live producers and final
+cleanup. Pin server SHA/runtime identity, client build, device/OS, fixture
+hash, adapter mechanism, network profile and experiment settings.
+
+**How to read it:** twenty successful state transitions with no captured
+audio is video evidence only. Zero dropped frames with a held picture is a
+failure. A quality badge that changes while the old rendition still plays
+is a telemetry/UI failure. A quiet screen during denied admission is a safe
+refusal, not proof that the quality changed. Unit tests protect ownership;
+captured media and physical devices establish continuity.
+
+## 11. Builder handoff — begin with evidence, then deliver the effort
+
+The requested implementation model is **GPT-6.1 Sol**. Use the independent clone
+`/Users/pjunod/code/plurx-agent/continuous-quality`, which contains this
+reviewed plan and has its own Git metadata. Do not write to the user's
+`/Users/pjunod/code/plurx` checkout, its shared target directory, or the other
+session's clone. Create `effort/continuous-quality` with this planning commit;
+refresh authoritative main and integrate upstream at §1.2's boundary. Do not
+build on an unrelated task branch or modify its untracked files. Read the repository instructions and
+the review dispositions before editing. Establish the compiler loop, then
+start CQ0 within its narrow file allowance. Check the upstream dependency
+before CQ2a/CQ1 and continue through the milestones only when the documented
+ownership boundary is satisfied; routine permission for authorized work is
+already granted.
+
+This document authorizes the build and its ordinary task PR workflow. It
+does not waive repository gates or turn absent physical-device access into
+passing evidence. If a hardware/API constraint blocks a platform, record the
+precise failed experiment and continue independent work. The checkout host was inspected during planning: Homebrew's default
+`rustc` reports 1.98.0, but `rustup run 1.97.1 rustc --version` successfully
+reports the required 1.97.1. Use the explicit pinned invocation (and verify
+again in the builder), rather than concluding this host has no compiler.
+The shared source-only cloud loop remains the fallback if local prerequisites
+fail. A required design change receives an adversarial delta review. Do not deploy an unfinished
+effort to the user's fleet to discover whether it compiles or plays.
