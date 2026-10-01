@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/p02-postmerge-validation",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_docs_index.py",
+  "test_file_sha256": "1cb333314f478d19e257eaa245e563d5bfd559465c261500c592faede7a48162",
+  "test_ids": ["test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve", "test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path"],
+  "command": "python3 -m unittest tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve tests.operations.test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path -v",
+  "output": "test_relative_links_between_documents_resolve (tests.operations.test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve) ... ok\ntest_no_reference_points_at_a_missing_docs_path (tests.operations.test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path) ... ok\n\nRan 2 tests in 1.461s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 2}
+}
