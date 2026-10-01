@@ -2161,6 +2161,7 @@
         let mut fingerprints = std::collections::HashSet::new();
         for suffix in [",ec-3", ",ac-3", ",mp4a.40.2", ""] {
             let frozen = FrozenHlsPresentation::from_contract(file.clone(), HlsContext {
+                codec_facts: None,
                 bandwidth: None, file_id: file.id, start_seconds: 0.0, media_origin_seconds: 0.0,
                 codecs: format!("avc1.640034{suffix}"), supplemental_codecs: None, frame_rate: Some(30.0),
             }, &SessionKind::Transcode { height: 1440 }, Some(plan.output_contract()));

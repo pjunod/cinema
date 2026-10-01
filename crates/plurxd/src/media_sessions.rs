@@ -1179,6 +1179,10 @@ impl ReleaseSettlement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output_receiver: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     /// Retained route context. Tolerated by the parser floor, never minted by
     /// it and never sufficient to authorize a worker route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1217,7 +1221,10 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.candidate_id.is_none() || request.decoder_caps.is_some())
+    request.retained_output_receiver.is_none_or(|version| version == 1)
+        && (request.retained_output.is_none() || request.retained_output_receiver == Some(1))
+        && request.retained_output.as_ref().is_none_or(crate::transcode::RetainedOutputFacts::valid)
+        && (request.candidate_id.is_none() || request.decoder_caps.is_some())
         // An explicit snapshot is a current capability constraint, including
         // on ordinary negotiated routes. Empty/all-unavailable is decoder
         // loss, not permission to fall back to legacy unconstrained dispatch.
@@ -1302,6 +1309,8 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_output: Option<crate::transcode::RetainedOutputFacts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
@@ -1416,6 +1425,7 @@ fn decode_remote_start_response(
 impl From<StartInfo> for RemoteStartResponse {
     fn from(info: StartInfo) -> Self {
         Self {
+            retained_output: info.retained_output,
             audio_delivery: info.audio_delivery,
             session_id: info.session_id,
             playlist_url: info.playlist_url,
@@ -1436,6 +1446,10 @@ impl From<StartInfo> for RemoteStartResponse {
 impl RemoteStartResponse {
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
+            && self
+                .retained_output
+                .as_ref()
+                .is_none_or(|facts| self.vod && facts.valid())
             && self
                 .audio_delivery
                 .as_ref()
@@ -2659,7 +2673,11 @@ impl MediaSessionCoordinator {
                 (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
             )
             .await?;
-        decode_remote_start_response(response)
+        let started = decode_remote_start_response(response)?;
+        if request.retained_output_receiver != Some(1) && started.info.retained_output.is_some() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        Ok(started)
     }
 
     pub(crate) async fn activate_remote(
@@ -5873,6 +5891,8 @@ mod tests {
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -5905,6 +5925,71 @@ mod tests {
                 transport: None,
             },
         }
+    }
+
+    #[test]
+    fn retained_receipt_extensions_are_omitted_for_legacy_and_require_negotiation() {
+        // The pre-extension strict worker key set, not a permissive JSON map.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyStart {
+            candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+            presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+            decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
+            protocol_version: i64,
+            incarnation_id: String,
+            user_id: i64,
+            source_size: i64,
+            source_mtime: i64,
+            typeless_playlist: bool,
+            library_channel: Option<serde_json::Value>,
+            request: SessionRequest,
+        }
+        let mut request = valid_start_request();
+        let legacy_wire = serde_json::to_value(&request).expect("legacy serialization");
+        assert!(legacy_wire.get("retained_output_receiver").is_none());
+        assert!(legacy_wire.get("retained_output").is_none());
+        assert!(serde_json::from_value::<LegacyStart>(legacy_wire.clone()).is_ok());
+        let decoded: RemoteStartRequest =
+            serde_json::from_value(legacy_wire).expect("new parser accepts legacy");
+        assert_eq!(decoded.retained_output_receiver, None);
+        assert!(decoded.retained_output.is_none());
+        request.retained_output_receiver = Some(1);
+        let negotiated = serde_json::to_value(&request).expect("negotiated serialization");
+        assert!(
+            serde_json::from_value::<LegacyStart>(negotiated).is_err(),
+            "never send extension to a strict old worker"
+        );
+        assert!(request.is_valid());
+        request.retained_output_receiver = Some(2);
+        assert!(!request.is_valid());
+        request.retained_output_receiver = None;
+        request.retained_output = Some(crate::transcode::RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        });
+        assert!(
+            !request.is_valid(),
+            "unnegotiated retained descriptor is not accepted"
+        );
+        request.retained_output_receiver = Some(1);
+        assert!(request.is_valid());
+        let mut response = valid_start_response();
+        let legacy_response = serde_json::to_value(&response).expect("legacy response");
+        assert!(
+            legacy_response.get("retained_output").is_none(),
+            "new worker with legacy capture emits no extension"
+        );
+        response.retained_output = request.retained_output;
+        assert!(response.is_valid());
+        response.vod = false;
+        assert!(
+            !response.is_valid(),
+            "retained VOD proof cannot be replayed onto rolling output"
+        );
     }
 
     fn valid_prepare_request() -> RemotePrepareRequest {
@@ -5943,6 +6028,7 @@ mod tests {
     fn valid_start_response() -> RemoteStartResponse {
         let session_id = "00000000-0000-4000-8000-0000000000b1".to_owned();
         RemoteStartResponse {
+            retained_output: None,
             audio_delivery: None,
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
