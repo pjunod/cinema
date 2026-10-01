@@ -6,6 +6,27 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 positive margin refuses bare metrics and retired candidate attachment", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const begin=source.indexOf("function measuredCandidateOutput(");
+  const end=source.indexOf("\nasync function ",begin+1);
+  const context=vm.createContext({PlaybackPolicy:policy}); vm.runInContext(source.slice(begin,end),context);
+  const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"encode"};
+  const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:"encode",
+    artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),
+    qualification:"complete_full_mux_rfc8216_v1",average_bps:12000000,peak_bps:14000000};
+  const player={sessionId:"session",qualityCandidateId:candidate.id,mediaAttachment:{},measuredCandidateOutputs:[output]};
+  const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false,
+    attachment:player.mediaAttachment,session_id:player.sessionId,candidate_id:player.qualityCandidateId};
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
+  transfer.receipt="00000000-0000-0000-0000-000000000001"; transfer.etag="etag";
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),true);
+  player.qualityCandidateId="c".repeat(32);
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
+  player.qualityCandidateId=candidate.id; player.mediaAttachment={};
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
+});
+
 test("a05 qualified full-output sidecar is required for positive candidate margin", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
   const begin=source.indexOf("function measuredCandidateOutput(");
@@ -14,8 +35,10 @@ test("a05 qualified full-output sidecar is required for positive candidate margi
   vm.runInContext(source.slice(begin,end),context);
   const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"encode",width:1920,height:1080,
     target_height:1080,decoder_compatible:true,complete_cache:true,sustainable:true,average_bps:1,peak_bps:1};
-  const player={measuredCandidateOutputs:null};
-  const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false};
+  const player={measuredCandidateOutputs:null,sessionId:"session",qualityCandidateId:candidate.id,mediaAttachment:{}};
+  const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false,
+    receipt:"00000000-0000-0000-0000-000000000001",etag:"etag",attachment:player.mediaAttachment,
+    session_id:player.sessionId,candidate_id:player.qualityCandidateId};
   assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"planned/cache fields are not proof");
   const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:"encode",
     artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),

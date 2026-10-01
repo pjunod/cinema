@@ -107,6 +107,7 @@ mod tests {
                 file_id: 2,
                 source_size: 4096,
                 source_mtime: 3,
+                source_object_version: "object:v1".into(),
                 recipe_digest: [4; 32],
                 route: crate::playback::candidate::CandidateRoute::Encode,
             },
@@ -154,5 +155,18 @@ mod tests {
         observe(&conn, &value, 115_001).expect("stale refused");
         observe(&conn, &value, 99_999).expect("future refused");
         assert!(get(&conn, &value.binding).expect("query").is_none());
+    }
+    #[test]
+    fn a05_bound_storage_refuses_same_size_mtime_replaced_source_object() {
+        let conn = Connection::open_in_memory().expect("memory database");
+        conn.execute_batch(SCHEMA).expect("schema");
+        let value = sample();
+        observe(&conn, &value, 100_000).expect("observation");
+        let mut replacement = value.binding.clone();
+        replacement.source_object_version = "object:v2".into();
+        assert!(get(&conn, &replacement).expect("replaced source").is_none());
+        assert!(get(&conn, &value.binding)
+            .expect("original source")
+            .is_some());
     }
 }

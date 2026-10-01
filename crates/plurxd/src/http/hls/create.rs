@@ -1672,6 +1672,22 @@ async fn create_with_purpose(
     let candidate_auto_policy = resolved.candidate_auto_policy;
     let candidate_route = resolved.candidate_route;
     let request = resolved.request;
+    // Capture before start and compare again after acceptance. A replacement
+    // source must not turn an older completed output into a new-source proof.
+    let link_source_binding = if candidate_auto_policy {
+        if let (Some(identity), Some(source), Some(context), Some(route)) = (
+            identity.as_ref(),
+            source.as_ref(),
+            request.candidate_context.as_ref(),
+            candidate_route,
+        ) {
+            link_receipts::binding(identity, source, context.recipe_digest, route).await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
@@ -2767,13 +2783,16 @@ async fn create_with_purpose(
             ) {
                 if let Some(source) =
                     link_receipts::binding(identity, source, context.recipe_digest, candidate_route)
+                        .await
                 {
-                    state.link_receipts.register(link_receipts::SessionBinding {
-                        source,
-                        session: published_route.session_id.clone(),
-                        incarnation: published_route.incarnation_id.clone(),
-                        owner_epoch: published_route.owner_epoch,
-                    });
+                    if link_source_binding.as_ref() == Some(&source) {
+                        state.link_receipts.register(link_receipts::SessionBinding {
+                            source,
+                            session: published_route.session_id.clone(),
+                            incarnation: published_route.incarnation_id.clone(),
+                            owner_epoch: published_route.owner_epoch,
+                        });
+                    }
                 }
             }
         }
