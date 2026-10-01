@@ -1427,8 +1427,13 @@ The next bounded A-05 source task uses the existing native film-clock stall
 observations and completed-transfer timestamps. Upgrade history belongs to the
 installed attachment/attempt: a new item or attempt cannot inherit it, and a
 re-read cliff sample cannot renew its original completion time. Native upgrades
-require 60 seconds without a stall and 90 seconds since a proved bandwidth
-cliff, in addition to the existing headroom/dwell/owner conditions.
+require 60 observed seconds from the later of attachment/attempt observation
+start and the last actual stall, and 90 seconds since a proved bandwidth cliff,
+in addition to the existing headroom/dwell/owner conditions. Missing observation
+start is Unknown; the independent 45-second headroom interval cannot replace
+the full quiet interval on a fresh attachment.
+Qualified headroom accumulates concurrently with these observation windows;
+quiet/cliff refusal delays the proposal, not the start of headroom measurement.
 
 Routine producer `held` state is not a stall verdict. Fresh exact-session and
 candidate active-production evidence can still attribute saturation while a

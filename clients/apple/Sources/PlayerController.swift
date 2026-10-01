@@ -8,14 +8,16 @@ import MediaPlayer
 struct AutoUpgradeEvidenceWindow {
     private var attachment: ObjectIdentifier?
     private var attempt: String?
+    private var observationStartMs: Int?
     private(set) var lastStallMs: Int?
     private(set) var lastCliffMs: Int?
 
-    mutating func bind(attachment: ObjectIdentifier?, attempt: String) {
+    mutating func bind(attachment: ObjectIdentifier?, attempt: String, nowMs: Int) {
         guard self.attachment != attachment || self.attempt != attempt else { return }
         self = AutoUpgradeEvidenceWindow()
         self.attachment = attachment
         self.attempt = attempt
+        observationStartMs = attachment != nil && nowMs >= 0 ? nowMs : nil
     }
 
     mutating func stalled(at nowMs: Int) {
@@ -30,9 +32,16 @@ struct AutoUpgradeEvidenceWindow {
     }
 
     func allowsUpgrade(nowMs: Int) -> Bool {
-        guard attachment != nil else { return false }
-        return (lastStallMs.map { nowMs >= $0 && nowMs - $0 >= 60_000 } ?? true)
+        guard attachment != nil, let observationStartMs else { return false }
+        let quietStart = max(observationStartMs, lastStallMs ?? observationStartMs)
+        return (nowMs >= quietStart && nowMs - quietStart >= 60_000)
             && (lastCliffMs.map { nowMs >= $0 && nowMs - $0 >= 90_000 } ?? true)
+    }
+
+    func allowsProposal(nowMs: Int, headroomStartedAtMs: Int?) -> Bool {
+        guard let headroomStartedAtMs, nowMs >= headroomStartedAtMs,
+              nowMs - headroomStartedAtMs >= 45_000 else { return false }
+        return allowsUpgrade(nowMs: nowMs)
     }
 }
 
@@ -6097,8 +6106,9 @@ final class PlayerController: ObservableObject {
                     establishedPlayback: self.attachmentRecovery.establishedPlayback
                 ) else { continue }
                 self.autoUpgradeEvidence.bind(attachment: self.player.currentItem.map(ObjectIdentifier.init),
-                                              attempt: self.playbackAttemptId)
+                    attempt: self.playbackAttemptId, nowMs: PlaybackControlSession.monotonicMs())
                 self.autoUpgradeEvidence.stalled(at: PlaybackControlSession.monotonicMs())
+                self.autoUpgradeSinceMs = nil
                 switch stallEvent.action {
                 case .none:
                     continue
@@ -10234,7 +10244,7 @@ extension PlayerController {
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
         else { return }
         let now = PlaybackControlSession.monotonicMs()
-        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId)
+        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
         let link: Double? = {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
@@ -10340,7 +10350,7 @@ extension PlayerController {
 
     private func tickDisplayAwareAuto() {
         let now = PlaybackControlSession.monotonicMs()
-        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId)
+        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId, nowMs: now)
         guard now >= autoNextTickMs else { return }
         autoNextTickMs = now + 5_000
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
@@ -10399,7 +10409,6 @@ extension PlayerController {
                 linkCeiling: severe || autoMildSamples >= 2 ? link : nil)
             autoUpgradeSinceMs = nil
         } else {
-            guard autoUpgradeEvidence.allowsUpgrade(nowMs: now) else { autoUpgradeSinceMs = nil; return }
             let fitting = eligible.filter { candidate in
                 link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? false } == true
             }
@@ -10412,7 +10421,7 @@ extension PlayerController {
                   autoLastSwitchMs.map({ now - $0 >= 60_000 }) ?? true
             else { autoUpgradeSinceMs = nil; return }
             if autoUpgradeSinceMs == nil { autoUpgradeSinceMs = now }
-            guard now - (autoUpgradeSinceMs ?? now) >= 45_000 else { return }
+            guard autoUpgradeEvidence.allowsProposal(nowMs: now, headroomStartedAtMs: autoUpgradeSinceMs) else { return }
         }
         guard let chosen else { return }
         guard severe || ((autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true) && autoSwitchTimes.count < 6) else { return }

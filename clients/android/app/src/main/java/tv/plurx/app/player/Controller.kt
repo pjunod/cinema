@@ -1293,8 +1293,9 @@ class Controller internal constructor(
                 // timer, just the reading the stall tracker already took.
                 sampleSurface(mediaPositionMs, observedAtMs)
                 if (openStall != null) {
-                    autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
+                    autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, observedAtMs)
                     autoUpgradeEvidence.stalled(observedAtMs)
+                    autoUpgradeSinceMs = null
                     if (openStall.controlMayDefer) {
                         playbackStallCount += 1
                     }
@@ -3045,7 +3046,7 @@ class Controller internal constructor(
             transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
         val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
-        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, now)
         if (severe && transfer != null) autoUpgradeEvidence.cliff(transfer.completedAtMs, now)
         val mild = autoMildSamples >= 2 && link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
         val producer = autoActiveProductionPressure(sessionStatus,
@@ -3079,7 +3080,7 @@ class Controller internal constructor(
 
     private fun tickDisplayAwareAuto() {
         val now = monotonicNowMs()
-        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch, now)
         if (now < autoNextTickMs) return
         autoNextTickMs = now + 5_000L
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
@@ -3133,7 +3134,6 @@ class Controller internal constructor(
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
                 link.takeIf { severe || autoMildSamples >= 2 })
         } else {
-            if (!autoUpgradeEvidence.allowsUpgrade(now)) { autoUpgradeSinceMs = null; return }
             val fitting = eligible.filter { candidate -> link?.let { bps -> candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } == true } == true }
             val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
@@ -3144,7 +3144,7 @@ class Controller internal constructor(
                 return
             }
             if (autoUpgradeSinceMs == null) autoUpgradeSinceMs = now
-            if (now - (autoUpgradeSinceMs ?: now) < 45_000L) return
+            if (!autoUpgradeEvidence.allowsProposal(now, autoUpgradeSinceMs)) return
             pick
         } ?: return
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
@@ -4795,16 +4795,18 @@ internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long
 internal class AutoUpgradeEvidenceWindow {
     private var attachment: Any? = null
     private var epoch: Long? = null
+    private var observationStartMs: Long? = null
     var lastStallMs: Long? = null
         private set
     var lastCliffMs: Long? = null
         private set
-    fun reset() { attachment = null; epoch = null; lastStallMs = null; lastCliffMs = null }
-    fun bind(attachment: Any?, epoch: Long) {
+    fun reset() { attachment = null; epoch = null; observationStartMs = null; lastStallMs = null; lastCliffMs = null }
+    fun bind(attachment: Any?, epoch: Long, nowMs: Long) {
         if (this.attachment === attachment && this.epoch == epoch) return
         reset()
         this.attachment = attachment
         this.epoch = epoch
+        observationStartMs = if (attachment != null && nowMs >= 0) nowMs else null
     }
     fun stalled(nowMs: Long) {
         if (attachment != null && nowMs >= 0) lastStallMs = maxOf(lastStallMs ?: nowMs, nowMs)
@@ -4813,9 +4815,15 @@ internal class AutoUpgradeEvidenceWindow {
         if (attachment != null && completedAtMs >= 0 && nowMs >= completedAtMs && nowMs - completedAtMs <= 15_000L)
             lastCliffMs = maxOf(lastCliffMs ?: completedAtMs, completedAtMs)
     }
-    fun allowsUpgrade(nowMs: Long): Boolean = attachment != null &&
-        (lastStallMs?.let { nowMs >= it && nowMs - it >= 60_000L } ?: true) &&
-        (lastCliffMs?.let { nowMs >= it && nowMs - it >= 90_000L } ?: true)
+    fun allowsUpgrade(nowMs: Long): Boolean {
+        val start = observationStartMs ?: return false
+        val quietStart = maxOf(start, lastStallMs ?: start)
+        return attachment != null && nowMs >= quietStart && nowMs - quietStart >= 60_000L &&
+            (lastCliffMs?.let { nowMs >= it && nowMs - it >= 90_000L } ?: true)
+    }
+    fun allowsProposal(nowMs: Long, headroomStartedAtMs: Long?): Boolean =
+        headroomStartedAtMs != null && nowMs >= headroomStartedAtMs &&
+            nowMs - headroomStartedAtMs >= 45_000L && allowsUpgrade(nowMs)
 }
 
 internal fun autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: Long?, nowMs: Long,
