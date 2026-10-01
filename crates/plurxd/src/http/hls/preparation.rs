@@ -663,6 +663,7 @@ pub(super) enum PreparationPurpose {
 }
 
 pub(super) struct PreparationCandidateInputs {
+    pub(super) accepted_observation: Option<super::prepared_link::AcceptedObservation>,
     /// The live session this exchange belongs to. Staging needs it twice: to
     /// reach the actor that owns the one successor slot, and to name the
     /// predecessor the commit CAS will fence against.
@@ -773,6 +774,7 @@ pub(super) fn preserve_prepared_audio(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn plan_preparation_candidate(
     state: &AppState,
     predecessor: &RemoteStartRequest,
@@ -782,6 +784,34 @@ pub(super) async fn plan_preparation_candidate(
     source: &MediaFile,
     delivered_height: i64,
 ) -> Result<crate::transcode::SessionRequest, ApiError> {
+    plan_preparation_with_candidate(
+        state,
+        predecessor,
+        planning_caps,
+        planning_overrides,
+        selection,
+        source,
+        delivered_height,
+    )
+    .await
+    .map(|(request, _)| request)
+}
+
+async fn plan_preparation_with_candidate(
+    state: &AppState,
+    predecessor: &RemoteStartRequest,
+    planning_caps: Option<&plurx_core::playback::DeviceCaps>,
+    planning_overrides: Option<&CreateOverrides>,
+    selection: &crate::playback_control::ClientSelection,
+    source: &MediaFile,
+    delivered_height: i64,
+) -> Result<
+    (
+        crate::transcode::SessionRequest,
+        Option<plurx_core::playback::candidate::QualityCandidate>,
+    ),
+    ApiError,
+> {
     if let Some(caps) = planning_caps {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -850,7 +880,7 @@ pub(super) async fn plan_preparation_candidate(
             })));
         }
         preserve_prepared_audio(&predecessor.request, &mut candidate, source)?;
-        return Ok(candidate);
+        return Ok((candidate, None));
     };
 
     use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
@@ -1096,6 +1126,7 @@ pub(super) async fn plan_preparation_candidate(
     )
     .await?;
     let plan_height = plan.height;
+    let selected_candidate = plan.selected_candidate;
     let mut resolved = plan.request;
     validate_hevc_copy_transport(state, source, caps, &resolved).await?;
     // The same guard ordinary create runs, on the same function. This path
@@ -1129,7 +1160,7 @@ pub(super) async fn plan_preparation_candidate(
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
     preserve_prepared_audio(&predecessor.request, &mut resolved, source)?;
-    Ok(resolved)
+    Ok((resolved, selected_candidate))
 }
 
 async fn prepared_relocation_owner(
@@ -1184,6 +1215,7 @@ pub(super) async fn process_preparation_candidate(
     exchange: PreparationCandidateInputs,
 ) {
     let PreparationCandidateInputs {
+        accepted_observation,
         session_id,
         route,
         mut recipe,
@@ -1293,7 +1325,7 @@ pub(super) async fn process_preparation_candidate(
             }
         }
     }
-    let candidate = match plan_preparation_candidate(
+    let (mut candidate, selected_candidate) = match plan_preparation_with_candidate(
         &state,
         &recipe,
         planning_caps.as_ref(),
@@ -1338,9 +1370,32 @@ pub(super) async fn process_preparation_candidate(
         selection: &proposed,
         grade: crate::playback_control::GradeIntent::from_request(&candidate),
     };
+    let candidate_auto = matches!(
+        selection.quality,
+        crate::playback_control::QualitySelection::Auto { .. }
+    ) && candidate.candidate_context.is_some();
+    let prepared_proof = if let Some(observation) = accepted_observation.as_ref() {
+        if let Some(selected) = selected_candidate.as_ref() {
+            tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                observation.proposed_proof(&state, source, &mut candidate, selected),
+            )
+            .await
+            .ok()
+            .flatten()
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let conditions = crate::playback_control::PreparationConditions {
-        observed_download_bps,
-        delivered_bps,
+        observed_download_bps: if candidate_auto {
+            None
+        } else {
+            observed_download_bps
+        },
+        delivered_bps: if candidate_auto { None } else { delivered_bps },
     };
     let decision = crate::playback_control::decide_preparation(
         delivered_view,
@@ -1383,6 +1438,17 @@ pub(super) async fn process_preparation_candidate(
         }
         PreparationPurpose::PlannedRelocation(_) => None,
     };
+    // An implicit measured upgrade needs real incumbent Link and full-output
+    // cost proof. Unknown is not a feature/ordinary/manual/recovery refusal.
+    let successor_owner = if candidate_auto
+        && proposed.height > delivered.height
+        && prepared_proof.is_none()
+        && matches!(purpose, PreparationPurpose::SelectionChange)
+    {
+        None
+    } else {
+        successor_owner
+    };
     if let Some(successor_owner) = successor_owner {
         // Production always stages and primes. Hooks that decline priming (the
         // test hooks of `AppState::new` do, until a test calls
@@ -1406,6 +1472,7 @@ pub(super) async fn process_preparation_candidate(
             &successor_owner,
             purpose,
             AcceptedAsk {
+                prepared_proof,
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
             },
@@ -1472,6 +1539,7 @@ const PREPARATION_PRIME_BUDGET: Duration = Duration::from_secs(45);
 /// one exchange under the ask from another builds a successor for a moment and
 /// a selection that never coexisted.
 pub(super) struct AcceptedAsk {
+    pub(super) prepared_proof: Option<super::prepared_link::PreparedProof>,
     /// The absolute film time the accepted envelope settled on — the viewer's
     /// seek target where they asked for one, their playhead otherwise.
     pub(super) film_time_ms: i64,
@@ -1537,6 +1605,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
         return;
     }
     let AcceptedAsk {
+        prepared_proof,
         film_time_ms: accepted_film_time_ms,
         desired_digest,
     } = accepted;
@@ -1927,8 +1996,24 @@ pub(super) async fn stage_prepared_successor_with_prime(
         };
         if let Some(guard) = activated {
             let active = guard.disarm();
+            // Observations cannot delay the existing cleanup/deadline owner.
+            arm_preparation_deadline(active.clone());
+            if successor_owner == state.node_id {
+                if let Some(proof) = prepared_proof.as_ref() {
+                    let _ = tokio::time::timeout(
+                        std::time::Duration::from_millis(100),
+                        proof.register(
+                            state,
+                            &active.preparation.session_id,
+                            &active.preparation.incarnation_id,
+                            active.preparation.deadline_ms,
+                            active.cancelled.clone(),
+                        ),
+                    )
+                    .await;
+                }
+            }
             crate::playback_control::record_preparation_staged(true);
-            arm_preparation_deadline(active);
         } else {
             crate::playback_control::record_preparation_staged(false);
         }

@@ -480,14 +480,27 @@ function createPreparedHlsLoader(StockLoader,p,state){
 function notePreparedHlsFragmentLoaded(p,state,d){
   if(preparedState(p)===state&&d&&d.frag&&d.frag.type==='main'){
     const stats=d.frag.stats||d.stats||{};
-    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now());
+    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now(),stats.loaded);
     if(proof){
+      if(candidateTransferOriginCurrent(proof)&&proof.receipt&&proof.etag
+        &&new URL(d.frag.url,location.href).pathname.split('/').includes(state.sessionId)
+        &&PlaybackPolicy.qualityTransferBps({...proof,age_ms:performance.now()-proof.atMs})>0){
+        state.linkReportedReceipts=state.linkReportedReceipts||new Set();
+        if(state.linkReportedReceipts.size<8&&!state.linkReportedReceipts.has(proof.receipt)){
+          clientLog({event:'candidate_link_sample',message:'Completed staged candidate body',session_id:state.sessionId,
+            link_sample:{receipt:proof.receipt,object_name:proof.object_name,etag:proof.etag,
+              body_bytes:proof.bytes,body_duration_ms:Math.round(proof.elapsed_ms),age_ms:Math.round(performance.now()-proof.atMs),
+              network_load:true,from_cache:false,producer_paced:false,cause:'link',negative:false,
+              media_duration_ms:proof.server_media_duration_ms??null,presenting:false,stalled:false,runway_ms:0}});
+          state.linkReportedReceipts.add(proof.receipt);
+        }
+      }
       state.qualityTransfer=proof;
       const samples=state.qualityTransfers||[];
       const segmentId=String(d.frag.url||'');
       state.qualityTransfers=samples.filter(row=>row.segment_id!==segmentId
         &&proof.atMs-row.atMs<=15000).slice(-7);
-      state.qualityTransfers.push({...proof,segment_id:segmentId,media_duration_ms:d.frag.duration*1000});
+      state.qualityTransfers.push({...proof,segment_id:segmentId,media_duration_ms:proof.server_media_duration_ms});
       notePreparedBuffer(p,state);
     }
   }

@@ -424,9 +424,11 @@ function freePreparedReplacement(p,state){
   }
 }
 
-async function sendPlaybackControl(url,body,signal){
+async function sendPlaybackControl(url,body,signal,linkReceipt=null){
+  const proofHeaders=typeof linkReceipt==="string"&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(linkReceipt)
+    ?{"X-Plurx-Link-Receipt":linkReceipt}:{};
   const response=await fetch(url,{method:"POST",signal,
-    headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
+    headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{},proofHeaders),
     body:JSON.stringify(body)});
   if(!response.ok){
     let failure=null;
