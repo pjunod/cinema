@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/p02-postmerge-validation",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_doc_status_audit.py",
+  "test_file_sha256": "58ccb669583560721f146959f8250f48d62908a701980396919211be1cb087dd",
+  "test_ids": ["test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions"],
+  "command": "python3 -m unittest tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions -v",
+  "output": "test_current_index_has_no_mechanical_contradictions (tests.operations.test_doc_status_audit.DocStatusAuditCase.test_current_index_has_no_mechanical_contradictions) ... ok\n\nRan 1 test in 0.030s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}
