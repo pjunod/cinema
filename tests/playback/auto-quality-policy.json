@@ -20,6 +20,7 @@
   "defaults_source": "AUTO_DEFAULTS in crates/plurxd/src/web/playback-policy.js, asserted equal by the runner",
   "defaults": {
     "sampleMs": 5000,
+    "switchBudgetPerHour": 6,
     "decisionMs": 1000,
     "safeEstimateFactor": 0.95,
     "severeEstimateRatio": 0.7,
@@ -506,9 +507,7 @@
         "lastSwitchAtMs": 540000,
         "switchesThisPlaybackHour": 6
       },
-      "expect": {"height": 720, "reason": null},
-      "web_current": {"height": 480, "reason": "bandwidth pressure"},
-      "finding": "No platform has a switch budget. `decideRung` takes no count of automatic changes and returns none, so `switchesThisPlaybackHour` in this sample is inert and the browser takes the seventh switch exactly like the first. The browser bounds the rate (cooldown plus stall window) and not the total, which is the gap section 3.4 names. The proposed number is six per playback-hour and it is a proposal, not a measurement: section 7.3 asks whether a real cliff even provokes that many, and the shaped-network traces of D3 are what answers it. If those traces show two, this case and the `switchBudgetPerHour` row in `proposed_defaults` are deleted rather than implemented."
+      "expect": {"height": 720, "reason": "switch-budget", "action": "suppressed"}
     }
   ],
   "controller_gates": [

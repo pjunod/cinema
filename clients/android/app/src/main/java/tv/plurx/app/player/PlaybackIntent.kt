@@ -34,7 +34,39 @@ class PlaybackIntent(
         private set
     var controlSequenceFloor: Long? = null
         private set
+    internal val rejectedAutoCandidateIds = mutableSetOf<String>()
     private var nextSequence = 0L
+    var automaticCandidateId: String? = null
+        private set
+    var automaticCandidateHeight: Int? = null
+        private set
+    private var envelopeRecipeRevision = 1L
+    private var envelopeDestinationRevision = 1L
+    private var envelopeTransportRevision = 1L
+    private var envelopeSelection: ClientSelection? = null
+
+    @Synchronized
+    fun noteViewerDestination() {
+        envelopeDestinationRevision = (envelopeDestinationRevision + 1).coerceAtMost(9_007_199_254_740_991L)
+    }
+
+    @Synchronized
+    fun requestAutomaticCandidate(id: String?, height: Int?) {
+        automaticCandidateId = id
+        automaticCandidateHeight = height
+    }
+
+    @Synchronized
+    fun mediaIntent(selection: ClientSelection): tv.plurx.app.data.MediaIntentEnvelope {
+        if (envelopeSelection != null && envelopeSelection != selection) {
+            envelopeRecipeRevision = (envelopeRecipeRevision + 1).coerceAtMost(9_007_199_254_740_991L)
+        }
+        envelopeSelection = selection
+        return tv.plurx.app.data.MediaIntentEnvelope(playbackId, envelopeRecipeRevision,
+            envelopeDestinationRevision, envelopeTransportRevision,
+            tv.plurx.app.data.MediaIntentSelection(selection.quality, selection.codec,
+                selection.dynamicRange, selection.audioTrack, selection.audioOffsetMs, selection.subtitle))
+    }
     private var presentedFrames = 0L
     private var lastAudioPositionMs: Long? = null
     private var audioObservedAtMs = 0L
@@ -111,6 +143,8 @@ class PlaybackIntent(
 
     @Synchronized
     fun setPlaybackRequested(requested: Boolean) {
+        if (playbackRequested != requested) envelopeTransportRevision =
+            (envelopeTransportRevision + 1).coerceAtMost(9_007_199_254_740_991L)
         playbackRequested = requested
     }
 

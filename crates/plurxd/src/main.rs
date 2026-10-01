@@ -2387,8 +2387,9 @@ async fn probe_system(
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
     let configured_ffprobe = crate::ffmpeg::ffprobe_bin();
+    let configured_bound_ffprobe = crate::ffmpeg::bound_ffprobe_bin();
     let decode_probe_identity = match crate::decode_facts::DecodeProbeIdentity::discover(
-        &configured_ffprobe,
+        &configured_bound_ffprobe,
     )
     .await
     {
@@ -2398,10 +2399,7 @@ async fn probe_system(
             None
         }
     };
-    let ffprobe = decode_probe_identity.as_ref().map_or_else(
-        || configured_ffprobe.clone(),
-        |identity| identity.executable().display().to_string(),
-    );
+    let ffprobe = configured_ffprobe;
     // Detect available hardware encoders once at startup.
     let encoder_caps = plurx_core::transcode::detect_encoders(&ffmpeg).await;
     let decoders = plurx_core::transcode::detect_video_decoders(&ffmpeg).await;

@@ -229,6 +229,7 @@ final class PlaybackControlSession {
         // a successor's first exchange — says nothing about the picture the
         // viewer is watching, and the reporter already owns whether to retry.
         // The player is told so it can leave a trace, and for no other reason.
+        onEffectiveSelection: @escaping @MainActor @Sendable (EffectiveSelection) -> Void = { _ in },
         onExchangeFailure: @escaping @MainActor @Sendable (String) -> Void = { _ in }
     ) {
         end()
@@ -300,6 +301,13 @@ final class PlaybackControlSession {
                               subtitleReadiness.record(exchange.response?.delivery?.subtitleReadiness)
                         else { return }
                         onSubtitleReady()
+                    }
+                }
+                if let effective = exchange.response?.effectiveSelection {
+                    scheduleSubtitleReady { [weak self] in
+                        guard self?.activeGeneration == generation,
+                              exchange.capture.hasSameIntent(as: latest.load()) else { return }
+                        onEffectiveSelection(effective)
                     }
                 }
                 if let delivered = exchange.request.acknowledgement,

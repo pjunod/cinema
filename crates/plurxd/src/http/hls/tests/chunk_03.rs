@@ -331,6 +331,9 @@
         staged_request.request_id = Some(staged_incarnation_id.clone());
         let response = StartResponse {
             delivered_audio: None,
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("//attacker.invalid/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -1937,6 +1940,7 @@
         // explicit clear the successor would stage claiming to be a reopen of
         // a session that is still playing.
         let candidate = crate::transcode::SessionRequest {
+            candidate_context: None,
             previous_session_id: Some(uuid::Uuid::new_v4().to_string()),
             reopen_reason: Some(crate::transcode::ReopenReason::Stall),
             ..staged_candidate_request()

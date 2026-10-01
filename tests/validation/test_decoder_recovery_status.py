@@ -517,12 +517,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("selection_provenance", facts_digest)
         self.assertNotIn("source_identity", facts_digest)
 
-        # One selection rule, reached by both planning routes.
+        # One selection rule, shared by planning and the quality catalog.
         daemon_facts = (ROOT / "crates/plurxd/src/decode_facts.rs").read_text(
             encoding="utf-8"
         )
         self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
-        self.assertEqual(self.daemon_transcode.count("legacy_ordinal_facts("), 1)
+        self.assertEqual(self.daemon_transcode.count("legacy_ordinal_facts("), 2)
+        for path in ("plan.rs", "candidates.rs"):
+            source = (ROOT / "crates/plurxd/src/transcode/manager" / path).read_text()
+            self.assertEqual(source.count("crate::decode_facts::legacy_ordinal_facts("), 1)
         self.assertNotIn(
             "DecodeFacts::from_ffprobe_json_with_catalog(", self.daemon_transcode
         )
@@ -703,11 +706,13 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # leaving a control that rotates a key space for no benefit.
         self.assertIn("the control never exists without the behaviour behind it", self.status)
 
-        # The recorded constraints a later milestone will implement literally.
-        # `verified_cache_hit` reads like a reuse decision and is not: its only
-        # caller feeds cluster offer eligibility.
+        # Both the placement offer and the quality catalog inspect the same
+        # verified cache rule. Neither caller starts or reuses a producer.
         daemon = module_source(DAEMON_TRANSCODE)
-        self.assertEqual(daemon.count("self.verified_cache_hit("), 1)
+        self.assertEqual(daemon.count("self.verified_cache_hit("), 2)
+        for path in ("construct.rs", "candidates.rs"):
+            source = (ROOT / "crates/plurxd/src/transcode/manager" / path).read_text()
+            self.assertEqual(source.count("self.verified_cache_hit("), 1)
         self.assertIn(
             "and so\n  does `verified_cache_hit`, which reads like a reuse decision and is not",
             self.status,

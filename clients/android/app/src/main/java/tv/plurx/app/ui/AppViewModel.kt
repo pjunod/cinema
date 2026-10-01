@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
+import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot
 import tv.plurx.app.data.DecisionCapsReq
@@ -206,6 +207,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
                                 Session.displayModeMatch = recovered.info.display_mode_match
+                                Session.displayAwareAuto = recovered.info.playback_display_aware_auto
+                                Session.autoAbr = recovered.info.playback_auto_abr
+                                Session.displayAwareAutoProtocol = recovered.info.display_aware_auto_protocol
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -481,6 +485,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
         Session.displayModeMatch = false
+        Session.displayAwareAuto = false
+        Session.autoAbr = false
+        Session.displayAwareAutoProtocol = null
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -777,13 +784,21 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         fileId: Long,
         tracks: PreplayTracks = PreplayTracks.NONE,
         quality: PlaybackQuality = _preferences.value.playbackQuality,
+        presentationTarget: PresentationTarget? = null,
+        audioOffsetMs: Long = 0,
     ): PlaybackDecision {
-        val snapshot = Caps.snapshot(getApplication<Application>())
+        val measured = Caps.snapshot(getApplication<Application>())
+        val snapshot = measured.copy(document = measured.document.copy(
+            display = measured.document.display.copy(
+                presentation_target = presentationTarget.takeIf { Session.displayAwareAuto },
+            ),
+        ))
         // Request-local only. Omitting a parameter keeps the shared playback-
         // default policy and the response older clients get; the server never
         // writes a Playback setting from these.
         val request = mapOf("force" to decisionForce(quality)) +
-            preplayQueryParams(tracks)
+            preplayQueryParams(tracks) + if (Session.displayAwareAuto && Session.displayAwareAutoProtocol == "route-v1")
+                mapOf("audio_offset_ms" to audioOffsetMs.toString()) else emptyMap()
         val decision = try {
             api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))
         } catch (error: HttpException) {
@@ -939,6 +954,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
+        Session.displayAwareAuto = info.playback_display_aware_auto
+        Session.autoAbr = info.playback_auto_abr
+        Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -986,6 +1004,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (serverInstanceId != info.instance_id) invalidateLibraryPager()
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
+        Session.displayAwareAuto = info.playback_display_aware_auto
+        Session.autoAbr = info.playback_auto_abr
+        Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }

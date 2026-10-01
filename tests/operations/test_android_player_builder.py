@@ -23,7 +23,9 @@ class AndroidPlayerBuilderContract(unittest.TestCase):
                 "PlayerRole.Finite",
                 "PlayerRole.Successor",
                 "Net.dataSourceFactory()",
-                "transferListener = progressiveMediaOrigin",
+                "val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)",
+                "transferListener = autoTransfers",
+                "return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)",
             ),
             "livetv/LiveTvPlayer.kt": (
                 "PlayerRole.LiveTv",
