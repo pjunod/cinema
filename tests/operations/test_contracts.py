@@ -1515,7 +1515,7 @@ assert.equal(context.ACT_TIMER, null);
             "\n  android_jvm:", 1
         )[0]
         android_device = workflow.split("\n  android_device:", 1)[1].split(
-            "\n  coverage:", 1
+            "\n  package_smoke:", 1
         )[0]
         self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
         self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
@@ -1639,22 +1639,10 @@ assert.equal(context.ACT_TIMER, null);
             effort_apple,
         )
 
-        coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
-        self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
-        self.assertIn("--failure-mode all", coverage)
-        # Instrumenting the cluster harness made the diagnostic badge depend on
-        # replicated-store deadlines and turned one slow worker into a red CI
-        # badge. Keep coverage on the same runner-neutral lane as `check`.
-        self.assertIn(
-            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
-            coverage,
-        )
-        self.assertIn("scripts/publish-badge", coverage)
-        self.assertIn("--branch badges", coverage)
-        self.assertIn('--message "${msg}%"', coverage)
+        # The coverage workflow owns measurement and publication independently
+        # of the manually dispatched full-CI sweep.
+        self.assertNotIn("coverage", workflow_job_blocks(".github/workflows/ci.yml"))
 
-        # The README shows badges from the ready-PR gate and the last manual
-        # coverage measurement, rather than the retired full-CI snapshots.
         readme = read("README.md")
         for badge in (
             "../badges-pr-ci/ci.svg",
@@ -1668,7 +1656,8 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("last manual full-CI measurement", readme)
+        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
+        self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -1788,6 +1777,48 @@ assert.equal(context.ACT_TIMER, null);
         for surface in ("rust", "apple", "android_jvm", "web_layout"):
             self.assertTrue(selected[surface], surface)
         self.assertFalse(selected["docs_only"])
+
+    def test_coverage_refreshes_on_main_without_full_ci(self):
+        workflow = read(".github/workflows/coverage.yml")
+        trigger = workflow.split("\non:\n", 1)[1].split("\nenv:", 1)[0]
+        self.assertIn("  push:\n    branches: [main]", trigger)
+        self.assertIn("  workflow_dispatch:", trigger)
+        self.assertNotIn("pull_request", trigger)
+        self.assertNotIn("paths", trigger)
+        self.assertIn("group: coverage-main", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        jobs = workflow_job_blocks(".github/workflows/coverage.yml")
+        self.assertEqual(set(jobs), {"coverage"})
+        coverage = jobs["coverage"]
+        self.assertEqual(workflow_job_needs(coverage), ())
+        self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
+        self.assertIn("ref: main", coverage)
+        self.assertIn("persist-credentials: false", coverage)
+        self.assertIn("components: llvm-tools-preview", coverage)
+        self.assertIn("lane: coverage", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertIn(
+            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
+            coverage,
+        )
+        self.assertIn("--failure-mode all", coverage)
+        steps = workflow_step_blocks(coverage)
+        publish = steps["Publish the unit coverage badge"]
+        self.assertNotIn("continue-on-error", publish)
+        self.assertNotIn("if: always()", publish)
+        self.assertIn("scripts/publish-badge", publish)
+        self.assertIn("--branch badges", publish)
+        self.assertIn("--alias codex/badges", publish)
+        self.assertIn("date -u +%F", publish)
+        self.assertIn('--message "${msg}% · ${measured_on} UTC"', publish)
+        self.assertLess(
+            coverage.index("Measure line coverage"),
+            coverage.index("Publish the unit coverage badge"),
+        )
+        self.assertIn("Enforce persistent Cargo bounds", steps)
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            if path.name != "coverage.yml":
+                self.assertNotIn("--filename coverage", path.read_text())
 
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
@@ -2730,7 +2761,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("clients/android/**/*.gradle*", workflow)
         self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
         android_device = workflow.split("  android_device:", 1)[1].split(
-            "\n  coverage:", 1
+            "\n  package_smoke:", 1
         )[0]
         self.assertEqual(
             android_device.count(
@@ -3365,6 +3396,7 @@ assert.equal(context.ACT_TIMER, null);
         for path in (
             ".github/workflows/ci.yml",
             ".github/workflows/cluster-store-backstop.yml",
+            ".github/workflows/coverage.yml",
             ".github/workflows/effort-ci.yml",
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
@@ -3386,10 +3418,9 @@ assert.equal(context.ACT_TIMER, null);
                     and name == "apple_compile"
                 ):
                     expected = apple
-                elif path == ".github/workflows/ci.yml" and name in {
-                    "cluster_daemon",
-                    "coverage",
-                }:
+                elif (path == ".github/workflows/ci.yml" and name == "cluster_daemon") or (
+                    path == ".github/workflows/coverage.yml" and name == "coverage"
+                ):
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
