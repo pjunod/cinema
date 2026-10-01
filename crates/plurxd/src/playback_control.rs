@@ -2341,6 +2341,8 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ControlErrorBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
     pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2370,6 +2372,10 @@ impl ControlErrorBody {
                 .generation
                 .as_deref()
                 .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+            && self.terminal_reason.as_deref().is_none_or(|reason| {
+                status == 410
+                    && crate::vodserve::Terminal::from_durable_reason(Some(reason)).is_some()
+            })
             && self.control_epoch.is_none_or(|epoch| epoch > 0)
             && self.retry_after_ms.is_none_or(|delay| delay <= 60_000)
             && self
@@ -2424,6 +2430,7 @@ pub(crate) enum ControlStateError {
     StaleSequence,
     RateLimited(u32),
     SessionEnded,
+    RollingEnded(RollingTerminalCause),
     PauseExpired,
     OwnerTransition,
     /// The owner is gone and its durable recipe can never be taken over, so
@@ -6471,6 +6478,25 @@ impl RollingTerminalCause {
         }
     }
 
+    pub(crate) fn terminal_reason(self) -> crate::vodserve::Terminal {
+        use crate::vodserve::Terminal;
+        match self {
+            Self::End => Terminal::Deleted,
+            Self::AuthorityFence => Terminal::AuthorityFenced,
+            Self::LeaseExpired => Terminal::ControlExpired,
+            Self::StartupExpired => Terminal::StartupExpired,
+            Self::PauseExpired => Terminal::PauseExpired,
+        }
+    }
+
+    pub(crate) fn control_error(self) -> ControlStateError {
+        if self == Self::PauseExpired {
+            ControlStateError::PauseExpired
+        } else {
+            ControlStateError::RollingEnded(self)
+        }
+    }
+
     fn metric_index(self) -> usize {
         match self {
             Self::End => 0,
@@ -9150,6 +9176,8 @@ enum RollingStartupState {
         first_served_at: Option<Instant>,
         baseline: Option<StartupPositionObservation>,
         timeline_sequence: u64,
+        held_at: Option<Instant>,
+        suspended: Duration,
     },
     Presented,
     Expired,
@@ -9161,6 +9189,8 @@ impl RollingStartupState {
             first_served_at: None,
             baseline: None,
             timeline_sequence: 0,
+            held_at: None,
+            suspended: Duration::ZERO,
         }
     }
 
@@ -9177,19 +9207,17 @@ impl RollingStartupState {
         match self {
             Self::AwaitingPresentation {
                 first_served_at: Some(first_served_at),
+                held_at: None,
+                suspended,
                 ..
-            } => first_served_at.checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET),
-            Self::AwaitingPresentation {
-                first_served_at: None,
-                ..
-            }
-            | Self::Presented
-            | Self::Expired => None,
+            } => first_served_at.checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET + *suspended),
+            Self::AwaitingPresentation { .. } | Self::Presented | Self::Expired => None,
         }
     }
 
     fn observe_control(
         &mut self,
+        now: Instant,
         generation: &str,
         owner_epoch: u64,
         producer_attempt: u64,
@@ -9200,10 +9228,25 @@ impl RollingStartupState {
             first_served_at,
             baseline,
             timeline_sequence,
+            held_at,
+            suspended,
         } = self
         else {
             return;
         };
+        match demand.demand {
+            PlaybackDemand::Hold => {
+                held_at.get_or_insert(now);
+            }
+            PlaybackDemand::Active => {
+                if let Some(held) = held_at.take() {
+                    // A pre-playlist hold consumes no active startup budget.
+                    let anchor = first_served_at.map_or(now, |served| held.max(served));
+                    *suspended += now.saturating_duration_since(anchor);
+                }
+            }
+            PlaybackDemand::End => {}
+        }
         if first_served_at.is_none() {
             return;
         }
@@ -9212,7 +9255,8 @@ impl RollingStartupState {
             *baseline = None;
             return;
         }
-        if demand.demand != PlaybackDemand::Active || demand.render_state != RenderState::Rendering
+        if demand.render_state != RenderState::Rendering
+            || !matches!(demand.demand, PlaybackDemand::Active | PlaybackDemand::Hold)
         {
             *baseline = None;
             return;
@@ -9246,13 +9290,17 @@ impl RollingStartupState {
             Self::AwaitingPresentation {
                 first_served_at,
                 baseline,
+                held_at,
+                suspended,
                 ..
             } => RollingStartupSnapshot {
                 phase: RollingStartupPhase::AwaitingPresentation,
                 remaining: first_served_at.and_then(|served| {
                     served
-                        .checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET)
-                        .map(|deadline| deadline.saturating_duration_since(now))
+                        .checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET + *suspended)
+                        .map(|deadline| {
+                            deadline.saturating_duration_since(held_at.unwrap_or(now).max(served))
+                        })
                 }),
                 presentation_progress_seen: baseline.is_some(),
             },
@@ -10089,13 +10137,10 @@ impl RollingControlActor {
             let Some((disposition, accepted_sequence, action, platform, action_suppressed)) =
                 replay
             else {
-                return Err(
-                    if self.terminal == Some(RollingTerminalCause::PauseExpired) {
-                        ControlStateError::PauseExpired
-                    } else {
-                        ControlStateError::SessionEnded
-                    },
-                );
+                return Err(self.terminal.map_or(
+                    ControlStateError::SessionEnded,
+                    RollingTerminalCause::control_error,
+                ));
             };
             return Ok(RollingControlOutcome {
                 disposition,
@@ -10145,6 +10190,7 @@ impl RollingControlActor {
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
             self.startup.observe_control(
+                now,
                 &request.generation,
                 request.owner_epoch,
                 self.delivery.producer_attempt,
@@ -10160,7 +10206,7 @@ impl RollingControlActor {
             // told us, not one that has changed its mind.
             self.retained_capabilities
                 .clone_from(&self.control.last_capabilities);
-            if self.startup.snapshot(now).phase == RollingStartupPhase::Presented {
+            {
                 match request.snapshot.demand {
                     PlaybackDemand::Hold => {
                         self.pause_started_at.get_or_insert(now);
@@ -21596,7 +21642,7 @@ mod tests {
                     prepared_successor: PreparedSuccessorObservation::NotRequested,
                 })
                 .await,
-            Err(ControlStateError::SessionEnded),
+            Err(ControlStateError::RollingEnded(RollingTerminalCause::End)),
             "a sequence replay cannot substitute a different demand payload"
         );
 
@@ -21615,7 +21661,7 @@ mod tests {
                     prepared_successor: PreparedSuccessorObservation::NotRequested,
                 })
                 .await,
-            Err(ControlStateError::SessionEnded),
+            Err(ControlStateError::RollingEnded(RollingTerminalCause::End)),
             "only the exact accepted terminal sequence may replay"
         );
     }
@@ -23920,7 +23966,9 @@ mod tests {
         ));
         assert_eq!(
             actor.control_at(started + Duration::from_secs(63), owned_control(&request())),
-            Err(ControlStateError::SessionEnded)
+            Err(ControlStateError::RollingEnded(
+                RollingTerminalCause::LeaseExpired
+            ))
         );
 
         let mut renewed =
@@ -23968,29 +24016,63 @@ mod tests {
                 renewed_deadline + Duration::from_millis(1),
                 owned_control(&request)
             ),
-            Err(ControlStateError::SessionEnded)
+            Err(ControlStateError::RollingEnded(
+                RollingTerminalCause::LeaseExpired
+            ))
         );
     }
 
     #[test]
-    fn thirty_minute_foreground_hold_remains_live_on_delivered_heartbeats() {
+    fn thirty_minute_foreground_play_pause_remains_live_on_delivered_heartbeats() {
         let started = Instant::now();
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        actor.begin_producer_attempt_at(started).expect("producer");
+        actor.startup.activate_at(started);
         let mut request = request();
-        request.demand = PlaybackDemand::Hold;
-        request.playback_rate = 0.0;
-        request.render_state = RenderState::Waiting;
+        request.render_state = RenderState::Rendering;
+        request.position_ms = 1_000;
+        actor
+            .control_at(started, owned_control(&request))
+            .expect("presentation baseline");
+        request.sequence += 1;
+        request.position_ms += 300;
+        let presented = actor
+            .control_at(
+                started + Duration::from_millis(300),
+                owned_control(&request),
+            )
+            .expect("advancing rendering observation");
+        assert_eq!(
+            presented.lease.startup.phase,
+            RollingStartupPhase::Presented
+        );
+
         let mut now = started + Duration::from_secs(1);
-        for sequence in 1..=360 {
+        for sequence in 3..=362 {
             request.sequence = sequence;
+            // Continuous Hold retains its existing finite grace after presentation,
+            // too. Real foreground playback resumes between bounded pause episodes;
+            // a heartbeat cannot renew the pause grace by itself.
+            let active = (sequence - 3) % 30 == 0;
+            request.demand = if active {
+                PlaybackDemand::Active
+            } else {
+                PlaybackDemand::Hold
+            };
+            request.playback_rate = if active { 1.0 } else { 0.0 };
+            request.render_state = if active {
+                RenderState::Rendering
+            } else {
+                RenderState::Waiting
+            };
             let outcome = actor
                 .control_at(now, owned_control(&request))
-                .expect("delivered hold heartbeat remains admissible");
+                .expect("delivered foreground heartbeat remains admissible");
             assert_eq!(outcome.disposition, ControlDisposition::Accepted);
             assert_eq!(
                 outcome.lease.demand.as_ref().map(|demand| demand.demand),
-                Some(PlaybackDemand::Hold)
+                Some(request.demand)
             );
             now += Duration::from_secs(5);
         }
@@ -24505,6 +24587,7 @@ mod tests {
         assert!(!oversized_sequence.is_valid());
 
         let unavailable = ControlErrorBody {
+            terminal_reason: None,
             code: "control_unavailable".to_owned(),
             message: "owner deadline".to_owned(),
             generation: None,
@@ -24524,6 +24607,7 @@ mod tests {
     #[test]
     fn a_lost_owner_is_a_distinct_control_answer_from_a_transition() {
         let lost = ControlErrorBody {
+            terminal_reason: None,
             code: "owner_lost".to_owned(),
             message: "the node holding this media session is gone".to_owned(),
             generation: None,
@@ -24540,6 +24624,7 @@ mod tests {
             "and must not be accepted at the retryable status it replaces"
         );
         let pause_expired = ControlErrorBody {
+            terminal_reason: None,
             code: "pause_grace_expired".to_owned(),
             ..lost.clone()
         };
@@ -24555,6 +24640,7 @@ mod tests {
         let previously_valid = ["session_ended", "owner_transition"];
         for code in previously_valid {
             let body = ControlErrorBody {
+                terminal_reason: None,
                 code: code.to_owned(),
                 ..lost.clone()
             };
@@ -27296,6 +27382,107 @@ mod tests {
         };
         assert_eq!(expired.terminal, Some(RollingTerminalCause::StartupExpired));
         assert_eq!(expired.startup.phase, RollingStartupPhase::Expired);
+    }
+
+    #[test]
+    fn mkv_hls_startup_rendering_hold_proves_progress_but_waiting_hold_does_not() {
+        for rendering in [true, false] {
+            let started = Instant::now();
+            let mut actor = RollingControlActor::new(
+                started,
+                "session-start",
+                Arc::new(AtomicBool::new(false)),
+            );
+            actor.begin_producer_attempt_at(started).expect("producer");
+            actor.startup.activate_at(started);
+            let mut report = request();
+            report.render_state = RenderState::Rendering;
+            report.position_ms = 1000;
+            actor
+                .control_at(started, owned_control(&report))
+                .expect("active baseline");
+            report.sequence += 1;
+            report.position_ms += 300;
+            report.demand = PlaybackDemand::Hold;
+            report.playback_rate = 0.0;
+            report.render_state = if rendering {
+                RenderState::Rendering
+            } else {
+                RenderState::Waiting
+            };
+            let paused = actor
+                .control_at(started + Duration::from_secs(1), owned_control(&report))
+                .expect("pause");
+            assert_eq!(
+                paused.lease.startup.phase,
+                if rendering {
+                    RollingStartupPhase::Presented
+                } else {
+                    RollingStartupPhase::AwaitingPresentation
+                }
+            );
+            assert_eq!(paused.lease.pause_remaining, Some(ROLLING_PAUSE_GRACE));
+            if !rendering {
+                assert_eq!(
+                    actor
+                        .snapshot_at(started + Duration::from_secs(20))
+                        .startup
+                        .remaining,
+                    Some(Duration::from_secs(29))
+                );
+                report.sequence += 1;
+                report.demand = PlaybackDemand::Active;
+                report.playback_rate = 1.0;
+                report.render_state = RenderState::Waiting;
+                actor
+                    .control_at(started + Duration::from_secs(20), owned_control(&report))
+                    .expect("resume");
+                report.sequence += 1;
+                actor
+                    .control_at(started + Duration::from_secs(40), owned_control(&report))
+                    .expect("keep control alive");
+                let RollingExpiryClaim::Claimed(expired) =
+                    actor.claim_expiry_at(started + Duration::from_secs(49))
+                else {
+                    panic!("remaining active budget expires")
+                };
+                assert_eq!(expired.terminal, Some(RollingTerminalCause::StartupExpired));
+            }
+        }
+    }
+
+    #[test]
+    fn mkv_hls_startup_hold_before_playlist_has_finite_nonrenewing_grace() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let mut report = request();
+        report.demand = PlaybackDemand::Hold;
+        report.playback_rate = 0.0;
+        report.render_state = RenderState::Waiting;
+        actor
+            .control_at(started, owned_control(&report))
+            .expect("pre-playlist pause");
+        actor.startup.activate_at(started + Duration::from_secs(10));
+        for elapsed in (20..=160).step_by(20) {
+            report.sequence += 1;
+            let held = actor
+                .control_at(
+                    started + Duration::from_secs(elapsed),
+                    owned_control(&report),
+                )
+                .expect("held heartbeat");
+            assert_eq!(
+                held.lease.startup.remaining,
+                Some(ROLLING_PRESENTATION_STARTUP_BUDGET)
+            );
+        }
+        let RollingExpiryClaim::Claimed(expired) =
+            actor.claim_expiry_at(started + ROLLING_PAUSE_GRACE)
+        else {
+            panic!("finite hold expires")
+        };
+        assert_eq!(expired.terminal, Some(RollingTerminalCause::PauseExpired));
     }
 
     #[test]

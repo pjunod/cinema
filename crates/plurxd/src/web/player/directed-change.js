@@ -496,8 +496,8 @@ function startPlaybackControl(v,p,bootstrap){
         // server was sure of. Ruling D1 says the verdict is armed rather than
         // executed; this is where it is armed. It outlives the reporter and a
         // same-title session replacement, but not the lease.
-        if(response&&response.action&&response.action.type==="terminal"
-          &&captured.intentGeneration===(p.controlIntentGeneration||0)){
+        if(response&&response.action&&response.action.type==="terminal"){
+          p.sessionTerminal={sessionId:p.sessionId,attachment,reason:response.action.code||null};
           p.controlVerdict=response.action;
           p.controlVerdictExpiresAt=performance.now()+bootstrap.lease_timeout_ms;
         }
@@ -516,6 +516,9 @@ function startPlaybackControl(v,p,bootstrap){
         if(error){
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
+          if(Number(error.status)===410){
+            p.sessionTerminal={sessionId:p.sessionId,attachment,reason:error.terminalReason||null};
+          }
           // The paused presentation was retired: Play must open the one
           // replacement rather than resume a loader into a dead playlist.
           if(PlaybackPolicy.isPauseGraceExpiry(error)&&PlaybackPolicy.parksPausedPlaybackError(

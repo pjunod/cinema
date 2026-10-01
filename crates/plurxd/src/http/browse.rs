@@ -530,14 +530,15 @@ pub async fn item_detail(
         let raw_probe = state.catalogue.get_file_probe_json(file.id).await?;
         probe_bytes = probe_bytes.saturating_add(raw_probe.as_ref().map_or(0, String::len));
         let start = wanted.len();
-        if crate::copyseg::supports(file.video_codec.as_deref()) {
-            for video in
-                crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
-            {
-                wanted.push((file.id, crate::fragindex::identity_for(file, video)));
-            }
+        let videos = if crate::copyseg::supports(file.video_codec.as_deref()) {
+            crate::fragindex::video_identities(file, raw_probe.as_deref(), have_dovi, convert)
+        } else {
+            Vec::new()
+        };
+        for video in &videos {
+            wanted.push((file.id, crate::fragindex::identity_for(file, *video)));
         }
-        prepared.push((raw_probe, start..wanted.len()));
+        prepared.push((raw_probe, start..wanted.len(), videos));
     }
     let mut statuses = Vec::with_capacity(wanted.len());
     for chunk in wanted.chunks(plurx_core::store::FRAGMENT_INDEX_STATUS_CHUNK) {
@@ -555,7 +556,8 @@ pub async fn item_detail(
         statuses.extend(batch);
     }
     record_detail_projection(&statuses, probe_bytes);
-    for ((f, observation), (raw_probe, range)) in files.into_iter().zip(availability).zip(prepared)
+    for ((f, observation), (raw_probe, range, videos)) in
+        files.into_iter().zip(availability).zip(prepared)
     {
         let path = f.path.clone();
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
@@ -586,8 +588,13 @@ pub async fn item_detail(
             // false-permanent-state failure this whole milestone exists to
             // remove, inverted.
             let mut refusals = Vec::new();
-            for status in &statuses[range.clone()] {
-                if status.presence == plurx_core::store::IndexPresence::Ready {
+            // Preserve metadata-only batched local answers and the newer
+            // cluster-artifact fallback for the exact same captured pipeline.
+            // Never reintroduce packed per-file local index reads here.
+            for (status, video) in statuses[range.clone()].iter().zip(&videos) {
+                if status.presence == plurx_core::store::IndexPresence::Ready
+                    || state.transcode.cluster_index_available(&f, *video).await
+                {
                     present += 1;
                 } else if let Some(outcome) = &status.outcome {
                     refusals.push(outcome.clone());
@@ -1140,6 +1147,162 @@ mod tests {
         )
         .expect("JSON");
         assert_eq!(body["files"][0]["vod_index_status"], "indexed");
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
+    }
+
+    #[tokio::test]
+    async fn merged_detail_preserves_batched_local_and_exact_cluster_index_metadata() {
+        use crate::queue_fixture::QueueFixture;
+        use plurx_core::store::{
+            ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation,
+            FragmentIndexSourceObservation, NewClusterFragmentIndexJob,
+        };
+
+        plurx_core::testfixtures::require_ffmpeg();
+        let page = index_page(2, false).await;
+        publish(&page, 0, 1, 4100).await;
+        let file = &page.files[1];
+        // Owned metadata fixture, not a claim that these bytes are playable
+        // media. Match the scanner's exact size/mtime before attesting it.
+        std::fs::write(&file.path, vec![0_u8; file.size as usize]).expect("owned source");
+        std::fs::File::open(&file.path)
+            .expect("source handle")
+            .set_times(std::fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH + std::time::Duration::from_secs(file.mtime as u64),
+            ))
+            .expect("fixture scanner mtime");
+        let raw = page
+            .state
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .expect("probe");
+        let video = crate::fragindex::video_identities(
+            file,
+            raw.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            true,
+        )[0];
+        let source_sha256 = "b".repeat(64);
+        let object_version = crate::fragment_index_cluster::inspect_copy_source(file)
+            .await
+            .expect("exact source identity");
+        page.state
+            .store
+            .record_fragment_index_source(&FragmentIndexSourceObservation {
+                node_id: "detail-node".to_owned(),
+                file_id: file.id,
+                object_version,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.clone(),
+                observed_at_ms: 1,
+            })
+            .await
+            .expect("source observation fixture");
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let pipeline_sha256 = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("exact pipeline key");
+        let now = crate::fragment_index_cluster::unix_ms();
+        assert!(page
+            .state
+            .store
+            .enqueue_cluster_fragment_index(&NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.clone(),
+                pipeline_sha256: pipeline_sha256.clone(),
+                priority: "foreground".to_owned(),
+                trigger: "foreground".to_owned(),
+                target_node_id: "detail-node".to_owned(),
+                not_before_ms: now,
+                created_at_ms: now,
+            })
+            .await
+            .expect("enqueue fixture"));
+        let claimed = page
+            .state
+            .store
+            .fixture_claim_cluster_fragment_index("detail-node", &[], now, now + 60_000)
+            .await
+            .expect("claim fixture")
+            .expect("one fixture job");
+        let index = plurx_core::segplan::FragmentIndex::new(
+            1000,
+            vec![plurx_core::segplan::IndexRow {
+                dts: 0,
+                duration: 1000,
+                bytes: 100,
+                video_bytes: 90,
+                class: plurx_core::fmp4::CutClass::CleanIdr,
+            }],
+            "fixture-init",
+            crate::fragindex::identity_for(file, video),
+        );
+        let blob = plurx_core::store::encode_cluster_fragment_index_blob(
+            &index,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("fixture blob");
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: plurx_core::store::cluster_fragment_index_blob_sha256(&blob),
+            bytes: blob.len() as i64,
+            built_by_node_id: "detail-node".to_owned(),
+            built_at_ms: now + 1,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key,
+            node_id: "detail-node".to_owned(),
+            bytes: artifact.bytes,
+            verified_at_ms: now + 1,
+            last_seen_at_ms: now + 1,
+        };
+        assert!(page
+            .state
+            .store
+            .fixture_complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1,)
+            .await
+            .expect("publish metadata fixture"));
+        let counter = plurx_core::store::fragment_index_unpack_counter(
+            &page.root.path().join("catalogue.db"),
+        );
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
+        let body = detail(&page).await;
+        assert!(
+            body["files"]
+                .as_array()
+                .expect("files")
+                .iter()
+                .all(|file| file["vod_index_status"] == "indexed"),
+            "local and cluster metadata must both survive the merge: {body}"
+        );
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            before,
+            "detail must not unpack either a local index or a cluster blob"
+        );
+        // The metadata badge is advisory, not blob availability authority.
+        // Changing the physical source invalidates only its cluster fallback.
+        std::fs::write(&file.path, b"changed source").expect("replace owned source");
+        let body = detail(&page).await;
+        assert_eq!(body["files"][0]["vod_index_status"], "indexed");
+        assert_eq!(body["files"][1]["vod_index_status"], "pending");
         assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
     }
 

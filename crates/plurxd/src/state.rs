@@ -5920,10 +5920,8 @@ impl JobManager {
                 }
                 DueJob::CleanupTranscode => {
                     self.stamp_local(keys::JOB_LAST_TRANSCODE_CLEANUP).await;
-                    let removed = transcode.sweep_orphan_dirs().await;
-                    if removed > 0 {
-                        tracing::info!(removed, "swept orphaned transcode directories");
-                    }
+                    // Startup clears proven previous-process scratch under the daemon
+                    // lock before admission. Retirement alone owns live-process paths.
                     // The cache is swept here as well as before each producer
                     // run, and the redundancy is the point: production and
                     // eviction are different settings, and a server whose
@@ -9790,6 +9788,8 @@ impl JobManager {
             // This runs even when the queue is empty. Every producer-enabled
             // node therefore maintains its own disk without multiplying work
             // on each scheduler tick.
+            let sweep_started = std::time::Instant::now();
+            tracing::info!(node, "pretranscode cachekeep sweep started");
             crate::cachekeep::sweep_with_readers(
                 &self.store,
                 root,
@@ -9798,6 +9798,11 @@ impl JobManager {
                 now(),
             )
             .await;
+            tracing::info!(
+                node,
+                elapsed_ms = sweep_started.elapsed().as_millis() as u64,
+                "pretranscode cachekeep sweep finished"
+            );
         }
         let cache_ceiling = match crate::cachekeep::budget_bytes_fallible(&self.store).await {
             Ok(Some(bytes)) => bytes,

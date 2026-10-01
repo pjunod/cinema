@@ -2446,6 +2446,7 @@
                 delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
+                control_observed_at: None,
                 last_control_snapshot: None,
                 control_end: None,
                 control_end_snapshot: None,
@@ -2454,6 +2455,21 @@
                 tombstone: None,
             },
         );
+
+        // Activity inventory must not queue behind manifest-backed diagnostics,
+        // enumerate planned objects, or renew this attachment's idle clock.
+        let manifest_guard = rendition.manifest.lock().await;
+        let inventory = tokio::time::timeout(
+            Duration::from_millis(100), serve.delivery_infos_bounded(1),
+        ).await.expect("inventory does not acquire the manifest");
+        assert_eq!(inventory.len(), 1);
+        let observation = inventory[0].observation.as_ref().expect("VOD observations");
+        assert_eq!(observation.control_demand, None);
+        assert_eq!(observation.control_age_ms, None);
+        assert_eq!(observation.producer_state.as_deref(), Some("absent"));
+        assert!(serve.delivery_infos_bounded(0).await.is_empty());
+        assert_eq!(*serve.shared.sessions.lock().await["sess-a"].last_touch.lock().expect("touch lock"), touched);
+        drop(manifest_guard);
 
         let status = serve.status("sess-a").await.expect("live VOD status");
         assert_eq!(status.id, "sess-a");
@@ -2566,6 +2582,7 @@
                 delivery: Arc::new(crate::meter::Meter::new()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 marker_destinations: Vec::new(),
+                control_observed_at: None,
                 last_control_snapshot: Some(control_snapshot),
                 control_end: None,
                 control_end_snapshot: None,

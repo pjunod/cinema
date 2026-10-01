@@ -6173,23 +6173,28 @@ mod startup_tests {
             let captured = logbuf::testwriter::CapturedWriter::new();
             let subscriber = logging_subscriber(
                 &logs,
-                EnvFilter::new("trace"),
+                EnvFilter::new("info"),
                 format,
                 false,
                 captured.clone(),
             );
             tracing::subscriber::with_default(subscriber, || {
                 tracing::info!(target: "plurx::cluster", "cluster detail");
-                tracing::warn!(target: "plurx::cluster", "cluster trouble");
+                tracing::warn!(target: "plurx_core::cluster::migration::status", proof_attempt_sequence = 7, proof_in_flight = true, phase = "request_round_trip", "quorum proof expiry evidence");
+                tracing::warn!(target: "plurx_core::cluster::migration::status", attempt_seq = 8, outage_ms = 900, suppressed = 3, "quorum watermark sampling recovered");
                 tracing::info!(target: "plurxd::http", "ordinary detail");
             });
             let console = captured.text();
             assert!(!console.contains("cluster detail"), "{format:?}: {console}");
-            assert!(console.contains("cluster trouble"), "{format:?}: {console}");
+            assert!(
+                console.contains("quorum proof expiry evidence"),
+                "{format:?}: {console}"
+            );
+            assert!(console.contains("quorum watermark sampling recovered"));
             assert!(console.contains("ordinary detail"), "{format:?}: {console}");
             // The ring the product shows keeps the cluster detail the console
             // dropped, and keeps the two surfaces apart.
-            assert_eq!(logs.cluster.tail("trace", 8).len(), 2);
+            assert_eq!(logs.cluster.tail("trace", 8).len(), 3);
             assert_eq!(logs.general.tail("trace", 8).len(), 1);
         }
     }
