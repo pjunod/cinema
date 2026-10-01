@@ -20,6 +20,8 @@
             request_id: Some("r".to_owned()),
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             kind: SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: true,
@@ -470,6 +472,7 @@
             subtitle_burn,
         );
         let offline_spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index,
             subtitle: OfflineSubtitle::None,
@@ -561,6 +564,7 @@
         supported.set_supported(Encoder::Software, true);
         let package_id = "offline-vbr-snapshot";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-vbr-snapshot-request".to_owned(),
             user_id: user.id,
@@ -605,6 +609,7 @@
             };
         };
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -692,6 +697,7 @@
 
         let package_id = "offline-one-shot-decode-recovery";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-one-shot-decode-recovery-request".to_owned(),
             user_id: user.id,
@@ -726,6 +732,7 @@
             .expect("claim")
             .expect("queued package");
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,

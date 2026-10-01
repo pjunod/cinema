@@ -2489,6 +2489,8 @@
             },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -2507,6 +2509,7 @@
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),

@@ -184,6 +184,7 @@ pub struct OfflineSpec {
     pub subtitle: OfflineSubtitle,
     /// Immutable package identity captured when the request was accepted.
     pub effective_rate_control: EffectiveRateControl,
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

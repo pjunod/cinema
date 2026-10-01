@@ -188,6 +188,8 @@ impl CreateSession {
             kind,
             start_seconds: self.start.unwrap_or(0.0).max(0.0),
             audio_index: self.audio.filter(|a| *a >= 0),
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: self.subtitle_burn.filter(|s| *s >= 0),
             audio_offset_ms: self.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000),
             hdr10: self.hdr10 == Some(true),
@@ -1102,7 +1104,15 @@ pub(crate) async fn resolve_plan(
             }
         }
     }
+    let audio_claim = body
+        .caps
+        .as_ref()
+        .map(plurx_core::playback::audio::AudioClaim::from_caps)
+        .transpose()
+        .map_err(|error| ApiError::BadRequest(error.to_owned()))?
+        .flatten();
     let mut request = body.into_request(file_id, height);
+    request.audio_claim = audio_claim;
     if request
         .request_id
         .as_ref()
@@ -1126,6 +1136,32 @@ pub(crate) async fn resolve_plan(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
+    if let (Some(file), Some(claim)) = (source, request.audio_claim.as_ref()) {
+        let selected = request.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let route = match request.kind {
+            crate::transcode::SessionKind::Copy { .. } => {
+                plurx_core::playback::audio::AudioRoute::Progressive
+            }
+            _ => plurx_core::playback::audio::AudioRoute::EncodedVod,
+        };
+        let delivery = plurx_core::playback::audio::resolve_audio(
+            selected,
+            &claim.profile(),
+            route,
+            request.audio_offset_ms,
+        );
+        if let crate::transcode::SessionKind::Copy { aac, .. } = &mut request.kind {
+            *aac = delivery.transcodes();
+        }
+        request.audio_delivery = Some(delivery);
+    }
     Ok(ResolvedPlan {
         request,
         height,
@@ -2089,6 +2125,7 @@ async fn create_with_purpose(
         info.playlist_url
     };
     let response = StartResponse {
+        delivered_audio: info.audio_delivery.clone(),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -2101,7 +2138,11 @@ async fn create_with_purpose(
         // at the source height: an advertised rung is a promise, and the web
         // ABR controller upgrades into any rung the ladder lists. See
         // `capability_height_ceiling`.
-        ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
+        ladder: crate::transcode::advertised_ladder_with_audio(
+            source_height,
+            ladder_ceiling,
+            info.audio_delivery.as_ref(),
+        ),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
         delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(

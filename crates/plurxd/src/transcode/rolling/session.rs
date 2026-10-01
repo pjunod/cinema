@@ -152,6 +152,7 @@ pub(super) struct Session {
     /// bound to a manual session repeats this exact route instead of silently
     /// turning an Original/copy delivery into a transcode.
     pub(super) kind: SessionKind,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     /// Re-encoding the picture, or only repackaging it. Immutable, unlike
     /// `encoder_label`: what this session *is* does not change when the
     /// encoder behind it does, and the activity page must not relabel a copy

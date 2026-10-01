@@ -330,6 +330,7 @@
         staged_request.file_id = fixture.file_id();
         staged_request.request_id = Some(staged_incarnation_id.clone());
         let response = StartResponse {
+            delivered_audio: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("//attacker.invalid/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),

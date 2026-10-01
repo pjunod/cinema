@@ -456,7 +456,7 @@ impl Shared {
         let plan = if let Some(encoding) = &recipe.encoding {
             encoding.grid.plan(
                 duration_ms,
-                (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
+                (encoding.options.video_bitrate_kbps + encoding.options.audio_budget_kbps())
                     .saturating_mul(1000)
                     .into(),
             )

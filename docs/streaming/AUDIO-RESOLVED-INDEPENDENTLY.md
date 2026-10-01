@@ -1,6 +1,7 @@
 # Audio resolved independently — the picture's rung stops deciding the sound
 
-**Status:** implementation blocked on measured audio evidence · **Executes:** Q5 / §3.1.2 / F-stream-5 from
+**Status:** partial implementation; synthetic subset measured 2026-09-30,
+real-content/device evidence open · **Executes:** Q5 / §3.1.2 / F-stream-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -225,6 +226,17 @@ with an explicit `pan` per **source layout**, using channel *names* so the
 matrix does not depend on channel order (the assessment's objection to the
 appendix's numeric string):
 
+**2026-09-30 measured correction:** the preceding attenuation description
+was the original hypothesis, not a universal shipped-engine result.
+[Jellyfin 8.1.3 synthetic measurements](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md)
+found the default and explicit pan both split FC by approximately −3 dB
+per side, including actual AAC 160 kb/s output. No dialogue-improvement
+claim follows. The named matrices clipped the coherent worst case; a
+−1 dBFS pre-AAC limiter failed the decoded −1 dBFS bound, while a −2 dBFS
+limiter with auto-level disabled met it on these synthetic inputs. Gains
+and limiter semantics remain candidate production recipes until their
+actual propagation, VOD join and content acceptance checks are proved.
+
 ```text
 5.1 / 5.1(side):  pan=stereo|FL=FL+0.707*FC+0.707*{BL|SL}|FR=FR+0.707*FC+0.707*{BR|SR}
 7.1:              pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR
@@ -321,10 +333,32 @@ every lossy rolling/full-transcode and copy-conversion path now emits `-ar
 48000`, including progressive remux conversion, while copied audio remains
 untouched. The review disposition then added source and sink sample-rate facts,
 kept decoder and passthrough trust separate, and rotated recipe identity to v4.
-The remaining work is still blocked rather than guessed: the source-layout
-continuation below does not interpret speaker positions, M4 has not measured per-layout gains or limiter
-need, and no Apple/Android/web device has supplied the route evidence. No
-shipped client sends the claim, so surround delivery remains unenabled.
+The source-layout continuation below retains opaque facts; it does not
+interpret speaker positions. The dated synthetic receipt now measures the
+three proposed layouts, including failed −1 dB decoded-AAC margin and the
+passing synthetic −2 dB candidate. Real-content/phase and device evidence
+remains owed; no shipped client sends a sink claim.
+
+**2026-10-01 M2 implementation continuation:** the accompanying draft carries
+the already-resolved typed audio decision through rolling/encoded-VOD/copy
+options and actual argv, recipe/digest and VOD rendition identity, master
+CODECS and rung budgets, durable offline snapshots, remote owner response
+facts, and prepared-successor inheritance/refusal. Legacy absent claims keep
+their previous argv and v4 golden identity. Encoded VOD admits only its fixed
+AAC/48 kHz lattice; old offline rows receive null, not a guessed new recipe.
+Copy bitrate headroom remains a conservative 640 kb/s estimate, not a probed
+source rate. A canonical bounded sink claim keys request intent separately
+from the server answer; explanatory text does not select argv or cache keys.
+Prepared video-only switches retain actual producer audio, while incompatible
+audio changes require reopen. No concrete pan, limiter, new client claim,
+readiness/layout feature gate, or count-to-speaker-map inference is enabled.
+
+Verification is in progress on the draft. The current-source freshness audit
+identified main #627 startup snapshots/timings and concurrent #657 parser-floor
+context; their behavior must be retained on the main-synced effort before
+final compile/test evidence or publication. This statement is not a claim
+that an older-source check qualifies that eventual tree. M4 content/listening
+and M3/M5 device-route acceptance remain open.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -372,6 +406,15 @@ Acceptance: FC-only clip lands within ±1 LU of −20 LUFS − 3 dB per side
 `alimiter` stage with its own before/after; `pan` strings per layout
 committed with the numbers in the PR; `cargo test -p plurx-core
 transcode::audio` pins each layout's string.
+
+**2026-09-30 synthetic subset:** the linked
+[numeric receipt](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) records true
+`5.1`, `5.1(side)` and `7.1` inputs, separate per-side LUFS/RMS, sample
+peaks/full-scale counts, default versus named matrices, and both insufficient
+and sufficient synthetic AAC limiter margins. Executed collector bytes,
+source/PCM hashes, actual argv and numeric JSON are retained. This is not
+the three real-content scene comparisons, 7.1 content, listening notes,
+device evidence, production argv pinning, or complete M4 acceptance.
 
 ### 5.5 M5 — Android and web claims
 

@@ -1862,6 +1862,7 @@
         let user = store.create_user("paul", "hash", true).await.expect("user");
         let package_id = "offline-shipped-shape";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-shipped-shape-request".to_owned(),
             user_id: user.id,
@@ -1896,6 +1897,7 @@
             .expect("claim")
             .expect("queued package");
         let spec = OfflineSpec {
+            audio_delivery: None,
             target_height: 720,
             audio_index: None,
             subtitle: OfflineSubtitle::None,
@@ -2036,4 +2038,47 @@
                 "the production {point} point is ready at its first poll"
             );
         }
+    }
+    #[test]
+    fn actual_audio_delivery_changes_manifest_codec_and_rung_budget() {
+        use plurx_core::playback::audio::{AudioAction, AudioDelivery};
+        let mut audio = AudioDelivery {
+            action: AudioAction::Encode { codec: "eac3".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 640, sample_rate: 48_000 },
+            downmix: None,
+            reason: "actual producer audio".into(),
+        };
+        assert_eq!(super::ladder::audio_delivery_hls_codecs("avc1.640028,mp4a.40.2".into(), Some(&audio)), "avc1.640028,ec-3");
+        let legacy = super::ladder::advertised_ladder(Some(1080), 1080);
+        let rungs = super::ladder::advertised_ladder_with_audio(Some(1080), 1080, Some(&audio));
+        for (old, new) in legacy.iter().zip(&rungs) {
+            assert_eq!(new.total_kbps, old.total_kbps + 480);
+            assert_eq!(new.peak_kbps, old.peak_kbps + 480);
+        }
+        assert_eq!(super::ladder::advertised_ladder_with_audio(Some(1080), 1080, None), legacy);
+        audio.action = AudioAction::None;
+        assert_eq!(super::ladder::audio_delivery_hls_codecs("avc1.640028,mp4a.40.2".into(), Some(&audio)), "avc1.640028");
+    }
+
+    #[test]
+    fn audio_intent_fingerprint_keys_the_claim_not_a_refreshed_server_answer() {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let mut request = SessionRequest {
+            control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
+            automatic: false, previous_session_id: None, reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
+            audio_index: None, audio_delivery: None, audio_claim: None,
+            subtitle_burn: None, audio_offset_ms: 0, hdr10: false,
+            presentation: Default::default(), block_budget_secs: None, transport: None,
+        };
+        let legacy = request.intent_fingerprint("paul");
+        assert_eq!(legacy, r#"["paul",1,"player",0,"t720","0.000",null,null,0,null,null]"#);
+        request.audio_delivery = Some(AudioDelivery { action: AudioAction::None, downmix: None, reason: "server source refresh".into() });
+        assert_eq!(request.intent_fingerprint("paul"), legacy);
+        request.audio_claim = Some(AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink { codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] });
+        let claimed = request.intent_fingerprint("paul");
+        assert_ne!(claimed, legacy);
+        request.audio_delivery.as_mut().expect("audio answer").reason = "new explanation".into();
+        assert_eq!(request.intent_fingerprint("paul"), claimed);
+        request.audio_claim.as_mut().expect("sink claim").sinks[0].max_channels = 2;
+        assert_ne!(request.intent_fingerprint("paul"), claimed);
     }

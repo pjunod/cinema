@@ -712,6 +712,67 @@ pub(super) struct PreparationCandidateInputs {
 /// whole. Recipes written before the durable response sidecar was retained use
 /// the legacy edit path so an upgrade never guesses capabilities that the
 /// client did not provide.
+pub(super) fn preserve_prepared_audio(
+    predecessor: &crate::transcode::SessionRequest,
+    candidate: &mut crate::transcode::SessionRequest,
+    source: &MediaFile,
+) -> Result<(), ApiError> {
+    use plurx_core::playback::audio::{resolve_audio, AudioAction, AudioRoute};
+    let same_track_and_route = candidate.audio_index == predecessor.audio_index
+        && candidate.audio_claim == predecessor.audio_claim
+        && candidate.audio_offset_ms == predecessor.audio_offset_ms;
+    let full_encode = matches!(
+        candidate.kind,
+        crate::transcode::SessionKind::Transcode { .. }
+    ) && candidate.presentation == crate::transcode::Presentation::Vod;
+    if same_track_and_route && !full_encode {
+        candidate.audio_delivery = predecessor.audio_delivery.clone();
+    } else if let Some(claim) = &candidate.audio_claim {
+        let selected = candidate
+            .audio_index
+            .and_then(|index| {
+                source
+                    .audio_streams
+                    .iter()
+                    .find(|track| track.index == index)
+            })
+            .or_else(|| source.audio_streams.first());
+        candidate.audio_delivery = Some(resolve_audio(
+            selected,
+            &claim.profile(),
+            if full_encode {
+                AudioRoute::EncodedVod
+            } else if matches!(candidate.kind, crate::transcode::SessionKind::Copy { .. }) {
+                AudioRoute::Progressive
+            } else {
+                AudioRoute::RollingHls
+            },
+            candidate.audio_offset_ms,
+        ));
+    }
+    if candidate
+        .audio_delivery
+        .as_ref()
+        .map(|audio| audio.byte_identity())
+        != predecessor
+            .audio_delivery
+            .as_ref()
+            .map(|audio| audio.byte_identity())
+    {
+        return Err(ApiError::typed(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "prepared_output_unsupported",
+            "the audio delivery changed; reopen instead of switching a prepared successor",
+        ));
+    }
+    if let (crate::transcode::SessionKind::Copy { aac, .. }, Some(audio)) =
+        (&mut candidate.kind, &candidate.audio_delivery)
+    {
+        *aac = matches!(audio.action, AudioAction::Encode { .. });
+    }
+    Ok(())
+}
+
 pub(super) async fn plan_preparation_candidate(
     state: &AppState,
     predecessor: &RemoteStartRequest,
@@ -765,7 +826,7 @@ pub(super) async fn plan_preparation_candidate(
         // document (or one this build cannot parse) can still have a
         // successor staged as a burn that tone-maps the picture at the moment
         // it is committed, which is the failure this guard exists for.
-        let candidate = crate::playback_control::candidate_request(
+        let mut candidate = crate::playback_control::candidate_request(
             &predecessor.request,
             selection,
             height,
@@ -785,6 +846,7 @@ pub(super) async fn plan_preparation_candidate(
                 "error": HDR_SUBTITLE_BURN_REFUSAL,
             })));
         }
+        preserve_prepared_audio(&predecessor.request, &mut candidate, source)?;
         return Ok(candidate);
     };
 
@@ -1049,6 +1111,7 @@ pub(super) async fn plan_preparation_candidate(
     // the incumbent use rolling has not changed merely because its quality or
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
+    preserve_prepared_audio(&predecessor.request, &mut resolved, source)?;
     Ok(resolved)
 }
 
@@ -1106,7 +1169,7 @@ pub(super) async fn process_preparation_candidate(
     let PreparationCandidateInputs {
         session_id,
         route,
-        recipe,
+        mut recipe,
         planning_caps,
         planning_overrides,
         selection,
@@ -1118,6 +1181,11 @@ pub(super) async fn process_preparation_candidate(
         accepted_film_time_ms,
         purpose,
     } = exchange;
+    if let Ok(response) = serde_json::from_str::<StartResponse>(&route.response_json) {
+        if let Some(audio) = response.delivered_audio {
+            recipe.request.audio_delivery = Some(audio);
+        }
+    }
     let _finished = PreparationCandidateFinished {
         hooks: state.hls_route_hooks.get(),
         incarnation_id: &route.incarnation_id,
@@ -1505,6 +1573,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        delivered_audio: staged_request.audio_delivery.clone(),
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,
