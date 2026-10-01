@@ -998,6 +998,7 @@ paths = [
   "scripts/subtitle-readiness-browser-check",
   "scripts/js-check",
   "scripts/web-jsconfig",
+  "scripts/web-shape-check",
   "scripts/web-types",
   "scripts/reader-browser",
   "scripts/themes-proposed.json",

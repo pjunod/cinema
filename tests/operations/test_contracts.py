@@ -1946,7 +1946,7 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("run: make apple-build", effort)
         self.assertIn("run: make android", effort)
-        self.assertIn("run: make web-check", effort)
+        self.assertIn("run: make effort-web-static-check", effort)
         web_check = makefile.split(".PHONY: web-check", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("node tests/web/cluster-membership.test.js", web_check)
         self.assertIn(
@@ -3260,15 +3260,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("run: make release-check", readiness)
         self.assertIn("fetch-depth: 0", readiness)
 
-    def test_effort_web_provisions_pinned_browser_before_contracts(self):
+    def test_effort_web_lints_source_without_provisioning_behavior_browser(self):
         web = workflow_job_blocks(".github/workflows/effort-ci.yml")["web_static"]
-        provision = "uses: ./.github/actions/playwright"
-        check = "run: make web-check"
-        self.assertIn(provision, web)
-        self.assertLess(web.index(provision), web.index(check))
-        self.assertRegex(web, r'uses: \./\.github/actions/playwright\n\s+with:\n\s+version: "1\.62\.0"')
-        self.assertIn("path: ~/.cache/ms-playwright", web)
-        self.assertIn("key: playwright-${{ runner.os }}-1.62.0", web)
+        self.assertIn("run: make effort-web-static-check", web)
+        self.assertNotIn("playwright", web.lower())
+        self.assertNotIn("run: make web-check", web)
 
     def test_preflight_budgets_allow_full_history_and_contracts(self):
         for workflow in ("ci", "effort-ci", "main-fast-lane"):
