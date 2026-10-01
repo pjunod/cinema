@@ -5,6 +5,7 @@ import retrofit2.Response
 import retrofit2.http.Body
 import retrofit2.http.DELETE
 import retrofit2.http.GET
+import retrofit2.http.Header
 import retrofit2.http.POST
 import retrofit2.http.PUT
 import retrofit2.http.Path
@@ -158,6 +159,7 @@ interface PlurxApi {
         @Path("id") id: Long,
         @QueryMap request: Map<String, String>,
         @Body body: DecisionCapsReq,
+        @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null,
     ): Decision
 
     /**
@@ -189,7 +191,8 @@ interface PlurxApi {
      * GET could spawn a second encoder.
      */
     @POST("files/{id}/hls/sessions")
-    suspend fun createHlsSession(@Path("id") id: Long, @Body body: CreateSessionReq): HlsStart
+    suspend fun createHlsSession(@Path("id") id: Long, @Body body: CreateSessionReq,
+        @Header("X-Plurx-Link-Receipt") linkReceipt: String? = null): HlsStart
 
     @GET("hls/{session}/status")
     suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus

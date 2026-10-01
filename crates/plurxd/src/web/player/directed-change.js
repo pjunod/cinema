@@ -646,7 +646,8 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+  const linkReceipt=typeof candidateLinkReceipt==='function'?candidateLinkReceipt(player,fileId):null;
+  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal,linkReceipt});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the

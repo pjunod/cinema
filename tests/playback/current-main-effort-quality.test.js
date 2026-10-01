@@ -6,18 +6,145 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 completed response join refuses ambiguous bodies and preserves EOF age", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
+  const start=source.indexOf("function completedQualityTransfer(");
+  const end=source.indexOf("\nfunction ",start+1);
+  const timing={encodedBodySize:4096,transferSize:4500,responseStart:100,responseEnd:5100,startTime:90};
+  let entries=[timing];
+  const context=vm.createContext({URL,location:{href:"http://server/"},
+    performance:{getEntriesByName:()=>entries}});
+  vm.runInContext(source.slice(start,end),context);
+  const response={status:200,getResponseHeader:name=>({"X-Plurx-Producer-Paced":"0",
+    "X-Plurx-Link-Receipt":"this-response",ETag:"this-etag"})[name]};
+  const read=(now=5200,loading={start:90,end:5100},bytes=4096)=>
+    context.completedQualityTransfer(response,"/hls/session/seg00001.m4s",loading,now,bytes);
+  const sample=read();
+  assert.equal(sample.atMs,5100,"callback delay cannot renew the response EOF");
+  assert.equal(sample.receipt,"this-response");
+  assert.equal(sample.etag,"this-etag");
+  entries=[timing,{...timing,startTime:6000,responseStart:6010,responseEnd:7000}];
+  assert.equal(read().atMs,5100,"latest same-URL response is not borrowed");
+  entries=[timing,{...timing}];
+  assert.equal(read(),undefined,"two matching responses are ambiguous");
+  entries=[timing];
+  assert.equal(read(20101),undefined,"age is measured from original EOF");
+  assert.equal(read(5099),undefined,"future EOF cannot be accepted");
+  assert.equal(read(5200,{start:90}),undefined,"missing completion interval is Unknown");
+  assert.equal(read(5200,{start:90,end:5110}),undefined,"coarse unmatched interval is Unknown");
+  assert.equal(read(5200,{start:90,end:5100},4095),undefined,"body size must identify this response");
+});
+
+test("a05 changed delivery origin cannot lend positive Link evidence", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const start=source.indexOf("function candidateTransferEvidence(");
+  const end=source.indexOf("function measuredCandidateOutput(",start);
+  const player={fileId:7,sessionId:"session",qualityCandidateId:"candidate",mediaAttachment:{},abr:{}};
+  player.abr.qualityTransfer={bytes:4096,elapsed_ms:1000,atMs:100,completed:true,from_cache:false,
+    producer_paced:false,attachment:player.mediaAttachment,session_id:"session",candidate_id:"candidate",
+    receipt:"00000000-0000-0000-0000-000000000001",etag:"etag",linkPositiveReported:true,origin:"http://server"};
+  const context=vm.createContext({URL,location:{href:"http://server/"},PLAYER:player,PlaybackPolicy:policy,
+    playbackOwnsAttachedMedia:()=>true,qualityForce:()=>"auto",performance:{now:()=>200,
+      getEntriesByName:()=>[{encodedBodySize:4096,transferSize:4500,responseStart:100,responseEnd:5100,startTime:90}]}});
+  vm.runInContext(source.slice(start,end),context);
+  assert.equal(context.candidateLinkReceipt(player,7),player.abr.qualityTransfer.receipt);
+  player.abr.qualityTransfer.origin="http://another-serving-origin";
+  assert.equal(context.candidateLinkReceipt(player,7),null);
+  player.abr.qualityTransfer.origin=null;
+  assert.equal(context.candidateLinkReceipt(player,7),null,"unknown delivery origin cannot be promoted");
+  const playerSource=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
+  const first=playerSource.indexOf("function completedQualityTransfer(");
+  const last=playerSource.indexOf("\nfunction ",first+1);
+  vm.runInContext(playerSource.slice(first,last),context);
+  const response={status:200,getResponseHeader:name=>({"X-Plurx-Producer-Paced":"0",
+    "X-Plurx-Link-Receipt":"00000000-0000-0000-0000-000000000001",ETag:"etag"})[name]};
+  assert.equal(context.completedQualityTransfer(response,"http://another-serving-origin/hls/session/seg00001.m4s",{start:90,end:5100},5100,4096),undefined);
+  assert.equal(context.completedQualityTransfer(response,"/hls/session/seg00001.m4s",{start:90,end:5100},5100,4096).origin,"http://server");
+});
+
+test("a05 Link stall echoes only immutable server body duration", () => {
+  const playerSource=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
+  const start=playerSource.indexOf("function completedQualityTransfer(");
+  const finish=playerSource.indexOf("\nfunction ",start+1);
+  const stallSource=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const report=stallSource.indexOf("function reportCandidateLinkSample(");
+  const reportEnd=stallSource.indexOf("\nasync function ",report+1);
+  const sent=[],player={sessionId:"session",qualityCandidateId:"candidate",mediaAttachment:{},started:true,waitAt:1,abr:{}};
+  let observed="4001";
+  const response={status:200,getResponseHeader:name=>({"X-Plurx-Producer-Paced":"0",
+    "X-Plurx-Link-Receipt":"00000000-0000-0000-0000-000000000001",ETag:"etag",
+    "X-Plurx-Link-Media-Duration-Ms":observed})[name]};
+  const context=vm.createContext({URL,location:{href:"http://server/"},PLAYER:player,
+    performance:{getEntriesByName:()=>[{encodedBodySize:4096,transferSize:4500,responseStart:100,responseEnd:5100,startTime:90}]},
+    playbackOwnsAttachedMedia:()=>true,qualityForce:()=>"auto",bufferRunway:()=>1,clientLog:row=>sent.push(row)});
+  vm.runInContext(playerSource.slice(start,finish),context);
+  vm.runInContext(stallSource.slice(report,reportEnd),context);
+  const install=()=>{
+    const sample=context.completedQualityTransfer(response,"/hls/session/seg00001.m4s",{start:90,end:5100},5100,4096);
+    player.abr.qualityTransfer={...sample,attachment:player.mediaAttachment,session_id:"session",
+      candidate_id:"candidate",media_duration_ms:1};
+  };
+  install();
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"unknown",5100);
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"link",5200);
+  assert.equal(sent.length,2);
+  assert.equal(sent[1].link_sample.media_duration_ms,4001,"outward-rounded server value, not client duration");
+  observed="6000";install();sent.length=0;
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"unknown",5100);
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"link",5200);
+  assert.equal(sent.length,1,"client duration cannot fabricate slow-body negative");
+  observed=null;install();sent.length=0;
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"unknown",5100);
+  context.reportCandidateLinkSample(player,{paused:false,seeking:false},"link",5200);
+  assert.equal(sent.length,1,"missing server duration remains Unknown for negatives");
+});
+
+test("a05 request header uses only this installed incumbent nonce", async () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const begin=source.indexOf("function candidateTransferEvidence(");
+  const end=source.indexOf("function measuredCandidateOutput(",begin);
+  const requests=[];
+  const player={fileId:7,sessionId:"session",qualityCandidateId:"candidate",mediaAttachment:{},abr:{}};
+  player.abr.qualityTransfer={bytes:4096,elapsed_ms:1000,atMs:100,completed:true,from_cache:false,
+    producer_paced:false,attachment:player.mediaAttachment,session_id:"session",candidate_id:"candidate",
+    receipt:"00000000-0000-0000-0000-000000000001",etag:"etag",linkPositiveReported:true,origin:"http://server"};
+  const context=vm.createContext({URL,location:{href:"http://server/"},PLAYER:player,PlaybackPolicy:policy,playbackOwnsAttachedMedia:()=>true,
+    qualityForce:()=>"auto",window:{},performance:{now:()=>200},AUTH_GENERATION:1,TOKEN:"token",API:"/api/v1",
+    fetch:async (path,options)=>{requests.push(options);return {status:200,ok:true,headers:{get:()=>null},json:async()=>({})};}});
+  vm.runInContext(source.slice(begin,end),context);
+  vm.runInContext(fs.readFileSync("crates/plurxd/src/web/core/api.js","utf8"),context);
+  const nonce=context.candidateLinkReceipt(player,7);
+  assert.equal(nonce,player.abr.qualityTransfer.receipt);
+  await context.api("/files/7/decision",{linkReceipt:nonce});
+  assert.equal(requests.at(-1).headers["x-plurx-link-receipt"],nonce);
+  assert.equal(context.candidateLinkReceipt(null,7),null,"detail preflight has no incumbent");
+  assert.equal(context.candidateLinkReceipt(player,8),null,"another source is not this attachment");
+  player.mediaAttachment={};
+  const retired=context.candidateLinkReceipt(player,7);
+  assert.equal(retired,null);
+  await context.api("/files/7/decision",{linkReceipt:retired});
+  assert.equal(requests.at(-1).headers["x-plurx-link-receipt"],undefined);
+  player.mediaAttachment=player.abr.qualityTransfer.attachment;
+  player.qualityCandidateId="successor";
+  assert.equal(context.candidateLinkReceipt(player,7),null);
+  player.qualityCandidateId="candidate";
+  assert.equal(context.candidateLinkReceipt(player,7,15101),null,"original sample expires");
+  await context.api("/files/7/decision",{linkReceipt:nonce+"\nspoof"});
+  assert.equal(requests.at(-1).headers["x-plurx-link-receipt"],undefined);
+});
+
 test("a05 positive margin refuses bare metrics and retired candidate attachment", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
-  const begin=source.indexOf("function measuredCandidateOutput(");
+  const begin=source.indexOf("function candidateTransferOriginCurrent(");
   const end=source.indexOf("\nasync function ",begin+1);
-  const context=vm.createContext({PlaybackPolicy:policy}); vm.runInContext(source.slice(begin,end),context);
+  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:policy}); vm.runInContext(source.slice(begin,end),context);
   const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"encode"};
   const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:"encode",
     artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),
     qualification:"complete_full_mux_rfc8216_v1",average_bps:12000000,peak_bps:14000000};
   const player={sessionId:"session",qualityCandidateId:candidate.id,mediaAttachment:{},measuredCandidateOutputs:[output]};
   const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false,
-    attachment:player.mediaAttachment,session_id:player.sessionId,candidate_id:player.qualityCandidateId};
+    attachment:player.mediaAttachment,session_id:player.sessionId,candidate_id:player.qualityCandidateId,origin:"http://server"};
   assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
   transfer.receipt="00000000-0000-0000-0000-000000000001"; transfer.etag="etag";
   assert.equal(context.candidatePositiveMargin(player,candidate,transfer),true);
@@ -29,16 +156,16 @@ test("a05 positive margin refuses bare metrics and retired candidate attachment"
 
 test("a05 qualified full-output sidecar is required for positive candidate margin", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
-  const begin=source.indexOf("function measuredCandidateOutput(");
+  const begin=source.indexOf("function candidateTransferOriginCurrent(");
   const end=source.indexOf("\nasync function ",begin+1);
-  const context=vm.createContext({PlaybackPolicy:policy});
+  const context=vm.createContext({URL,location:{href:"http://server/"},PlaybackPolicy:policy});
   vm.runInContext(source.slice(begin,end),context);
   const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"encode",width:1920,height:1080,
     target_height:1080,decoder_compatible:true,complete_cache:true,sustainable:true,average_bps:1,peak_bps:1};
   const player={measuredCandidateOutputs:null,sessionId:"session",qualityCandidateId:candidate.id,mediaAttachment:{}};
   const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false,
     receipt:"00000000-0000-0000-0000-000000000001",etag:"etag",attachment:player.mediaAttachment,
-    session_id:player.sessionId,candidate_id:player.qualityCandidateId};
+    session_id:player.sessionId,candidate_id:player.qualityCandidateId,origin:"http://server"};
   assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"planned/cache fields are not proof");
   const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:"encode",
     artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),
@@ -64,11 +191,11 @@ test("a05 genuine completed body carries the response receipt without cache prom
   const context=vm.createContext({URL,location:{href:"http://server/"},performance:{getEntriesByName:()=>[timing]}});
   vm.runInContext(source.slice(begin,end),context);
   const response={status:200,getResponseHeader:name=>({"X-Plurx-Producer-Paced":"0","X-Plurx-Link-Receipt":"nonce",ETag:"etag"})[name]};
-  const sample=context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90},5100);
+  const sample=context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90,end:5100},5100,4096);
   assert.equal(sample.receipt,"nonce"); assert.equal(sample.etag,"etag");
   assert.equal(sample.object_name,"seg00001.m4s"); assert.equal(sample.elapsed_ms,5000);
   timing.transferSize=0;
-  assert.equal(context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90},5100),undefined);
+  assert.equal(context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90,end:5100},5100,4096),undefined);
 });
 
 test("a05 completed link sender permits only immutable two-stage active attachment claims", () => {
@@ -78,7 +205,7 @@ test("a05 completed link sender permits only immutable two-stage active attachme
   const sent=[];
   const player={sessionId:"session",qualityCandidateId:"candidate",mediaAttachment:{},started:true,waitAt:1,
     abr:{qualityTransfer:{receipt:"nonce",etag:"etag",object_name:"seg00001.m4s",bytes:4096,elapsed_ms:5000,
-      atMs:100,completed:true,from_cache:false,producer_paced:false,session_id:"session",candidate_id:"candidate",media_duration_ms:4000}}};
+      atMs:100,completed:true,from_cache:false,producer_paced:false,session_id:"session",candidate_id:"candidate",media_duration_ms:4000,server_media_duration_ms:4000}}};
   player.abr.qualityTransfer.attachment=player.mediaAttachment;
   const context=vm.createContext({PLAYER:player,playbackOwnsAttachedMedia:()=>true,qualityForce:()=>"auto",
     bufferRunway:()=>1,clientLog:value=>sent.push(value)});
