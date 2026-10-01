@@ -2638,6 +2638,8 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    retained_output: None,
+                    retained_output_receiver: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,

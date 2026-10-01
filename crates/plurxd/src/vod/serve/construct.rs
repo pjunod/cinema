@@ -134,6 +134,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
+                measured_candidate: None,
                 file: file.clone(),
                 audio_index: None,
                 aac: true,
@@ -198,6 +199,7 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                retained_output: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(file.clone()),
@@ -338,6 +340,7 @@ impl VodServe {
                 pool: WaitPool::new(DEFAULT_GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
+                retained_artifacts: retained::RetainedArtifactRegistry::default(),
                 terminal_eviction_cursor: AtomicU64::new(0),
                 hooks: crate::seam_hooks::HookSlot::new(&NoopVodSharedHooks),
             }),

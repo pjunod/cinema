@@ -9,6 +9,7 @@
             "sess-a".into(),
             Session {
                 rendition: Some(Arc::clone(&rendition)),
+                retained_output: None,
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),
@@ -56,6 +57,7 @@
             Session {
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
+                retained_output: None,
                 file: replacement_file,
                 playback_id: "play-b".into(),
                 user_name: "paul".into(),
@@ -1685,6 +1687,7 @@
                 "shipped-shape",
                 None,
                 Recipe {
+                    measured_candidate: None,
                     file,
                     audio_index: None,
                    aac: true,
@@ -2812,6 +2815,7 @@
             Session {
                 rendition: Some(rendition),
                 rendition_key,
+                retained_output: None,
                 file,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
@@ -2948,6 +2952,7 @@
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
            aac: true,
@@ -3220,6 +3225,67 @@
         sink.materialize(0, vec![7; 1000]).await.expect("legacy repeat remains playable");
         assert!(rendition.output_measurement.lock().expect("observer")
             .complete_rates().is_none(), "duplicate publication loses measurement authority");
+    }
+
+    #[tokio::test]
+    async fn retained_complete_output_pins_exact_init_media_and_refuses_conflicting_repair() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("retained fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let source_path = temp.path().join("held-source.bin");
+        tokio::fs::write(&source_path, b"original source").await.expect("source");
+        let file = media_file_at(source_path, 10_000);
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None).await.expect("source fence");
+        let init = b"original immutable init";
+        let served_init = hex::encode(Sha256::digest(init));
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        owned.recipe.file = file;
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity { muxer_init: served_init.clone(), served_init, promotion: Default::default() }),
+            from_disk: false,
+        };
+        tokio::fs::write(rendition.dir.path().join(INIT_NAME), init).await.expect("init");
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
+        for entry in 0..rendition.plan.len() {
+            sink.materialize(entry as u32, vec![7; 1000 + entry]).await.expect("actual publication");
+        }
+        sink.completed_output().await;
+        let identity = rendition.output_measurement.lock().expect("observer").complete_rates().expect("complete").identity;
+        wait_until("retained assembly", Duration::from_secs(5), || {
+            let serve = Arc::clone(&serve);
+            async move { serve.shared.retained_artifacts.acquire(&identity).is_some() }
+        }).await;
+        let artifact = serve.shared.retained_artifacts.acquire(&identity).expect("retained artifact");
+        let meter = Arc::new(crate::meter::Meter::default());
+        let mut init_ready = artifact.open(None, &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained init");
+        let mut init_bytes = Vec::new();
+        init_ready.file.read_to_end(&mut init_bytes).await.expect("read init");
+        assert_eq!(init_bytes, init);
+        assert!(init_ready.observed_media_duration_ms.is_none());
+        let mut ready = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("retained segment");
+        assert!(ready.retained_lease.is_some());
+        assert_eq!(ready.observed_media_duration_ms, plan_media_duration_ms(&rendition, 0));
+        // The ordinary recipe names change, but already-issued hardlink and
+        // open body leases continue to name precisely the original bytes.
+        sink.materialize(0, vec![9; 1000]).await.expect("ordinary rematerialization");
+        let mut original = Vec::new();
+        ready.file.read_to_end(&mut original).await.expect("open body remains readable");
+        assert_eq!(original, vec![7; 1000]);
+        let private = temp.path().join(".retained").join(artifact.facts().artifact_id);
+        tokio::fs::remove_file(private.join(segment_name(0))).await.expect("missing-object fixture");
+        assert!(matches!(artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await,
+            Err(VodError::ProducerFailed(_))), "different live bytes cannot repair an issued proof");
+        assert!(rendition.failed.lock().expect("failure lock").is_none(), "artifact-local refusal cannot poison the rendition");
+        sink.materialize(0, vec![7; 1000]).await.expect("exact replacement bytes");
+        let repaired = artifact.open(Some(0), &meter, &serve.shared, &rendition, Duration::from_secs(1)).await.expect("exact repair");
+        assert_eq!(repaired.len, 1000);
+        assert!(serve.shared.retained_artifacts.acquire_expected(&artifact.facts(), &rendition).is_some());
+        let mut wrong = artifact.facts();
+        wrong.average_bps += 1;
+        assert!(serve.shared.retained_artifacts.acquire_expected(&wrong, &rendition).is_none());
     }
 
     /// Fix 4: a stale generation's queued materialize — landing after the

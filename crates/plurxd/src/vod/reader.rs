@@ -4,6 +4,7 @@ use super::*;
 /// cache's key discipline (plan §2.4).
 #[derive(Debug, Clone)]
 pub(super) struct Recipe {
+    pub(super) measured_candidate: Option<RetainedCandidateBinding>,
     pub(super) file: MediaFile,
     pub(super) audio_index: Option<i64>,
     pub(super) aac: bool,
