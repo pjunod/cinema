@@ -1705,7 +1705,7 @@ pub(super) async fn control_inner(
 /// The session UUID is still the bearer capability, but it cannot keep a
 /// deleted, disabled, or newly-hidden channel alive. Ordinary VOD response
 /// JSON has no `library_channel` member and pays only one object lookup.
-async fn library_channel_control_refusal(
+pub(super) async fn library_channel_control_refusal(
     state: &AppState,
     route: &MediaSessionRoute,
 ) -> Option<Response> {
@@ -2868,7 +2868,7 @@ pub(super) async fn control_local_with_settlement_capacity(
         // Claimed before the spawn, not inside it: a task that has not been
         // polled yet is still work this playback is doing, and an exchange
         // that raced in between would otherwise be told `none`.
-        let pending = PendingCandidateGuard::begin(&route.playback_id, &desired_digest);
+        let pending = PendingCandidateGuard::begin_control(&route.playback_id, &request);
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(

@@ -827,6 +827,46 @@ fn post_classification_route_rejection(
     (route.lease_expires_at_ms <= now_unix_ms).then_some(StatusCode::CONFLICT)
 }
 
+/// Cancellation discovery and mutation use the same exact-write peer auth as
+/// ordinary control, in a separate envelope unknown to legacy parsers.
+pub(crate) async fn quality_control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_CONTROL_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityControlRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Some(budget) =
+        crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+    else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match tokio::time::timeout(
+        budget,
+        super::hls::quality_control_routed(
+            &state,
+            &request.session_id,
+            request.request,
+            Some(&request.expected_owner_node_id),
+            request.deadline_unix_ms,
+        ),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 /// Exact-write-authenticated control relay. The envelope repeats the durable
 /// owner tuple so a delayed peer request cannot mutate whichever owner happens
 /// to hold the public session id when it arrives.

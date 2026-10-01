@@ -26,6 +26,8 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                 film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
                 desired_digest: None,
             },
@@ -741,6 +743,8 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -813,6 +817,8 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1063,6 +1069,8 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: Some("the-first-ask".to_owned()),
                 },
@@ -1245,6 +1253,8 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                 desired_digest: None,
             },
@@ -1433,6 +1443,8 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
                     desired_digest: None,
                 },
@@ -1447,6 +1459,102 @@
         cancel_preparations_for_superseded_predecessor(&playback_id, None);
         staging.await.expect("the staging task finished");
         drop(pending);
+
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, "register-window-digest"),
+            "the successor registered in that window must not be left running",
+        );
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "and it must never have been reserved, let alone staged",
+        );
+        let superseded_after = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let now = cancelled_total("predecessor_superseded");
+                if now > superseded_before {
+                    break now;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the post-registration read settled the successor as a supersession");
+        assert!(superseded_after > superseded_before);
+        assert_eq!(
+            cancelled_total("ownership_cancelled"),
+            ownership_before,
+            "the supersession must be what tore it down, not a reservation guard \
+             dropping after it had already gone on to reserve and prime",
+        );
+    }
+
+    /// Retrying the same selection creates a new planning owner. A digest
+    /// comparison cannot distinguish it from the older cancelled candidate.
+    #[tokio::test]
+    async fn same_selection_retry_cannot_revive_cancelled_planning_at_registration() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-register-same-selection");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+
+        // The marker a real candidate would be holding at this point.
+        let pending = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
+        delay_preparation_registration(&fixture.state, &playback_id, std::time::Duration::from_millis(800));
+
+        let superseded_before = cancelled_total("predecessor_superseded");
+        let ownership_before = cancelled_total("ownership_cancelled");
+        let state = fixture.state.clone();
+        let staging_session = session_id.clone();
+        let staging_route = route.clone();
+        let candidate = crate::transcode::SessionRequest {
+            candidate_context: None,
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        let predecessor_recipe = staged_predecessor_recipe(&route);
+        let planning_cancellation = pending.cancellation_token();
+        let staging = tokio::spawn(async move {
+            stage_prepared_successor_with_prime(
+                &state,
+                &staging_session,
+                &staging_route,
+                &predecessor_recipe,
+                &candidate,
+                Some(&staged_source_file()),
+                &state.node_id,
+                PreparationPurpose::SelectionChange,
+                AcceptedAsk {
+                    quality_intent: None,
+                    planning_cancellation: Some(planning_cancellation),
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: Some("register-window-digest".to_owned()),
+                },
+                true,
+            )
+            .await;
+        });
+
+        // Inside the parked window: after the task's last await, before it
+        // registers. The real edge, not a hand-written cancellation.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let newer = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
+        assert!(pending.cancelled());
+        assert!(!newer.cancelled());
+        staging.await.expect("the staging task finished");
+        drop(pending);
+        assert!(!newer.cancelled());
 
         assert!(
             !has_active_preparation_for_ask(&playback_id, "register-window-digest"),

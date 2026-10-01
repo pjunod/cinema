@@ -1,7 +1,7 @@
 <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Continuous quality — build status</title>
 <style>body{max-width:960px;margin:48px auto;padding:0 24px;background:#15191e;color:#e8edf2;font:17px/1.6 system-ui}a{color:#8ecbff}h1{line-height:1.15}table{border-collapse:collapse;width:100%}td,th{padding:12px;text-align:left;border-bottom:1px solid #3c4650}.muted{color:#bbc5cf}.state{padding:10px 16px;background:#293544;border-radius:8px}code{font-size:.9em}</style>
 <h1>Continuous quality</h1><p class="muted">Updated October 1, 2026 · Independent clone · <code>codex/continuous-quality-cq0</code></p>
-<p class="state">Production build resumed. Upstream PR #669 is merged and integrated; cancellation reconciliation is underway.</p>
+<p class="state">Production build resumed. Upstream PR #669 is merged and integrated; cancellation ownership is being implemented.</p>
 <table><tr><th>Work</th><th>Current evidence</th></tr>
 <tr><td>Same-player Chrome probe</td><td>720p ↔ 1080p; one audio buffer; no quality-driven buffer removal.</td></tr>
 <tr><td>Actual append samples</td><td>Test-only fMP4 inspection records sample PTS, frame count and rendition shape on completed appends. Target starts at the incumbent frontier; no inspection errors in the new experiments.</td></tr>
@@ -13,7 +13,7 @@
 <tr><td>Safari</td><td>Direct native playback recorded 476 frame callbacks at 1080p. Both playlists were fetched, but no presented rung switch was observed. One selected video track; exact manual control remains unqualified. WebDriver session still times out.</td></tr>
 <tr><td>Audio/display capture</td><td>Decoded 48 kHz test PCM captured; no near-zero run longer than one sample, matching baseline. Physical audible output and continuous display capture remain unmeasured.</td></tr>
 <tr><td>Upstream</td><td>PR #669 merged as <code>91917940e</code>. Integrated in <code>7c2a950ef</code>; Rust 1.97.1 workspace/all-target compilation passed. Shared ownership released.</td></tr>
-<tr><td>CQ2a–CQ8</td><td>CQ2a/CQ1 underway: reuse upstream negotiation and retention; close cancellation gaps. CQ2–CQ8 remain unfinished.</td></tr>
+<tr><td>CQ2a–CQ8</td><td>CQ2a/CQ1 underway: cancellation now reaches planning before registration. Exact cancellation tokens are carried into successors to prevent same-selection retries reviving cancelled work. Separate bounded public/peer cancellation negotiation routes are wired with owner fencing; client integration and durable cleanup settlement remain. Regressions authored; compilation passed; tests deferred. CQ2–CQ8 remain unfinished.</td></tr>
 </table>
 <p class="muted">Latest substantive CQ0 commit: <code>9d50400cb</code>. The independent branch is backed up on Forgejo; it has not been merged or deployed.</p>
 <h2>Delivery decisions</h2><p>Normal commits, batched into one larger PR. Adversarial review at main readiness, then the fast lane. The single new script is registered under the existing playback catalog owner. No feature readiness gates. No fleet deployment.</p>

@@ -2800,6 +2800,47 @@ impl MediaSessionCoordinator {
         relay_response(response)
     }
 
+    pub(crate) async fn quality_control(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityControlRelayRequest,
+    ) -> Result<Option<crate::http::hls::QualityControlResponse>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_CONTROL_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let budget =
+            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+                .ok_or(PeerTransportError::TimedOut)?;
+        let deadline = deadline_after(budget);
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_CONTROL_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_CONTROL_MAX_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if matches!(response.status.as_u16(), 404 | 405) {
+            return Ok(None);
+        }
+        if !response.status.is_success() {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let response =
+            serde_json::from_slice::<crate::http::hls::QualityControlResponse>(&response.body)
+                .ok()
+                .filter(|response| response.valid_for(&request.request))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        Ok(Some(response))
+    }
+
     /// Mutating playback control uses its own exact-auth endpoint. It must not
     /// inherit the generic relay's read authorization merely because the M1
     /// action happens to be `none`.

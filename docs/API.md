@@ -1621,6 +1621,40 @@ the client inferring it from `producer_state`.
 
 ---
 
+### Independent quality cancellation negotiation
+
+`POST /api/v1/hls/{session}/quality-control` uses the same session capability
+with a separate strict JSON envelope (maximum 4096 bytes, four-second total
+deadline). It leaves existing control bootstrap/request/response shapes
+unchanged. Discover first with
+`{version:1,generation,control_epoch,operation:"discover"}`. The response
+repeats the generation and epoch and advertises `features:["quality_cancel_v1"]`
+only if both ingress and the active owner implement this endpoint. An old
+ingress returns 404; an old owner's missing endpoint produces
+`features:[],outcome:"unsupported"`. Owner/generation changes require rediscovery.
+Continuous rendition support is not advertised by this cancellation extension.
+
+After an accepted control exchange carrying a media intent, cancel with
+`operation:"cancel_unappended"` and `identity` containing `generation`,
+`control_epoch`, `client_instance_id`, `lifetime_id`, `recipe_revision`, and
+`accepted_sequence`. All must match the exact planning owner; the accepted
+sequence prevents a delayed cancel from reaching a later same-selection retry.
+Cancellation reaches planning and registered uncommitted successors and never
+retires the incumbent. Repetition does not allocate or cancel a newer owner.
+
+`outcome:"cancel_requested"` acknowledges initiation, not completed worker or
+Store cleanup. `observation_unknown` means this owner no longer has matching
+cancellable work; it may already have moved to commit ownership. Neither
+outcome is a `retained_current` settlement or permission to discard committed
+media. Durable terminal cancellation receipts and client retention settlement
+remain implementation work in the continuous-quality build.
+
+The cluster hop uses `POST /internal/cluster/media/sessions/quality-control`,
+exact-write Ed25519 request authentication, an inherited deadline, and the
+expected owner node. A generation/epoch/owner mismatch refuses the operation.
+No user credentials are forwarded and all discovery responses are uncacheable.
+
+
 ## 11. Subtitles and overlays
 
 | Method | Path | Auth | What it does |

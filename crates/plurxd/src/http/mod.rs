@@ -359,6 +359,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
         | "/api/v1/hls/{session}/subs/{index}/{segment}"
         | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/quality-control"
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
@@ -483,6 +484,7 @@ fn http_route_group(path: &str) -> usize {
         | crate::media_sessions::PREPARE_PATH
         | crate::media_sessions::ABORT_PATH
         | crate::media_sessions::RELAY_PATH
+        | hls::QUALITY_CONTROL_PATH
         | crate::media_sessions::CONTROL_PATH => 7,
         _ => 8,
     }
@@ -1708,6 +1710,10 @@ pub fn router(state: AppState) -> Router {
                 crate::playback_control::MAX_REQUEST_BYTES,
             )),
         )
+        .route(
+            "/hls/{session}/quality-control",
+            post(hls::quality_control).layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
@@ -1934,6 +1940,11 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            hls::QUALITY_CONTROL_PATH,
+            post(internal_media_sessions::quality_control)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
             crate::media_sessions::CONTROL_PATH,
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
@@ -2052,6 +2063,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
             crate::media_sessions::ABORT_PATH
                 | crate::media_sessions::RELAY_PATH
                 | crate::media_sessions::CONTROL_PATH
+                | hls::QUALITY_CONTROL_PATH
         | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
                 // A retire is a stop plus a fence. Refusing it during
@@ -2078,7 +2090,10 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | ["api", "v1", "live-tv", "sessions", _, _]
         ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
     let existing_media_control = (method == Method::POST
-        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "hls", _, "control" | "quality-control"]
+        ))
         || (method == Method::DELETE
             && matches!(
                 segments.as_slice(),
@@ -2173,6 +2188,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
+                    | hls::QUALITY_CONTROL_PATH
                     | crate::live_tv::RESOURCE_PATH
                     | crate::live_tv::STOP_PATH
             ))
@@ -2251,7 +2267,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             segments.as_slice(),
             ["api", "v1", "files", _, "hls", "sessions"]
                 | ["api", "v1", "files", _, "publication"]
-                | ["api", "v1", "hls", _, "control"]
+                | ["api", "v1", "hls", _, "control" | "quality-control"]
                 // The caps-v2 spelling of the decision read. It is a POST only
                 // because its capabilities are a JSON document rather than a
                 // query string — it writes nothing, and a learner that answers
@@ -3921,6 +3937,7 @@ mod tests {
             // that have migrated, and nothing else in this matrix would say so.
             (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
+            (Method::POST, "/api/v1/hls/session-8/quality-control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
@@ -3936,6 +3953,7 @@ mod tests {
             (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             // The relay was in the matrix and had never been asserted. It is
             // the highest-traffic path a learner ingress originates: every
             // segment of media owned by another node goes through it.
@@ -4002,8 +4020,10 @@ mod tests {
             (Method::GET, "/api/v1/hls/session/index.m3u8"),
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, "/api/v1/hls/session/quality-control"),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
+            (Method::POST, hls::QUALITY_CONTROL_PATH),
             (Method::GET, "/api/v1/live-tv/sessions/cap/index.m3u8"),
             (
                 Method::GET,
@@ -4170,6 +4190,43 @@ mod tests {
         assert_eq!(
             app.oneshot(internal).await.expect("response").status(),
             StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_control_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-control", uuid::Uuid::new_v4()),
+            hls::QUALITY_CONTROL_PATH.to_owned(),
+        ] {
+            let oversized = Request::builder()
+                .method("POST")
+                .uri(&path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_CONTROL_MAX_BYTES + 1]))
+                .expect("quality control test request or response");
+            assert_eq!(
+                app.clone()
+                    .oneshot(oversized)
+                    .await
+                    .expect("quality control test request or response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("quality control test request or response");
+        assert_eq!(
+            app.oneshot(unsigned)
+                .await
+                .expect("quality control test request or response")
+                .status(),
+            StatusCode::UNAUTHORIZED
         );
     }
 

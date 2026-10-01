@@ -27,6 +27,7 @@ pub(super) struct ActivePreparedSuccessor {
     executor: crate::playback_control::PreparationExecutor,
     pub(super) preparation: plurx_core::domain::MediaSessionPreparation,
     pub(super) purpose: PreparationPurpose,
+    quality_intent: Option<QualityIntentIdentity>,
     cancelled: tokio_util::sync::CancellationToken,
 }
 
@@ -74,7 +75,8 @@ pub(in crate::http) async fn prepared_handoff_write_guard() -> tokio::sync::Owne
 struct PendingPreparationCandidate {
     claim: u64,
     desired_digest: String,
-    cancelled: bool,
+    quality_intent: Option<QualityIntentIdentity>,
+    cancelled: tokio_util::sync::CancellationToken,
 }
 
 fn pending_preparation_candidates(
@@ -95,6 +97,8 @@ static NEXT_PENDING_CANDIDATE_CLAIM: std::sync::atomic::AtomicU64 =
 pub(super) struct PendingCandidateGuard {
     playback_id: String,
     claim: u64,
+    quality_intent: Option<QualityIntentIdentity>,
+    cancelled: tokio_util::sync::CancellationToken,
 }
 
 impl PendingCandidateGuard {
@@ -102,9 +106,30 @@ impl PendingCandidateGuard {
     /// older one: there is one preparation slot per playback, so the older
     /// candidate is already doomed, and leaving its digest installed would make
     /// the emit rule answer `staging` about work nobody asked for any more.
+    #[cfg(test)]
     pub(super) fn begin(playback_id: &str, desired_digest: &str) -> Self {
+        Self::begin_owned(playback_id, desired_digest, None)
+    }
+
+    pub(super) fn begin_control(
+        playback_id: &str,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> Self {
+        Self::begin_owned(
+            playback_id,
+            &request.selection.desired().digest(),
+            QualityIntentIdentity::from_control(request),
+        )
+    }
+
+    fn begin_owned(
+        playback_id: &str,
+        desired_digest: &str,
+        quality_intent: Option<QualityIntentIdentity>,
+    ) -> Self {
         let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pending_preparation_candidates()
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let previous = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
@@ -112,13 +137,23 @@ impl PendingCandidateGuard {
                 PendingPreparationCandidate {
                     claim,
                     desired_digest: desired_digest.to_owned(),
-                    cancelled: false,
+                    quality_intent: quality_intent.clone(),
+                    cancelled: cancelled.clone(),
                 },
             );
+        if let Some(previous) = previous {
+            previous.cancelled.cancel();
+        }
         Self {
             playback_id: playback_id.to_owned(),
             claim,
+            quality_intent,
+            cancelled,
         }
+    }
+
+    pub(super) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.cancelled.clone()
     }
 
     /// Whether this candidate has been superseded since it was spawned.
@@ -131,7 +166,7 @@ impl PendingCandidateGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&self.playback_id)
-            .is_none_or(|pending| pending.claim != self.claim || pending.cancelled)
+            .is_none_or(|pending| pending.claim != self.claim || pending.cancelled.is_cancelled())
     }
 }
 
@@ -155,7 +190,7 @@ pub(super) fn pending_candidate_for_playback(playback_id: &str) -> Option<String
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(playback_id)
-        .filter(|pending| !pending.cancelled)
+        .filter(|pending| !pending.cancelled.is_cancelled())
         .map(|pending| pending.desired_digest.clone())
 }
 
@@ -169,7 +204,7 @@ fn cancel_pending_candidate(playback_id: &str) {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get_mut(playback_id)
     {
-        pending.cancelled = true;
+        pending.cancelled.cancel();
     }
 }
 
@@ -207,7 +242,8 @@ pub(super) fn pending_candidate_superseded(
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(playback_id)
         .is_some_and(|pending| {
-            pending.cancelled || desired_digest.is_some_and(|asked| pending.desired_digest != asked)
+            pending.cancelled.is_cancelled()
+                || desired_digest.is_some_and(|asked| pending.desired_digest != asked)
         })
 }
 
@@ -269,6 +305,7 @@ pub(super) fn register_test_preparation(
         executor,
         preparation,
         purpose,
+        quality_intent: None,
         cancelled: cancelled.clone(),
     });
     cancelled
@@ -278,7 +315,15 @@ fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
-                () = active.cancelled.cancelled() => return,
+                () = active.cancelled.cancelled() => {
+                    // A newer planning claim can cancel this token directly.
+                    // If cleanup has not already taken the registry entry,
+                    // this watcher owns retiring the registered successor.
+                    if let Some(active) = take_active_preparation(&active.preparation.incarnation_id) {
+                        settle_cancelled_preparation(active, "quality intent cancelled").await;
+                    }
+                    return;
+                },
                 () = tokio::time::sleep(Duration::from_millis(25)) => {}
             }
             if active_preparation(&active.preparation.incarnation_id).is_none() {
@@ -375,6 +420,62 @@ pub(super) async fn settle_cancelled_preparation(
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
     active.cancelled.cancel();
     tokio::spawn(settle_cancelled_preparation(active, reason));
+}
+
+pub(super) fn quality_preparation_identity(playback_id: &str) -> Option<QualityIntentIdentity> {
+    if let Some(identity) = pending_preparation_candidates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(playback_id)
+        .and_then(|pending| pending.quality_intent.clone())
+    {
+        return Some(identity);
+    }
+    active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .find(|active| active.preparation.playback_id == playback_id)
+        .and_then(|active| active.quality_intent.clone())
+}
+
+pub(super) fn cancel_quality_preparation(
+    playback_id: &str,
+    identity: &QualityIntentIdentity,
+) -> bool {
+    let pending_found = {
+        let pending = pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pending
+            .get(playback_id)
+            .filter(|candidate| candidate.quality_intent.as_ref() == Some(identity))
+            .is_some_and(|candidate| {
+                candidate.cancelled.cancel();
+                true
+            })
+    };
+    let matches = {
+        let mut active = active_prepared_successors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let ids = active
+            .iter()
+            .filter(|(_, candidate)| {
+                candidate.preparation.playback_id == playback_id
+                    && candidate.quality_intent.as_ref() == Some(identity)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| active.remove(&id))
+            .collect::<Vec<_>>()
+    };
+    let found = pending_found || !matches.is_empty();
+    for active in matches {
+        spawn_cancelled_preparation(active, "quality intent cancelled");
+    }
+    found
 }
 
 pub(super) fn cancel_preparations_for_incumbent_wait(playback_id: &str) {
@@ -1341,6 +1442,8 @@ pub(super) async fn process_preparation_candidate(
             AcceptedAsk {
                 film_time_ms: accepted_film_time_ms,
                 desired_digest: Some(selection.desired().digest()),
+                planning_cancellation: Some(pending.cancellation_token()),
+                quality_intent: pending.quality_intent.clone(),
             },
             primes,
         )
@@ -1413,6 +1516,10 @@ pub(super) struct AcceptedAsk {
     /// current then. `None` where the caller stages without an observed
     /// selection.
     pub(super) desired_digest: Option<String>,
+    /// Exact planning ownership, retained across registration so a later
+    /// same-selection request cannot revive a cancelled earlier candidate.
+    pub(super) planning_cancellation: Option<tokio_util::sync::CancellationToken>,
+    pub(super) quality_intent: Option<QualityIntentIdentity>,
 }
 
 #[cfg(test)]
@@ -1472,6 +1579,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let AcceptedAsk {
         film_time_ms: accepted_film_time_ms,
         desired_digest,
+        planning_cancellation,
+        quality_intent,
     } = accepted;
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
@@ -1744,7 +1853,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
             executor: executor.clone(),
             preparation: preparation.clone(),
             purpose,
-            cancelled: tokio_util::sync::CancellationToken::new(),
+            quality_intent,
+            cancelled: planning_cancellation
+                .unwrap_or_else(tokio_util::sync::CancellationToken::new),
         };
         // A test's only way to put a supersession into the window the comment
         // below names (`delay_preparation_registration`). Production's point
@@ -1764,7 +1875,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // after the registry names the successor, is what closes it: from this
         // point on `cancel_preparations_for_superseded_predecessor` can see the
         // entry itself, and before it the guard could.
-        if pending_candidate_superseded(&preparation.playback_id, desired_digest.as_deref()) {
+        if active.cancelled.is_cancelled()
+            || pending_candidate_superseded(&preparation.playback_id, desired_digest.as_deref())
+        {
             if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
@@ -1916,4 +2029,51 @@ fn arm_preparation_deadline(active: ActivePreparedSuccessor) {
             settle_cancelled_preparation(active, "prepared successor expired").await;
         }
     });
+}
+
+#[cfg(test)]
+mod quality_cancellation_tests {
+    use super::*;
+
+    fn identity(sequence: u64) -> QualityIntentIdentity {
+        QualityIntentIdentity {
+            generation: uuid::Uuid::new_v4().to_string(),
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: "quality-test".to_owned(),
+            recipe_revision: 1,
+            accepted_sequence: sequence,
+        }
+    }
+
+    #[test]
+    fn cancellation_before_offer_is_exact_and_idempotent() {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let identity = identity(3);
+        let pending = PendingCandidateGuard::begin_owned(&playback, "720p", Some(identity.clone()));
+        let mut wrong = identity.clone();
+        wrong.control_epoch += 1;
+        assert!(!cancel_quality_preparation(&playback, &wrong));
+        assert!(!pending.cancelled());
+        assert!(cancel_quality_preparation(&playback, &identity));
+        assert!(cancel_quality_preparation(&playback, &identity));
+        assert!(pending.cancelled());
+        assert!(pending_candidate_for_playback(&playback).is_none());
+    }
+
+    #[test]
+    fn late_cancel_does_not_cancel_a_same_selection_retry() {
+        let playback = uuid::Uuid::new_v4().to_string();
+        let earlier = identity(3);
+        let mut later = earlier.clone();
+        later.accepted_sequence = 5;
+        let old = PendingCandidateGuard::begin_owned(&playback, "720p", Some(earlier.clone()));
+        let current = PendingCandidateGuard::begin_owned(&playback, "720p", Some(later.clone()));
+        assert!(old.cancelled());
+        assert!(!cancel_quality_preparation(&playback, &earlier));
+        drop(old);
+        assert!(!current.cancelled());
+        assert!(cancel_quality_preparation(&playback, &later));
+        assert!(current.cancelled());
+    }
 }
