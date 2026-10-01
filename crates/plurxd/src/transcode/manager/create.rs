@@ -1323,6 +1323,23 @@ impl TranscodeManager {
         } else {
             None
         };
+        if encoding.is_none()
+            && measured_candidate.is_some()
+            && matches!(
+                &retained_capture,
+                crate::vodserve::RetainedOutputCapture::New
+            )
+            && req
+                .candidate_context
+                .as_ref()
+                .is_some_and(|context| context.retained_output.is_none())
+        {
+            // Bounded queue publication only, never full-title preparation in
+            // the foreground. Ordinary unknown-cost playback remains usable.
+            if let Err(error) = self.enqueue_copy_output(req, &file, &settings).await {
+                tracing::debug!(%error, file_id = file.id, "complete copy preparation unavailable");
+            }
+        }
         let prepared = crate::vodserve::VodRecipeRequest {
             measured_candidate,
             retained_capture: match retained_capture {

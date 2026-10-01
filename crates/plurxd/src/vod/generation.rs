@@ -438,12 +438,33 @@ async fn establish_or_verify(
                 let served = identity
                     .served_init_for(muxer)
                     .expect("an identity just established from this muxer init serves it");
-                if let Err(error) = store_identity(&rendition.identity_path(), &identity).await {
+                let preparation = rendition.preparation();
+                if let Err(error) = store_identity_observed(
+                    &rendition.identity_path(),
+                    &identity,
+                    preparation
+                        .as_ref()
+                        .map(|preparation| &preparation.allowance),
+                )
+                .await
+                {
                     tracing::warn!(
                         target: "plurxd::vodserve",
                         rendition = %rendition.key,
                         "persisting identity.json: {error}"
                     );
+                    if preparation.is_some() {
+                        rendition.revoke_preparation();
+                        drop(state);
+                        on_generation_end(
+                            shared,
+                            rendition,
+                            Outcome::Failed(Failure::Sink(error)),
+                            epoch,
+                        )
+                        .await;
+                        return false;
+                    }
                 }
                 *state = IdentityState {
                     identity: Some(identity),
@@ -452,6 +473,25 @@ async fn establish_or_verify(
                 served
             }
         }
+    };
+    let preparation = rendition.preparation();
+    let pending = if let Some(preparation) = preparation.as_ref() {
+        match preparation.allowance.begin(served.bytes.len() as u64) {
+            Some(pending) => Some(pending),
+            None => {
+                rendition.revoke_preparation();
+                on_generation_end(
+                    shared,
+                    rendition,
+                    Outcome::Failed(Failure::Sink(io::ErrorKind::OutOfMemory.into())),
+                    epoch,
+                )
+                .await;
+                return false;
+            }
+        }
+    } else {
+        None
     };
     if let Err(error) = rendition.dir.write_init(&served.bytes).await {
         on_generation_end(
@@ -462,6 +502,9 @@ async fn establish_or_verify(
         )
         .await;
         return false;
+    }
+    if let Some(pending) = pending {
+        pending.commit(false);
     }
     rendition.clear_demand(INIT_DEMAND_INDEX);
     rendition.init_notify.notify_waiters();
@@ -475,6 +518,14 @@ async fn on_generation_end(
     outcome: Outcome,
     epoch: u64,
 ) {
+    if rendition.cancelled_preparation_epoch.load(Acquire) == epoch.saturating_add(1) {
+        // Background cancellation is not a foreground producer verdict. The
+        // key/readers fence refuses to terminate an epoch acquired by a live
+        // reader; its existing driver owns subsequent reconciliation.
+        super::copy_preparation::fence_cancelled_epoch(shared, rendition, epoch).await;
+        rendition.kick();
+        return;
+    }
     if rendition.closed.load(Relaxed) {
         return;
     }
@@ -834,6 +885,22 @@ impl vodgen::Sink for RenditionSink {
                 return Err(io::Error::from(io::ErrorKind::NotFound));
             }
             let before = manifest.state(entry).map(|s| s.bytes()).unwrap_or(0);
+            let preparation = self.rendition.preparation();
+            let pending = if let Some(preparation) = preparation.as_ref() {
+                if before != 0 || manifest.is_admitted() {
+                    self.rendition.revoke_preparation();
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                match preparation.allowance.begin(len) {
+                    Some(pending) => Some(pending),
+                    None => {
+                        self.rendition.revoke_preparation();
+                        return Err(io::ErrorKind::OutOfMemory.into());
+                    }
+                }
+            } else {
+                None
+            };
             self.rendition
                 .dir
                 .materialize(&mut manifest, entry, &bytes, now_ms())
@@ -864,8 +931,14 @@ impl vodgen::Sink for RenditionSink {
                 sub_saturating(&self.shared.working_set, before);
                 self.shared.working_set.fetch_add(len, Relaxed);
             }
-            if manifest.next_gap(0).is_none() {
+            if let Some(pending) = pending {
+                pending.commit(true);
+            }
+            if manifest.next_gap(0).is_none() && preparation.is_none() {
                 self.shared.try_admit(&self.rendition, &mut manifest).await;
+            }
+            if let Some(preparation) = preparation {
+                preparation.progress.notify_waiters();
             }
             self.rendition.clear_demand(entry);
         }

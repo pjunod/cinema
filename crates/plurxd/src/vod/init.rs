@@ -238,7 +238,16 @@ pub(super) async fn load_identity(path: &Path) -> Option<InitIdentity> {
 
 /// Persist the identity tmp-then-rename, like every other rendition file:
 /// absent or complete, never partial.
+#[cfg(test)]
 pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::Result<()> {
+    store_identity_observed(path, identity, None).await
+}
+
+pub(super) async fn store_identity_observed(
+    path: &Path,
+    identity: &InitIdentity,
+    allowance: Option<&Arc<super::copy_preparation::PreparationAllowance>>,
+) -> io::Result<()> {
     let stored = StoredIdentity {
         muxer_init: identity.muxer_init.clone(),
         served_init: identity.served_init.clone(),
@@ -246,9 +255,20 @@ pub(super) async fn store_identity(path: &Path, identity: &InitIdentity) -> io::
     };
     let bytes = serde_json::to_vec(&stored)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let pending = allowance
+        .map(|allowance| {
+            allowance
+                .begin(bytes.len() as u64)
+                .ok_or_else(|| io::Error::from(io::ErrorKind::OutOfMemory))
+        })
+        .transpose()?;
     let tmp = path.with_extension("json.tmp");
     tokio::fs::write(&tmp, &bytes).await?;
-    tokio::fs::rename(&tmp, path).await
+    tokio::fs::rename(&tmp, path).await?;
+    if let Some(pending) = pending {
+        pending.commit(false);
+    }
+    Ok(())
 }
 
 pub(super) async fn sync_file(path: &Path) -> io::Result<()> {

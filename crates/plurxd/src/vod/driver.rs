@@ -436,6 +436,23 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         }
         let belief = rendition.slot.belief().await;
         let handoff = bound_handoff(shared, rendition).await;
+        let preparation = rendition.preparation();
+        let preparation_live = match preparation.as_ref() {
+            Some(preparation) => preparation.live(rendition).await && handoff.is_none(),
+            None => false,
+        };
+        if let Some(preparation) = preparation.as_ref() {
+            // Reuse this driver's admission poll for the finite worker's
+            // observation; no second scheduler or synthetic viewer demand.
+            preparation.progress.notify_waiters();
+        }
+        if preparation.is_some() && !preparation_live {
+            rendition.revoke_preparation();
+        }
+        let epoch = rendition.gen_epoch.load(Relaxed);
+        if super::copy_preparation::fence_cancelled_epoch(shared, rendition, epoch).await {
+            return;
+        }
         // Reader windows may require asynchronous state reads. Take that
         // snapshot before the manifest lock so cached GET publication never
         // waits behind policy or admission I/O.
@@ -443,6 +460,9 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         let mut manifest = rendition.manifest.lock().await;
         let (demands, prewarm_ledgers) = {
             let readers = rendition.readers.lock().await;
+            if !readers.is_empty() {
+                rendition.revoke_preparation();
+            }
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
@@ -456,7 +476,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             seconds_per_segment: rendition.seconds_per_segment,
             ahead_held: rendition.ahead_hold.load(Acquire),
             working_set: WorkingSet {
-                used_bytes: shared.working_set.load(Relaxed),
+                used_bytes: {
+                    let total = shared.working_set.load(Relaxed);
+                    total
+                        .checked_sub(shared.preparation_media.load(Relaxed))
+                        .unwrap_or(total)
+                },
                 budget_bytes: rendition.working_set_budget,
                 held: matches!(
                     belief,
@@ -468,8 +493,15 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 ),
             },
         };
-        let decision =
+        let mut decision =
             decide_with_marker_prewarm(&manifest, &demands, position, &windows, &prewarm_ledgers);
+        // An explicit leased background obligation is not a viewer/frontier.
+        // It uses the same producer slot only while no reader has acquired it.
+        if preparation_live && rendition.preparation().is_some() && demands.is_empty() {
+            decision.action = manifest
+                .next_gap(0)
+                .map_or(Action::Idle, |next| Action::Produce { next });
+        }
         // Record only this pass's decision. A later non-capacity decision
         // clears the reason, so the status cannot outlive the condition that
         // produced it.
@@ -616,6 +648,12 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 drop(manifest);
                 match perform_driver_step(shared, rendition, step).await {
                     Ok(Performed::NeedsSpawn { at }) => {
+                        if rendition.preparation().is_some() {
+                            rendition.preparation_epoch.store(
+                                rendition.gen_epoch.load(Relaxed).saturating_add(1),
+                                Release,
+                            );
+                        }
                         spawn_generation(shared, rendition, at, prepared_permit.take()).await;
                     }
                     Ok(Performed::Done) => {}
@@ -749,6 +787,17 @@ pub(super) fn playback_demands(
 
 pub(super) async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> Vec<ReaderWindow> {
     let mut windows = rendition.reader_windows().await;
+    if let Some(preparation) = rendition.preparation() {
+        if preparation.live(rendition).await {
+            // A real reservation pin, not a fabricated playback reader.
+            windows.push(ReaderWindow {
+                back: 0,
+                playhead: 0,
+                frontier: rendition.plan.len().saturating_sub(1) as u32,
+                ahead: 0,
+            });
+        }
+    }
     windows.extend(
         shared
             .pool
