@@ -827,6 +827,57 @@ extra internal keys are reported separately, not treated as grid drift.
 Physical/graph acceptance, authenticated campaign provenance and the original
 full census below remain open. No production GOP flag changes follow here.
 
+**2026-10-01 real-owner acquisition candidate:**
+[`scripts/rolling-grid-acquire`](../../scripts/rolling-grid-acquire) and the
+feature-enabled ignored `rolling_grid_campaign::owned_real_rolling_cell`
+entry point provide a private loopback acquisition path. They do not add a
+public Live create field, force a VOD refusal or change production flags.
+The internal Live request runs the existing manager/producer, then real
+in-memory Store claim/assign/activate APIs bind its active route. The bridge
+delegates to shipped playlist/segment handlers and their actual downstream
+EOF pump: buffering bridge bytes is never an extra delivery commit.
+
+The active viewport video runs at1× with vendored hls.js. Real
+`requestVideoFrameCallback` media time/presented-frame observations are sampled
+at500ms, not every33ms; two actually accepted advancing observations must
+satisfy the existing30s startup policy. No test-only presented marks, download
+frontier relabel or synthetic Rendering is permitted. Nonce, session,
+generation and producer attempt fence callbacks; absolute origin is applied
+once at server control ingestion. Missing callbacks, stalls, refusal or changed
+source preserve partial evidence, never a completed cell.
+
+Supply an existing hash-pinned browser and reviewed feature-enabled test
+binary; no build/download/install occurs in this controller. Its manifest pins
+source, FFmpeg, ffprobe, browser, test binary and vendored hls.js. Source must
+provide≥64s without looping and support the requested360/480/720/1080 rung.
+Prepare the exact reviewed page only in a fresh owned mode700 root, then
+validate without launching:
+
+```bash
+python3 scripts/rolling-grid-acquire --page-template /private/tmp/owned-cell/page.html
+python3 scripts/rolling-grid-acquire /private/tmp/owned-cell/manifest.json
+```
+
+Operational `--execute` needs a separately authorized owned Linux cgroup
+ceiling≤2CPU/2GiB/256PID for the complete local producer/browser tree; bare-host
+execution refuses. One browser/page/cell,≤4 concurrent media response bodies,
+≤4096 observations/snapshots,≤256 segments/512MiB media,64MiB logs and10min wall
+deadline. The fresh standalone child limiter caps file/CPU resources without
+threaded post-fork callbacks. The later16-cell serial campaign retains its
+160min aggregate bound; this tool does not authorize that campaign or reserve
+K06 hosts. Pin actual browser build separately in the operational receipt.
+
+Raw playlist revisions and exact served object names/hashes remain immutable;
+an accumulated sliding window is derived evidence, not an original server
+playlist. Completion requires≥30 distinct contiguous fully consumed segments,
+≥60s of their actual advertised durations and actual browser media progress.
+The census still measures packet/GOP facts; browser callbacks are not NAL IDR
+proof. This is test-binary/internal-manager/shipped-handler/headless-browser
+presentation evidence, NOT public create-route, physical, native, artist-HDR,
+GPU or whole-M3 qualification. No actual acquisition has run for this candidate.
+Two new focused synthetic ownership contracts passed once after negative
+controls; no previous unit successes repeated.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).
