@@ -117,6 +117,216 @@ mod tests {
             ClusterClockState::NoPeers
         );
     }
+
+    fn publish_offset(guard: &ClusterClockGuard, offset_us: i64, uncertainty_us: i64) {
+        let ticket = guard.roster(&["peer".into()]);
+        assert!(guard.publish(
+            ticket,
+            BTreeMap::from([(
+                "peer".into(),
+                PeerClockOffset::Bounded {
+                    offset_us,
+                    uncertainty_us,
+                    observed_at: Instant::now(),
+                },
+            )])
+        ));
+    }
+
+    #[test]
+    fn acquisition_requires_exact_fresh_roster_and_safe_upper_bound() {
+        let standalone = ClusterClockGuard::new(false);
+        let ticket = standalone.acquire().expect("standalone proof");
+        assert!(ticket.now_ms() > 0);
+        assert_eq!(standalone.revalidate(&ticket), Ok(()));
+
+        let guard = ClusterClockGuard::new(true);
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        guard.roster(&[]);
+        let empty = guard.acquire().expect("proved empty committed roster");
+        assert_eq!(guard.revalidate(&empty), Ok(()));
+        {
+            let mut inner = guard.inner.lock().expect("clock state lock");
+            inner.roster_observed_at = Some(Instant::now() - Duration::from_secs(26));
+        }
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        assert_eq!(
+            guard.revalidate(&empty),
+            Err(ClockRefusal::GenerationChanged)
+        );
+
+        // Exact threshold includes uncertainty, on either side of zero.
+        for offset in [1_999_000, -1_999_000] {
+            publish_offset(&guard, offset, 1_000);
+            assert!(guard.acquire().is_ok());
+        }
+        for (offset, uncertainty) in [(1_500_000, 601_000), (-2_500_000, 1_000)] {
+            publish_offset(&guard, offset, uncertainty);
+            assert_eq!(guard.acquire().err(), Some(ClockRefusal::Offset));
+        }
+        for (offset, uncertainty) in [(i64::MIN, 1_000), (0, -1)] {
+            publish_offset(&guard, offset, uncertainty);
+            assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        }
+        publish_offset(&guard, 0, 1_000);
+        {
+            let mut inner = guard.inner.lock().expect("clock state lock");
+            inner.snapshot.peers = bounded(Instant::now() - Duration::from_secs(26));
+        }
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        publish_offset(&guard, 0, 1_000);
+        {
+            let mut inner = guard.inner.lock().expect("clock state lock");
+            inner.snapshot.peers = bounded(Instant::now() + Duration::from_secs(1));
+        }
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        guard.roster_failed();
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+    }
+
+    #[test]
+    fn acquisition_ticket_is_guard_bound_and_rechecks_both_generations() {
+        let guard = ClusterClockGuard::new(true);
+        publish_offset(&guard, 0, 1_000);
+        let ticket = guard.acquire().expect("safe initial ticket");
+        let original_now = ticket.now_ms();
+        let other = ClusterClockGuard::new(true);
+        publish_offset(&other, 0, 1_000);
+        assert_eq!(
+            other.revalidate(&ticket),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(guard.revalidate(&ticket), Ok(()));
+        assert_eq!(ticket.now_ms(), original_now);
+
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        let ticket = guard.acquire().expect("new safe ticket");
+        guard.roster(&["peer".into(), "new-peer".into()]);
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+
+        publish_offset(&guard, 0, 1_000);
+        let ticket = guard.acquire().expect("safe before failed round");
+        let round = guard.roster(&["peer".into()]);
+        assert!(guard.publish(
+            round,
+            BTreeMap::from([("peer".into(), PeerClockOffset::Unknown)])
+        ));
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+    }
+
+    #[test]
+    fn acquisition_refuses_common_mode_step_and_unrepresentable_wall() {
+        let guard = ClusterClockGuard::new(true);
+        publish_offset(&guard, 0, 1_000);
+        let ticket = guard.acquire().expect("safe before common-mode step");
+        {
+            let mut inner = guard.inner.lock().expect("clock state lock");
+            // Relative peer offsets still say zero. Only synchronous local
+            // continuity at the actual policy read can invalidate this proof.
+            *inner.anchor_wall_ms.as_mut().expect("fixture anchor") += 15_000;
+        }
+        assert_eq!(
+            guard.revalidate(&ticket),
+            Err(ClockRefusal::LocalDiscontinuity)
+        );
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        assert!(!guard.snapshot().readiness.is_unbounded());
+        publish_offset(&guard, 0, 1_000);
+        {
+            let mut inner = guard.inner.lock().expect("clock state lock");
+            inner.anchor_wall_ms = None;
+        }
+        assert_eq!(
+            guard.acquire().err(),
+            Some(ClockRefusal::LocalDiscontinuity)
+        );
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+    }
+
+    #[test]
+    fn readiness_counts_completed_positive_rounds_and_resets_on_invalid_evidence() {
+        let guard = ClusterClockGuard::new(true);
+        assert!(!guard.snapshot().readiness.is_unbounded());
+        publish_offset(&guard, 2_500_000, 1_000);
+        for _ in 0..10 {
+            assert!(
+                !guard.snapshot().readiness.is_unbounded(),
+                "polls are not rounds"
+            );
+        }
+        let invalid = guard.roster(&["peer".into()]);
+        assert!(!guard.publish(invalid, BTreeMap::new()));
+        assert!(!guard.snapshot().readiness.is_unbounded());
+        publish_offset(&guard, -2_500_000, 1_000);
+        assert!(!guard.snapshot().readiness.is_unbounded());
+        publish_offset(&guard, -2_500_000, 1_000);
+        assert!(guard.snapshot().readiness.is_unbounded());
+        for reset in [
+            "safe",
+            "unknown",
+            "failure",
+            "expiry",
+            "roster",
+            "continuity",
+        ] {
+            match reset {
+                "safe" => publish_offset(&guard, 0, 1_000),
+                "unknown" => {
+                    let round = guard.roster(&["peer".into()]);
+                    assert!(guard.publish(
+                        round,
+                        BTreeMap::from([("peer".into(), PeerClockOffset::Unknown)])
+                    ));
+                }
+                "failure" => guard.roster_failed(),
+                "expiry" => {
+                    let mut inner = guard.inner.lock().expect("clock state lock");
+                    inner.snapshot.peers = bounded(Instant::now() - Duration::from_secs(26));
+                }
+                "roster" => {
+                    guard.roster(&[]);
+                }
+                "continuity" => {
+                    let mut inner = guard.inner.lock().expect("clock state lock");
+                    inner.anchor_wall_ms = None;
+                    drop(inner);
+                    assert_eq!(
+                        guard.acquire().err(),
+                        Some(ClockRefusal::LocalDiscontinuity)
+                    );
+                }
+                _ => unreachable!("listed fixture reset"),
+            }
+            assert!(!guard.snapshot().readiness.is_unbounded(), "{reset}");
+            publish_offset(&guard, 2_500_000, 1_000);
+            assert!(
+                !guard.snapshot().readiness.is_unbounded(),
+                "first round after {reset}"
+            );
+            publish_offset(&guard, 2_500_000, 1_000);
+            assert!(
+                guard.snapshot().readiness.is_unbounded(),
+                "second round after {reset}"
+            );
+        }
+        let metrics = guard.prometheus();
+        assert!(metrics.contains("measurement-only emits zero"));
+        assert!(metrics.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"offset\"} 0"
+        ));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,6 +348,49 @@ pub struct ClockDecisionTicket {
     pub now_ms: i64,
 }
 
+/// Pure policy refusal. No production consumer is connected in this release.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ClockRefusal {
+    #[error("clock coverage is incomplete or expired")]
+    Unknown,
+    #[error("clock offset upper bound exceeds the safety limit")]
+    Offset,
+    #[error("local wall clock continuity changed")]
+    LocalDiscontinuity,
+    #[error("clock decision evidence changed")]
+    GenerationChanged,
+}
+
+/// An acquisition proof belongs to this exact shared guard, not another node's
+/// equal-looking generations. Unlike a measurement ticket it cannot be forged.
+#[derive(Clone, Copy)]
+pub struct ClockAcquisitionTicket<'guard> {
+    guard: &'guard ClusterClockGuard,
+    decision: ClockDecisionTicket,
+}
+
+impl ClockAcquisitionTicket<'_> {
+    /// Bind this original value to the caller's expiry query/proposal. A later
+    /// revalidation never replaces it with a fresh wall reading.
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        self.decision.now_ms
+    }
+}
+
+/// Passive facts from completed observation rounds, not readiness polls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClockReadiness {
+    consecutive_violating_rounds: u8,
+}
+
+impl ClockReadiness {
+    #[must_use]
+    pub fn is_unbounded(self) -> bool {
+        self.consecutive_violating_rounds >= 2
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ClockSnapshot {
     pub state: ClusterClockState,
@@ -146,6 +399,7 @@ pub struct ClockSnapshot {
     pub state_generation: u64,
     pub discontinuities: u64,
     pub unknown_rounds: u64,
+    pub readiness: ClockReadiness,
 }
 
 struct ClockInner {
@@ -153,6 +407,8 @@ struct ClockInner {
     roster_proved: bool,
     anchor_wall_ms: Option<i64>,
     anchor_mono: Instant,
+    standalone: bool,
+    roster_observed_at: Option<Instant>,
 }
 
 pub struct ClusterClockGuard {
@@ -188,10 +444,13 @@ impl ClusterClockGuard {
                     state_generation: 0,
                     discontinuities: 0,
                     unknown_rounds: 0,
+                    readiness: ClockReadiness::default(),
                 },
                 roster_proved: !replicated,
                 anchor_wall_ms: wall_ms(),
                 anchor_mono: mono,
+                standalone: !replicated,
+                roster_observed_at: None,
             }),
         }
     }
@@ -207,6 +466,62 @@ impl ClusterClockGuard {
         let wall = wall_ms();
         let after = Instant::now();
         Self::continuity(&mut inner, before, wall, after)
+    }
+
+    /// Prepare a pure acquisition proof from one serialized continuity/state
+    /// read. Future consumers must revalidate immediately before submission.
+    /// This does not submit, count a production refusal, or cancel an existing
+    /// commit-unknown proposal.
+    pub fn acquire(&self) -> Result<ClockAcquisitionTicket<'_>, ClockRefusal> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let generation = inner.snapshot.clock_generation;
+        let before = Instant::now();
+        let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        if decision.clock_generation != generation {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
+        Self::acquisition_policy(&inner)?;
+        Ok(ClockAcquisitionTicket {
+            guard: self,
+            decision,
+        })
+    }
+
+    /// Close both generation races after awaited preparation. This is a local
+    /// synchronous check only; it cannot establish whether a submitted CAS won.
+    pub fn revalidate(&self, ticket: &ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal> {
+        if !std::ptr::eq(self, ticket.guard) {
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let before = Instant::now();
+        let current = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        if current.clock_generation != ticket.decision.clock_generation {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
+        if current.state_generation != ticket.decision.state_generation {
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        Self::acquisition_policy(&inner)
+    }
+
+    fn acquisition_policy(inner: &ClockInner) -> Result<(), ClockRefusal> {
+        match inner.snapshot.state {
+            ClusterClockState::NoPeers if inner.roster_proved => Ok(()),
+            ClusterClockState::Bounded { worst_abs_upper_us }
+                if worst_abs_upper_us <= CLOCK_OFFSET_REFUSAL_MS * 1_000 =>
+            {
+                Ok(())
+            }
+            ClusterClockState::Bounded { .. } => Err(ClockRefusal::Offset),
+            _ => Err(ClockRefusal::Unknown),
+        }
     }
 
     fn continuity(
@@ -238,6 +553,8 @@ impl ClusterClockGuard {
                 *peer = PeerClockOffset::Unknown;
             }
             inner.roster_proved = false;
+            inner.roster_observed_at = None;
+            inner.snapshot.readiness = ClockReadiness::default();
             inner.anchor_wall_ms = wall;
             inner.anchor_mono = before;
         }
@@ -252,8 +569,18 @@ impl ClusterClockGuard {
 
     fn expire(inner: &mut ClockInner, now: Instant) {
         let mut changed = false;
+        if !inner.standalone
+            && inner.roster_proved
+            && !inner.roster_observed_at.is_some_and(|observed| {
+                now.checked_duration_since(observed)
+                    .is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE)
+            })
+        {
+            inner.roster_proved = false;
+            changed = true;
+        }
         for peer in inner.snapshot.peers.values_mut() {
-            if matches!(peer, PeerClockOffset::Bounded { observed_at, .. } if now.saturating_duration_since(*observed_at) > CLOCK_OBSERVATION_MAX_AGE)
+            if matches!(peer, PeerClockOffset::Bounded { observed_at, .. } if !now.checked_duration_since(*observed_at).is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE))
             {
                 *peer = PeerClockOffset::Unknown;
                 changed = true;
@@ -261,6 +588,7 @@ impl ClusterClockGuard {
         }
         if changed {
             inner.snapshot.state_generation += 1;
+            inner.snapshot.readiness = ClockReadiness::default();
         }
     }
 
@@ -320,7 +648,9 @@ impl ClusterClockGuard {
             }
             inner.roster_proved = true;
             inner.snapshot.state_generation += 1;
+            inner.snapshot.readiness = ClockReadiness::default();
         }
+        inner.roster_observed_at = Some(Instant::now());
         Self::recompute(&mut inner);
         ClockDecisionTicket {
             state_generation: inner.snapshot.state_generation,
@@ -347,6 +677,7 @@ impl ClusterClockGuard {
             || inner.snapshot.state_generation != ticket.state_generation
             || inner.snapshot.peers.keys().ne(peers.keys())
         {
+            inner.snapshot.readiness = ClockReadiness::default();
             return false;
         }
         let failed = peers
@@ -358,7 +689,21 @@ impl ClusterClockGuard {
         }
         // Every completed round invalidates tickets, including a newly failed peer.
         inner.snapshot.state_generation += 1;
+        Self::expire(&mut inner, Instant::now());
         Self::recompute(&mut inner);
+        inner.snapshot.readiness.consecutive_violating_rounds = match inner.snapshot.state {
+            ClusterClockState::Bounded { worst_abs_upper_us }
+                if worst_abs_upper_us > CLOCK_OFFSET_REFUSAL_MS * 1_000 =>
+            {
+                inner
+                    .snapshot
+                    .readiness
+                    .consecutive_violating_rounds
+                    .saturating_add(1)
+                    .min(2)
+            }
+            _ => 0,
+        };
         true
     }
 
@@ -368,6 +713,8 @@ impl ClusterClockGuard {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.roster_proved = false;
+        inner.roster_observed_at = None;
+        inner.snapshot.readiness = ClockReadiness::default();
         for peer in inner.snapshot.peers.values_mut() {
             *peer = PeerClockOffset::Unknown;
         }

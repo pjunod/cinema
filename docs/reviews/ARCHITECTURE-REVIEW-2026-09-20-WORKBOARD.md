@@ -256,3 +256,17 @@ rule 4 remains.
 This file is kept honest by `tests/operations/test_docs_index.py` (every
 linked plan must exist) and by rule 2 above (a claim without a PR is not a
 claim).
+
+**2026-10-01 K-06 E0 preparation decision (gpt-6.1-sol,
+agent:/root/s14_resume_sol61):** under Paul's delegated routine-decision
+authority and effort/main-at-end sequencing, the coordinator authorizes
+`codex/k06-pure-clock-policy` preparatory core policy. The three canonical
+clock plans record the same dated ruling: preparation may proceed now;
+active production refusal consumers need successful identified measurement
+evidence before effort integration. An owned isolated four-node LAN observation
+of an identified current-effort measurement artifact can supply that safety
+bar, not main/fleet qualification. One-hour idle plus 60-second actual network
+load, existing bounds/auth/no-switch contract and original failed/missing
+receipts remain unchanged. No active consumer, fake refusal metrics, rollout,
+clock step, lab launch or K-06 closure is claimed; 24-hour/drill final acceptance
+remains open. The reviewable E0 PR will carry the source/proof/ownership record.

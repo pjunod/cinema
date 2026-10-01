@@ -78,6 +78,22 @@ it — each is explicitly refused in §4 and each has a reason.
 
 ## 1. Objective
 
+**2026-10-01 sequencing decision — preparatory policy is not enforcement.**
+Under Paul's delegated routine-decision authority and the newer workflow that
+promotes the effort to main only at its end, the coordinator permits E0 pure
+policy source preparation now. This dated ruling supersedes the earlier
+before-claim prohibition only for preparation: active production refusal
+consumers still require successful identified measurement evidence before
+effort integration. A separately identified, measurement-only current-effort
+artifact observed in an owned isolated four-node LAN lab can supply that
+safety evidence; it is not a main release or production-fleet qualification.
+Keep §5.5's one-hour idle and 60-second actual network-load observation,
+complete roster/uncertainty/continuity/authority-cost facts, 250 ms local and
+2,000 ms relative bounds, and original failed/missing receipts unchanged.
+The later 24-hour enforcing observation and explicitly approved disposable
+clock-step drill remain final acceptance. There is no enablement switch or
+gate, and this ruling authorizes no deployment, lab launch or clock step.
+
 Board id **K-06**. A node that steps its clock must not be able to steal
 every session in the fleet, and an operator must be able to see the offset
 before it does. Concretely: each node continuously measures its clock offset
@@ -992,6 +1008,7 @@ claim protocol). **Model** is the runtime's exact model identifier;
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | E0 preparatory pure policy | `codex/k06-pure-clock-policy` | Coordinator's dated sequencing ruling above permits source preparation, not active consumers. Core-only typed acquisition/revalidation and completed-positive-round readiness facts; measurement remains automatic and measurement-only. Identified observation, active consumers and final qualification remain open. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0-M4 design | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1ddfe0c26` | Reconciled the existing signed request timestamp, distinct 30 s/5 s auth windows, authenticated response body, conservative upper-bound decision, discontinuity reset, no-gate rollout split and executable follow-on evidence. No runtime behaviour or fleet result is claimed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | sole-review disposition | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1318972bb` | Added synchronous wall/monotonic continuity plus decision/state generations; split acquisition from fenced target removal; floored and time-expired the delay filter; and added executable common-mode, decision-race, removal and 0→1 ms fixtures. Runtime and fleet evidence remain unclaimed. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/dashboard_remaining_count_sol61 | original-design receipt and required runtime handoffs | `codex/k06-runtime-handoffs`, docs-only continuation | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) final head `1fffa4dbafccc1f7ee06b0a807d482df13afb588` and landing `02c7760e2486e09e84d390e0b40b35f64449d53d` share tree `28f1ee1eda8e8f23f0d8ff4af2698f0865011aa9`; both design and Python model are unchanged at effort `f319fa779`. Sole review [3360](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3360), disposition [3368](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3368) and final CI-only timeout correction [3405](http://192.168.4.7:3000/noirr/plurx/pulls/430#issuecomment-3405) are retained. Final-head [gate UI 2533](http://192.168.4.7:3000/noirr/plurx/actions/runs/2533) / API 2551 passed scope, preflight, Rust, Windows and Main promotion; irrelevant web/mobile jobs skipped. Current baseline's design/index/status checks passed 12 tests. Section 5's two separately owned runtime handoffs are now documented; owners remain unclaimed, enabling-policy conflict awaits a human ruling, and no runtime, fleet, drill or final effort qualification is claimed. |
