@@ -621,7 +621,7 @@
             )
             .await
             .expect("first offline pass"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let first_hash = store
             .offline_package_for_user(package_id, user.id)
@@ -651,7 +651,7 @@
             )
             .await
             .expect("resumed offline pass after hot setting change"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         assert_eq!(
             store
@@ -686,7 +686,7 @@
         mgr.set_automatic_decoder_recovery(true);
         mgr.test_script_offline_production([
             OfflineProduceOutcome::HealthRefused,
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
         ]);
 
@@ -742,7 +742,7 @@
             )
             .await
             .expect("first offline pass"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let attempts = mgr.test_offline_produced_recipes();
         assert_eq!(attempts.len(), 2, "one refused primary gets one alternate");
@@ -920,7 +920,7 @@
             .expect("pending fixture after restart");
         assert_eq!(pending_resumed.decoder_recovery_state, "recovery_pending");
         assert_eq!(pending_resumed.recipe_hash, None);
-        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded]);
+        mgr.test_script_offline_production([OfflineProduceOutcome::Yielded("production_interrupted")]);
         assert!(matches!(
             mgr.ensure_offline(
                 &pending_resumed,
@@ -931,7 +931,7 @@
             )
             .await
             .expect("resume from pending recovery"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         assert_eq!(
             mgr.test_offline_produced_recipes().last(),
@@ -1023,7 +1023,7 @@
         );
         survivor.test_publish_artifact_qualification(ArtifactQualification::HealthQualified);
         survivor.test_script_offline_production([
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
             OfflineProduceOutcome::HealthRefused,
         ]);
@@ -1038,7 +1038,7 @@
                 )
                 .await
                 .expect("software survivor recovery"),
-            OfflineProduceOutcome::Yielded
+            OfflineProduceOutcome::Yielded(_)
         ));
         let survivor_attempts = survivor.test_offline_produced_recipes();
         assert_eq!(survivor_attempts.len(), 1);

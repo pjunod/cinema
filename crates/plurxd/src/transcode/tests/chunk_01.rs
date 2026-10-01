@@ -626,7 +626,8 @@
             )
             .await
             .expect("legacy producer after neutral observation")
-            .expect("legacy FFmpeg completed inside its retained budget");
+            ;
+        let ProductionProgress::Ready(produced) = produced else { panic!("legacy FFmpeg completed inside its retained budget"); };
         assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
     }
 
@@ -718,7 +719,8 @@
             )
             .await
             .expect("legacy producer after final observation timeout")
-            .expect("legacy FFmpeg completed after the probe released its source offset lane");
+            ;
+        let ProductionProgress::Ready(produced) = produced else { panic!("legacy FFmpeg completed after the probe released its source offset lane"); };
         assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
     }
 

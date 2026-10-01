@@ -60,7 +60,7 @@ pub(super) enum PartEnd {
     /// ffmpeg reached the end of the file.
     Finished,
     /// A viewer wants the hardware.
-    Preempted,
+    Preempted(&'static str),
     /// This producer run is out of time.
     Deadline,
     Failed(String),
@@ -75,7 +75,7 @@ pub(super) enum PartEnd {
 pub(super) fn part_exit_disposition(ended: &PartEnd) -> crate::decoder_health::ExitDisposition {
     match ended {
         PartEnd::Finished => crate::decoder_health::ExitDisposition::CleanEnd,
-        PartEnd::Preempted | PartEnd::Deadline => {
+        PartEnd::Preempted(_) | PartEnd::Deadline => {
             crate::decoder_health::ExitDisposition::IntentionalYield
         }
         PartEnd::Failed(_) => crate::decoder_health::ExitDisposition::FailedTermination,
@@ -104,6 +104,13 @@ impl LiveAdmission {
 pub(super) struct Tracks {
     pub(super) audio_index: Option<i64>,
     pub(super) subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
+}
+
+/// Completion or the observed reason a producer stopped without publishing.
+#[derive(Debug)]
+pub(super) enum ProductionProgress {
+    Ready(Published),
+    Yielded(&'static str),
 }
 
 /// A published cache entry, as measured on disk.
@@ -166,7 +173,7 @@ impl PretranscodePolicySnapshot {
 #[derive(Debug, Clone)]
 pub enum PretranscodeProduceOutcome {
     Ready(Produced),
-    Yielded,
+    Yielded(&'static str),
     StoreUnavailable,
     PolicyChanged,
     SourceChanged,
@@ -199,7 +206,7 @@ pub enum OfflineSubtitle {
 pub enum OfflineProduceOutcome {
     Ready(Produced),
     Cached(Produced),
-    Yielded,
+    Yielded(&'static str),
     ClaimedElsewhere,
     StoreUnavailable,
     PolicyChanged,
@@ -682,12 +689,14 @@ impl PretranscodeFence {
 
     pub async fn yield_job(
         &self,
+        reason: &str,
         _store: &dyn Store,
         now_unix_ms: i64,
         not_before_ms: i64,
     ) -> Result<bool, plurx_core::error::StoreError> {
         self.durable
             .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                error_code: Some(reason.into()),
                 checkpoint: None,
                 not_before_ms: not_before_ms.max(now_unix_ms),
             })
