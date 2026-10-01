@@ -460,6 +460,8 @@
             starved_at_ms: Some(1),
             sample_count: 12,
             updated_at_ms: 1,
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
         };
 
         for hdr10 in [false, true] {

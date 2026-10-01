@@ -23677,6 +23677,7 @@ async fn playback_telemetry_contract_runs_through_dyn_store() {
             throughput_kbps: Some(6_000),
             starved_rung_height: None,
             observed_at_ms: 1_700_000_100_000,
+            measured_link: None,
         }];
         assert_eq!(
             store
@@ -23777,6 +23778,7 @@ async fn network_prior_contract_runs_through_dyn_store() {
                 throughput_kbps: Some(8_000),
                 starved_rung_height: Some(1080),
                 observed_at_ms: 1_700_000_000_000,
+                measured_link: None,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: observe prior: {error}"));
