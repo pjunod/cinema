@@ -54,12 +54,15 @@ import androidx.media3.exoplayer.source.LoadEventInfo
 import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.hls.HlsManifest
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -3865,16 +3868,61 @@ class Controller internal constructor(
     private var preparedStartedAtMs = 0L
     private data class AutoStagedObservation(val player: ExoPlayer, val meter: AutoTransferEvidence,
         val sessionId: String, val candidateId: String, val recipeDigest: List<Int>,
-        val startedAtMs: Long, val deadlineMs: Long)
+        val startedAtMs: Long, val deadlineMs: Long, val credentialOrigin: String, val credentialToken: String?,
+        var playlistUrl: String? = null, var immutableVod: Boolean = false)
     private var autoStagedObservation: AutoStagedObservation? = null
+    private var autoStagedPlaylistJob: Job? = null
 
     private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
         nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
+            Session.origin == observation.credentialOrigin && Session.token == observation.credentialToken &&
             preparedPlayer === observation.player && autoTransfersByPlayer[observation.player] === observation.meter &&
             preparedLedger.action?.sessionId == observation.sessionId &&
             preparedLedger.action?.effectiveSelection?.candidateId == observation.candidateId &&
             autoDesiredCandidate?.id == observation.candidateId &&
             autoDesiredCandidate?.recipe_digest == observation.recipeDigest
+
+    /** One received media-playlist lookup, bound to the stage and original deadline. */
+    private fun captureAutoStagedVodPlaylist(observation: AutoStagedObservation) {
+        if (!autoStagedObservationCurrent(observation, monotonicNowMs()) || observation.playlistUrl != null) return
+        val manifest = observation.player.currentManifest as? HlsManifest ?: return
+        val url = manifest.mediaPlaylist.baseUri
+        val uri = Uri.parse(url)
+        if (Session.canonicalOrigin(url) != Session.canonicalOrigin(observation.credentialOrigin) ||
+            !uri.pathSegments.contains(observation.sessionId) || uri.lastPathSegment?.endsWith(".m3u8") != true) return
+        observation.playlistUrl = url
+        val remaining = observation.deadlineMs - monotonicNowMs()
+        if (remaining <= 0) return
+        val client = (observation.credentialToken?.let(Net::profileClient) ?: Net.capabilityClient)
+            .newBuilder().callTimeout(remaining, java.util.concurrent.TimeUnit.MILLISECONDS).build()
+        autoStagedPlaylistJob = scope.launch {
+            val valid = withContext(Dispatchers.IO) {
+                runCatching {
+                    client.newCall(okhttp3.Request.Builder().url(url).header("Cache-Control", "no-cache").build())
+                        .execute().use responseBody@{ response ->
+                            val body = response.body
+                            if (response.code != 200 || response.request.url.toString() != url || body == null ||
+                                body.contentLength() > 1_048_576L) return@responseBody false
+                            val bytes = java.io.ByteArrayOutputStream()
+                            body.byteStream().use { input ->
+                                val buffer = ByteArray(8192)
+                                while (true) {
+                                    if (monotonicNowMs() >= observation.deadlineMs) return@responseBody false
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    if (bytes.size() + count > 1_048_576) return@responseBody false
+                                    bytes.write(buffer, 0, count)
+                                }
+                            }
+                            (body.contentLength() < 0 || body.contentLength() == bytes.size().toLong()) &&
+                                autoImmutableVodPlaylist(bytes.toByteArray())
+                        }
+                }.getOrDefault(false)
+            }
+            if (valid && autoStagedObservation === observation &&
+                autoStagedObservationCurrent(observation, monotonicNowMs())) observation.immutableVod = true
+        }
+    }
 
     /**
      * When the switch happened, while the commit still waits for the frame that
@@ -3892,6 +3940,7 @@ class Controller internal constructor(
         val requiresHlsOverride: Boolean?,
         val progressiveMediaOrigin: ProgressiveMediaOrigin,
         val baseMs: Long,
+        val sessionIsVod: Boolean,
         val sessionId: String?,
         val activeMediaPath: String?,
         val deliveredRange: String?,
@@ -4017,13 +4066,16 @@ class Controller internal constructor(
             stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
             AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
                 desired.recipe_digest.toList(), preparedStartedAtMs,
-                preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS)) else null
+                preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS), Session.origin, Session.token) else null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
         rendezvousSeekObserved = false
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                autoStagedObservation?.takeIf { it.player === built.player }?.let(::captureAutoStagedVodPlaylist)
+            }
             override fun onPlayerError(error: PlaybackException) {
                 // Posted, not called. Abandoning releases this very player, and
                 // re-entering `release()` from inside its own `ListenerSet`
@@ -4252,6 +4304,9 @@ class Controller internal constructor(
         val successor = preparedPlayer ?: return
         val action = preparedLedger.action ?: return
         val originMs = action.mediaOriginMs ?: return
+        val stagedFilmLocalVod = autoStagedObservation?.let {
+            autoStagedObservationCurrent(it, monotonicNowMs()) && it.immutableVod && originMs == 0L
+        } == true
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
@@ -4292,7 +4347,7 @@ class Controller internal constructor(
                 }
             }
             val samples = observation.meter.recent().filter { autoTransferOriginCurrent(it) }
-            val margin = if (unknown) autoStagedEmpiricalMargin(samples, observation.meter,
+            val margin = if (unknown) observation.immutableVod && autoStagedEmpiricalMargin(samples, observation.meter,
                 observation.sessionId, now, observation.deadlineMs) else samples.any { sample ->
                 sample.pipelineIdentity === observation.meter &&
                     sample.segmentId.contains("/${observation.sessionId}/") && sample.receipt != null && sample.etag != null &&
@@ -4340,6 +4395,7 @@ class Controller internal constructor(
             requiresHlsOverride = attachedRequiresHlsOverride,
             progressiveMediaOrigin = progressiveMediaOrigin,
             baseMs = baseMs,
+            sessionIsVod = sessionIsVod,
             sessionId = sessionId,
             activeMediaPath = activeMediaPath,
             deliveredRange = deliveredRange,
@@ -4388,6 +4444,9 @@ class Controller internal constructor(
         // controller derives from "which session am I playing" moves with it,
         // in one place, so no two answers about the same stream can drift.
         activeMediaPath = action.playlistUrl?.let(::relativeMediaPath)
+        // ENDLIST is a delivery proof, never permission to erase a nonzero
+        // explicit media origin or retain the incumbent's timeline regime.
+        sessionIsVod = stagedFilmLocalVod
         baseMs = sessionPlaybackTimeline(
             mediaOriginMs = originMs,
             isVod = sessionIsVod,
@@ -4503,6 +4562,7 @@ class Controller internal constructor(
             attachRecipe(recipe, predecessor.transport ?: recipe.recipe.desiredTransport)
         }
         baseMs = predecessor.baseMs
+        sessionIsVod = predecessor.sessionIsVod
         sessionId = predecessor.sessionId
         activeMediaPath = predecessor.activeMediaPath
         deliveredRange = predecessor.deliveredRange
@@ -4594,6 +4654,8 @@ class Controller internal constructor(
      * is a second decoder the viewer is paying for and cannot see.
      */
     private fun releaseSuccessor() {
+        autoStagedPlaylistJob?.cancel()
+        autoStagedPlaylistJob = null
         autoStagedObservation = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
@@ -4848,6 +4910,38 @@ internal data class AutoCompletedTransfer(
 }
 
 /** Empirical stage-only margin; never a full-output peak qualification. */
+/** Strict bounded immutable media-playlist type proof; no guessed timeline. */
+internal fun autoImmutableVodPlaylist(bytes: ByteArray): Boolean {
+    if (bytes.isEmpty() || bytes.size > 1_048_576) return false
+    val text = runCatching { java.nio.charset.StandardCharsets.UTF_8.newDecoder()
+        .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+        .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+        .decode(java.nio.ByteBuffer.wrap(bytes)).toString() }.getOrNull() ?: return false
+    val lines = text.lineSequence().filter { it.isNotEmpty() }.toList()
+    if (lines.firstOrNull() != "#EXTM3U" || lines.lastOrNull() != "#EXT-X-ENDLIST" ||
+        "#EXT-X-PLAYLIST-TYPE:VOD" !in lines) return false
+    var pending = false
+    val names = mutableSetOf<String>()
+    for (line in lines.drop(1)) {
+        if (line.startsWith("#EXTINF:")) {
+            val duration = line.removePrefix("#EXTINF:").removeSuffix(",").toDoubleOrNull()
+            if (pending || !line.endsWith(",") || duration == null || !duration.isFinite() || duration <= 0 || duration > 120)
+                return false
+            pending = true
+        } else if (line.startsWith("#")) {
+            if (pending || !(line == "#EXT-X-ENDLIST" || line == "#EXT-X-PLAYLIST-TYPE:VOD" ||
+                    line == "#EXT-X-MEDIA-SEQUENCE:0" || line == "#EXT-X-MAP:URI=\"init.mp4\"" ||
+                    line.startsWith("#EXT-X-VERSION:") || line.startsWith("#EXT-X-TARGETDURATION:"))) return false
+        } else {
+            val index = line.removePrefix("seg").removeSuffix(".m4s").toUIntOrNull()
+            if (!pending || index == null || line != "seg${index.toString().padStart(5, '0')}.m4s" ||
+                names.size >= 8192 || !names.add(line)) return false
+            pending = false
+        }
+    }
+    return !pending && names.isNotEmpty()
+}
+
 internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>, pipeline: Any,
     sessionId: String, nowMs: Long, deadlineMs: Long): Boolean {
     if (nowMs < 0 || nowMs >= deadlineMs) return false

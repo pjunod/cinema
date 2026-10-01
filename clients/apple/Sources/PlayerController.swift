@@ -2570,6 +2570,8 @@ final class PlayerController: ObservableObject {
         let sessionId: String
         let candidateId: String
         let recipeDigest: [UInt8]
+        let credentialOrigin: String
+        let credentialToken: String?
         let startedAtMs: Int
         let deadlineMs: Int
         var playlistURL: URL?
@@ -2702,7 +2704,9 @@ final class PlayerController: ObservableObject {
 
     private func autoStagedObservationCurrent(_ observation: AutoStagedObservation) -> Bool {
         let now = PlaybackControlSession.monotonicMs()
+        let credentials = Session.shared.credentials
         return now >= observation.startedAtMs && now < observation.deadlineMs &&
+            credentials.origin == observation.credentialOrigin && credentials.token == observation.credentialToken &&
             preparedItem.map(ObjectIdentifier.init) == observation.item &&
             preparedPlayer.map(ObjectIdentifier.init) == observation.pipeline &&
             autoDesiredCandidate?.id == observation.candidateId &&
@@ -2722,7 +2726,9 @@ final class PlayerController: ObservableObject {
         guard remaining > 0 else { return }
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
                                  timeoutInterval: Double(remaining) / 1000)
-        Session.shared.authorize(&request)
+        if let token = observation.credentialToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         autoStagedPlaylistTask = Task { @MainActor [weak self, weak item] in
             let configuration = URLSessionConfiguration.ephemeral
             configuration.timeoutIntervalForResource = Double(remaining) / 1000
@@ -10749,9 +10755,11 @@ extension PlayerController: PreparedSuccessorHost {
         if autoPreparing, let desired = autoDesiredCandidate, desired.recipeDigest.count == 32,
            action.effectiveSelection.candidateId == desired.id {
             let now = PlaybackControlSession.monotonicMs()
+            let credentials = Session.shared.credentials
             autoStagedObservation = AutoStagedObservation(scope: UUID(), item: ObjectIdentifier(item),
                 pipeline: ObjectIdentifier(successor), sessionId: action.sessionId, candidateId: desired.id,
-                recipeDigest: desired.recipeDigest, startedAtMs: now,
+                recipeDigest: desired.recipeDigest, credentialOrigin: credentials.origin,
+                credentialToken: credentials.token, startedAtMs: now,
                 deadlineMs: now + 15_000)
         }
         installAutoTransferMetrics(for: item, staged: true, stagedAction: action)
@@ -10974,6 +10982,11 @@ extension PlayerController: PreparedSuccessorHost {
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
         let automaticTrial = autoPreparing
+        // Playlist type proves delivery, not the film origin. Only the
+        // current stage's explicit zero origin permits film-local mapping.
+        let stagedFilmLocalVOD = autoStagedObservation.map {
+            autoStagedObservationCurrent($0) && $0.intervals != nil && action.mediaOriginMs == 0
+        } ?? false
         if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
@@ -11077,6 +11090,7 @@ extension PlayerController: PreparedSuccessorHost {
         let incumbent = player.currentItem
         let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
+            vod: isVOD, directTimeline: usesDirectTimeline,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
         let exposureAttempt = snapshotAttempt()
         stopStatusPolling()
@@ -11103,6 +11117,8 @@ extension PlayerController: PreparedSuccessorHost {
         if autoPreparing { autoExposed = true }
         sessionId = action.sessionId
         baseMs = action.mediaOriginMs
+        isVOD = stagedFilmLocalVOD
+        usesDirectTimeline = stagedFilmLocalVOD
         activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
         activeMediaAuthenticated = false
         if action.effectiveSelection.height > 0 {
@@ -11156,6 +11172,8 @@ extension PlayerController: PreparedSuccessorHost {
                 activeMediaAuthenticated = incumbentState.authenticated
                 sessionHeight = incumbentState.height
                 isDirectPlayback = incumbentState.direct
+                isVOD = incumbentState.vod
+                usesDirectTimeline = incumbentState.directTimeline
                 sessionStatus = incumbentState.status
                 diagnosticSessionStatus = incumbentState.diagnostic
                 diagnosticSessionStatusObservedAt = incumbentState.observedAt
