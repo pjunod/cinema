@@ -23,6 +23,8 @@ HOSTS = [("nynuc", "192.168.5.236"), ("m6", "192.168.4.14"),
 LABEL = "tv.plurx.k06-owner"
 RAW_LIMIT = 64 * 1024 * 1024
 HEX = re.compile(r"^[0-9a-f]{64}$")
+TMPFS = {"/tmp": "rw,nosuid,nodev,noexec,size=128m",
+         "/var/lib/plurx": "rw,nosuid,nodev,noexec,size=16m"}
 
 
 def require(condition, message):
@@ -66,6 +68,7 @@ def validate_manifest(m):
     image_config = artifact.get("image_config")
     require(isinstance(image_config, dict) and len(json.dumps(image_config)) <= 64 * 1024,
             "bounded independently verified image configuration required")
+    validate_image_volumes(image_config)
     labels = image_config.get("Labels", {}) or {}
     require(labels.get("org.opencontainers.image.revision") == artifact["source"]
             and labels.get("tv.plurx.k06-source-tree") == artifact["tree"],
@@ -88,12 +91,19 @@ def image_ids(artifact):
     return (artifact["image"], "sha256:" + artifact["config_digest"])
 
 
+def validate_image_volumes(config):
+    volumes = config.get("Volumes") or {}
+    require(isinstance(volumes, dict) and set(volumes).issubset({"/var/lib/plurx"})
+            and all(value == {} for value in volumes.values()), "unreviewed image volume declaration")
+
+
 def validate_image(item, artifact):
     require(item["Id"] in image_ids(artifact) and item["Architecture"] == "amd64"
             and item["Os"] == "linux", "image outside independently verified manifest/config pair")
     require(item.get("RootFS") == {"Type": "layers", "Layers": artifact["rootfs_diff_ids"]},
             "image ordered RootFS proof mismatch")
     require(item.get("Config") == artifact["image_config"], "image canonical configuration proof mismatch")
+    validate_image_volumes(item["Config"])
     return item["Id"]
 
 
@@ -134,6 +144,7 @@ def load_manifest(path):
 
 
 def daemon_args(m, n, uid, gid):
+    validate_image_volumes(m["artifact"]["image_config"])
     identity = n.get("docker_image_id")
     require(identity in image_ids(m["artifact"]), "persisted per-node image preflight required before create")
     return ["docker", "create", "--name", n["name"], "--label", LABEL + "=" + m["owner"],
@@ -142,7 +153,7 @@ def daemon_args(m, n, uid, gid):
             "--network", n["network_id"], "--user", f"{uid}:{gid}", "--cpus=2",
             "--memory=2g", "--memory-swap=2g", "--pids-limit=256", "--read-only",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--restart=no",
-            "--tmpfs=/tmp:rw,nosuid,nodev,size=128m", "--tmpfs=/var/lib/plurx:rw,nosuid,nodev,size=16m",
+            *["--tmpfs=" + path + ":" + options for path, options in TMPFS.items()],
             "--log-driver=local", "--log-opt=max-size=10m", "--log-opt=max-file=3",
             "--log-opt=compress=false", "--mount", "type=bind,src=" + n["root"] + ",dst=/data",
             "--env", "PLURX_MDNS_ADVERTISE=false", "--env", "PLURX_BIND=0.0.0.0:55420",
@@ -276,6 +287,25 @@ def capacity(check_swap=True):
             "pressure": pressure, "swap_pages": before}
 
 
+def validate_mounts(item, n):
+    require(item["HostConfig"].get("Tmpfs") == TMPFS, "exact bounded noexec tmpfs required")
+    mounts = item.get("Mounts")
+    require(isinstance(mounts, list), "actual mount inventory required")
+    binds = [mount for mount in mounts if mount.get("Type") == "bind"]
+    temporary = [mount for mount in mounts if mount.get("Type") == "tmpfs"]
+    require(len(binds) == 1 and binds[0].get("Source") == n["root"]
+            and binds[0].get("Destination") == "/data" and binds[0].get("RW") is True,
+            "exact owned data bind required")
+    require(len(binds) + len(temporary) == len(mounts), "volume or other mount refused")
+    # --tmpfs is represented by HostConfig.Tmpfs; engines may also expose its
+    # full Mounts entries. Never accept an additional or partial inventory.
+    if temporary:
+        require(len(temporary) == len(TMPFS)
+                and {mount.get("Destination") for mount in temporary} == set(TMPFS)
+                and all(mount.get("Source") == "" and mount.get("RW") is True
+                        for mount in temporary), "unexpected actual tmpfs inventory")
+
+
 def validate_container(item, m, n):
     owner_check(item, m)
     require(item["Id"] == n["container_id"] and item["Image"] == n.get("docker_image_id")
@@ -295,7 +325,7 @@ def validate_container(item, m, n):
     require(h["LogConfig"]["Type"] == "local" and h["LogConfig"]["Config"]["max-size"] == "10m"
             and h["LogConfig"]["Config"]["max-file"] == "3", "log caps mismatch")
     require(item["Config"]["User"] == f"{os.getuid()}:{os.getgid()}", "wrong state owner")
-    require([x["Source"] for x in item["Mounts"] if x["Type"] == "bind"] == [n["root"]], "unexpected host mount")
+    validate_mounts(item, n)
 
 
 def process_identity(pid):
