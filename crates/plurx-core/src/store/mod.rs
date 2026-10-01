@@ -29,7 +29,9 @@ mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
 mod quality_cancellation;
+mod quality_ledger;
 pub use quality_cancellation::QualityCancellationReceipt;
+pub use quality_ledger::QualityLedgerSnapshot;
 mod renditionplan;
 mod sqlite;
 mod telemetry;
@@ -4961,6 +4963,22 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         user_id: i64,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Read the durable rendition transaction facts with their CAS revision.
+    async fn quality_ledger(
+        &self,
+        generation: &str,
+    ) -> Result<Option<QualityLedgerSnapshot>, StoreError>;
+
+    /// Publish only under the exact active parent owner and observed revision.
+    /// Takeover may advance epoch, but may not replace the attachment identity.
+    async fn write_quality_ledger(
+        &self,
+        ledger: &crate::playback::continuous_quality::QualityLedger,
+        owner_node_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Record independent target cancellation under the exact current owner.
     /// At most 128 receipts belong to a generation. Replays preserve the first

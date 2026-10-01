@@ -2299,6 +2299,7 @@ fn apply_restore_image_changes(
         "media_session_preparations",
         "media_session_terminal_acks",
         "quality_cancellation_receipts",
+        "continuous_quality_ledgers",
         "quality_preparation_owners",
         "media_session_producer_recovery",
         "media_playback_pointers",

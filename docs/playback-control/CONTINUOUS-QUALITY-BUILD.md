@@ -863,7 +863,7 @@ historical measured outcomes as current evidence.
 | CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
 | CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; web caller and durable cleanup receipts implemented; client replay/retention settlement remains |
 | CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap closed; manual retention and explicit Retry/restart implemented, qualification pending |
-| CQ2 | — | — | Not run |
+| CQ2 | Strict transaction ledger and owner-fenced storage implemented; serving integration underway | Pinned workspace/all-target compile; lost append, replay, takeover, pin-pressure and cross-language fixture regressions authored, unrun | Dependency reservations persist; producer/cache-pin and client adapters still need integration |
 | CQ3 | — | — | Not run |
 | CQ4 | — | — | Not run |
 | CQ5 | — | — | Not run |
@@ -1117,3 +1117,36 @@ again in the builder), rather than concluding this host has no compiler.
 The shared source-only cloud loop remains the fallback if local prerequisites
 fail. A required design change receives an adversarial delta review. Do not deploy an unfinished
 effort to the user's fleet to discover whether it compiles or plays.
+
+
+### 10.3 Continuous-media transaction storage — October 1, 2026
+
+The shared core owns a strict version-1 request, operation and receipt schema,
+with its initial cross-language fixture in
+`tests/playback/continuous-quality/contract.json`. This schema is separate
+from legacy control readers. The operation object is tagged by `kind` and
+unknown fields and operations fail strict decoding. No production discovery
+advertises continuous support yet: serving and client adapters remain work.
+
+One generation and attachment retain 16 transactions, 64 reserved intervals,
+256 MiB of reserved media, and 128 replay receipts. The complete durable JSON
+is capped at 128 KiB. Exact receipt replay lasts 90 seconds; expiry removes
+replay copies, never unresolved reserved intervals. Refusal applies atomically
+and backpressures new scheduling rather than discarding committed facts.
+SQLite migration 89 and replicated migration 67 add the ledger. Writes CAS
+its revision under the active parent owner/epoch/lease. Takeover preserves
+reserved and appended media facts while clearing old command authority and
+requiring producer readiness to be verified again. Inactive-parent maintenance
+cleans records in batches of 256 after the replay horizon; restore clears old
+operational ledgers.
+
+A cancellation carrying completed append facts first records those facts.
+A cancellation with no append observation conservatively retains scheduled
+dependencies. Only completed transport disposal releases its named intervals;
+producer cleanup alone cannot prove a scheduled append absent. First
+presentation and observation time remain separate from scheduling and append.
+After disposal, bounded per-interval metadata may be removed, while the
+`ever_appended` fact prevents a later cancellation from claiming retention.
+The ledger records dependency reservations; physical cache-pin renewal and
+producer serving are the next integration work, not evidence already supplied
+by this storage model. All newly authored behavioral regressions remain unrun.

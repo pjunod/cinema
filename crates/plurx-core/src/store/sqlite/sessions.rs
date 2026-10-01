@@ -2745,6 +2745,70 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn quality_ledger(
+        &self,
+        generation: &str,
+    ) -> Result<Option<crate::store::QualityLedgerSnapshot>, StoreError> {
+        let generation = generation.to_owned();
+        self.with_read(move |conn| {
+            let sql = format!(
+                "SELECT {} FROM continuous_quality_ledgers WHERE generation = ?1",
+                crate::store::quality_ledger::COLUMNS
+            );
+            let raw = conn
+                .query_row(&sql, [generation], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .optional()?;
+            raw.map(|(owner, epoch, revision, json, updated)| {
+                crate::store::quality_ledger::decode_snapshot(owner, epoch, revision, json, updated)
+            })
+            .transpose()
+        })
+        .await
+    }
+
+    async fn write_quality_ledger(
+        &self,
+        ledger: &crate::playback::continuous_quality::QualityLedger,
+        owner_node_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let json = crate::store::quality_ledger::encode_write(
+            ledger,
+            owner_node_id,
+            expected_revision,
+            now_ms,
+        )?;
+        let generation = ledger.generation.clone();
+        let attachment = ledger.attachment.attachment_id.clone();
+        let epoch = i64::try_from(ledger.control_epoch)
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+        let owner = owner_node_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                crate::store::quality_ledger::WRITE,
+                params![
+                    generation,
+                    owner,
+                    epoch,
+                    expected_revision,
+                    attachment,
+                    json,
+                    now_ms
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn request_quality_cancellation(
         &self,
         receipt: &crate::store::QualityCancellationReceipt,
@@ -3758,6 +3822,12 @@ impl MediaSessionStore for SqliteStore {
                     ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
+            tx.execute("DELETE FROM continuous_quality_ledgers WHERE generation IN (
+                SELECT ledger.generation FROM continuous_quality_ledgers ledger
+                WHERE ledger.updated_at_ms < ?1 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
+                    WHERE parent.incarnation_id = ledger.generation AND parent.state = 'active')
+                ORDER BY ledger.updated_at_ms, ledger.generation LIMIT ?2)",
+                params![now_ms.saturating_sub(crate::playback::continuous_quality::QUALITY_RECEIPT_HORIZON_MS),MAINTENANCE_BATCH])?;
             tx.execute("DELETE FROM quality_preparation_owners WHERE staged_incarnation_id IN (
                 SELECT owner.staged_incarnation_id FROM quality_preparation_owners owner
                 WHERE NOT EXISTS (SELECT 1 FROM media_sessions child WHERE child.incarnation_id = owner.staged_incarnation_id)

@@ -17,6 +17,25 @@ use crate::domain::{
 };
 use crate::error::StoreError;
 
+struct QualityLedgerRow {
+    owner: String,
+    epoch: i64,
+    revision: i64,
+    json: String,
+    updated: i64,
+}
+impl From<&mut Row<'_>> for QualityLedgerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            owner: row.get("owner_node_id"),
+            epoch: row.get("owner_epoch"),
+            revision: row.get("revision"),
+            json: row.get("ledger_json"),
+            updated: row.get("updated_at_ms"),
+        }
+    }
+}
+
 #[cfg(feature = "hiqlite-contract-tests")]
 type ActivationPointerReadPause = (
     tokio::sync::oneshot::Sender<()>,
@@ -287,6 +306,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
         super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
+        super::quality_ledger::SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
         super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
@@ -3420,6 +3440,64 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
     }
 
+    async fn quality_ledger(
+        &self,
+        generation: &str,
+    ) -> Result<Option<crate::store::QualityLedgerSnapshot>, StoreError> {
+        let sql = format!(
+            "SELECT {} FROM continuous_quality_ledgers WHERE generation = $1",
+            crate::store::quality_ledger::COLUMNS
+        );
+        let rows = timeout_store(
+            self.client()
+                .query_consistent_map::<QualityLedgerRow, _>(sql, params!(generation)),
+        )
+        .await?;
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                crate::store::quality_ledger::decode_snapshot(
+                    row.owner,
+                    row.epoch,
+                    row.revision,
+                    row.json,
+                    row.updated,
+                )
+            })
+            .transpose()
+    }
+
+    async fn write_quality_ledger(
+        &self,
+        ledger: &crate::playback::continuous_quality::QualityLedger,
+        owner_node_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let json = crate::store::quality_ledger::encode_write(
+            ledger,
+            owner_node_id,
+            expected_revision,
+            now_ms,
+        )?;
+        let epoch = i64::try_from(ledger.control_epoch)
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+        Ok(timeout_store(self.client().execute(
+            crate::store::quality_ledger::WRITE,
+            params!(
+                ledger.generation.as_str(),
+                owner_node_id,
+                epoch,
+                expected_revision,
+                ledger.attachment.attachment_id.as_str(),
+                json,
+                now_ms
+            ),
+        ))
+        .await?
+            == 1)
+    }
+
     async fn request_quality_cancellation(
         &self,
         receipt: &crate::store::QualityCancellationReceipt,
@@ -4304,6 +4382,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
                       WHERE state = 'ended' AND updated_at_ms < $4)
+                    OR EXISTS (SELECT 1 FROM continuous_quality_ledgers ledger
+                      WHERE ledger.updated_at_ms < $6 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
+                        WHERE parent.incarnation_id = ledger.generation AND parent.state = 'active'))
                     OR EXISTS (SELECT 1 FROM quality_preparation_owners owner
                       WHERE NOT EXISTS (SELECT 1 FROM media_sessions child
                         WHERE child.incarnation_id = owner.staged_incarnation_id))
@@ -4319,7 +4400,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE lease.resource = 'session:' || session.incarnation_id))",
-                params!(retire_before, now_ms, failed_cutoff, retained_cutoff, now_ms.saturating_sub(60_000)),
+                params!(retire_before, now_ms, failed_cutoff, retained_cutoff, now_ms.saturating_sub(60_000),
+                    now_ms.saturating_sub(crate::playback::continuous_quality::QUALITY_RECEIPT_HORIZON_MS)),
             )
             .await?
             .into_iter()
@@ -4472,6 +4554,14 @@ impl MediaSessionStore for HiqliteAuthStore {
                               AND session.incarnation_id = acknowledgement.incarnation_id)
                     ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT $2)",
                 params!(now_ms, MAINTENANCE_BATCH),
+            ),
+            (
+                "DELETE FROM continuous_quality_ledgers WHERE generation IN (
+                    SELECT ledger.generation FROM continuous_quality_ledgers ledger
+                    WHERE ledger.updated_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
+                        WHERE parent.incarnation_id = ledger.generation AND parent.state = 'active')
+                    ORDER BY ledger.updated_at_ms, ledger.generation LIMIT $2)",
+                params!(now_ms.saturating_sub(crate::playback::continuous_quality::QUALITY_RECEIPT_HORIZON_MS),MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM quality_preparation_owners WHERE staged_incarnation_id IN (

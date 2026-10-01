@@ -35758,3 +35758,202 @@ async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup()
     })
     .await;
 }
+
+#[tokio::test]
+async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("continuous-ledger-user", "hash", false)
+            .await
+            .expect("user");
+        let generation = "00000000-0000-4000-8000-00000000ce01";
+        let session = "00000000-0000-4000-8000-00000000ce02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "continuous-ledger",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut ledger = QualityLedger::new(
+            generation.into(),
+            1,
+            QualityAttachment {
+                client_instance_id: "00000000-0000-4000-8000-00000000ce03".into(),
+                lifetime_id: "movie".into(),
+                attachment_id: "00000000-0000-4000-8000-00000000ce04".into(),
+                family_id: "a".repeat(64),
+            },
+        )
+        .expect("ledger");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 7, 1500)
+                .await
+                .expect("missing CAS"),
+            "{backend}: missing revision accepted"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "wrong-owner", 0, 1500)
+                .await
+                .expect("wrong owner"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1500)
+                .await
+                .expect("create"),
+            "{backend}"
+        );
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 0, 1600)
+                .await
+                .expect("stale create"),
+            "{backend}"
+        );
+        let transaction = "00000000-0000-4000-8000-00000000ce05";
+        let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+            version: 1,
+            generation: generation.into(),
+            control_epoch: ledger.control_epoch,
+            sequence,
+            attachment: ledger.attachment.clone(),
+            transaction_id: transaction.into(),
+            operation,
+        };
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: "b".repeat(64),
+            },
+        );
+        ledger.apply(&prepare, 1700).expect("prepare");
+        let interval = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 240240,
+            through_tick: 288288,
+            byte_length: 500000,
+        };
+        ledger
+            .ready(transaction, vec![interval.clone()])
+            .expect("verified ready");
+        let schedule = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: vec![interval.clone()],
+            },
+        );
+        ledger.apply(&schedule, 1800).expect("scheduled");
+        let append = request(
+            &ledger,
+            3,
+            QualityOperation::Appended {
+                intervals: vec![interval.clone()],
+            },
+        );
+        let receipt = ledger.apply(&append, 1900).expect("append");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "staged-node", 1, 2000)
+                .await
+                .expect("persist append"),
+            "{backend}"
+        );
+        let persisted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read")
+            .expect("snapshot");
+        assert_eq!(persisted.revision, 2, "{backend}");
+        assert_eq!(persisted.ledger, ledger, "{backend}");
+        assert_eq!(
+            persisted
+                .ledger
+                .clone()
+                .apply(&append, 2100)
+                .expect("ack loss replay"),
+            receipt,
+            "{backend}"
+        );
+        let mut changed_attachment = ledger.clone();
+        changed_attachment.attachment.attachment_id = "00000000-0000-4000-8000-00000000ce06".into();
+        assert!(
+            store
+                .write_quality_ledger(&changed_attachment, "staged-node", 2, 2100)
+                .await
+                .is_err(),
+            "{backend}: inconsistent receipt attachment accepted"
+        );
+        let parent = store
+            .media_session_route(session)
+            .await
+            .expect("parent")
+            .expect("route");
+        let takeover_at = parent.lease_expires_at_ms + 1;
+        let next = store
+            .claim_media_session_takeover(&plurx_core::domain::MediaSessionTakeover {
+                incarnation_id: generation.into(),
+                expected_owner_node_id: "staged-node".into(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "replacement-node".into(),
+                now_ms: takeover_at,
+                lease_expires_at_ms: takeover_at + 900000,
+            })
+            .await
+            .expect("takeover")
+            .expect("new owner");
+        assert_eq!(next.owner_epoch, 2, "{backend}");
+        assert!(
+            !store
+                .write_quality_ledger(&ledger, "staged-node", 2, takeover_at + 1)
+                .await
+                .expect("old owner"),
+            "{backend}"
+        );
+        ledger.adopt_epoch(2).expect("adopt exact facts");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 2, takeover_at + 1)
+                .await
+                .expect("new owner projection"),
+            "{backend}"
+        );
+        let adopted = store
+            .quality_ledger(generation)
+            .await
+            .expect("read adopted")
+            .expect("snapshot");
+        assert_eq!(adopted.owner_node_id, "replacement-node", "{backend}");
+        assert_eq!(
+            adopted.ledger.transactions[0].reserved,
+            vec![interval],
+            "{backend}"
+        );
+        assert!(adopted.ledger.transactions[0].ever_appended, "{backend}");
+        assert_eq!(
+            store
+                .media_session_route_for_playback(user.id, "continuous-ledger")
+                .await
+                .expect("current")
+                .expect("incumbent")
+                .incarnation_id,
+            generation,
+            "{backend}"
+        );
+    })
+    .await;
+}
