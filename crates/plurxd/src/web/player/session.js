@@ -96,11 +96,16 @@ function playbackControlCapabilities(){
   const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
   const capabilities={platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
     codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffOffered(PLAYER)};
-  if(SERVER&&SERVER.playback_display_aware_auto&&SERVER.display_aware_auto_protocol==='route-v1'){
+  if(SERVER&&SERVER.playback_display_aware_auto&&PLAYER?.qualityProtocol==='route-v1'){
     const caps=currentCapsDocument(), target=measuredPresentationTarget();
     const video=caps.video.map(entry=>({codec:entry.codec,profiles:entry.profiles||[],available:true,
-      dynamic_ranges:(entry.present||[]).map(range=>range==='pq'?'hdr10':range).filter(range=>range==='sdr'||range==='hdr10'),
-      dv_profiles:entry.dv_profiles||[],...(entry.max_height?{max_height:entry.max_height}:{})}));
+      dynamic_ranges:[...(entry.present||[]).map(range=>range==='pq'?'hdr10':range)
+        .filter(range=>range==='sdr'||range==='hdr10'||range==='hlg'),
+        ...((entry.dv_profiles||[]).length?['dolby_vision']:[])],
+      dv_profiles:entry.dv_profiles||[],...(entry.max_height?{max_height:entry.max_height}:{}),
+      ...(entry.max_width?{max_width:entry.max_width}:{}),
+      ...(entry.max_frame_rate?{max_frame_rate:entry.max_frame_rate}:{}),
+      ...(entry.max_bitrate_bps?{max_bitrate_bps:entry.max_bitrate_bps}:{})}));
     const key=JSON.stringify(video);
     const p=PLAYER;
     if(p&&p.abr){
@@ -120,7 +125,7 @@ function qualityCatalogSelectionKey(p){
 function qualityCatalogSelectionCurrent(p){
   return !!p?.abr&&p.abr.catalogSelectionKey===qualityCatalogSelectionKey(p);
 }
-function playbackControlSelection(p){
+function playbackControlSelection(p,ownerBound=false){
   const requested=playQuality();
   const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested):null;
   const quality=["original","nomse"].includes(requested)
@@ -136,7 +141,7 @@ function playbackControlSelection(p){
       // a selection change at all - so no successor is ever staged for it.
       // Absent means plain Auto, which digests exactly as it always has.
       : (p&&p.abr&&p.abr.requestedCandidateId&&qualityCatalogSelectionCurrent(p)&&SERVER&&SERVER.playback_display_aware_auto
-        &&SERVER.display_aware_auto_protocol==='route-v1')
+        &&SERVER.display_aware_auto_protocol==='route-v1'&&(!ownerBound||p.qualityProtocol==='route-v1'))
         ? {mode:"auto",candidate_id:p.abr.requestedCandidateId,
           ...((p.qualityCandidates||[]).find(candidate=>candidate.id===p.abr.requestedCandidateId)?.route==='encode'
             ?{height:(p.qualityCandidates||[]).find(candidate=>candidate.id===p.abr.requestedCandidateId).target_height}:{})}
@@ -274,9 +279,9 @@ function playbackControlSnapshot(v,p){
     seek_target_ms:render==="seeking"
       ? (attachedSeek?attachedSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
-    selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
+    selection:playbackControlSelection(p,true),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
-  const intent=qualityMediaIntent(p,snapshot.selection);
+  const intent=p.qualityProtocol==='route-v1'?qualityMediaIntent(p,snapshot.selection):null;
   if(intent) Object.assign(snapshot,{intent});
   // A commit and terminal demand are both true, but the protocol deliberately
   // refuses them in one exchange: publishing the successor has to win before

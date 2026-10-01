@@ -197,12 +197,24 @@ impl TranscodeManager {
         &self,
         file_id: i64,
         plan: &ResolvedTranscode,
+        source_object_version: Option<&str>,
     ) -> bool {
+        let (Some(source_object_version), Some(pipeline)) = (source_object_version, self.digest())
+        else {
+            return false;
+        };
         let Ok(recipe) = self.candidate_recipe_digest(plan, super::Presentation::Vod) else {
             return false;
         };
         self.vod
-            .complete_candidate_cache(file_id, recipe, &plan.plan_digest())
+            .complete_candidate_cache_bound(
+                file_id,
+                recipe,
+                &plan.plan_digest(),
+                Some(&pipeline),
+                Some(source_object_version),
+                plan.output_contract().normalized_geometry().is_none(),
+            )
             .await
     }
 

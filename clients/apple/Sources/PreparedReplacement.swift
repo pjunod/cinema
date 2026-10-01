@@ -155,6 +155,9 @@ enum PreparedCommitOutcome: Equatable {
     /// released — so this is both a settlement and a reopen, and the picture
     /// the viewer is looking at is frozen until that reopen lands.
     case switchedWithoutAFrame
+    /// A voluntary trial failed; its retained incumbent was restored, or a
+    /// newer owner already superseded it. Never reopen for the abandoned trial.
+    case failedWithoutReopen
 }
 
 /// One preparation at a time, and everything owed about it.
@@ -811,6 +814,11 @@ final class PreparedReplacementCoordinator {
             ledger.noteAbandoned(action, .aborted)
             host?.preparedSuccessorOwesAnExchange()
             host?.fallBackToInPlaceReplacement(action)
+        case .failedWithoutReopen:
+            host?.notePreparedSuccessorAbandoned(.failed)
+            host?.discardPreparedSuccessor()
+            ledger.noteAbandoned(action, .failed)
+            host?.preparedSuccessorOwesAnExchange()
         case .switchedWithoutAFrame:
             host?.recordPreparedFallbackInterruption(ms: max(0, now() - startedAt))
             host?.notePreparedSuccessorAbandoned(.failed)

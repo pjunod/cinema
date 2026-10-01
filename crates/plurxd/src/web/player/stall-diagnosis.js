@@ -123,7 +123,7 @@ function maybeDecodeRescue(){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(!p || !v || !p.started || !p.hitches || v.paused) return;
   const routeAuto=!!(SERVER&&SERVER.playback_display_aware_auto
-    &&SERVER.display_aware_auto_protocol==='route-v1'&&Array.isArray(p.qualityCandidates));
+    &&p.qualityProtocol==='route-v1'&&Array.isArray(p.qualityCandidates));
   if(p.method!=='remux' && p.method!=='direct_play'&&!routeAuto) return;
   const h=p.hitches, secs=playedSecs(v), q=qualityForce();
   // An Auto session that is deliberately re-testing an old limit gets judged
@@ -325,11 +325,11 @@ function queueAutoControllerTick(p,urgent){
 function scheduleUrgentAutoControllerTick(p,kbps,now){
   if(p&&PLAYER===p&&p.abr&&!p.abr.switching&&qualityForce()==='auto'
     &&SERVER&&SERVER.playback_auto_abr&&SERVER.playback_display_aware_auto
-    &&SERVER.display_aware_auto_protocol==='route-v1'&&Array.isArray(p.qualityCandidates)){
+    &&p.qualityProtocol==='route-v1'&&Array.isArray(p.qualityCandidates)){
     const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
     const sample=p.abr.qualityPressureTransfer;
     if(current&&sample&&sample.attachment===p.mediaAttachment&&now-sample.atMs<=15000
-      &&sample.bps<current.peak_bps*0.7
+      &&sample.bps<PlaybackPolicy.qualityPressureCostBps(current,candidateTransferEvidence(p,now),sample.mediaBps)*0.7
       &&(p.abr.lastUrgentAutoTickAtMs==null||now-p.abr.lastUrgentAutoTickAtMs>=1000)){
       p.abr.lastUrgentAutoTickAtMs=now;queueAutoControllerTick(p,true);
     }
@@ -486,7 +486,7 @@ async function autoControllerTick(){
     p.abr.stallEvents[kind]=(p.abr.stallEvents[kind]||[]).filter(at=>now-at<windowMs);
   }
   const causeEvidence=autoCauseEvidence(p,now);
-  if(SERVER.playback_display_aware_auto&&SERVER.display_aware_auto_protocol==='route-v1'
+  if(SERVER.playback_display_aware_auto&&p.qualityProtocol==='route-v1'
     &&Array.isArray(p.qualityCandidates)){
     await candidateAutoControllerTick(p,v,causeEvidence,now);
     return;
@@ -586,7 +586,7 @@ function candidateTransferEvidence(p,now){
 }
 async function naturalBoundaryQualityCandidate(p,seekIntent){
   if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto
-    ||SERVER.display_aware_auto_protocol!=='route-v1'||!Array.isArray(p.qualityCandidates)) return null;
+    ||p.qualityProtocol!=='route-v1'||!Array.isArray(p.qualityCandidates)) return null;
   const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),1500);
   const generation=p.controlIntentGeneration;
   try{
@@ -624,7 +624,8 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
   const progress=p.abr.qualityPressureTransfer;
   const pressureBps=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
   const conservative=pressureBps>0?Math.min(link||Infinity,pressureBps):link;
-  if(cause==='unknown'&&conservative>0&&current.peak_bps>0&&conservative<current.peak_bps*1.2) cause='link';
+  const demand=PlaybackPolicy.qualityPressureCostBps(current,transfer,pressureBps>0?progress.mediaBps:null);
+  if(cause==='unknown'&&conservative>0&&demand>0&&conservative<demand*1.2) cause='link';
   // recent_speed includes pacing. Only the new active-production measurement
   // can attribute an encoder shortage rather than a deliberate producer hold.
   const speed=p.health&&p.health.active_encode_milli_realtime;
@@ -638,7 +639,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     sample:{now_ms:now,automatic:qualityForce()==='auto',presenting:p.started,
       paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange||p.abr.switching,
       cause,cause_age_ms:cause==='link'?(pressureBps>0?now-progress.atMs:transfer.age_ms):(causeEvidence.ageMs||0),
-      link_pressure_bps:pressureBps,link_pressure_age_ms:pressureBps>0?now-progress.atMs:null,
+      link_pressure_bps:pressureBps,link_pressure_media_bps:pressureBps>0?progress.mediaBps:null,link_pressure_age_ms:pressureBps>0?now-progress.atMs:null,
       runway_ms:bufferRunway(v)*1000,stalled:!!p.waitAt,last_stall_ms:p.abr.lastStallAtMs,
       natural_boundary:false,transfer}
   });

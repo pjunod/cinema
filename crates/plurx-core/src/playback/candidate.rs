@@ -218,6 +218,12 @@ pub struct QualityCandidate {
     pub id: CandidateId,
     pub recipe_digest: [u8; 32],
     pub route: CandidateRoute,
+    /// False only for exact compatible legacy cache recipes; identity remains distinct.
+    #[serde(
+        default = "normalized_geometry_default",
+        skip_serializing_if = "normalized_geometry_default_value"
+    )]
+    pub normalized_geometry: bool,
     pub width: u32,
     pub height: u32,
     /// Requested encoder rung; distinct from a cropped/source-ceiling raster.
@@ -236,6 +242,13 @@ pub enum CandidateRoute {
     Original,
     Remux,
     Encode,
+}
+
+fn normalized_geometry_default() -> bool {
+    true
+}
+fn normalized_geometry_default_value(value: &bool) -> bool {
+    *value
 }
 
 impl QualityCandidate {
@@ -681,6 +694,7 @@ mod policy_regressions {
             id: CandidateId::for_recipe_digest(recipe_digest),
             recipe_digest,
             route,
+            normalized_geometry: true,
             width: height * 16 / 9,
             height,
             target_height: height,

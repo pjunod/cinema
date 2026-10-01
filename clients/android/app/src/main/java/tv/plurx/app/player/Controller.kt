@@ -596,7 +596,6 @@ class Controller internal constructor(
                     // has to be told apart from a viewer's pause.
                     if (!value) {
                         playbackTelemetry.cancelPending()
-        autoTransfersByPlayer.clear()
                         viewerTransport.ownerStopping()
                     }
                     if (value && lifecyclePaused) applyEffectivePlayWhenReady()
@@ -2884,7 +2883,7 @@ class Controller internal constructor(
             tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" &&
             autoRouteProtocol == "route-v1") baseCapabilities.copy(
                 presentationTarget = autoPresentationTarget,
-                decoderCaps = DecoderCapabilitySnapshot(1L, decisionCaps.video),
+                decoderCaps = DecoderCapabilitySnapshot.fromVideo(1L, decisionCaps.video),
             ) else baseCapabilities
         val position = realPosition()
         val duration = player.duration
@@ -3028,8 +3027,9 @@ class Controller internal constructor(
             transfer.fromLocalCache == false && transfer.producerPaced == false &&
             transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0)
             transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
-        val severe = link?.let { bps -> current.peak_bps?.let { bps < it * 0.7 } } == true
-        val mild = autoMildSamples >= 2 && link?.let { bps -> current.peak_bps?.let { bps < it * 1.3 } } == true
+        val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
+        val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        val mild = autoMildSamples >= 2 && link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
         val producer = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
             sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
             sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
@@ -3039,12 +3039,8 @@ class Controller internal constructor(
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
-        val area = current.width.toLong() * current.height
-        val next = autoCatalog.filter { it.hasValidIdentity && it.id !in autoDecoderRejected &&
-            it.decoder_compatible && (it.complete_cache || it.sustainable) && it.grade == current.grade &&
-            it.width.toLong() * it.height < area && (!severe ||
-                link?.let { bps -> it.peak_bps?.let { peak -> peak <= bps } } == true)
-        }.maxByOrNull { it.width.toLong() * it.height } ?: return
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected,
+            link.takeIf { severe || mild }) ?: return
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
@@ -3058,10 +3054,7 @@ class Controller internal constructor(
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return
         val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return
         if (!autoDecoderRejected.add(current.id)) return
-        val area = current.width.toLong() * current.height
-        val next = autoCatalog.filter { it.hasValidIdentity && it.id !in autoDecoderRejected &&
-            it.decoder_compatible && (it.complete_cache || it.sustainable) && it.grade == current.grade &&
-            it.width.toLong() * it.height < area }.maxByOrNull { it.width.toLong() * it.height } ?: return
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
@@ -3096,11 +3089,12 @@ class Controller internal constructor(
         } else null
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         val area = current.width.toLong() * current.height
-        val eligible = autoCatalog.filter { it.id != current.id &&
+        val eligible = autoCatalog.filter {
             it.hasValidIdentity && it.id !in autoDecoderRejected && it.width > 0 && it.height > 0 &&
             it.decoder_compatible && (it.route != "encode" || it.grade == current.grade) && (autoBlockedUntil[it.id] ?: 0L) <= now }
-        val severe = link?.let { bps -> current.peak_bps?.let { bps < it * 0.7 } } == true
-        val mild = link?.let { bps -> current.peak_bps?.let { bps < it * 1.3 } } == true
+        val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
+        val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        val mild = link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
         if (!mild) { autoMildSamples = 0; autoMildTransferCompletedMs = null }
         else if (autoMildTransferCompletedMs != transfer?.completedAtMs) {
             autoMildSamples = (autoMildSamples + 1).coerceAtMost(2)
@@ -3113,20 +3107,18 @@ class Controller internal constructor(
             sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
             sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true &&
             player.bufferedPosition - player.currentPosition < 10_000L
-        val pressure = severe || autoMildSamples >= 2 || producerPressure
+        val pressure = ((severe || autoMildSamples >= 2) &&
+            (current.peak_bps != null || player.bufferedPosition - player.currentPosition < 10_000L)) || producerPressure
         val aspect = current.width.toDouble() / current.height
         val neededWidth = minOf(target.width_px.toDouble(), target.height_px * aspect)
         val neededHeight = minOf(target.height_px.toDouble(), target.width_px / aspect)
         val chosen = if (pressure) {
             autoUpgradeSinceMs = null
-            eligible.filter { it.width.toLong() * it.height < area &&
-                (!severe || link?.let { bps -> it.peak_bps?.let { peak -> peak <= bps } } == true) }
-                .maxByOrNull { it.width.toLong() * it.height }
+            autoRecoveryCandidate(eligible, current, autoDecoderRejected,
+                link.takeIf { severe || autoMildSamples >= 2 })
         } else {
             val fitting = eligible.filter { candidate -> link?.let { bps -> (candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: (candidate.route != "encode")) } == true }
-            val pick = fitting.firstOrNull { it.route != "encode" } ?: fitting.filter {
-                it.route == "encode" && it.width >= neededWidth && it.height >= neededHeight
-            }.minByOrNull { it.width.toLong() * it.height }
+            val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
                     current.route == "encode" && pick.route != "encode") ||
                 player.bufferedPosition - player.currentPosition < 10_000L ||
@@ -4635,6 +4627,34 @@ interface PlanLike {
      * see the field's own doc on [tv.plurx.app.data.Decision].
      */
     val deliveredDolbyVisionProfile: Int?
+}
+
+internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
+    current: tv.plurx.app.data.QualityCandidate, rejected: Set<String>, linkCeiling: Double? = null,
+    decoderRecovery: Boolean = false): tv.plurx.app.data.QualityCandidate? =
+    candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
+        (decoderRecovery || it.route != "encode" || it.grade == current.grade) &&
+        it.width.toLong() * it.height < current.width.toLong() * current.height &&
+        (linkCeiling == null || it.peak_bps?.let { peak -> peak > 0 && peak <= linkCeiling } == true)
+    }.maxByOrNull { it.width.toLong() * it.height }
+
+internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
+    neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =
+    candidates.firstOrNull { it.route != "encode" } ?: candidates.filter {
+        autoDisplayFits(it.width, it.height, neededWidth, neededHeight)
+    }.minByOrNull { it.width.toLong() * it.height }
+
+internal fun autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double): Boolean =
+    width > 0 && height > 0 && width.toDouble() * 11 >= neededWidth * 10 &&
+        height.toDouble() * 11 >= neededHeight * 10
+
+internal fun autoDownsideCostBps(candidate: tv.plurx.app.data.QualityCandidate,
+    sample: AutoCompletedTransfer?, sessionId: String?, nowMs: Long): Double? {
+    candidate.peak_bps?.takeIf { it > 0 }?.let { return it.toDouble() }
+    if (candidate.route == "encode" || sample == null || sessionId == null ||
+        !sample.segmentId.contains("/$sessionId/") || autoCompletedTransferBps(sample, nowMs) == null) return null
+    val measured = sample.mediaDurationMs?.takeIf { it > 0 }?.let { sample.bodyBytes.toDouble() * 8_000 / it }
+    return listOfNotNull(candidate.average_bps?.takeIf { it > 0 }?.toDouble(), measured).maxOrNull()
 }
 
 /** A source-body sample confirmed by Media3's completed media load event. */

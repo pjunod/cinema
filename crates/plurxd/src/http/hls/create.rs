@@ -1269,7 +1269,10 @@ pub(crate) async fn resolve_plan(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
-    if request.candidate_context.is_some() {
+    if let Some(context) = request.candidate_context.as_ref() {
+        if !candidate_copy {
+            request.hdr10 = context.grade == plurx_core::transcode::OutputGrade::Hdr10;
+        }
         request.kind = if candidate_copy {
             match request.kind {
                 crate::transcode::SessionKind::Copy { .. } => request.kind,
@@ -1802,6 +1805,63 @@ async fn create_with_purpose(
         true,
     );
 
+    let quality_enabled = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
+    let mut quality_owners = std::collections::HashSet::new();
+    if quality_enabled && candidate_decoder_caps.is_some() {
+        quality_owners.insert(state.node_id.clone());
+        if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
+            quality_owners.extend(
+                state
+                    .media_pool
+                    .quality_candidates(
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: request.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.clone(),
+                            audio_index: request.audio_index,
+                            audio_offset_ms: request.audio_offset_ms,
+                            subtitle_burn: request.subtitle_burn,
+                            presentation: request.presentation,
+                        },
+                    )
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.node_id),
+            );
+        }
+        if let Some(owner) = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.owner_node_id.as_ref())
+        {
+            quality_owners.insert(owner.clone());
+        }
+    }
+    let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
+        state
+            .store
+            .media_session_route(previous)
+            .await?
+            .map(|route| route.owner_node_id)
+    } else {
+        None
+    };
+    // The mandatory receive-only decoder snapshot proves the actual worker
+    // supports the new owner semantics; parser-only workers refuse dispatch.
+    // A retained legacy predecessor may stay on its old owner without claiming
+    // the new protocol or requiring fields that owner cannot execute.
+    let quality_negotiated = !quality_owners.is_empty()
+        && (request.candidate_context.is_some()
+            || predecessor_owner
+                .as_ref()
+                .is_none_or(|owner| quality_owners.contains(owner)));
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
@@ -1809,11 +1869,10 @@ async fn create_with_purpose(
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        presentation_target: request.candidate_context.as_ref().and(candidate_target),
-        decoder_caps: request
-            .candidate_context
-            .as_ref()
-            .and(candidate_decoder_caps.clone()),
+        presentation_target: quality_negotiated.then_some(candidate_target).flatten(),
+        decoder_caps: quality_negotiated
+            .then_some(candidate_decoder_caps.clone())
+            .flatten(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
@@ -1991,6 +2050,9 @@ async fn create_with_purpose(
             Err(_) => Vec::new(),
         }
     };
+    if quality_negotiated {
+        owner_candidates.retain(|owner| quality_owners.contains(owner));
+    }
     // Cold snapshots and one-node recovery retain the established local
     // behavior. A non-empty ranked list is authoritative: an ineligible local
     // offer must not bypass an eligible peer or capacity refusal.
@@ -2280,13 +2342,13 @@ async fn create_with_purpose(
         .await?
         .is_some_and(|value| value.trim() == "1");
     let response = StartResponse {
-        display_aware_auto_protocol: Some("route-v1".to_owned()),
+        display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
         quality_candidates: if let (true, Some(source), Some(caps)) = (
-            display_aware_enabled,
+            display_aware_enabled && quality_negotiated,
             source.as_ref(),
             candidate_decoder_caps.as_ref(),
         ) {

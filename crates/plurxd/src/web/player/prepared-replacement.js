@@ -463,7 +463,8 @@ function createPreparedHlsLoader(StockLoader,p,state){
             loadingStartMs:previous.at,loadingEndMs:now});
           if(kbps&&p.abr){
             if(xhr.getResponseHeader("X-Plurx-Producer-Paced")==="0")
-              p.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:p.mediaAttachment};
+              p.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:p.mediaAttachment,
+                mediaBps:Number(xhr.getResponseHeader("Content-Length"))*8/context.frag.duration};
             p.abr.recentEstimateKbps=kbps;
             p.abr.recentEstimateAtMs=now;
             p.abr.recentEstimateSource='progress';
@@ -499,7 +500,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
       loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
   if(!kbps) return;
   const now=performance.now(),url=String(d.frag.url||'');
-  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now,d.networkDetails,d.frag.url);
+  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now,d.networkDetails,d.frag.url,d.frag.duration*1000);
   // A completed request can average bytes from both sides of a cliff. Keep
   // the fresher within-request progress delta until a new request measures it.
   if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url

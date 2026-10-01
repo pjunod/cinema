@@ -908,7 +908,7 @@ impl TranscodeManager {
             grade,
         );
         if let Some(context) = req.candidate_context.as_ref() {
-            options.normalized_geometry = true;
+            options.normalized_geometry = context.normalized_geometry;
             if let Some(profile) = context.profile {
                 options.auto_quality_rate_profile = Some(profile);
                 options.video_bitrate_kbps = profile.video_bitrate_kbps();

@@ -6767,6 +6767,8 @@ test("viewer recipe edits do not send an incumbent candidate under new tracks or
     qualityCandidates:[f.middle],abr:{requestedCandidateId:f.middle.id}};
   p.abr.catalogSelectionKey=shipped.key(p);
   assert.equal(shipped.selection(p).quality.candidate_id,f.middle.id);
+  assert.equal(shipped.selection(p,true).quality.candidate_id,undefined);
+  assert.equal(shipped.selection({...p,qualityProtocol:'route-v1'},true).quality.candidate_id,f.middle.id);
   for(const change of [{audioIndex:1},{aoffset:250},{curSub:2,burnedSub:2}])
     assert.equal(shipped.selection({...p,...change}).quality.candidate_id,undefined);
   const query=new Function(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
@@ -6781,6 +6783,44 @@ test("severe route pressure skips intermediate rungs despite voluntary budget",(
     candidates:[f.low,f.middle,f.high,f.original],currentId:f.original.id,target:f.target,aspect:16/9});
   assert.equal(result.candidate.id,f.low.id);
   assert.equal(result.emergency,true);
+});
+
+test("unknown peak original downshifts from fresh demand without inventing upgrade proof",()=>{
+  const f=routeQualityFixture(), original={...f.original,peak_bps:null,average_bps:50000000};
+  const args={state:{},candidates:[f.low,f.middle,original],currentId:original.id,
+    target:f.target,aspect:16/9,sample:{...f.sample,cause:"link",stalled:true,runway_ms:500,
+      transfer:{...f.transfer,bytes:1750000}}};
+  assert.equal(policy.decideCandidateTransition(args).candidate.id,f.low.id);
+  const noAverage={...original,average_bps:null};
+  const measured={...args,sample:{...args.sample,transfer:{...args.sample.transfer,media_duration_ms:280}},
+    candidates:[f.low,f.middle,noAverage]};
+  assert.equal(policy.decideCandidateTransition(measured).candidate.id,f.low.id);
+  assert.equal(policy.decideCandidateTransition({...measured,sample:{...measured.sample,
+    transfer:{...measured.sample.transfer,producer_paced:true}}}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...measured,sample:{...measured.sample,
+    transfer:{...measured.sample.transfer,age_ms:15001}}}).candidate,null);
+  assert.equal(policy.qualityOriginalTrialMargin([measured.sample.transfer]),false);
+  const progress={...args,candidates:[f.low,f.middle,noAverage],sample:{...args.sample,transfer:null,
+    link_pressure_bps:14000000,link_pressure_media_bps:50000000,link_pressure_age_ms:0}};
+  assert.equal(policy.decideCandidateTransition(progress).candidate.id,f.low.id);
+  assert.equal(policy.decideCandidateTransition({...progress,sample:{...progress.sample,
+    link_pressure_age_ms:15001}}).candidate,null);
+});
+
+test("cold original recovery can try an unproved compatible lower route within measured link",()=>{
+  const f=routeQualityFixture(), low={...f.low,sustainable:false}, middle={...f.middle,sustainable:false};
+  const args={state:{},candidates:[low,middle,f.original],currentId:f.original.id,
+    target:f.target,aspect:16/9,sample:{...f.sample,cause:"link",stalled:true,runway_ms:0,
+      transfer:{...f.transfer,bytes:1750000}}};
+  const result=policy.decideCandidateTransition(args);
+  assert.equal(result.candidate.id,low.id);
+  assert.equal(result.transition,"recover");
+  assert.equal(result.candidate.sustainable,false);
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[{...low,decoder_compatible:false},middle,f.original]}).candidate,null);
+  assert.equal(policy.decideCandidateTransition({...args,sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
+  assert.equal(policy.decideCandidateTransition({...args,candidates:[low,middle,{...f.original,grade:"hdr10"}],
+    sample:{...args.sample,cause:"decode",transfer:null}}).candidate.id,middle.id);
+  assert.equal(policy.selectQualityCandidate({candidates:[low,middle],target:f.target,aspect:16/9}),null);
 });
 
 // Drained last, in registration order, after every synchronous case has run.

@@ -4,11 +4,26 @@ impl VodServe {
     /// A cache offer never creates a rendition or starts a producer. Only an
     /// already resolved exact recipe with a complete durable manifest can
     /// answer; cold/unverified disk directories remain unknown until adoption.
+    #[cfg(test)]
     pub(crate) async fn complete_candidate_cache(
         &self,
         file_id: i64,
         recipe_digest: [u8; 32],
         plan_digest: &str,
+    ) -> bool {
+        self.complete_candidate_cache_bound(file_id, recipe_digest, plan_digest, None, None, false)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn complete_candidate_cache_bound(
+        &self,
+        file_id: i64,
+        recipe_digest: [u8; 32],
+        plan_digest: &str,
+        pipeline: Option<&plurx_core::transcode::PipelineDigest>,
+        source_object_version: Option<&str>,
+        allow_legacy: bool,
     ) -> bool {
         let rendition = self
             .shared
@@ -21,8 +36,18 @@ impl VodServe {
                     && !rendition.closed.load(Relaxed)
                     && rendition.failure().is_none()
                     && rendition.recipe.encoding.as_ref().is_some_and(|encoding| {
-                        encoding.candidate_recipe == Some(recipe_digest)
-                            && encoding.plan.plan_digest() == plan_digest
+                        encoding.plan.plan_digest() == plan_digest
+                            && source_object_version
+                                .is_none_or(|version| encoding.source_object_version == version)
+                            && pipeline.is_none_or(|pipeline| {
+                                encoding.ffmpeg_build == pipeline.ffmpeg_build
+                            })
+                            && (encoding.candidate_recipe == Some(recipe_digest)
+                                || (allow_legacy
+                                    && pipeline.is_some()
+                                    && source_object_version.is_some()
+                                    && encoding.candidate_recipe.is_none()
+                                    && !encoding.options.normalized_geometry))
                     })
             })
             .cloned();

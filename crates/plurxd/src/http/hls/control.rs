@@ -603,7 +603,7 @@ async fn settle_preparation_control(
                 if !candidate_snapshot_current(
                     state,
                     staged_incarnation_id,
-                    request.capabilities.as_ref(),
+                    outcome.selection.capabilities.as_ref(),
                 )
                 .await
                 {

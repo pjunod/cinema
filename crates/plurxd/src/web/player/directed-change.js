@@ -823,6 +823,7 @@ function attachSession(v, t, info, wantSec){
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
   t.qualityCandidateId=info.quality_candidate_id||null;
+  t.qualityProtocol=info.display_aware_auto_protocol==='route-v1'?'route-v1':null;
   if(t.abr){
     t.abr.requestedCandidateId=t.qualityCandidateId;
     t.abr.catalogSelectionKey=qualityCatalogSelectionKey(t);

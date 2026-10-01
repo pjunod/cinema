@@ -1557,7 +1557,10 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
-        display_aware_auto_protocol: Some("route-v1".to_owned()),
+        display_aware_auto_protocol: predecessor
+            .decoder_caps
+            .as_ref()
+            .map(|_| "route-v1".to_owned()),
         quality_candidate_id: candidate
             .candidate_context
             .as_ref()

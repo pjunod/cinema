@@ -2150,6 +2150,17 @@
     const bps = transfer.bytes * 8000 / transfer.elapsed_ms;
     return Number.isFinite(bps) && bps > 0 ? bps : null;
   }
+  function qualityPressureCostBps(candidate, transfer = null, progressMediaBps = null) {
+    if (Number.isFinite(candidate?.peak_bps) && candidate.peak_bps > 0) return candidate.peak_bps;
+    // These are downside-only demand observations, never a claimed peak or
+    // sufficient proof for an upgrade. A source average below a fresh link
+    // does not prove the link can carry the source's bursts.
+    const average = Number.isFinite(candidate?.average_bps) && candidate.average_bps > 0 ? candidate.average_bps : 0;
+    const segment = qualityTransferBps(transfer) && Number.isFinite(transfer.media_duration_ms)
+      && transfer.media_duration_ms > 0 ? transfer.bytes * 8000 / transfer.media_duration_ms : 0;
+    const progress = Number.isFinite(progressMediaBps) && progressMediaBps > 0 ? progressMediaBps : 0;
+    return Math.max(average, segment, progress) || null;
+  }
   function qualityEncodeProof(health, candidateId, receiptAgeMs = 0) {
     return !!health && health.active_encode_candidate_id === candidateId
       && Number.isFinite(receiptAgeMs) && receiptAgeMs >= 0
@@ -2176,7 +2187,7 @@
     const link = Number.isFinite(linkLimitBps) && linkLimitBps > 0
       ? Math.min(completedLink || Infinity,linkLimitBps) : completedLink;
     const eligible = (allowTrial ? compatibleQualityCandidates(candidates) : playableQualityCandidates(candidates)).filter(candidate =>
-      !(link > 0 && candidate.peak_bps > link));
+      !(link > 0 && qualityPressureCostBps(candidate) > link));
     const area = candidate => candidate.width * candidate.height;
     const copied = eligible.filter(candidate => candidate.route !== "encode")
       .sort((a, b) => area(b) - area(a));
@@ -2213,7 +2224,7 @@
       if (next.blockedCandidates.includes(currentId)) return hold("decoder recovery owns repeated failure");
       next.blockedCandidates.push(currentId);
     }
-    const eligible = compatibleQualityCandidates(candidates).filter(candidate => (candidate.grade === current.grade || candidate.route !== "encode")
+    const eligible = compatibleQualityCandidates(candidates).filter(candidate => (candidate.grade === current.grade || candidate.route !== "encode" || sample.cause === "decode")
       && !next.blockedCandidates.includes(candidate.id));
     const completedLink = qualityTransferBps(sample.transfer);
     const progressLink = sample.link_pressure_age_ms >= 0 && sample.link_pressure_age_ms <= 15000
@@ -2224,17 +2235,23 @@
     const draining = sample.stalled || next.previousRunwayMs != null
       && sample.runway_ms < next.previousRunwayMs;
     next.previousRunwayMs = sample.runway_ms;
-    const severe = sample.cause === "link" && link > 0 && current.peak_bps > 0
-      && link * 10 < current.peak_bps * 7 && draining;
-    const lowMargin = sample.cause === "link" && link > 0 && current.peak_bps > 0
-      && link < current.peak_bps * 1.2 && draining;
+    const demand = qualityPressureCostBps(current, sample.transfer,
+      progressLink ? sample.link_pressure_media_bps : null);
+    const severe = sample.cause === "link" && link > 0 && demand > 0
+      && link * 10 < demand * 7 && draining;
+    const lowMargin = sample.cause === "link" && link > 0 && demand > 0
+      && link < demand * 1.2 && draining;
     next.mildSamples = lowMargin ? (next.mildSamples || 0) + 1 : 0;
     const emergency = severe || sample.cause === "decode";
     const pressure = severe || next.mildSamples >= 2 || ["encode", "decode"].includes(sample.cause);
     const area = candidate => candidate.width * candidate.height;
     let chosen;
     if (pressure) {
-      const lower = playableQualityCandidates(eligible).filter(candidate => area(candidate) < area(current))
+      // Recovery may attempt an unproved compatible encode: requiring an
+      // already-running producer makes a cold original impossible to rescue.
+      // The owner still bounds preparation and validates the actual successor.
+      const lower = eligible.filter(candidate => area(candidate) < area(current)
+        && (sample.cause !== "link" || candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95))
         .sort((a, b) => area(b) - area(a));
       chosen = severe ? lower.find(candidate => candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95) : lower[0];
     } else chosen = selectQualityCandidate({candidates:eligible,target,aspect,transfer:sample.transfer,
@@ -2282,6 +2299,7 @@
   return Object.freeze({
     playableQualityCandidates,
     qualityTransferBps,
+    qualityPressureCostBps,
     qualityEncodeProof,
     qualityOriginalTrialMargin,
     selectQualityCandidate,

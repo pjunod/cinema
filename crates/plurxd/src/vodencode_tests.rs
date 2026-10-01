@@ -254,6 +254,48 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     assert!(serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
     assert!(!serve.complete_candidate_cache(file_id, [8; 32], &plan_digest).await);
     assert!(!serve.complete_candidate_cache(file_id, candidate, "different plan").await);
+    let pipeline = plurx_core::transcode::PipelineDigest { ffmpeg_build: encoding.ffmpeg_build.clone() };
+    assert!(serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
+        Some(&pipeline), Some(&encoding.source_object_version), false).await);
+    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
+        Some(&pipeline), Some("another-held-source-object"), true).await);
+    let wrong_pipeline = plurx_core::transcode::PipelineDigest { ffmpeg_build: "different executable build".into() };
+    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
+        Some(&wrong_pipeline), Some(&encoding.source_object_version), true).await);
+
+    let mut legacy_encoding = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    Arc::get_mut(&mut legacy_encoding).expect("unique legacy fixture").candidate_recipe = None;
+    assert!(!legacy_encoding.options.normalized_geometry, "fixture is the ordinary legacy recipe");
+    let legacy = serve.shared.build_rendition(
+        "legacy-candidate-cache", None, Recipe {
+            file: rendition.recipe.file.clone(), audio_index: None, aac: true,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: Some(legacy_encoding.source_object_version.clone()),
+            cluster_cache_key: None, encoding: Some(Arc::clone(&legacy_encoding)),
+        }, legacy_encoding.grid.plan(8_000, 428_000), &settings(),
+    ).await.expect("legacy cached rendition without producer");
+    legacy.dir.write_init(init).await.expect("legacy init");
+    *legacy.identity.lock().await = IdentityState {
+        identity: Some(InitIdentity { muxer_init: "fixture".into(),
+            served_init: hex::encode(Sha256::digest(init)), promotion: Default::default() }), from_disk: false,
+    };
+    { let mut manifest = legacy.manifest.lock().await;
+      for index in 0..manifest.len() as u32 {
+          legacy.dir.materialize(&mut manifest, index, b"complete segment fixture", now_ms()).await.expect("legacy publication");
+      }
+      manifest.complete(&Budgets { working_set_bytes: u64::MAX, admission_sizing_bytes: u64::MAX, admission_share: 0.5 }).expect("legacy complete");
+    }
+    // Remove the candidate-tagged member to exercise the actual legacy branch.
+    serve.shared.renditions.lock().await.clear();
+    serve.shared.renditions.lock().await.insert(legacy.key.clone(), Arc::clone(&legacy));
+    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
+        Some(&pipeline), Some(&encoding.source_object_version), false).await);
+    assert!(serve.complete_candidate_cache_bound(file_id, candidate, &plan_digest,
+        Some(&pipeline), Some(&encoding.source_object_version), true).await);
+    assert!(!serve.complete_candidate_cache_bound(file_id, candidate, "normalized-or-other-plan",
+        Some(&pipeline), Some(&encoding.source_object_version), true).await);
+    serve.shared.renditions.lock().await.clear();
+    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
     let member = rendition.dir.path().join(segment_name(0));
     tokio::fs::write(&member, b"short").await.expect("simulate truncated restore");
     assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);

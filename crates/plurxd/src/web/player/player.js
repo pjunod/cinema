@@ -121,6 +121,7 @@
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
+ * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
  * @property {number|null} [autoHeight]    the rung Auto started or settled on
  * @property {number|null} [autoRequestedHeight] the rung Auto last asked the server for
@@ -632,7 +633,7 @@ function resumeHlsStartup(video,player){
   armHlsStartupRetry(video,player,episode);
   return true;
 }
-function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=null){
+function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=null,mediaDurationMs=null){
   if(!p||!p.abr) return;
   const elapsed=Number(loading&&loading.end)-Number(loading&&loading.start);
   if(!(Number(bytes)>0)||!(elapsed>0)) return;
@@ -644,7 +645,7 @@ function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=n
   const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
   if(document.hidden||!video||video.paused||video.seeking||p.controlSeek) return;
   const evidence=completedQualityTransfer(networkDetails,url,loading,now);
-  if(evidence) p.abr.qualityTransfer={...evidence,attachment:p.mediaAttachment};
+  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment};
 }
 function completedQualityTransfer(networkDetails,url,loading,now){
   // Upgrade evidence needs a completed network body from bytes already sealed
@@ -705,7 +706,8 @@ function createHlsStartupLoader(StockLoader,episode){
             loadingStartMs:previous.at,loadingEndMs:now});
           if(kbps&&player.abr){
             if(xhr.getResponseHeader("X-Plurx-Producer-Paced")==="0")
-              player.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:player.mediaAttachment};
+              player.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:player.mediaAttachment,
+                mediaBps:Number(xhr.getResponseHeader("Content-Length"))*8/context.frag.duration};
             player.abr.recentEstimateKbps=kbps;
             player.abr.recentEstimateAtMs=now;
             player.abr.recentEstimateSource='progress';
@@ -1031,7 +1033,7 @@ function wireHlsObservers(hls,startup,video,observesCurrent){
       : null;
     if(sampleKbps&&p.abr){
       const now=performance.now();
-      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now,d.networkDetails,d.frag.url);
+      if(d.frag.type==='main') noteCompletedAutoTransfer(p,stats.loaded||b,loading,now,d.networkDetails,d.frag.url,d.frag.duration*1000);
       // The completed fragment's full-load average can include fast bytes
       // from before a cliff. Preserve a fresher within-fragment byte delta
       // until the next request supplies its own measurement.

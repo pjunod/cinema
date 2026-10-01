@@ -361,7 +361,33 @@ data class ClientSelection(
 @Serializable
 data class DecoderCapabilitySnapshot(
     val revision: Long,
-    val video: List<tv.plurx.app.data.VideoEntry>,
+    val video: List<RuntimeVideoConstraint>,
+) {
+    companion object {
+        fun fromVideo(revision: Long, video: List<tv.plurx.app.data.VideoEntry>) =
+            DecoderCapabilitySnapshot(revision, video.map { entry ->
+                RuntimeVideoConstraint(entry.codec, entry.profiles, true,
+                    (entry.present.mapNotNull { when (it) {
+                        "sdr" -> DynamicRangePolicy.SDR
+                        "pq" -> DynamicRangePolicy.HDR10
+                        "hlg" -> DynamicRangePolicy.HLG
+                        else -> null
+                    } } + if (!entry.dv_profiles.isNullOrEmpty()) listOf(DynamicRangePolicy.DOLBY_VISION) else emptyList()).distinct(),
+                    entry.dv_profiles.orEmpty(), entry.max_width, entry.max_height, entry.max_frame_rate)
+            }.distinct().take(16)) // A bounded subset can only remove capability claims, never add them.
+    }
+}
+
+@Serializable
+data class RuntimeVideoConstraint(
+    val codec: String,
+    val profiles: List<String>,
+    val available: Boolean,
+    @SerialName("dynamic_ranges") val dynamicRanges: List<DynamicRangePolicy>,
+    @SerialName("dv_profiles") val dvProfiles: List<Int>,
+    @SerialName("max_width") val maxWidth: Int? = null,
+    @SerialName("max_height") val maxHeight: Int? = null,
+    @SerialName("max_frame_rate") val maxFrameRate: tv.plurx.app.data.DecoderFrameRate? = null,
 )
 
 @Serializable

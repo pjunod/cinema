@@ -482,6 +482,8 @@ pub struct CandidateExecutionContext {
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
     pub recipe_digest: [u8; 32],
+    pub normalized_geometry: bool,
+    pub grade: plurx_core::transcode::OutputGrade,
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 

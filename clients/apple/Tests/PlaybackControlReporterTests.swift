@@ -1451,6 +1451,60 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    private func candidate(_ height: Int, route: String = "encode", peak: UInt64? = 3_000_000, grade: String = "sdr") -> QualityCandidate {
+        QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+            route: route, width: height * 16 / 9, height: height, targetHeight: height,
+            averageBps: 8_000_000, peakBps: peak, grade: grade, decoderCompatible: true,
+            completeCache: false, sustainable: false)
+    }
+
+    func testRuntimeDecoderSnapshotUsesStrictServerVocabulary() throws {
+        let video = VideoCaps(codec: "hevc", profiles: ["main10"], maxHeight: 1_440, maxWidth: 2_560,
+            maxFrameRate: DecoderFrameRate(numerator: 30, denominator: 1), present: ["pq", "sdr"], dvProfiles: [8])
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let wire = try encoder.encode(DecoderCapabilitySnapshot(revision: 1, video: [video]))
+        let expected = Data(#"{"revision":1,"video":[{"codec":"hevc","profiles":["main10"],"available":true,"dynamic_ranges":["hdr10","sdr","dolby_vision"],"dv_profiles":[8],"max_width":2560,"max_height":1440,"max_frame_rate":{"numerator":30,"denominator":1}}]}"#.utf8)
+        XCTAssertEqual(try JSONSerialization.jsonObject(with: wire) as? NSDictionary,
+                       try JSONSerialization.jsonObject(with: expected) as? NSDictionary)
+        let empty = VideoCaps(codec: "h264", profiles: nil, maxHeight: nil, present: ["sdr"], dvProfiles: nil)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(DecoderCapabilitySnapshot(revision: 2, video: [empty]))) as? [String: Any])
+        let entry = try XCTUnwrap((object["video"] as? [[String: Any]])?.first)
+        XCTAssertEqual(entry["profiles"] as? [String], [])
+        XCTAssertEqual(entry["dv_profiles"] as? [Int], [])
+        XCTAssertNil(entry["present"])
+        XCTAssertEqual(DecoderCapabilitySnapshot(revision: 3, video: Array(repeating: video, count: 20)).video.count, 16)
+    }
+
+    func testCurrentDisplayOptimumDoesNotUpgradeAndBothAxesLimitEnlargement() {
+        let current = candidate(1_080)
+        XCTAssertEqual(autoPreferredDisplayCandidate([current, candidate(1_440)], neededWidth: 2_000, neededHeight: 1_125)?.height, 1_080)
+        XCTAssertEqual(autoPreferredDisplayCandidate([current, candidate(1_440)], neededWidth: 2_400, neededHeight: 1_350)?.height, 1_440)
+        XCTAssertFalse(autoDisplayFits(width: 1_920, height: 1_000, neededWidth: 2_000, neededHeight: 1_125))
+        XCTAssertFalse(autoDisplayFits(width: 1_800, height: 1_080, neededWidth: 2_000, neededHeight: 1_125))
+    }
+
+    func testColdOriginalCanRecoverToUnprovedCompatibleEncodeWithinLinkBudget() {
+        let original = candidate(2_160, route: "remux", peak: nil)
+        let lower = candidate(1_080)
+        XCTAssertEqual(autoRecoveryCandidate([original, lower], current: original, rejected: [], linkCeiling: 4_000_000)?.height, 1_080)
+        XCTAssertNil(autoRecoveryCandidate([lower], current: original, rejected: [], linkCeiling: 2_000_000))
+        XCTAssertNil(autoRecoveryCandidate([lower], current: original, rejected: [lower.id]))
+        XCTAssertFalse(lower.sustainable)
+        let hdrOriginal = candidate(2_160, route: "remux", peak: nil, grade: "hdr10")
+        XCTAssertNil(autoRecoveryCandidate([lower], current: hdrOriginal, rejected: []))
+        XCTAssertEqual(autoRecoveryCandidate([lower], current: hdrOriginal, rejected: [], decoderRecovery: true)?.height, 1_080)
+    }
+
+    func testOriginalAverageIsDownsideOnlyAndNeedsFreshUnpacedSessionEvidence() {
+        let original = candidate(2_160, route: "remux", peak: nil)
+        XCTAssertEqual(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 2_000), 8_000_000)
+        XCTAssertNil(original.peakBps)
+        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "other", nowMs: 2_000))
+        XCTAssertNil(autoDownsideCostBps(original, sample: sample(paced: true), sessionId: "staged", nowMs: 2_000))
+        XCTAssertNil(autoDownsideCostBps(original, sample: sample(), sessionId: "staged", nowMs: 12_000))
+    }
+
     private func sample(_ segment: String = "a", bodySeconds: Double = 0.5,
                         mediaSeconds: Double? = 1, completedAt: Int = 1_000,
                         cached: Bool = false, paced: Bool? = false) -> PlayerController.AutoCompletedTransfer {

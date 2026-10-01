@@ -105,6 +105,7 @@ impl TranscodeManager {
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
                     route: CandidateRoute::Remux,
+                    normalized_geometry: true,
                     width,
                     height,
                     target_height: height,
@@ -122,20 +123,48 @@ impl TranscodeManager {
             }
         }
 
-        let mut heights: Vec<i64> = ladder(file.height)
-            .into_iter()
-            .map(|rung| rung.height)
-            .collect();
-        heights.push(1440);
-        heights.sort_unstable();
-        heights.dedup();
-        for height in heights {
+        let source_height = source_facts
+            .as_ref()
+            .and_then(|facts| match facts.rotation_degrees()? {
+                90 | 270 => {
+                    let sar = facts.sample_aspect_ratio()?;
+                    i64::try_from(
+                        u64::from(facts.width()?).checked_mul(u64::from(sar.numerator()))?
+                            / u64::from(sar.denominator()),
+                    )
+                    .ok()
+                }
+                0 | 180 => facts.height().map(i64::from),
+                _ => None,
+            })
+            .or(file.height);
+        let heights = candidate_heights(source_height);
+        let legacy_geometry_known = source_facts.as_ref().is_some_and(|facts| {
+            facts.normalization_transform_known()
+                && facts.rotation_degrees() == Some(0)
+                && facts
+                    .sample_aspect_ratio()
+                    .is_some_and(|sar| sar.numerator() == sar.denominator())
+        });
+        for (height, hdr_requested, normalized_geometry) in heights.into_iter().flat_map(|height| {
+            [false, true].into_iter().flat_map(move |hdr| {
+                [true, false]
+                    .into_iter()
+                    .map(move |normalized| (height, hdr, normalized))
+            })
+        }) {
+            if !normalized_geometry && !legacy_geometry_known {
+                continue;
+            }
             let Ok((encoder, grade)) = self
-                .encoder_and_grade_for(file, false, height, subtitle.is_some())
+                .encoder_and_grade_for(file, hdr_requested, height, subtitle.is_some())
                 .await
             else {
                 continue;
             };
+            if hdr_requested && grade != OutputGrade::Hdr10 {
+                continue;
+            }
             let mut options = self.live_lookup_options(
                 self.rate_control_snapshot(),
                 encoder,
@@ -155,8 +184,8 @@ impl TranscodeManager {
                 None,
                 grade,
             );
-            options.normalized_geometry = true;
-            if height == 1440 {
+            options.normalized_geometry = normalized_geometry;
+            if normalized_geometry && grade == OutputGrade::Sdr && height == 1440 {
                 let profile = transcode::AutoQualityRateProfile::H264Sdr1440P30V1;
                 options.auto_quality_rate_profile = Some(profile);
                 options.video_bitrate_kbps = profile.video_bitrate_kbps();
@@ -213,8 +242,20 @@ impl TranscodeManager {
             };
             let complete_cache = match presentation {
                 Presentation::Live => self.verified_cache_hit(&plan).await,
-                Presentation::Vod => self.candidate_complete_vod_cache(file.id, &plan).await,
+                Presentation::Vod => {
+                    self.candidate_complete_vod_cache(
+                        file.id,
+                        &plan,
+                        copy_source.as_ref().map(|source| source.object_version()),
+                    )
+                    .await
+                }
             };
+            // An unnormalized route is offered only when its exact legacy
+            // bytes already exist and passed the same integrity/source checks.
+            if !normalized_geometry && !complete_cache {
+                continue;
+            }
             let sustainable = self
                 .candidate_production_proof(recipe_digest)
                 .is_some_and(|speed| speed >= 1150);
@@ -231,6 +272,7 @@ impl TranscodeManager {
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,
                 route: CandidateRoute::Encode,
+                normalized_geometry,
                 width,
                 height: height_px,
                 target_height: height as u32,
@@ -329,7 +371,8 @@ impl TranscodeManager {
         match envelope.request.kind {
             SessionKind::Transcode { height }
                 if candidate.route == CandidateRoute::Encode
-                    && height == i64::from(candidate.target_height) => {}
+                    && height == i64::from(candidate.target_height)
+                    && envelope.request.hdr10 == (candidate.grade == OutputGrade::Hdr10) => {}
             SessionKind::Copy { .. } if candidate.route != CandidateRoute::Encode => {}
             _ => return Err("candidate delivery mismatch".to_owned()),
         }
@@ -342,7 +385,11 @@ impl TranscodeManager {
             owner_node_id: None,
             candidate_id: candidate.id,
             recipe_digest: candidate.recipe_digest,
-            profile: (candidate.target_height == 1440)
+            normalized_geometry: candidate.normalized_geometry,
+            grade: candidate.grade,
+            profile: (candidate.normalized_geometry
+                && candidate.grade == OutputGrade::Sdr
+                && candidate.target_height == 1440)
                 .then_some(transcode::AutoQualityRateProfile::H264Sdr1440P30V1),
         }
     }
@@ -354,4 +401,39 @@ fn normalized_profile(value: &str) -> String {
         .filter(|character| !character.is_whitespace())
         .flat_map(char::to_lowercase)
         .collect()
+}
+
+fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
+    let mut heights: Vec<i64> = ladder(source_height)
+        .into_iter()
+        .map(|rung| rung.height)
+        .collect();
+    if let Some(source_height) = source_height.filter(|height| *height >= MIN_HEIGHT) {
+        let ceiling = source_height.min(MAX_HEIGHT);
+        heights.extend([1440, 2160].into_iter().filter(|height| *height <= ceiling));
+        heights.push(ceiling);
+    }
+    heights.sort_unstable();
+    heights.dedup();
+    heights
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn candidate_catalog_keeps_qualified_2160_and_scope_source_recipes() {
+        assert_eq!(
+            super::candidate_heights(Some(2160)),
+            vec![144, 240, 360, 480, 720, 1080, 1440, 2160]
+        );
+        assert_eq!(
+            super::candidate_heights(Some(1600)),
+            vec![144, 240, 360, 480, 720, 1080, 1440, 1600]
+        );
+        assert_eq!(
+            super::candidate_heights(Some(1080)),
+            vec![144, 240, 360, 480, 720, 1080]
+        );
+        assert_eq!(super::candidate_heights(Some(4320)).last(), Some(&2160));
+    }
 }

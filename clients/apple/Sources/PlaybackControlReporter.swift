@@ -267,7 +267,31 @@ struct ClientSelection: Codable, Equatable {
 
 struct DecoderCapabilitySnapshot: Codable, Equatable {
     var revision: UInt64
-    var video: [VideoCaps]
+    var video: [RuntimeVideoConstraint]
+
+    init(revision: UInt64, video: [VideoCaps]) {
+        self.revision = revision
+        self.video = Array(video.prefix(16)).map { entry in
+            var ranges = entry.present.compactMap { value -> DynamicRangePolicy? in
+                switch value { case "sdr": return .sdr; case "pq": return .hdr10; case "hlg": return .hlg; default: return nil }
+            }
+            if !(entry.dvProfiles ?? []).isEmpty { ranges.append(.dolbyVision) }
+            return RuntimeVideoConstraint(codec: entry.codec, profiles: entry.profiles ?? [], available: true,
+                dynamicRanges: ranges, dvProfiles: entry.dvProfiles ?? [], maxWidth: entry.maxWidth,
+                maxHeight: entry.maxHeight, maxFrameRate: entry.maxFrameRate)
+        }
+    }
+}
+
+struct RuntimeVideoConstraint: Codable, Equatable {
+    var codec: String
+    var profiles: [String]
+    var available: Bool
+    var dynamicRanges: [DynamicRangePolicy]
+    var dvProfiles: [Int]
+    var maxWidth: Int?
+    var maxHeight: Int?
+    var maxFrameRate: DecoderFrameRate?
 }
 
 struct DynamicCapabilities: Codable, Equatable {
