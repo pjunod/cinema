@@ -597,6 +597,9 @@ paths = [
   "crates/plurxd/src/clock_offset.rs",
   "crates/plurxd/src/http/internal_clock.rs",
   "tests/operations/test_clock_skew_guard_design.py",
+  "scripts/k06-owned-lab.py",
+  "tests/operations/test_k06_owned_lab.py",
+  "tests/operations/test_k06_owned_lab_review.py",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["cluster.membership"]
