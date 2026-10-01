@@ -1303,14 +1303,18 @@
             .contains_key(&session_id));
 
         tokio::time::advance(Duration::from_millis(1)).await;
+        // The acknowledgement and retirement-owned presentation have distinct
+        // lifetimes. Cleanup may still retain the winning terminal fact, but
+        // neither outcome may replay an expired acknowledgement.
+        let after_expiry = fixture.state.transcode.hls_session_control(request(1)).await;
         assert!(
-            fixture
-                .state
-                .transcode
-                .hls_session_control(request(1))
-                .await
-                .is_none(),
-            "the rolling manager must drop the exact retained operation at acknowledgement expiry"
+            matches!(
+                after_expiry,
+                None | Some(Err(crate::playback_control::ControlStateError::RollingEnded(
+                    crate::playback_control::RollingTerminalCause::End
+                )))
+            ),
+            "expired acknowledgement cannot replay; retirement may still retain its winning End"
         );
         assert!(!fixture
             .state
@@ -1320,12 +1324,19 @@
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&session_id));
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(fixture
+        assert!(matches!(
+            fixture.state.transcode.hls_session_control(request(1)).await,
+            None | Some(Err(crate::playback_control::ControlStateError::RollingEnded(
+                crate::playback_control::RollingTerminalCause::End
+            )))
+        ));
+        assert!(!fixture
             .state
             .transcode
-            .hls_session_control(request(1))
-            .await
-            .is_none());
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
     }
 
     #[tokio::test]

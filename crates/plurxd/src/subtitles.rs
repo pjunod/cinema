@@ -4444,6 +4444,9 @@ mod stored_source_tests {
     #[tokio::test]
     async fn styled_ass_stored_matroska_burn_matches_source_cues_and_style() {
         crate::transcode::require_ffmpeg();
+        // Successful stored copies increment the same Burn hit counter as
+        // joined flights; keep this writer inside the existing fixture guard.
+        let _counters = crate::subtitle_source::testing::counter_lock().lock().await;
         let base = crate::test_tempdir().expect("fixture");
         let authored = base.path().join("styled.ass");
         std::fs::write(&authored, "[Script Info]\nScriptType: v4.00+\nPlayResX: 320\nPlayResY: 180\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,24,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,1\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\nDialogue: 0,0:00:01.50,0:00:03.50,Default,,0,0,0,,{\\pos(120,90)}Positioned caption\n").expect("ASS");
