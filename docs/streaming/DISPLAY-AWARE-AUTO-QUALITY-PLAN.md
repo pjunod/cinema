@@ -1459,7 +1459,7 @@ exposure is distinct from a warm recommendation; a trial never populates
 The browser's staged loader binds each completed unpaced network response to
 its item, pipeline, stage object, session, candidate and full recipe digest.
 Its original trial requires distinct nonce/ETag-bearing segment objects with
-server-observed durations, nonoverlapping media intervals, at least two
+server-issued immutable-plan advertised durations, nonoverlapping media intervals, at least two
 segments and two seconds of media within the 15-second deadline. Conservative
 actual transfer must exceed 1.8 times their largest observed wire cost. That
 maximum remains empirical segment evidence, never a whole-title peak or
@@ -1475,3 +1475,18 @@ once. Pinned Rust 1.97.1 all-target source checking passes. Final committed-tree
 checks, native composition, one formal review and the current effort gate
 remain pending at this author checkpoint.
 This records source work, not physical restoration, D3 or A-05 completion.
+
+**Native interval checkpoint:** Apple cannot infer segment starts from metric
+event `mediaTime`. Its stage captures the exact item, player, session and full
+recipe, and makes one bounded lookup of that item's actual media-playlist URL.
+Only a complete same-origin immutable VOD playlist with canonical unique
+`seg%05d.m4s` objects supplies advertised `EXTINF` intervals. The lookup refuses
+redirects, ranges, discontinuities, aliases, partial bodies, more than 1 MiB or
+8192 entries, and completion after the original observation deadline. Header
+duration agrees within outward-millisecond/six-decimal rounding; neither value
+claims packet-exact duration. Android retains actual completed-load start/end
+intervals and the exact staged pipeline. Duplicate objects, receipts, ETags,
+overlap and stale attachment evidence cannot qualify the empirical margin.
+Missing proof retains the healthy incumbent without reopening or renewing a
+deadline. Native natural-boundary original-first routing remains in progress
+in this same task; this checkpoint is not the complete continuation.

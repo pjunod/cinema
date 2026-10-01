@@ -1728,6 +1728,31 @@ class PlaybackControlSettleTest {
 }
 
 class DisplayAwareAutoEvidenceTest {
+    @Test fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline() {
+        val pipeline = Any()
+        fun sample(index: Int) = AutoCompletedTransfer(100_000, 100, 1_000,
+            "https://node", true, false, false, "https://node/hls/staged/seg0000$index.m4s",
+            receipt = "00000000-0000-0000-0000-00000000000$index", etag = "object$index", statusCode = 200,
+            pipelineIdentity = pipeline, observedMediaDurationMs = 1_000,
+            mediaStartTimeMs = index * 1_000L, mediaEndTimeMs = (index + 1) * 1_000L, fullObject = true)
+        val first = sample(0)
+        val second = sample(1)
+        fun margin(samples: List<AutoCompletedTransfer>, now: Long = 2_000, owner: Any = pipeline) =
+            autoStagedEmpiricalMargin(samples, owner, "staged", now, 15_000)
+        assertTrue(margin(listOf(first, second)))
+        assertFalse(margin(listOf(first, first)))
+        assertFalse(margin(listOf(first, second), owner = Any()))
+        assertFalse(margin(listOf(first, second), now = 15_000))
+        assertFalse(margin(listOf(first, second), now = 999))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = 500, mediaEndTimeMs = 1_500))))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = null))))
+        assertFalse(margin(listOf(first, second.copy(observedMediaDurationMs = 1_003))))
+        assertFalse(margin(listOf(first, second.copy(fullObject = false))))
+        assertFalse(margin(listOf(first, second.copy(segmentId = "https://node/hls/staged/seg1.m4s"))))
+        assertFalse(margin(listOf(first, second.copy(receipt = first.receipt))))
+        assertFalse(margin(listOf(first, second.copy(etag = first.etag))))
+    }
+
     private fun candidate(height: Int, route: String = "encode", peak: Long? = 3_000_000L) =
         tv.plurx.app.data.QualityCandidate("0a7ba9bab6fbdd31bab5e5e362a3fac7", List(32) { 0 },
             route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,

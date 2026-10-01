@@ -680,6 +680,7 @@ class Controller internal constructor(
     private var autoUpgradeSinceMs: Long? = null
     private val autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Long? = null
+    private var autoLastEvaluation: Triple<Any, Long, Long>? = null
     private val autoSwitchTimes = mutableListOf<Long>()
     private val autoBlockedUntil = mutableMapOf<String, Long>()
     private var autoPreparing = false
@@ -3134,7 +3135,11 @@ class Controller internal constructor(
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
                 link.takeIf { severe || autoMildSamples >= 2 })
         } else {
-            val fitting = eligible.filter { candidate -> link?.let { bps -> candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } == true } == true }
+            val fitting = eligible.filter { candidate -> link?.let { bps ->
+                candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: autoCatalog.firstOrNull {
+                    it.id == candidate.id && it.recipe_digest == candidate.recipe_digest
+                }?.let { autoUnknownOriginalTrial(it, autoMeasuredOutputs) && bps > 0 } ?: false
+            } == true }
             val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
                     current.route == "encode" && pick.route != "encode") ||
@@ -3145,10 +3150,15 @@ class Controller internal constructor(
             }
             if (autoUpgradeSinceMs == null) autoUpgradeSinceMs = now
             if (!autoUpgradeEvidence.allowsProposal(now, autoUpgradeSinceMs)) return
+            autoLastEvaluation?.let { evaluation ->
+                if (autoTransfersByPlayer[player] === evaluation.first && mediaMutationEpoch == evaluation.second &&
+                    (now < evaluation.third || now - evaluation.third < 60_000L)) return
+            }
             pick
         } ?: return
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
         autoDesiredCandidate = chosen
+        if (!pressure) autoTransfersByPlayer[player]?.let { autoLastEvaluation = Triple(it, mediaMutationEpoch, now) }
         autoVoluntary = !pressure
         playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
         autoPreparing = true
@@ -3853,6 +3863,18 @@ class Controller internal constructor(
     private var preparedOrigin: ProgressiveMediaOrigin? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
+    private data class AutoStagedObservation(val player: ExoPlayer, val meter: AutoTransferEvidence,
+        val sessionId: String, val candidateId: String, val recipeDigest: List<Int>,
+        val startedAtMs: Long, val deadlineMs: Long)
+    private var autoStagedObservation: AutoStagedObservation? = null
+
+    private fun autoStagedObservationCurrent(observation: AutoStagedObservation, nowMs: Long): Boolean =
+        nowMs >= observation.startedAtMs && nowMs < observation.deadlineMs &&
+            preparedPlayer === observation.player && autoTransfersByPlayer[observation.player] === observation.meter &&
+            preparedLedger.action?.sessionId == observation.sessionId &&
+            preparedLedger.action?.effectiveSelection?.candidateId == observation.candidateId &&
+            autoDesiredCandidate?.id == observation.candidateId &&
+            autoDesiredCandidate?.recipe_digest == observation.recipeDigest
 
     /**
      * When the switch happened, while the commit still waits for the frame that
@@ -3989,6 +4011,13 @@ class Controller internal constructor(
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
         autoTransfersByPlayer[built.player] = built.autoTransfers
+        val desired = autoDesiredCandidate
+        val stagedSessionId = action.sessionId
+        autoStagedObservation = if (autoPreparing && desired != null && desired.recipe_digest.size == 32 &&
+            stagedSessionId != null && action.effectiveSelection?.candidateId == desired.id)
+            AutoStagedObservation(built.player, built.autoTransfers, stagedSessionId, desired.id,
+                desired.recipe_digest.toList(), preparedStartedAtMs,
+                preparedStartedAtMs + minOf(15_000L, PREPARED_READINESS_BOUND_MS)) else null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -4073,6 +4102,29 @@ class Controller internal constructor(
         }
         val successor = preparedPlayer ?: return
         if (!preparedLedger.isLive) return
+        if (autoPreparing && autoVoluntary) {
+            val now = monotonicNowMs()
+            val observation = autoStagedObservation
+            val current = measuredCostCatalog().firstOrNull { it.id == autoActiveCandidateId }
+            val pressure = current?.let { autoActiveProductionPressure(sessionStatus,
+                sessionStatusAgeMs?.let { now - it }, now, sessionId, it.id,
+                player.bufferedPosition - player.currentPosition) } ?: true
+            val sample = latestAutoCompletedTransfer
+            val link = sample?.takeIf { it.pipelineIdentity === autoTransfersByPlayer[player] &&
+                sessionId != null && it.segmentId.contains("/$sessionId/") && it.statusCode == 200 &&
+                it.receipt != null && it.etag != null && autoTransferOriginCurrent(it) }
+                ?.let { autoCompletedTransferBps(it, now, 15_000L) }
+            val cost = current?.let { autoDownsideCostBps(it, sample, sessionId, now) }
+            val linkPressure = link != null && cost != null && link < cost * (if (current?.peak_bps == null) 1.0 else 1.3)
+            if (link != null && cost != null && link < cost * 0.7 && sample != null)
+                autoUpgradeEvidence.cliff(sample.completedAtMs, now)
+            if (observation == null || !autoStagedObservationCurrent(observation, now) ||
+                player.bufferedPosition - player.currentPosition < 10_000L || pressure || linkPressure ||
+                !autoUpgradeEvidence.allowsUpgrade(now)) {
+                abandonPreparedReplacement(failed = true)
+                return
+            }
+        }
         if (monotonicNowMs() - preparedStartedAtMs > PREPARED_READINESS_BOUND_MS) {
             abandonPreparedReplacement(failed = true)
             return
@@ -4213,8 +4265,13 @@ class Controller internal constructor(
             if (desired.route == "encode" && !desired.complete_cache &&
                 !autoStagedEncodeProof(autoStagedStatus, autoStagedStatusObservedMs, monotonicNowMs(),
                     action.sessionId ?: return, desired.id)) return
-            val peak = tv.plurx.app.data.measuredCandidatePeak(desired, autoMeasuredOutputs) ?: return
             val now = monotonicNowMs()
+            val observation = autoStagedObservation ?: return
+            if (!autoStagedObservationCurrent(observation, now)) return
+            val peak = tv.plurx.app.data.measuredCandidatePeak(desired, autoMeasuredOutputs)
+            val unknown = autoCatalog.firstOrNull { it.id == desired.id && it.recipe_digest == desired.recipe_digest }
+                ?.let { autoUnknownOriginalTrial(it, autoMeasuredOutputs) } == true
+            if (peak == null && !unknown) return
             autoTransfersByPlayer[successor]?.recent().orEmpty().forEach { sample ->
                 val receipt = sample.receipt
                 val duration = sample.bodyDurationMs
@@ -4234,10 +4291,12 @@ class Controller internal constructor(
                     autoLinkClaims[receipt] = Triple(sample.completedAtMs, false, desired.id)
                 }
             }
-            val margin = autoTransfersByPlayer[successor]?.recent().orEmpty().any { sample ->
-                sample.segmentId.contains("/${action.sessionId ?: return}/") && sample.receipt != null && sample.etag != null &&
-                autoTransferOriginCurrent(sample) &&
-                    sample.statusCode == 200 && autoCompletedTransferBps(sample, now, 15_000L)?.let { it >= peak * 1.8 } == true
+            val samples = observation.meter.recent().filter { autoTransferOriginCurrent(it) }
+            val margin = if (unknown) autoStagedEmpiricalMargin(samples, observation.meter,
+                observation.sessionId, now, observation.deadlineMs) else samples.any { sample ->
+                sample.pipelineIdentity === observation.meter &&
+                    sample.segmentId.contains("/${observation.sessionId}/") && sample.receipt != null && sample.etag != null &&
+                    sample.statusCode == 200 && autoCompletedTransferBps(sample, now, 15_000L)?.let { it >= (peak ?: return) * 1.8 } == true
             }
             if (!margin) return
         }
@@ -4535,6 +4594,7 @@ class Controller internal constructor(
      * is a second decoder the viewer is paying for and cannot see.
      */
     private fun releaseSuccessor() {
+        autoStagedObservation = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
@@ -4780,8 +4840,50 @@ internal data class AutoCompletedTransfer(
     val statusCode: Int? = null,
     val pipelineIdentity: Any? = null,
     val observedMediaDurationMs: Long? = null,
+    val mediaStartTimeMs: Long? = null,
+    val mediaEndTimeMs: Long? = null,
+    val fullObject: Boolean = false,
 ) {
     fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
+}
+
+/** Empirical stage-only margin; never a full-output peak qualification. */
+internal fun autoStagedEmpiricalMargin(samples: List<AutoCompletedTransfer>, pipeline: Any,
+    sessionId: String, nowMs: Long, deadlineMs: Long): Boolean {
+    if (nowMs < 0 || nowMs >= deadlineMs) return false
+    val names = mutableSetOf<String>()
+    val receipts = mutableSetOf<String>()
+    val etags = mutableSetOf<String>()
+    val intervals = mutableListOf<Pair<Long, Long>>()
+    var duration = 0L
+    var minimumLink = Double.POSITIVE_INFINITY
+    var maximumObservedCost = 0.0
+    samples.forEach { sample ->
+        val uri = runCatching { java.net.URI(sample.segmentId) }.getOrNull() ?: return@forEach
+        val path = uri.rawPath ?: return@forEach
+        val name = path.substringAfterLast('/')
+        val index = name.removePrefix("seg").removeSuffix(".m4s").toLongOrNull() ?: return@forEach
+        val start = sample.mediaStartTimeMs ?: return@forEach
+        val end = sample.mediaEndTimeMs ?: return@forEach
+        val advertised = sample.observedMediaDurationMs ?: return@forEach
+        val receipt = sample.receipt ?: return@forEach
+        val etag = sample.etag?.takeIf { it.isNotEmpty() } ?: return@forEach
+        val link = autoCompletedTransferBps(sample, nowMs, 15_000L) ?: return@forEach
+        if (sample.pipelineIdentity !== pipeline || !sample.fullObject || sample.statusCode != 200 ||
+            !path.split('/').contains(sessionId) || index !in 0..4_294_967_295L ||
+            name != "seg${index.toString().padStart(5, '0')}.m4s" || start < 0 || end <= start ||
+            advertised <= 0 || kotlin.math.abs(advertised - (end - start)) > 2 ||
+            !Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt) ||
+            name in names || receipt in receipts || etag in etags ||
+            intervals.any { (a, b) -> !(b <= start || end <= a) }) return@forEach
+        names.add(name); receipts.add(receipt); etags.add(etag)
+        intervals.add(start to end)
+        duration += end - start
+        minimumLink = minOf(minimumLink, link)
+        maximumObservedCost = maxOf(maximumObservedCost, sample.bodyBytes.toDouble() * 8_000 / (end - start))
+    }
+    return intervals.size >= 2 && duration >= 2_000 && maximumObservedCost > 0 &&
+        maximumObservedCost.isFinite() && minimumLink >= maximumObservedCost * 1.8
 }
 
 internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long, maximumAgeMs: Long = 10_000L): Double? {
@@ -4790,6 +4892,14 @@ internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long
         sample.ageMs(nowMs) > maximumAgeMs || sample.bodyBytes <= 0 || duration <= 0) return null
     return (sample.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
 }
+
+/** Unknown source-copy exposure is a bounded trial, never a measured peak. */
+internal fun autoUnknownOriginalTrial(candidate: tv.plurx.app.data.QualityCandidate,
+    outputs: List<tv.plurx.app.data.MeasuredCandidateOutput>): Boolean =
+    candidate.hasValidIdentity && candidate.decoder_compatible && candidate.route == "remux" &&
+        candidate.peak_bps == null && outputs.size <= 64 && outputs.none {
+            it.candidate_id == candidate.id && it.recipe_digest == candidate.recipe_digest && it.route == candidate.route
+        }
 
 /** Private observational windows; attachment changes cannot inherit old proof. */
 internal class AutoUpgradeEvidenceWindow {
@@ -4876,6 +4986,7 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
     private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
                             val origin: String?, val paced: Boolean?, val receipt: String?,
                             val etag: String?, val statusCode: Int?, val observedMediaDurationMs: Long?,
+                            val fullObject: Boolean,
                             var bytes: Long = 0)
     private val active = java.util.IdentityHashMap<DataSource, Body>()
     private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
@@ -4894,7 +5005,9 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             sample.bodyBytes != load.bytesLoaded) return
         val duration = if (media.mediaStartTimeMs != C.TIME_UNSET && media.mediaEndTimeMs != C.TIME_UNSET)
             (media.mediaEndTimeMs - media.mediaStartTimeMs).takeIf { it > 0 } else null
-        val confirmed = sample.copy(segmentId = load.uri.toString(), mediaDurationMs = duration)
+        val confirmed = sample.copy(segmentId = load.uri.toString(), mediaDurationMs = duration,
+            mediaStartTimeMs = media.mediaStartTimeMs.takeIf { it != C.TIME_UNSET && it >= 0 },
+            mediaEndTimeMs = media.mediaEndTimeMs.takeIf { it != C.TIME_UNSET && it >= 0 })
         completed = confirmed
         recent.removeAll { it.segmentId == confirmed.segmentId }
         recent.add(confirmed)
@@ -4917,7 +5030,8 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             if (active.size >= 32) active.clear()
             active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
                 when (paced) { "0" -> false; "1" -> true; else -> null }, receipt, etag,
-                (source as? HttpDataSource)?.responseCode, observedMediaDuration)
+                (source as? HttpDataSource)?.responseCode, observedMediaDuration,
+                dataSpec.position == 0L && dataSpec.length == C.LENGTH_UNSET.toLong())
         }
     }
     override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
@@ -4933,7 +5047,7 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
                 if (body.network) false else null, body.paced, receipt = body.receipt, etag = body.etag,
                 statusCode = body.statusCode, pipelineIdentity = this,
-                observedMediaDurationMs = body.observedMediaDurationMs)
+                observedMediaDurationMs = body.observedMediaDurationMs, fullObject = body.fullObject)
             while (ended.size > 32) ended.remove(ended.keys.first())
         }
     }
