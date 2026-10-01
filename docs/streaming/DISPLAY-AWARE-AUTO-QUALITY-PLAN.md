@@ -1420,3 +1420,36 @@ are unchanged. Real actor/intake regressions and source compilation establish
 these bounded contracts, not physical 14-versus-20, decoder, typed-recovery or
 complete A-05 acceptance. Formal review and the current effort gate remain
 separate from author development evidence.
+
+### 9.12 A-05 unknown whole-output source-copy trial (2026-10-01)
+
+The server/web continuation separates private `QualifiedOutput` authority from
+`UnknownOriginalTrial`. A trial requires the exact compatible source-copy
+recipe, local serving owner, independently authenticated fresh incumbent
+receipt and live accepted actor. The current HLS stage resolver implements
+that original-video route as `Remux`/`Copy`; unstaged `Original` file delivery
+and arbitrary encodes do not acquire this exception. A known peak or known
+qualified complete-output cost cannot fall through to the unknown branch.
+Exact retained Link negatives still exclude a candidate. Compatible catalog
+exposure is distinct from a warm recommendation; a trial never populates
+`retained_output` or claims complete-full-mux qualification.
+
+The browser's staged loader binds each completed unpaced network response to
+its item, pipeline, stage object, session, candidate and full recipe digest.
+Its original trial requires distinct nonce/ETag-bearing segment objects with
+server-observed durations, nonoverlapping media intervals, at least two
+segments and two seconds of media within the 15-second deadline. Conservative
+actual transfer must exceed 1.8 times their largest observed wire cost. That
+maximum remains empirical segment evidence, never a whole-title peak or
+reusable output sidecar. The qualified complete-output branch keeps its 1.8
+margin. Existing incumbent runway/pressure, preparation cancellation,
+five-minute failure backoff, presentation continuity and exposure rollback
+remain owned by the current controller.
+
+The old `aa0d6382b` browser source rejects the new focused trial regression;
+the changed browser source passes it once. The independent captured item/digest
+regression and both new authenticated-stage/catalog Rust regressions each pass
+once. Pinned Rust 1.97.1 all-target source checking passes. Final committed-tree
+checks, native composition, one formal review and the current effort gate
+remain pending at this author checkpoint.
+This records source work, not physical restoration, D3 or A-05 completion.
