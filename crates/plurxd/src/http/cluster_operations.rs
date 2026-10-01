@@ -1222,7 +1222,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
 /// fence. A recovery/SQLite process has no cached Store proof on this surface,
 /// so it reports unavailable rather than turning an operations request into a
 /// Store ping.
-fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
+pub(super) fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
     if state.membership.local_maintenance_active() {
         return ReadinessEvaluation {
             ready: false,
@@ -1236,10 +1236,10 @@ fn operations_readiness(state: &AppState) -> ReadinessEvaluation {
         };
     }
     if state.serving.is_ready() {
-        ReadinessEvaluation {
+        super::clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
-        }
+        })
     } else {
         ReadinessEvaluation {
             ready: false,

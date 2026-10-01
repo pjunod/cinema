@@ -1,4 +1,4 @@
-//! Node-local clock evidence. No HTTP, Store calls or enforcement consumers.
+//! Node-local clock evidence and typed consumer admission. No HTTP or Store calls.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,6 +131,47 @@ mod tests {
                 },
             )])
         ));
+    }
+
+    #[test]
+    fn consumer_refusals_count_only_typed_admission_not_policy_or_scrapes() {
+        let guard = ClusterClockGuard::new(true);
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        assert_eq!(
+            guard.acquire_for(ClockDecision::ExpiryScan).err(),
+            Some(ClockRefusal::Unknown)
+        );
+        publish_offset(&guard, 0, 1_000);
+        let acquired = guard
+            .acquire_for(ClockDecision::Takeover)
+            .expect("safe acquisition");
+        let original_now = acquired.now_ms();
+        guard.roster_failed();
+        assert_eq!(
+            guard.revalidate_for(ClockDecision::Takeover, &acquired),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(acquired.now_ms(), original_now);
+        let first = guard.prometheus();
+        let second = guard.prometheus();
+        assert_eq!(first, second, "scraping must not count another refusal");
+        assert!(first.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"expiry_scan\",cause=\"unknown\"} 1\n"
+        ));
+        assert!(first.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"generation_changed\"} 1\n"
+        ));
+        assert!(first.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"unknown\"} 0\n"
+        ));
+        assert_eq!(
+            first
+                .lines()
+                .filter(|line| line.starts_with("plurx_cluster_clock_refusals_total{"))
+                .count(),
+            12,
+            "metric cardinality is exactly three decisions by four causes"
+        );
     }
 
     #[test]
@@ -369,7 +410,7 @@ pub struct ClockDecisionTicket {
     pub now_ms: i64,
 }
 
-/// Pure policy refusal. No production consumer is connected in this release.
+/// Typed local refusal; it never establishes a submitted proposal's outcome.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ClockRefusal {
     #[error("clock coverage is incomplete or expired")]
@@ -380,6 +421,61 @@ pub enum ClockRefusal {
     LocalDiscontinuity,
     #[error("clock decision evidence changed")]
     GenerationChanged,
+}
+
+/// Closed metric vocabulary: no target, session, or caller-supplied labels.
+#[derive(Clone, Copy, Debug)]
+pub enum ClockDecision {
+    Takeover,
+    MembershipChange,
+    ExpiryScan,
+}
+
+impl ClockDecision {
+    const ALL: [Self; 3] = [Self::Takeover, Self::MembershipChange, Self::ExpiryScan];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Takeover => 0,
+            Self::MembershipChange => 1,
+            Self::ExpiryScan => 2,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Takeover => "takeover",
+            Self::MembershipChange => "membership_change",
+            Self::ExpiryScan => "expiry_scan",
+        }
+    }
+}
+
+impl ClockRefusal {
+    const ALL: [Self; 4] = [
+        Self::Offset,
+        Self::Unknown,
+        Self::LocalDiscontinuity,
+        Self::GenerationChanged,
+    ];
+
+    const fn index(self) -> usize {
+        match self {
+            Self::Offset => 0,
+            Self::Unknown => 1,
+            Self::LocalDiscontinuity => 2,
+            Self::GenerationChanged => 3,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Offset => "offset",
+            Self::Unknown => "unknown",
+            Self::LocalDiscontinuity => "local_discontinuity",
+            Self::GenerationChanged => "generation_changed",
+        }
+    }
 }
 
 /// An acquisition proof belongs to this exact shared guard, not another node's
@@ -435,6 +531,7 @@ struct ClockInner {
 pub struct ClusterClockGuard {
     inner: Mutex<ClockInner>,
     authority_reads: AtomicU64,
+    refusals: [[AtomicU64; 4]; 3],
 }
 
 fn wall_ms() -> Option<i64> {
@@ -450,6 +547,7 @@ impl ClusterClockGuard {
         let mono = Instant::now();
         Self {
             authority_reads: AtomicU64::new(0),
+            refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             inner: Mutex::new(ClockInner {
                 snapshot: ClockSnapshot {
                     state: if replicated {
@@ -530,6 +628,28 @@ impl ClusterClockGuard {
             return Err(ClockRefusal::GenerationChanged);
         }
         Self::acquisition_policy(&inner)
+    }
+
+    /// Actual consumer entry only; pure policy inspection remains uncounted.
+    pub fn acquire_for(
+        &self,
+        decision: ClockDecision,
+    ) -> Result<ClockAcquisitionTicket<'_>, ClockRefusal> {
+        self.acquire().inspect_err(|cause| {
+            self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+        })
+    }
+
+    /// Preserve the original caller time across awaits, counting only a real
+    /// refusal to submit. Never use this to abandon a commit-unknown proposal.
+    pub fn revalidate_for(
+        &self,
+        decision: ClockDecision,
+        ticket: &ClockAcquisitionTicket<'_>,
+    ) -> Result<(), ClockRefusal> {
+        self.revalidate(ticket).inspect_err(|cause| {
+            self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+        })
     }
 
     fn acquisition_policy(inner: &ClockInner) -> Result<(), ClockRefusal> {
@@ -794,14 +914,12 @@ impl ClusterClockGuard {
             }
         }
         out.push_str(&format!("# HELP plurx_cluster_clock_discontinuities_total Local wall/monotonic discontinuities observed.\n# TYPE plurx_cluster_clock_discontinuities_total counter\nplurx_cluster_clock_discontinuities_total {}\n# HELP plurx_cluster_clock_unknown_rounds_total Completed failed or incomplete observation rounds.\n# TYPE plurx_cluster_clock_unknown_rounds_total counter\nplurx_cluster_clock_unknown_rounds_total {}\n# HELP plurx_cluster_clock_authority_reads_total Consistent authority reads attributable to inbound clock requests.\n# TYPE plurx_cluster_clock_authority_reads_total counter\nplurx_cluster_clock_authority_reads_total {}\n# HELP plurx_cluster_clock_refusals_total Decisions refused because the clock could not be bounded (measurement-only emits zero).\n# TYPE plurx_cluster_clock_refusals_total counter\n", snapshot.discontinuities, snapshot.unknown_rounds, self.authority_reads.load(Ordering::Relaxed)));
-        for decision in ["takeover", "membership_change", "expiry_scan"] {
-            for cause in [
-                "offset",
-                "unknown",
-                "local_discontinuity",
-                "generation_changed",
-            ] {
-                out.push_str(&format!("plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} 0\n"));
+        for decision in ClockDecision::ALL {
+            for cause in ClockRefusal::ALL {
+                let count = self.refusals[decision.index()][cause.index()].load(Ordering::Relaxed);
+                let decision = decision.label();
+                let cause = cause.label();
+                out.push_str(&format!("plurx_cluster_clock_refusals_total{{decision=\"{decision}\",cause=\"{cause}\"}} {count}\n"));
             }
         }
         out
