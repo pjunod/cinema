@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-hdr-reference-scoring",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_codec_hdr_score.py",
+  "test_file_sha256": "88d450a8944b7a144aa5f7939028d58386c4ceb8e42a7d1bc412d89182ca707a",
+  "test_ids": ["test_codec_hdr_score.CodecHdrScoreTests.test_pq_pairing_refuses_grade_grid_metadata_and_residual_dv"],
+  "command": "RECONSTRUCTED method scope, not verbatim shell command: python3 -m unittest tests.operations.test_codec_hdr_score.CodecHdrScoreTests.test_pq_pairing_refuses_grade_grid_metadata_and_residual_dv tests.operations.test_codec_hdr_score.CodecHdrScoreTests.test_score_attributes_all_frames_and_refuses_missing_metric_output -v",
+  "output": "RECONSTRUCTED individual result from retained task context: tool504e08 test_pq_pairing_refuses_grade_grid_metadata_and_residual_dv PASS. The same invocation's other method ERROR is not imported as a pass. Original verbatim output is unavailable after context compaction.",
+  "provenance_note": "Individual passing-method evidence only, not an exclusively green invocation. Original file hash and tool ID retained; null commit denotes original uncommitted source. Requires independent authenticated admissibility review, not automatic source equivalence or a rerun.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

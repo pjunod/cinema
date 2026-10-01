@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+"""Offline matched PQ code-domain evidence; not HDR perceptual qualification."""
+
+import argparse
+import hashlib
+import json
+import math
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+class Refusal(ValueError):
+    """An input cannot support the claimed comparison."""
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def local_file(path, expected=None):
+    path = Path(path).absolute()
+    if path.is_symlink() or not path.is_file():
+        raise Refusal("a regular local file is required")
+    if any(parent.is_symlink() for parent in path.parents):
+        raise Refusal("symlinked input parents are not accepted")
+    digest = sha256(path)
+    if expected is not None and digest != expected:
+        raise Refusal("input SHA256 does not match its pinned identity")
+    return path, digest
+
+
+def run(command, timeout=90):
+    # File-backed channels avoid unbounded communicate() memory. No shell,
+    # post-fork callback, protocol URL, or production process is involved.
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        process = subprocess.Popen([sys.executable, str(Path(__file__).absolute()),
+                                    "--tool-exec", *command], stdout=out, stderr=err)
+        try:
+            status = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise Refusal("offline tool exceeded its deadline") from None
+        if out.tell() > 8 * 1024 * 1024 or err.tell() > 1024 * 1024:
+            raise Refusal("offline tool exceeded its output allowance")
+        out.seek(0)
+        err.seek(0)
+        output, error = out.read(), err.read()
+    if status:
+        raise Refusal("offline tool failed: " + error.decode(errors="replace")[-2000:])
+    return output.decode("utf-8")
+
+
+def inspect(probe, path, duration):
+    payload = json.loads(run([
+        str(probe), "-v", "error", "-protocol_whitelist", "file,pipe",
+        "-select_streams", "v:0", "-read_intervals", f"0%+{duration}",
+        "-show_streams", "-show_frames", "-show_entries",
+        "stream=width,height,pix_fmt,color_range,color_space,color_transfer,color_primaries,side_data_list:"
+        "frame=best_effort_timestamp_time,width,height,pix_fmt,color_range,color_space,color_transfer,color_primaries,side_data_list",
+        "-of", "json", str(path),
+    ]))
+    streams, frames = payload.get("streams", []), payload.get("frames", [])
+    if len(streams) != 1 or not 1 <= len(frames) <= 600:
+        raise Refusal("one video stream and 1..600 decoded frames are required")
+    return streams[0], frames
+
+
+GRADE = {"pix_fmt": "yuv420p10le", "color_range": "tv",
+         "color_space": "bt2020nc", "color_transfer": "smpte2084",
+         "color_primaries": "bt2020"}
+SDR_GRADE = dict(GRADE, pix_fmt="yuv420p", color_space="bt709",
+                 color_transfer="bt709", color_primaries="bt709")
+
+
+def generate_reference(ffmpeg, destination):
+    """A distinct neutral PQ ramp; never retag the incumbent testsrc fixture."""
+    destination = Path(destination).absolute()
+    if destination.exists() or not destination.parent.is_dir() or destination.parent.is_symlink():
+        raise Refusal("reference destination must be a new file in an owned existing directory")
+    ffmpeg, tool_hash = local_file(ffmpeg)
+    # ST2084 inverse EOTF for neutral RGB: 0..1000 cd/m², represented as
+    # nonlinear limited-range Y' (R'=G'=B'). Chroma is neutral. This authored
+    # test signal is not an independently captured film or Dolby Vision input.
+    luminance = "(1000*X/(W-1)/10000)"
+    power = f"pow({luminance},2610/16384)"
+    pq = f"pow((3424/4096+(2413/128)*{power})/(1+(2392/128)*{power}),2523/32)"
+    graph = ("nullsrc=size=64x64:rate=4:duration=2,format=yuv420p10le,"
+             f"geq=lum='64+876*{pq}':cb=512:cr=512")
+    command = [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-n",
+               "-filter_threads", "1", "-f", "lavfi", "-i", graph,
+               "-c:v", "libx265", "-threads", "1", "-pix_fmt", "yuv420p10le",
+               "-x265-params", "lossless=1:pools=none:frame-threads=1:log-level=error:"
+               "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited",
+               "-color_range", "tv", "-colorspace", "bt2020nc",
+               "-color_trc", "smpte2084", "-color_primaries", "bt2020",
+               "-flags", "+bitexact", "-map_metadata", "-1", str(destination)]
+    run(command)
+    return {"schema": 1, "kind": "authored-neutral-ST2084-reference",
+            "reference_sha256": sha256(destination), "ffmpeg_sha256": tool_hash,
+            "ffmpeg_version": run([str(ffmpeg), "-version"]), "argv": command,
+            "graph": graph, "luminance_nits": [0, 1000], "grade": GRADE,
+            "dimensions": [64, 64], "cadence": "4/1", "duration_seconds": 2,
+            "frames": 8, "genuine_dv_p5": False, "physical_hdr_ab": "not performed"}
+
+
+def sdr_graph(duration):
+    return (f"trim=duration={duration},setpts=PTS-STARTPTS,"
+            "zscale=transfer=linear:npl=100,format=gbrpf32le,"
+            "zscale=primaries=bt709,tonemap=tonemap=hable:desat=0:peak=10,"
+            "zscale=transfer=bt709:matrix=bt709:range=limited,format=yuv420p,"
+            "sidedata=mode=delete")
+
+
+def grade_sdr(source, source_sha, ffmpeg, ffprobe, destination, duration):
+    """Explicit independent Hable/100-nit SDR reference, not a server graph."""
+    if not math.isfinite(duration) or not 0 < duration <= 30:
+        raise Refusal("reference duration must be finite and within (0,30] seconds")
+    source, source_hash = local_file(source, source_sha)
+    ffmpeg, tool_hash = local_file(ffmpeg)
+    ffprobe, probe_hash = local_file(ffprobe)
+    pairing = validate_pair(inspect(ffprobe, source, duration), inspect(ffprobe, source, duration))
+    destination = Path(destination).absolute()
+    if destination.exists() or not destination.parent.is_dir() or destination.parent.is_symlink():
+        raise Refusal("SDR destination must be new and owned")
+    # An exact, recorded grade. Hable is not inferred to be the correct
+    # artistic reference for a film; that choice still needs physical A/B.
+    graph = sdr_graph(duration)
+    command = [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-n",
+               "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", str(source),
+               "-filter_threads", "1", "-vf", graph, "-frames:v", str(pairing["frames"]),
+               "-an", "-c:v", "libx264", "-crf", "0", "-threads", "1",
+               "-color_range", "tv", "-colorspace", "bt709", "-color_trc", "bt709",
+               "-color_primaries", "bt709", "-map_metadata", "-1", str(destination)]
+    run(command)
+    if sha256(source) != source_hash:
+        raise Refusal("source changed while grading")
+    return {"schema": 1, "kind": "independent-PQ-to-BT709-Hable-reference",
+            "parent_source_sha256": source_hash, "reference_sha256": sha256(destination),
+            "ffmpeg_sha256": tool_hash, "ffprobe_sha256": probe_hash,
+            "ffmpeg_version": run([str(ffmpeg), "-version"]), "argv": command,
+            "graph": graph, "source_pairing": pairing, "reference_white_nits": 100,
+            "source_peak_nits": 1000, "duration_seconds": duration,
+            "grade_choice": "explicit Hable; physical A/B still required"}
+
+
+def metadata(record):
+    return sorted((entry for entry in record.get("side_data_list", [])
+                   if entry.get("side_data_type") in (
+                       "Mastering display metadata", "Content light level metadata")),
+                  key=lambda entry: entry["side_data_type"])
+
+
+def validate_pair(reference, distorted, grade=None):
+    """No alignment/grade conversion is inferred from a filename or claim."""
+    a, af = reference
+    b, bf = distorted
+    grade = GRADE if grade is None else grade
+    for record in [a, b, *af, *bf]:
+        # Some demuxers omit primaries/transfer at stream level; every decoded
+        # frame still must supply them. A contradictory container is refused.
+        stream = record is a or record is b
+        if any(record.get(key) != value for key, value in grade.items()
+               if not stream or key in record):
+            raise Refusal("only explicitly decoded limited 10-bit BT2020NC PQ is supported")
+        if grade == SDR_GRADE and metadata(record):
+            raise Refusal("SDR reference/output retains HDR mastering/light metadata")
+        if not 8 <= record.get("width", 0) <= 3840 or not 8 <= record.get("height", 0) <= 2160:
+            raise Refusal("dimensions are outside the bounded scoring contract")
+        if any("DOVI" in entry.get("side_data_type", "").upper()
+               or "DOLBY" in entry.get("side_data_type", "").upper()
+               for entry in record.get("side_data_list", [])):
+            raise Refusal("DV must be independently reshaped before PQ scoring; residual RPU/config refused")
+    if len(af) != len(bf):
+        raise Refusal("decoded frame counts differ")
+    at = [float(frame["best_effort_timestamp_time"]) for frame in af]
+    bt = [float(frame["best_effort_timestamp_time"]) for frame in bf]
+    if any(not math.isfinite(value) for value in at + bt):
+        raise Refusal("nonfinite decoded timestamp")
+    if any(y <= x for x, y in zip(at, at[1:])):
+        raise Refusal("reference timestamps are not strictly increasing")
+    if at != bt:
+        raise Refusal("decoded timestamp grids differ; no resampling or frame repetition")
+    for left, right in [(a, b), *zip(af, bf)]:
+        if (left["width"], left["height"]) != (right["width"], right["height"]):
+            raise Refusal("decoded dimensions differ; no scaling")
+        if metadata(left) != metadata(right):
+            raise Refusal("mastering display / MaxCLL / MaxFALL evidence differs")
+        if (left["width"], left["height"]) != (a["width"], a["height"]):
+            raise Refusal("dimensions changed within the decoded reference grid")
+    return {"frames": len(af), "timestamps": at, "grade": grade,
+            "width": a["width"], "height": a["height"],
+            "stream_metadata": metadata(a),
+            "frame_metadata": [metadata(frame) for frame in af]}
+
+
+def score_sdr(source, source_sha, reference, distorted, distorted_sha,
+              receipt_path, receipt_sha, ffmpeg, ffprobe):
+    """The caller pins a separately retained grade receipt; no PQ relabel."""
+    receipt_path, _ = local_file(receipt_path, receipt_sha)
+    if receipt_path.stat().st_size > 1024 * 1024:
+        raise Refusal("grade receipt is oversized")
+    receipt = json.loads(receipt_path.read_text())
+    if receipt.get("kind") != "independent-PQ-to-BT709-Hable-reference" or receipt.get("schema") != 1:
+        raise Refusal("an independently retained explicit grade receipt is required")
+    source, source_hash = local_file(source, source_sha)
+    if receipt.get("parent_source_sha256") != source_hash:
+        raise Refusal("grade receipt belongs to a different parent source")
+    reference, reference_hash = local_file(reference, receipt.get("reference_sha256", ""))
+    distorted, distorted_hash = local_file(distorted, distorted_sha)
+    ffmpeg, ff_hash = local_file(ffmpeg)
+    ffprobe, probe_hash = local_file(ffprobe)
+    duration = receipt.get("duration_seconds")
+    argv = receipt.get("argv", [])
+    graph = receipt.get("graph", "")
+    if (not isinstance(duration, (int, float)) or not math.isfinite(duration)
+            or not 0 < duration <= 30 or graph != sdr_graph(duration)
+            or graph not in argv or receipt.get("reference_white_nits") != 100
+            or receipt.get("source_peak_nits") != 1000
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt.get("ffmpeg_sha256", ""))):
+        raise Refusal("grade graph/tool/white/peak provenance is incomplete")
+    # Grade duration is recorded in the fixed trim expression, never obtained
+    # by trusting container length or silently extending the last frame.
+    seconds = duration
+    parent = validate_pair(inspect(ffprobe, source, seconds), inspect(ffprobe, source, seconds))
+    if parent != receipt["source_pairing"]:
+        raise Refusal("parent decoded facts do not match the retained grade receipt")
+    pairing = validate_pair(inspect(ffprobe, reference, seconds),
+                            inspect(ffprobe, distorted, seconds), SDR_GRADE)
+    if pairing["timestamps"] != parent["timestamps"]:
+        raise Refusal("graded reference no longer has the source frame grid")
+    with tempfile.TemporaryDirectory(prefix="plurx-sdr-vmaf-") as directory:
+        stats = Path(directory) / "vmaf.json"
+        graph = (f"[0:v:0]trim=duration={seconds},settb=AVTB,setpts=PTS-STARTPTS[a];"
+                 f"[1:v:0]trim=duration={seconds},settb=AVTB,setpts=PTS-STARTPTS[b];"
+                 f"[a][b]libvmaf=model=version=vmaf_v0.6.1:n_subsample=1:"
+                 f"log_fmt=json:log_path={stats}:shortest=1:repeatlast=0:eof_action=endall")
+        run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-threads", "1",
+             "-protocol_whitelist", "file,pipe", "-i", str(distorted), "-threads", "1",
+             "-protocol_whitelist", "file,pipe", "-i", str(reference),
+             "-filter_complex_threads", "1", "-filter_complex", graph,
+             "-frames:v", str(pairing["frames"]), "-an", "-f", "null", "-"])
+        if not stats.is_file() or stats.stat().st_size > 1024 * 1024:
+            raise Refusal("VMAF frame statistics missing or oversized")
+        data = json.loads(stats.read_text())
+        frames = data.get("frames", [])
+        if len(frames) != pairing["frames"]:
+            raise Refusal("VMAF did not score every validated decoded frame")
+        values = []
+        for index, frame in enumerate(frames):
+            value = frame.get("metrics", {}).get("vmaf")
+            if frame.get("frameNum") != index or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise Refusal("VMAF frame attribution/result is invalid")
+            values.append(value)
+        stats_hash = sha256(stats)
+    if any(sha256(path) != digest for path, digest in (
+            (source, source_hash), (reference, reference_hash), (distorted, distorted_hash),
+            (receipt_path, receipt_sha))):
+        raise Refusal("source/reference/output/receipt changed during scoring")
+    return {"schema": 1, "domain": "SDR BT709 VMAF, not HDR perceptual fidelity",
+            "grade_receipt_sha256": receipt_sha, "parent_source_sha256": source_hash,
+            "reference_sha256": reference_hash, "distorted_sha256": distorted_hash,
+            "ffmpeg_sha256": ff_hash, "ffprobe_sha256": probe_hash,
+            "ffmpeg_version": run([str(ffmpeg), "-version"]),
+            "model": "vmaf_v0.6.1", "per_frame": values, "stats_sha256": stats_hash,
+            "pairing": pairing, "physical_hdr_ab": "not performed"}
+
+
+def metric(ffmpeg, reference, distorted, duration, frames, name, directory):
+    stats = Path(directory) / f"{name}.txt"
+    graph = (f"[0:v:0]trim=duration={duration},settb=AVTB,setpts=PTS-STARTPTS[a];"
+             f"[1:v:0]trim=duration={duration},settb=AVTB,setpts=PTS-STARTPTS[b];"
+             f"[a][b]{name}=stats_file={stats.name}:shortest=1:repeatlast=0:eof_action=endall")
+    # Relative stats filename is controlled, never a caller-provided filter.
+    command = [str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin",
+               "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", str(distorted),
+               "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", str(reference),
+               "-filter_complex_threads", "1", "-filter_complex", graph,
+               "-frames:v", str(frames), "-an", "-f", "null", "-"]
+    # ffmpeg writes its stats relative to cwd; use an absolute safe generated path.
+    command[command.index(graph)] = graph.replace(f"stats_file={stats.name}", f"stats_file={stats}")
+    run(command)
+    if not stats.is_file() or stats.stat().st_size > 1024 * 1024:
+        raise Refusal("metric statistics missing or oversized")
+    lines = stats.read_text().splitlines()
+    if len(lines) != frames:
+        raise Refusal("metric did not score every validated decoded frame")
+    field = "psnr_avg" if name == "psnr" else "All"
+    values = []
+    for index, line in enumerate(lines, 1):
+        fields = dict(re.findall(r"([A-Za-z_]+):([0-9.eE+\-]+|inf)", line))
+        if fields.get("n") != str(index) or field not in fields:
+            raise Refusal("invalid metric frame attribution")
+        value = float(fields[field])
+        if math.isnan(value) or (name == "ssim" and not -1 <= value <= 1):
+            raise Refusal("invalid metric result")
+        values.append("identical" if math.isinf(value) else value)
+    return {"per_frame": values, "stats_sha256": sha256(stats)}
+
+
+def census(ffmpeg, path, duration, frames, directory, prefix, shadow, highlight):
+    result = {}
+    for label, expression in (("range", None),
+                              ("shadow", f"if(lte(lum(X,Y),{shadow}),1023,0)"),
+                              ("highlight", f"if(gte(lum(X,Y),{highlight}),1023,0)")):
+        stats = Path(directory) / f"{prefix}-{label}.txt"
+        graph = f"trim=duration={duration}"
+        if expression:
+            graph += f",geq=lum='{expression}':cb=512:cr=512"
+        graph += f",signalstats,metadata=mode=print:file={stats}"
+        run([str(ffmpeg), "-hide_banner", "-v", "error", "-nostdin", "-threads", "1",
+             "-protocol_whitelist", "file,pipe", "-i", str(path), "-filter_threads", "1",
+             "-vf", graph, "-frames:v", str(frames), "-an", "-f", "null", "-"])
+        if not stats.is_file() or stats.stat().st_size > 1024 * 1024:
+            raise Refusal("census statistics missing or oversized")
+        text = stats.read_text()
+        lows = [float(value) for value in re.findall(r"lavfi.signalstats.YMIN=(\S+)", text)]
+        highs = [float(value) for value in re.findall(r"lavfi.signalstats.YMAX=(\S+)", text)]
+        means = [float(value) for value in re.findall(r"lavfi.signalstats.YAVG=(\S+)", text)]
+        if len(lows) != frames or len(highs) != frames or len(means) != frames:
+            raise Refusal("census did not cover every validated decoded frame")
+        if any(not math.isfinite(value) or not 0 <= value <= 1023
+               for value in lows + highs + means):
+            raise Refusal("invalid 10-bit census value")
+        result[label] = ({"minimum": lows, "maximum": highs} if label == "range"
+                         else {"fraction": [value / 1023 for value in means]})
+        result[label]["stats_sha256"] = sha256(stats)
+    return result
+
+
+def score(reference, distorted, reference_sha, distorted_sha, ffmpeg, ffprobe, duration,
+          shadow=80, highlight=900):
+    if not math.isfinite(duration) or not 0 < duration <= 30:
+        raise Refusal("duration must be finite and within (0,30] seconds")
+    if type(shadow) is not int or type(highlight) is not int or not 64 <= shadow < highlight <= 940:
+        raise Refusal("shadow/highlight thresholds must be ordered limited-range 10-bit code values")
+    reference, ref_hash = local_file(reference, reference_sha)
+    distorted, dist_hash = local_file(distorted, distorted_sha)
+    ffmpeg, ff_hash = local_file(ffmpeg)
+    ffprobe, probe_hash = local_file(ffprobe)
+    pairing = validate_pair(inspect(ffprobe, reference, duration), inspect(ffprobe, distorted, duration))
+    with tempfile.TemporaryDirectory(prefix="plurx-pq-score-") as directory:
+        metrics = {name: metric(ffmpeg, reference, distorted, duration,
+                                pairing["frames"], name, directory)
+                   for name in ("psnr", "ssim")}
+        censuses = {label: census(ffmpeg, path, duration, pairing["frames"], directory,
+                                 label, shadow, highlight)
+                    for label, path in (("reference", reference), ("distorted", distorted))}
+    # Refuse source replacement during the decode/score window.
+    if sha256(reference) != ref_hash or sha256(distorted) != dist_hash:
+        raise Refusal("input changed during scoring")
+    return {"schema": 1, "domain": "PQ encoded code values, not nits",
+            "reference_sha256": ref_hash, "distorted_sha256": dist_hash,
+            "ffmpeg_sha256": ff_hash, "ffprobe_sha256": probe_hash,
+            "ffmpeg_version": run([str(ffmpeg), "-version"]),
+            "ffprobe_version": run([str(ffprobe), "-version"]),
+            "duration_seconds": duration, "pairing": pairing, "metrics": metrics,
+            "census": censuses, "shadow_code_lte": shadow, "highlight_code_gte": highlight,
+            "hdr_perceptual_model": None, "physical_hdr_ab": "not performed"}
+
+
+def main():
+    if sys.argv[1:2] == ["score-sdr"]:
+        parser = argparse.ArgumentParser(description="Score SDR only against a separately pinned graded reference")
+        for field in ("source", "source-sha256", "reference", "distorted", "distorted-sha256",
+                      "receipt", "receipt-sha256", "ffmpeg", "ffprobe"):
+            parser.add_argument("--" + field, required=True)
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            result = score_sdr(args.source, args.source_sha256, args.reference,
+                               args.distorted, args.distorted_sha256, args.receipt,
+                               args.receipt_sha256, args.ffmpeg, args.ffprobe)
+        except (Refusal, ValueError, KeyError) as error:
+            parser.exit(2, f"refused: {error}\n")
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return
+    if sys.argv[1:2] == ["grade-sdr"]:
+        parser = argparse.ArgumentParser(description="Explicit independent PQ-to-SDR reference grade")
+        parser.add_argument("--source", required=True)
+        parser.add_argument("--source-sha256", required=True)
+        parser.add_argument("--ffmpeg", required=True)
+        parser.add_argument("--ffprobe", required=True)
+        parser.add_argument("--destination", required=True)
+        parser.add_argument("--duration", type=float, required=True)
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            result = grade_sdr(args.source, args.source_sha256, args.ffmpeg,
+                               args.ffprobe, args.destination, args.duration)
+        except (Refusal, ValueError) as error:
+            parser.exit(2, f"refused: {error}\n")
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return
+    if sys.argv[1:2] == ["generate-reference"]:
+        parser = argparse.ArgumentParser(description="Author a distinct bounded neutral ST2084 signal")
+        parser.add_argument("--ffmpeg", required=True)
+        parser.add_argument("--destination", required=True)
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            result = generate_reference(args.ffmpeg, args.destination)
+        except (Refusal, ValueError) as error:
+            parser.exit(2, f"refused: {error}\n")
+        print(json.dumps(result, indent=2, allow_nan=False))
+        return
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reference", required=True)
+    parser.add_argument("--distorted", required=True)
+    parser.add_argument("--reference-sha256", required=True)
+    parser.add_argument("--distorted-sha256", required=True)
+    parser.add_argument("--ffmpeg", required=True)
+    parser.add_argument("--ffprobe", required=True)
+    parser.add_argument("--duration", type=float, required=True)
+    parser.add_argument("--shadow-code", type=int, default=80)
+    parser.add_argument("--highlight-code", type=int, default=900)
+    args = parser.parse_args()
+    try:
+        result = score(args.reference, args.distorted, args.reference_sha256,
+                       args.distorted_sha256, args.ffmpeg, args.ffprobe, args.duration,
+                       args.shadow_code, args.highlight_code)
+    except (Refusal, KeyError, ValueError) as error:
+        parser.exit(2, f"refused: {error}\n")
+    print(json.dumps(result, indent=2, allow_nan=False))
+
+
+if __name__ == "__main__":
+    if sys.argv[1:2] == ["--tool-exec"]:
+        # A fresh interpreter sets limits before exec: safe even if the caller
+        # later uses threads. The tool cannot grow either output past 8 MiB.
+        import os
+        import resource
+        resource.setrlimit(resource.RLIMIT_FSIZE, (8 * 1024 * 1024, 8 * 1024 * 1024))
+        resource.setrlimit(resource.RLIMIT_CPU, (90, 90))
+        os.execv(sys.argv[2], sys.argv[2:])
+    else:
+        main()
