@@ -3141,6 +3141,36 @@
             std::time::Instant::now() + Duration::from_millis(100)).await.is_none());
     }
     #[tokio::test]
+    async fn a05_prepared_auth_ignores_all_forwarding_headers_and_requires_ipv4_socket() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback = unique_playback_id("a05-peer-only-observation-auth");
+        let (fixture, _, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        let token = "a05-peer-only-observation-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), route.user_id, None)
+            .await.expect("owned authentication token");
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Plurx-Link-Receipt", uuid::Uuid::new_v4().to_string().parse().expect("nonce"));
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("authorization"));
+        headers.insert("forwarded", "for=198.51.100.9".parse().expect("forwarded"));
+        headers.insert("x-forwarded-for", "203.0.113.9".parse().expect("xff"));
+        headers.insert("x-real-ip", "192.0.99.9".parse().expect("real ip"));
+        let remote = Some("192.0.2.8:12345".parse().expect("IPv4 socket"));
+        let observation = super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now() + Duration::from_millis(100)).await.expect("actual IPv4 peer authority");
+        assert_eq!(observation.network_fingerprint(), "192.0.2.0/24");
+        for unsupported in [None, Some("[2001:db8::8]:12345".parse().expect("IPv6 socket"))] {
+            assert!(super::prepared_link::authenticate(&fixture.state, &headers, unsupported,
+                std::time::Instant::now() + Duration::from_millis(100)).await.is_none(),
+                "forwarding headers cannot authorize a missing or unsupported socket");
+        }
+        headers.remove("forwarded");
+        headers.remove("x-forwarded-for");
+        assert!(super::prepared_link::authenticate(&fixture.state, &headers, None,
+            std::time::Instant::now() + Duration::from_millis(100)).await.is_none(),
+            "X-Real-IP alone cannot authorize an absent socket");
+    }
+
+    #[tokio::test]
     async fn a05_staged_intake_uses_own_eof_and_refuses_aborted_actor_without_claim() {
         a05_staged_intake_fixture(0).await;
     }
