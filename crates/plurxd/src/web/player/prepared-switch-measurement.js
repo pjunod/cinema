@@ -215,11 +215,11 @@ function rollbackPreparedReplacement(p,state,successor){
   retired.id="video";
   successor.id="video-prepared";
   retired.style.display="";
-  retired.muted=predecessor.muted;
+  retired.muted=successor.muted;
   try{
-    retired.volume=predecessor.volume;
-    retired.defaultPlaybackRate=predecessor.defaultPlaybackRate;
-    retired.playbackRate=predecessor.playbackRate;
+    retired.volume=successor.volume;
+    retired.defaultPlaybackRate=successor.defaultPlaybackRate;
+    retired.playbackRate=successor.playbackRate;
   }catch(e){}
   retired.removeAttribute("aria-hidden");
   successor.style.display="none";

@@ -1583,3 +1583,11 @@ filtered through the current lifecycle pause. It no longer restores controls
 saved before the switch. The obsolete predecessor control snapshots are removed.
 The existing prepared-authority regression checks these bindings; execution is
 deferred until final qualification.
+
+### 10.28 Web rollback retains live audio and speed controls
+
+After a failed exposed successor, web rollback now copies the successor's
+current mute, volume and playback speed to the retained predecessor. The
+regression drives the shipped rollback with settings changed since preparation
+and verifies they survive alongside standing Play/Pause intent. Script syntax
+checks pass; unit execution remains deferred.

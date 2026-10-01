@@ -7008,7 +7008,7 @@ function preparedRollbackTransportTests(){
     const predecessor={element,wantsPlayback:!wantsPlayback,sessionId:"incumbent",
       muted:false,volume:0.6,playbackRate:1,defaultPlaybackRate:1,hls:{}};
     const state={predecessor,hls:{}};
-    const successor={style:{},setAttribute(){}};
+    const successor={style:{},muted:true,volume:0.25,playbackRate:1.5,defaultPlaybackRate:1.5,setAttribute(){}};
     const p={wantsPlayback,sessionId:"successor"};
     const rollback=new Function("resumePreparedIncumbentLoad","restorePreparedOverlap",
       "adoptPlaybackMediaElement","resetPlaybackTransportEvents","destroyHlsInstance",
@@ -7020,6 +7020,10 @@ function preparedRollbackTransportTests(){
     assert.equal(plays,wantsPlayback?1:0,"rollback must not resume a viewer-paused incumbent");
     assert.equal(pauses,wantsPlayback?0:1,"rollback must not undo a newer Play command");
     assert.equal(adopted,element);
+    assert.equal(element.muted,true,"rollback retains the latest mute choice");
+    assert.equal(element.volume,0.25,"rollback retains the latest volume choice");
+    assert.equal(element.playbackRate,1.5,"rollback retains the latest speed choice");
+    assert.equal(element.defaultPlaybackRate,1.5);
     assert.equal(p.sessionId,"incumbent");
     assert.equal(state.predecessor,null,"the restored media has one owner");
   }
