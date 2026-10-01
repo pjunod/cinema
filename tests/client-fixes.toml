@@ -3495,7 +3495,7 @@ test_anchor = "fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDead
 # passed once on exact a82 source; no historical fd74 execution is implied.
 [[fixes]]
 id = "android.auto-prepared-viewer-boundary-owner-and-budget"
-commits = ["fd74cebe", "a82f48a5e"]
+commits = ["fd74cebe", "a82f48a5e", "3eb844b62"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "internal fun autoViewerTransport(delegate: Player"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
