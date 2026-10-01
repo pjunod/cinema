@@ -383,7 +383,8 @@ device-route acceptance remain open.
 
 The subsequent current-effort refresh composes `abdc6bf62` additively, including
 the delivered-codec contract, shared local-media pump, clock observer and
-unit-once workflow. Audio retained-authority and initial-route owners remain
+unit-once workflow, then `ae879d163` adds verified build packaging. Audio
+retained-authority and initial-route owners remain
 unchanged. The merged structural census measures task688, time1127 and
 process-launch417; those are source measurements, not repeated unit runs.
 Current compiler/hook receipts are recorded separately in #665; the original
