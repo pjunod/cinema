@@ -1,6 +1,7 @@
 # Audio resolved independently — the picture's rung stops deciding the sound
 
-**Status:** implementation blocked on measured audio evidence · **Executes:** Q5 / §3.1.2 / F-stream-5 from
+**Status:** partial implementation; synthetic subset measured 2026-09-30,
+real-content/device evidence open · **Executes:** Q5 / §3.1.2 / F-stream-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -225,6 +226,17 @@ with an explicit `pan` per **source layout**, using channel *names* so the
 matrix does not depend on channel order (the assessment's objection to the
 appendix's numeric string):
 
+**2026-09-30 measured correction:** the preceding attenuation description
+was the original hypothesis, not a universal shipped-engine result.
+[Jellyfin 8.1.3 synthetic measurements](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md)
+found the default and explicit pan both split FC by approximately −3 dB
+per side, including actual AAC 160 kb/s output. No dialogue-improvement
+claim follows. The named matrices clipped the coherent worst case; a
+−1 dBFS pre-AAC limiter failed the decoded −1 dBFS bound, while a −2 dBFS
+limiter with auto-level disabled met it on these synthetic inputs. Gains
+and limiter semantics remain candidate production recipes until their
+actual propagation, VOD join and content acceptance checks are proved.
+
 ```text
 5.1 / 5.1(side):  pan=stereo|FL=FL+0.707*FC+0.707*{BL|SL}|FR=FR+0.707*FC+0.707*{BR|SR}
 7.1:              pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR
@@ -321,10 +333,62 @@ every lossy rolling/full-transcode and copy-conversion path now emits `-ar
 48000`, including progressive remux conversion, while copied audio remains
 untouched. The review disposition then added source and sink sample-rate facts,
 kept decoder and passthrough trust separate, and rotated recipe identity to v4.
-The remaining work is still blocked rather than guessed: the source-layout
-continuation below does not interpret speaker positions, M4 has not measured per-layout gains or limiter
-need, and no Apple/Android/web device has supplied the route evidence. No
-shipped client sends the claim, so surround delivery remains unenabled.
+The source-layout continuation below retains opaque facts; it does not
+interpret speaker positions. The dated synthetic receipt now measures the
+three proposed layouts, including failed −1 dB decoded-AAC margin and the
+passing synthetic −2 dB candidate. Real-content/phase and device evidence
+remains owed; no shipped client sends a sink claim.
+
+**2026-10-01 M2 implementation continuation:** the accompanying draft carries
+the already-resolved typed audio decision through rolling/encoded-VOD/copy
+options and actual argv, recipe/digest and VOD rendition identity, master
+CODECS and rung budgets, durable offline snapshots, remote owner response
+facts, and prepared-successor inheritance/refusal. Legacy absent claims keep
+their previous argv and v4 golden identity. Encoded VOD admits only its fixed
+AAC/48 kHz lattice; old offline rows receive null, not a guessed new recipe.
+Copy bitrate headroom remains a conservative 640 kb/s estimate, not a probed
+source rate. A canonical bounded sink claim keys request intent separately
+from the server answer; explanatory text does not select argv or cache keys.
+Prepared video-only switches retain actual producer audio, while incompatible
+audio changes require reopen. No concrete pan, limiter, new client claim,
+readiness/layout feature gate, or count-to-speaker-map inference is enabled.
+
+The continuation in [draft #665](http://192.168.4.7:3000/noirr/plurx/pulls/665)
+composes effort `ec79f4b34` with runtime main `5c99538fd` and the later
+CI-only main `e82e36d62`, then landed queued-publication main `1b2ae4f62`:
+the latter's reason-bearing yield outcomes, admission ownership, source fences
+and publication regressions are retained additively. The audio option owners
+and their two regressions remain unchanged. The ownership census combines
+the prior413 with the new test-owned, bounded and reaped child: measured414.
+Startup settings snapshots
+and phase timings, worker accounting, and the landed #657 parser floor are
+retained. Initial transcodes carry the canonical claim until the actual
+rolling or encoded producer selects its route. A retained producer snapshot
+then takes precedence over that claim and refreshed source facts; encoded
+VOD refuses an incompatible retained snapshot rather than replacing it.
+The actual options-owner regressions exercise rolling and VOD argv plus
+plan/recipe identity with retained AAC six-channel audio and current stereo
+facts. Restoring the old resolution order fails both; the fixed owners pass.
+The pinned Rust 1.97.1 locked workspace/all-target check and normal hook are
+recorded for each composed source in the PR. On the prior `e61537747` source,
+seven focused core tests, eleven daemon tests (including both actual
+owners and three parser-floor cases), two real-backend offline tests, nine
+retained numeric/docs-index checks and the ownership census passed. The normal
+hook passed catalog/formatting, workspace/all-target Clippy with denied warnings
+and all seventy served JavaScript syntax checks. The draft records the final
+committed-tree check separately. Under the one-passing-run-per-PR rule, unchanged
+tests are not repeated for a base refresh; their original source receipts are
+retained, not relabeled as new-tree executions. M4 content/listening and M3/M5
+device-route acceptance remain open.
+
+The subsequent current-effort refresh composes `abdc6bf62` additively, including
+the delivered-codec contract, shared local-media pump, clock observer and
+unit-once workflow, then `ae879d163` adds verified build packaging. Audio
+retained-authority and initial-route owners remain
+unchanged. The merged structural census measures task688, time1127 and
+process-launch417; those are source measurements, not repeated unit runs.
+Current compiler/hook receipts are recorded separately in #665; the original
+nineteen regression declarations and sole review #28 disposition are retained.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -372,6 +436,15 @@ Acceptance: FC-only clip lands within ±1 LU of −20 LUFS − 3 dB per side
 `alimiter` stage with its own before/after; `pan` strings per layout
 committed with the numbers in the PR; `cargo test -p plurx-core
 transcode::audio` pins each layout's string.
+
+**2026-09-30 synthetic subset:** the linked
+[numeric receipt](AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) records true
+`5.1`, `5.1(side)` and `7.1` inputs, separate per-side LUFS/RMS, sample
+peaks/full-scale counts, default versus named matrices, and both insufficient
+and sufficient synthetic AAC limiter margins. Executed collector bytes,
+source/PCM hashes, actual argv and numeric JSON are retained. This is not
+the three real-content scene comparisons, 7.1 content, listening notes,
+device evidence, production argv pinning, or complete M4 acceptance.
 
 ### 5.5 M5 — Android and web claims
 
@@ -460,3 +533,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review disposition | [#418 comment #3296](http://192.168.4.7:3000/noirr/plurx/pulls/418#issuecomment-3296) | Separated decoder/sink/passthrough authority; source/sink sample rates now fail closed; recipe v4 keys the 48 kHz decision; flat `achannels` is bounded at the request; progressive AAC remux is fixed at 48 kHz. Hardware, layout and downmix evidence remain blocked honestly. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 source-layout prerequisite | Draft continuation on current effort `ffbbc16ce` | Claimed only optional source facts and backend round trips. `AudioStream.channel_layout` retains trimmed, opaque ffprobe spelling, bounded to 256 UTF-8 bytes; `5.1` and `5.1(side)` remain distinct. Empty, unknown/N/A, control-bearing and malformed non-string values mean no claim; unsupported bounded spellings remain opaque, not supported speaker maps. No inference from channel count. Absent/null legacy JSON remains absent on serialization, with no migration/backfill. Raw probe JSON retains rejected facts. Focused parser/serde and real SQLite plus feature-enabled three-voter Hiqlite round trips are required before push. No pan, gain, argv, recipe, client, runtime or surround-output change; M2 remains partial and M3–M5 acceptance remains owed. Current effort/focused-test workflow supersedes the older task-to-main/broad-suite instructions for this continuation. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M2 propagation and sole-review disposition | [#665](http://192.168.4.7:3000/noirr/plurx/pulls/665) | Typed audio reaches actual producer options/argv, plan/recipe identity, manifests/budgets, remote responses, durable offline snapshots and prepared successors. Sole review #28/comment #6752 identified retained rolling/encoded audio being re-resolved; actual owner regressions fail with the old claim-first behavior and pass with retained authority. Initial rolling negotiation remains route-specific; legacy absence and the v4 golden remain pinned. Composed effort `ec79f4b34` / main `5c99538fd`: pinned workspace check, core7, daemon11, real SQLite/three-voter offline2, numeric/docs9 and ownership census passed on their recorded source. Later main `1b2ae4f62` (#662) is composed additively with its yield reasons, publication/admission ownership and tests; audio owner/test bytes are unchanged, measured census414. Current committed-tree/compiler/hook receipts are in the PR; no already-passed tests are repeated for this base refresh. Numeric failures and physical/content/listening limits are retained; M3–M5 remain open. |

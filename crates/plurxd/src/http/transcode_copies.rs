@@ -633,6 +633,7 @@ async fn pass(
             }
             let settlement = if cancel.is_cancelled() {
                 JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: None,
                     not_before_ms: now_ms().saturating_add(5_000),
                 }

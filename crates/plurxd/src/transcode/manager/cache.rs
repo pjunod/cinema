@@ -837,7 +837,10 @@ impl TranscodeManager {
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
         };
-        let cached_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let cached_codecs = audio_delivery_hls_codecs(
+            transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
+            opts.audio.as_ref(),
+        );
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
@@ -915,6 +918,7 @@ impl TranscodeManager {
             recovery: None,
             automatic: owner.automatic,
             kind: cached_kind,
+            audio_delivery: opts.audio.clone(),
             // A cache hit only ever answers a transcode request (`serve_cached`
             // is reached from the transcode path alone); the encoder label goes to
             // "cached" here, which is exactly why the method is not read off it.
@@ -991,6 +995,7 @@ impl TranscodeManager {
         )
         .await;
         Some(StartInfo {
+            audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
             duration_ms: file.duration_ms,

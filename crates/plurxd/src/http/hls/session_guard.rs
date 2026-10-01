@@ -20,6 +20,9 @@ pub struct StartQuery {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct StartResponse {
+    /// Actual server-produced audio, not the client's proposed video plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_audio: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,

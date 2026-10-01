@@ -725,6 +725,15 @@ impl Admissions {
             > 0
     }
 
+    /// Whether an admitted background worker must yield to foreground demand.
+    /// Its own background reservation is not competing work.
+    pub fn background_must_yield(&self) -> bool {
+        self.permits
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .background_blocked()
+    }
+
     /// Does background work still own an encoder permit?
     ///
     /// Live admission uses this to distinguish a producer that has not yet

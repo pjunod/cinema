@@ -1127,7 +1127,7 @@ impl TranscodeManager {
         spec: &OfflineSpec,
         subtitle_burn: Option<plurx_core::transcode::SubtitleBurn>,
     ) -> TranscodeOptions {
-        self.options_for_effective_rate_control(
+        let mut options = self.options_for_effective_rate_control(
             encoder,
             file,
             spec.target_height,
@@ -1140,7 +1140,11 @@ impl TranscodeManager {
             // An offline package is downloaded for playback anywhere later;
             // the SDR rung is the one that plays everywhere.
             OutputGrade::Sdr,
-        )
+        );
+        if let Some(audio) = &spec.audio_delivery {
+            options.set_audio_delivery(audio.clone());
+        }
+        options
     }
 
     /// A lossless-enough sidecar for simple text codecs. ASS/SSA remains

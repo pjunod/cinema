@@ -1124,6 +1124,9 @@ pub enum RenewOutcome {
 #[serde(tag = "disposition", rename_all = "snake_case")]
 pub enum JobSettlement {
     Yield {
+        /// Bounded operator reason; absent on commands from older workers.
+        #[serde(default)]
+        error_code: Option<String>,
         checkpoint: Option<serde_json::Value>,
         not_before_ms: i64,
     },
@@ -2438,10 +2441,14 @@ LIMIT 1
         }
         match &request.settlement {
             JobSettlement::Yield {
+                error_code,
                 checkpoint,
                 not_before_ms,
             } => {
-                if *not_before_ms < request.now_ms
+                if error_code
+                    .as_ref()
+                    .is_some_and(|code| !identifier(code) || code.len() > 64)
+                    || *not_before_ms < request.now_ms
                     || checkpoint
                         .as_ref()
                         .map(encode)

@@ -7,6 +7,11 @@ impl TranscodeManager {
             // An idempotent replay of a VOD create: repeat the persisted
             // answer, field for field, from the session record.
             return Some(StartInfo {
+                audio_delivery: self
+                    .vod
+                    .hls_facts(&recovered.start.session_id)
+                    .await
+                    .and_then(|facts| facts.audio_delivery),
                 playlist_url: format!("/api/v1/hls/{}/index.m3u8", recovered.start.session_id),
                 session_id: recovered.start.session_id,
                 duration_ms: Some(recovered.start.duration_ms),
@@ -33,6 +38,7 @@ impl TranscodeManager {
             .and_then(|f| f.duration_ms);
         let encoder = *session.encoder_label.lock().await;
         Some(StartInfo {
+            audio_delivery: session.audio_delivery.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id: session_id.to_owned(),
             duration_ms,
