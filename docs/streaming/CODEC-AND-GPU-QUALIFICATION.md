@@ -859,8 +859,20 @@ python3 scripts/rolling-grid-acquire /private/tmp/owned-cell/manifest.json
 ```
 
 Operational `--execute` needs a separately authorized owned Linux cgroup
-ceiling≤2CPU/2GiB/256PID for the complete local producer/browser tree; bare-host
-execution refuses. One browser/page/cell,≤4 concurrent media response bodies,
+ceiling≤2CPU/2GiB/256PID for the complete local producer/browser tree, with this
+controller as PID 1 in a fresh private PID namespace; bare-host, shared-PID or
+already populated namespace execution refuses. A normal owned container can
+provide this without writable cgroup delegation or privileged mounts. The
+independent PID 1 supervisor bounds synchronous browser/body/drain/close calls:
+585 s work plus a 15 s cleanup reserve within the absolute 600 s deadline.
+Cleanup signals only pidfd-bound identities in the initially empty task-owned
+namespace, reaps descendants (including detached sessions), and refuses success
+unless only PID 1 remains. Kernel namespace teardown on PID 1 exit is the final
+backstop; the later operational owner must retain exact container identity and
+terminal state, not infer them from a worker receipt. Stop, receipt or browser
+errors cannot bypass subtree cleanup. Require successful `supervisor-final.json`
+alongside `complete.json`; completion alone is not clean terminal evidence.
+One browser/page/cell,≤4 concurrent media response bodies,
 ≤4096 observations/snapshots,≤256 segments/512MiB media,64MiB logs and10min wall
 deadline. The fresh standalone child limiter caps file/CPU resources without
 threaded post-fork callbacks. The later16-cell serial campaign retains its
@@ -875,8 +887,12 @@ The census still measures packet/GOP facts; browser callbacks are not NAL IDR
 proof. This is test-binary/internal-manager/shipped-handler/headless-browser
 presentation evidence, NOT public create-route, physical, native, artist-HDR,
 GPU or whole-M3 qualification. No actual acquisition has run for this candidate.
-Two new focused synthetic ownership contracts passed once after negative
-controls; no previous unit successes repeated.
+Two initial synthetic ownership contracts and two later supervisor failure
+contracts passed once. The latter model blocked operations and detached
+descendants; they do not execute browser, encoder or kernel namespace cleanup.
+The old candidate lacks the supervisor consumer and refuses those new tests;
+no previous unit successes repeated. Review 50's deadline and cleanup findings
+are repaired in this same candidate, pending independent disposition.
 
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
