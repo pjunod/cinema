@@ -566,10 +566,11 @@ impl RetainedArtifactRegistry {
             }
         }
     }
-    pub(super) fn acquire_expected(
+    pub(super) fn acquire_expected_for_request(
         &self,
         facts: &crate::transcode::RetainedOutputFacts,
         rendition: &Rendition,
+        incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
     ) -> Option<Arc<RetainedVodArtifact>> {
         if !facts.valid() {
             return None;
@@ -584,10 +585,10 @@ impl RetainedArtifactRegistry {
         };
         let artifact = self.acquire(&origin)?;
         (artifact.facts() == *facts
+            && artifact.logical == *incoming_logical
             && (artifact.recipe_key == rendition.key
                 || (artifact.durable
                     && artifact.logical.is_some()
-                    && artifact.logical == rendition.recipe.retained_logical
                     && artifact.observation.preimage.playlist.as_slice()
                         == rendition.playlist.as_slice()))
             && rendition.source.as_ref().is_some_and(|source| {
@@ -598,14 +599,17 @@ impl RetainedArtifactRegistry {
 
     /// Only an exact issued proof may request lazy full-byte validation. The
     /// registry lease protects it from GC throughout the blocking operation.
-    pub(super) async fn reacquire_expected(
+    pub(super) async fn reacquire_expected_for_request(
         &self,
         facts: &crate::transcode::RetainedOutputFacts,
         shared: &Shared,
         rendition: &Arc<Rendition>,
+        incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
         budget: Duration,
     ) -> Option<Arc<RetainedVodArtifact>> {
-        if let Some(artifact) = self.acquire_expected(facts, rendition) {
+        if let Some(artifact) =
+            self.acquire_expected_for_request(facts, rendition, incoming_logical)
+        {
             return Some(artifact);
         }
         if !facts.valid() {
@@ -630,7 +634,7 @@ impl RetainedArtifactRegistry {
         if artifact.facts() != *facts
             || !artifact.durable
             || artifact.logical.is_none()
-            || artifact.logical != rendition.recipe.retained_logical
+            || artifact.logical != *incoming_logical
             || artifact.observation.preimage.playlist.as_slice() != rendition.playlist.as_slice()
             || !rendition
                 .source
@@ -650,7 +654,7 @@ impl RetainedArtifactRegistry {
                 // while blocking file reads still hold their artifact lease.
                 let _reservation = validator;
                 let manifest = super::retained_manifest::ArtifactManifest::read(&lease.directory)?;
-                if !manifest.matches(&expected_rendition)
+                if !manifest.matches_request(&expected_rendition, &expected_logical)
                     || manifest.id != lease.id.to_string()
                     || Some(&manifest.logical) != expected_logical.as_ref()
                     || Some(&manifest.seal()?) != lease.sealed_identity.get()
@@ -671,7 +675,32 @@ impl RetainedArtifactRegistry {
             return None;
         }
         artifact.validated.store(true, Release);
-        self.acquire_expected(facts, rendition)
+        self.acquire_expected_for_request(facts, rendition, incoming_logical)
+    }
+    #[cfg(test)]
+    pub(super) fn acquire_expected(
+        &self,
+        facts: &crate::transcode::RetainedOutputFacts,
+        rendition: &Rendition,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        self.acquire_expected_for_request(facts, rendition, &rendition.recipe.retained_logical)
+    }
+    #[cfg(test)]
+    async fn reacquire_expected(
+        &self,
+        facts: &crate::transcode::RetainedOutputFacts,
+        shared: &Shared,
+        rendition: &Arc<Rendition>,
+        budget: Duration,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        self.reacquire_expected_for_request(
+            facts,
+            shared,
+            rendition,
+            &rendition.recipe.retained_logical,
+            budget,
+        )
+        .await
     }
     pub(super) fn acquire(&self, identity: &[u8; 32]) -> Option<Arc<RetainedVodArtifact>> {
         let mut state = self.state.lock().expect("retained registry lock");

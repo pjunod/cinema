@@ -225,13 +225,21 @@ impl ArtifactManifest {
             .ok_or_else(|| io::ErrorKind::InvalidData.into())
     }
 
-    pub(super) fn matches(&self, rendition: &Rendition) -> bool {
-        rendition.recipe.retained_logical.as_ref() == Some(&self.logical)
+    pub(super) fn matches_request(
+        &self,
+        rendition: &Rendition,
+        incoming_logical: &Option<LogicalOutput>,
+    ) -> bool {
+        incoming_logical.as_ref() == Some(&self.logical)
             && rendition
                 .source
                 .as_ref()
                 .is_some_and(|s| s.unchanged() && s.object_version() == self.origin.source_version)
             && rendition.playlist.as_slice() == self.origin.playlist.as_slice()
+    }
+    #[cfg(test)]
+    pub(super) fn matches(&self, rendition: &Rendition) -> bool {
+        self.matches_request(rendition, &rendition.recipe.retained_logical)
     }
 
     pub(super) fn read(directory: &Path) -> io::Result<Self> {

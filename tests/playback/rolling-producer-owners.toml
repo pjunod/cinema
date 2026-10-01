@@ -3568,7 +3568,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # production periodic timer or rolling lifecycle deadline owner.
 # +4 durable-output waits: lazy validation timeout plus three bounded polling
 # sleeps in the private assembly and real Restore fixtures. No new scheduler.
-expected_occurrences = 1138
+# +1 bounded polling sleep in sole-review45's new real same-key/incoming-tuple
+# consumer regression. It awaits actual completed artifact assembly, no task.
+expected_occurrences = 1139
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -1,4 +1,62 @@
 #[tokio::test]
+async fn durable_restore_checks_incoming_tuple_when_healthy_same_key_rendition_is_reused() {
+    let base = crate::test_tempdir().expect("incoming provenance consumer");
+    let (serve, file) = serve_on(base.path()).await;
+    create(&serve, &file, "incumbent", "original", &settings()).await;
+    let rendition = serve.shared.sessions.lock().await.get("incumbent").expect("incumbent")
+        .rendition.clone().expect("rendition");
+    for index in 0..rendition.plan.len() {
+        drop(fetch(&serve, "incumbent", &segment_name(index as u64)).await);
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let artifact = loop {
+        let rates = rendition.output_measurement.lock().expect("observer").complete_rates();
+        if let Some(artifact) = rates.and_then(|rates| serve.shared.retained_artifacts.acquire(&rates.identity)) {
+            break artifact;
+        }
+        assert!(Instant::now() < deadline, "real complete artifact unavailable");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let facts = artifact.facts();
+    let original = request("incumbent", 0.0);
+    serve.try_create(VodRecipeRequest {
+        measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
+        request: &original, encoding: None,
+    }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "incumbent".into())
+        .await.expect("same tuple positive control");
+    let incumbent = {
+        let sessions = serve.shared.sessions.lock().await;
+        let session = sessions.get("incumbent").expect("issued incumbent");
+        assert!(Arc::ptr_eq(session.rendition.as_ref().expect("shared rendition"), &rendition));
+        Arc::clone(&session.incarnation)
+    };
+    let mut different = original.clone();
+    different.audio_claim = Some(plurx_core::playback::audio::AudioClaim { decoders: vec!["aac".into()], sinks: vec![] });
+    let refused = serve.try_create(VodRecipeRequest {
+        measured_candidate: None, retained_capture: RetainedOutputCapture::Restore(Some(facts.clone())),
+        request: &different, encoding: None,
+    }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "incumbent".into())
+        .await.expect_err("different incoming provenance must not borrow old tuple");
+    assert_eq!(crate::transcode::vod_refusal(&refused).expect("typed refusal").0, "retained_artifact_unavailable");
+    {
+        let sessions = serve.shared.sessions.lock().await;
+        let preserved = sessions.get("incumbent").expect("preserved incumbent");
+        assert!(Arc::ptr_eq(&incumbent, &preserved.incarnation));
+        assert_eq!(preserved.retained_output.as_ref().expect("issued facts").facts(), facts);
+    }
+    let init = serve.segment("incumbent", INIT_NAME).await.expect("incumbent remains served");
+    assert!(init.result.expect("private init").expect("init").retained_lease.is_some());
+    serve.try_create(VodRecipeRequest {
+        measured_candidate: None, retained_capture: RetainedOutputCapture::New,
+        request: &different, encoding: None,
+    }, &file, &settings(), VodAttribution { user_name: "paul", item_title: "Fixture", supersession_user: "user" }, "uncaptured".into())
+        .await.expect("ordinary different tuple remains playable without borrowed proof");
+    assert!(serve.shared.sessions.lock().await.get("uncaptured").expect("ordinary session").retained_output.is_none());
+    serve.end("incumbent", Terminal::Deleted).await;
+    serve.end("uncaptured", Terminal::Deleted).await;
+}
+
+#[tokio::test]
 async fn durable_restore_preserves_none_incumbent_and_original_execution_identity() {
     let _ = tracing_subscriber::fmt().with_env_filter("plurxd::vodserve=debug").with_test_writer().try_init();
     let base = crate::test_tempdir().expect("durable real consumer");
