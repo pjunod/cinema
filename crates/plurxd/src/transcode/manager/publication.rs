@@ -912,7 +912,7 @@ impl TranscodeManager {
                 let grade = encoding.options.pipeline.output_grade();
                 let file = encoded_vod_presentation_file(facts.file, height, grade);
                 let mut codecs = audio_delivery_hls_codecs(
-                    transcoded_hls_codecs(grade, height),
+                    transcoded_hls_codecs_for_plan(&encoding.plan),
                     facts.audio_delivery.as_ref(),
                 );
                 if file.audio_streams.is_empty() {

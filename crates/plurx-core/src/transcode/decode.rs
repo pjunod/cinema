@@ -2008,6 +2008,8 @@ pub struct PresentationContract {
     output_codec: String,
     output_encoder: String,
     output_profile: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sdr_avc: Option<super::QualifiedSdrAvc>,
     output_pixel_format: String,
     output_dynamic_range: String,
     output_transfer: String,
@@ -2042,6 +2044,10 @@ impl PresentationContract {
 
     pub fn output_profile(&self) -> Option<&str> {
         self.output_profile.as_deref()
+    }
+
+    pub fn sdr_avc(&self) -> Option<&super::QualifiedSdrAvc> {
+        self.sdr_avc.as_ref()
     }
 
     pub fn output_pixel_format(&self) -> &str {
@@ -2167,6 +2173,54 @@ pub struct ResolvedTranscode {
 }
 
 impl ResolvedTranscode {
+    /// Bind only a completed exact-node experiment to this output plan. The
+    /// caller supplies the resolved OUTPUT grid; VOD must rebind after choosing
+    /// its fps-filter grid rather than reuse a source's average cadence.
+    pub fn with_sdr_avc_qualification(
+        mut self,
+        caps: &super::EncoderCaps,
+        cadence: Option<Rational>,
+        forced_idr: bool,
+    ) -> Self {
+        if self.output_contract.sdr_avc.take().is_some()
+            && self.codec_contract.grade == OutputGrade::Sdr
+        {
+            self.output_contract.output_profile =
+                (self.encoder == Encoder::Software).then(|| "high".to_owned());
+        }
+        let (Some(width), Some(height), Some(cadence)) = (
+            self.output_contract.effective_width,
+            self.output_contract.effective_height,
+            cadence,
+        ) else {
+            return self;
+        };
+        if self.output_contract.width_rule != OutputWidthRule::PreserveAspectEven
+            || self.codec_contract.grade != OutputGrade::Sdr
+            || u64::from(cadence.numerator()) > 60 * u64::from(cadence.denominator())
+        {
+            return self;
+        }
+        self.output_contract.sdr_avc = caps
+            .sdr_avc
+            .iter()
+            .find(|proof| {
+                proof.matches(
+                    self.encoder,
+                    (width, height),
+                    cadence,
+                    self.options.video_bitrate_kbps,
+                    self.options.effective_rate_control,
+                    forced_idr,
+                )
+            })
+            .cloned();
+        if self.output_contract.sdr_avc.is_some() {
+            self.output_contract.output_profile = Some("high".to_owned());
+        }
+        self
+    }
+
     pub fn decode(&self) -> &ResolvedDecode {
         &self.decode
     }
@@ -2327,6 +2381,21 @@ impl ResolvedTranscode {
             },
         );
         feed("encoder", self.encoder.label().as_bytes());
+        if let Some(proof) = self.output_contract.sdr_avc() {
+            // Conditional: old/unqualified plans retain their exact digest.
+            // Qualified software changes level flags too, so it is not exempt
+            // from cache identity merely because its old profile was High.
+            feed("sdr_avc_codec", proof.codec().as_bytes());
+            feed(
+                "sdr_avc_grid",
+                format!(
+                    "{}/{}",
+                    proof.cadence().numerator(),
+                    proof.cadence().denominator()
+                )
+                .as_bytes(),
+            );
+        }
         let options = &self.options;
         feed("height", options.target_height.to_string().as_bytes());
         feed(
@@ -2751,6 +2820,7 @@ pub fn resolve_transcode(
             OutputGrade::Sdr if request.encoder == Encoder::Software => Some("high".to_owned()),
             OutputGrade::Sdr => None,
         },
+        sdr_avc: None,
         output_pixel_format: output_grade.pixel_format().to_owned(),
         output_dynamic_range: output_grade.delivered_dynamic_range().to_owned(),
         output_transfer: output_grade.transfer().to_owned(),

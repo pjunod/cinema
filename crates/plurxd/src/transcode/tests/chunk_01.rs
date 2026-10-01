@@ -2976,7 +2976,7 @@
     fn a_transcode_advertises_the_codec_its_grade_produces() {
         assert_eq!(
             transcoded_hls_codecs(OutputGrade::Sdr, 2160),
-            "avc1.640034,mp4a.40.2"
+            "avc1,mp4a.40.2"
         );
         let hdr10 = transcoded_hls_codecs(OutputGrade::Hdr10, HDR10_HEIGHT);
         assert_eq!(hdr10, "hvc1.2.4.H120.90,mp4a.40.2");
