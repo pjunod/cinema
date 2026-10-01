@@ -116,6 +116,22 @@ or candidate-aware negative selection; see the combined plan §9.9.
 
 ## How to claim, work and finish a plan
 
+**P-02 post-merge evidence continuation, 2026-10-01 (gpt-6.1-sol,
+agent:/root/s09_665_resume_sol61):** all five actual bounded fuzz-only
+campaigns in API run3727 / UI3706 completed on exact effort
+`d3dfbe2aeaea39f773a20cc08327bddaa74d7ea6`. The
+[canonical plan §5.8](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md#58-m8--four-fuzz-targets)
+records executions, corpus before/after, final sizes and retained log/ZIP
+hashes; scoped M8 campaign acceptance is satisfied. A separate owned
+`plurxd diagnostic-panic` check resolved full file/line frames on frozen
+`4f243a01`, not the later effort binary, and its exact container was removed.
+Historical authorship and failed/pending receipts below are preserved.
+Full-image reproducibility/size, systemd/Compose peak-load/playback/GPU
+matrices, priority cadence/readback, overflow/workload and whole P02/main
+qualification remain open. This evidence-only PR changes no runtime,
+deployment, service policy or release profile; its independent review and
+Effort gate are separate from the measured campaigns.
+
 **S-14 continuation, 2026-10-01 (gpt-6.1-sol,
 agent:/root/s14_resume_sol61):** `codex/s14-removal-lifecycle` prepares the
 removal-only M7 transition against current effort `ec79f4b34`. Original
