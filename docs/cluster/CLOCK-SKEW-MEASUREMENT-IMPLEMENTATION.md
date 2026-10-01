@@ -29,6 +29,20 @@ implementation, not a rollout, clock step or fleet mutation.
 
 ## 2. Current entry points — re-verify before writing runtime code
 
+**2026-10-01 coordinator sequencing ruling:** Paul's newer effort/main-at-end
+workflow permits separately owned E0 pure-policy preparation now; the earlier
+before-claim wording applies to active enforcement, not this preparation.
+Active production refusal consumers still need successful identified
+measurement evidence before effort integration. An immutable measurement-only
+current-effort artifact in an owned isolated four-node LAN lab can meet that
+clock-model safety bar without being a main release or fleet qualification.
+Retain the one-hour idle plus 60-second actual network-load protocol, full
+identity/coverage/uncertainty/continuity/cost receipt and every original
+failed/missing observation. NTP points alone are not success. Bounds and
+auth windows are unchanged; no switch, deployment, lab launch or clock step
+is authorized. The 24-hour enforcing acceptance and approved drill remain
+later qualification, as recorded in the companion design's October 1 ruling.
+
 Inspected at `f319fa779`; symbols are more durable than September 21 line
 numbers. No clock route, prober or shared clock-policy runtime exists here.
 
@@ -149,4 +163,5 @@ operational acceptance remain open until actually recorded.
 
 | Date | Model | Session | Milestone | Outcome / evidence |
 |---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s14_resume_sol61 | E0 sequencing clarification | `codex/k06-pure-clock-policy` prepares core policy only on current effort. No production consumer or measurement receipt is invented; an identified owned-lab artifact is eligible for the unchanged observation safety bar, not main/fleet qualification. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M0–M2 measurement runtime | `codex/k06-measurement-runtime`, based on effort `8a7dbf533`; exact signed exchange, core continuity/generations, roster/filter observer, passive metrics and read-only Developer facts implemented. §4.1 records focused development proofs. Sole review, release gate and identified fleet evidence remain open. |

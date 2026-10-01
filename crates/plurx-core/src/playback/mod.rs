@@ -17,6 +17,7 @@ pub mod audio;
 pub mod candidate;
 pub mod caps;
 pub mod desired;
+pub mod geometry;
 pub mod intent;
 use crate::transcode::OutputGrade;
 pub use audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute, AudioSink, DownmixMatrix};

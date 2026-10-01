@@ -1143,6 +1143,7 @@
     ) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 5615,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1577,6 +1578,7 @@
     fn hls_context_with(codecs: &str, supplemental: Option<&str>) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1837,6 +1839,7 @@
 
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1864,6 +1867,7 @@
             .expect("ambiguous AVC init");
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1890,6 +1894,7 @@
         let fixture = HlsDeliveryFixture::publish(dir.path(), "mpegts-avc").await;
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2000,6 +2005,7 @@
 
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2031,6 +2037,7 @@
 
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2058,6 +2065,7 @@
 
         let context = crate::transcode::HlsContext {
             codec_facts: None,
+            bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2599,6 +2607,7 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
+            candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };

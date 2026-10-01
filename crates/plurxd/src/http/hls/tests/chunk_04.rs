@@ -336,6 +336,7 @@
     ) -> plurx_core::domain::MediaSessionPreparation {
         let staged_session_id = uuid::Uuid::new_v4().to_string();
         let staged_request = crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: route.playback_id.clone(),
             request_id: Some(staged_incarnation_id.to_owned()),
@@ -343,6 +344,9 @@
         };
         let response = StartResponse {
             delivered_audio: None,
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -444,6 +448,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let request = crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: predecessor.playback_id.clone(),
             request_id: Some(incarnation_id.clone()),
@@ -465,6 +470,9 @@
         };
         let start = StartResponse {
             delivered_audio: None,
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -729,6 +737,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -800,6 +809,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                candidate_context: None,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
             },
@@ -1039,6 +1049,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1230,6 +1241,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -1388,6 +1400,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1788,6 +1801,7 @@
 
     fn staged_candidate_request() -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 11,
             playback_id: "stage-player".to_owned(),
@@ -2035,6 +2049,9 @@
                 .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
                 response_json: serde_json::to_string(&StartResponse {
                     delivered_audio: None,
+                    display_aware_auto_protocol: Some("route-v1".to_owned()),
+                    quality_candidate_id: None,
+                    quality_candidates: None,
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                     duration_ms: Some(60_000),

@@ -466,6 +466,7 @@ fn http_route_group(path: &str) -> usize {
         | internal_auth_revocation::PATH
         | crate::subtitle_ranges::PATH
         | crate::media_pool::SNAPSHOT_PATH
+        | crate::media_pool::QUALITY_CANDIDATES_PATH
         | crate::media_pool::OFFERS_PATH
         | crate::shared_cache::CANARY_PATH
         | crate::live_tv::SNAPSHOT_PATH
@@ -1814,6 +1815,11 @@ pub fn router(state: AppState) -> Router {
             get(internal_media::snapshot),
         )
         .route(
+            crate::media_pool::QUALITY_CANDIDATES_PATH,
+            post(internal_media::quality_candidates)
+                .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
+        )
+        .route(
             crate::media_pool::OFFERS_PATH,
             post(internal_media::offers)
                 .layer(DefaultBodyLimit::max(crate::media_pool::MAX_REQUEST_BYTES)),
@@ -2164,6 +2170,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             && matches!(
                 path,
                 crate::subtitle_ranges::PATH
+                    | crate::media_pool::QUALITY_CANDIDATES_PATH
                     | crate::media_pool::OFFERS_PATH
                     | crate::shared_cache::CANARY_PATH
                     | crate::media_sessions::START_PATH

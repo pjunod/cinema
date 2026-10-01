@@ -1615,7 +1615,9 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-bounded-vod-head-regeneration"
 pattern = "HEAD_REGENERATION_(?:TIMEOUT|CAPACITY|MAX_BYTES)"
-expected_occurrences = 8
+# Quality-candidate cache inspection reuses MAX_BYTES to bound init hashing;
+# it reads an existing complete cache and never regenerates or starts media.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-vod-terminal-compaction-owner"
@@ -3536,7 +3538,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # signature deadlines are retained, not duplicated. No playback timer added.
 # S09 current-effort composition: shared local-media pump replaces duplicated
 # remote pump deadlines; merged structural source measures 1127, not 1134.
-expected_occurrences = 1127
+# +5 display-aware quality: the internal catalog handler has a 2 s read
+# deadline; aggregate local inspection and membership share that same 2 s
+# deadline; takeover recipe restoration shares its existing takeover deadline;
+# complete VOD cache inspection bounds manifest/member reads to 500 ms.
+# Every future is awaited by its request; none spawns a producer or timer owner.
+expected_occurrences = 1132
 
 [[module_structures]]
 id = "bare-time-constructor"
