@@ -1451,6 +1451,32 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance() throws {
+        // Check the actual controller callers, not just the budget helper:
+        // buttons and relative remote commands share skip(seconds:), whereas
+        // the position-clock marker writer must not open a viewer trial.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        func body(_ start: String, until end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start))
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            return String(source[lower.upperBound..<upper.lowerBound])
+        }
+        let relative = try body("func skip(seconds: Double) {", until: "func skipActiveMarker()")
+        XCTAssertTrue(relative.contains("seekState.relative("))
+        XCTAssertTrue(relative.contains("by: Int(seconds * 1000)"))
+        XCTAssertTrue(relative.contains("issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"))
+        let automatic = try body("func autoSkipActiveMarkerIfNeeded() {", until: "func reportMarkerOffer")
+        XCTAssertTrue(automatic.contains("beginSeek(toMs: marker.endMs, viewerOrigin: false)"))
+        XCTAssertFalse(automatic.contains("seek(toMs:"))
+        let absolute = try body("func seek(toMs requested: Int) {", until: "private func beginSeek")
+        XCTAssertTrue(absolute.contains("beginSeek(toMs: requested, viewerOrigin: true)"))
+        let forwarding = try body("private func beginSeek(toMs requested: Int, viewerOrigin: Bool) {", until: "private func issueSeek(")
+        XCTAssertTrue(forwarding.contains("viewerBoundary: viewerOrigin"))
+    }
+
     func testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal() {
         let first = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 1_500)!
         XCTAssertEqual(first.deadlineMs, 9_000)

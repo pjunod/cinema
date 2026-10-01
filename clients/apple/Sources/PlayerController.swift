@@ -4230,7 +4230,7 @@ final class PlayerController: ObservableObject {
         )
         abandonSeekMeasurement()
         requestedSeekGeneration = request.generation
-        issueSeek(to: request.target, generation: request.generation)
+        issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)
     }
 
     func skipActiveMarker() {
@@ -4277,7 +4277,7 @@ final class PlayerController: ObservableObject {
             message: "skip destination was not prewarmed"
         )
         lastMarkerSkipEndMs = marker.endMs
-        seek(toMs: marker.endMs)
+        beginSeek(toMs: marker.endMs, viewerOrigin: false)
     }
 
     func reportMarkerOffer(_ marker: Marker) {
