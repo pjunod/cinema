@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-real-rolling-acquisition",
+  "suite": "validation",
+  "source_commit": null,
+  "test_file": "tests/validation/test_python_prepare_refusal_recovery.py",
+  "test_file_sha256": "63826e4198f311305579cf45059c0a7d0bdce7f4e9cb05df59bcf6cbb9ae3f2c",
+  "test_ids": [
+    "test_python_prepare_refusal_recovery.PrepareRefusalRecoveryTests.test_actual_restore_recognizes_only_bound_zero_unit_prepare_and_imports_no_successes"
+  ],
+  "command": "python3 -m unittest tests.validation.test_python_prepare_refusal_recovery.PrepareRefusalRecoveryTests.test_actual_restore_recognizes_only_bound_zero_unit_prepare_and_imports_no_successes",
+  "output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.001s\n\nOK\n",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  }
+}
