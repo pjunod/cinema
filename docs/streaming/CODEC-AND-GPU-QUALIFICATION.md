@@ -686,10 +686,13 @@ small genuine P5 packet copy also yielded 50 actual Profile 5 RPUs; it is not
 a 45-second corpus input, decoded reshape or independently graded reference.
 The ten-bit gradient encoded but its unchanged checker refused it: the HEVC
 VUI contains unspecified primaries/transfer (2/2), with BT.709 matrix (1).
-The narrow candidate fix supplies explicit x265 `colorprim`, `transfer`,
-`colormatrix` and limited `range` for that fixture alone. Existing generic
-flags and the refusal remain; every other fixture argv is unchanged. Actual
-corrected tiny/full generation remains pending at this source checkpoint.
+An actual two-frame experiment showed explicit x265 `colorprim`, `transfer`,
+`colormatrix` and limited `range` alone still emitted unspecified transfer
+and primaries. The final narrow candidate also binds these properties on
+the frames with `setparams` after the existing GEQ expression: metadata only,
+not a pixel transform. Existing generic flags and the refusal remain; every
+other fixture argv is unchanged. Actual corrected tiny/full generation
+remains pending at this source checkpoint.
 No GPU, production bitmap-burn or physical HDR acceptance follows.
 
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
