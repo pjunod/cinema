@@ -742,6 +742,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
                 file_id,
                 start_seconds,
                 media_origin_seconds: start_seconds,
@@ -1512,6 +1513,11 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::audio(
+                    audio_delivery,
+                    !file.audio_streams.is_empty(),
+                    served.transcode_audio,
+                )),
                 file_id,
                 start_seconds,
                 media_origin_seconds,

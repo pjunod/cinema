@@ -667,7 +667,7 @@ answer and never waits for an init object it cannot produce. AVC fMP4 masters
 are attempt media, and the frozen-presentation fingerprint is version 2 so
 the changed publication contract cannot collide with the older shape.
 
-### 5.3 M3 — forced profile/level on hardware, and a rung-derived string
+### 5.3 M3 — qualified profile/level/cadence, and a frozen output string
 
 Code: §3.3, both halves. This is the recipe-identity PR; the body states
 which cached entries invalidate and why.
@@ -686,7 +686,7 @@ Tests:
 
 | Test | Asserts |
 |---|---|
-| `every_sdr_family_forces_a_profile` | `encode_args_for(Sdr, ..)` contains `-profile:v high` for all five families |
+| `only_exact_qualified_plans_change_encoder_flags_and_recipe_identity` | Only measured family/raster/cadence/rate-control cells gain High/level flags; unsupported or refused cells retain their original argv |
 | `the_declared_level_covers_the_resolved_grid` | 360/480/720/1080/2160 at 59.94/60 map to §3.3; >60 stays unqualified |
 | `a_family_that_refused_the_probe_keeps_its_old_arguments` | caps with the new verdict false -> argv identical to `0f02b7ea`'s |
 | `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | qualified flags change the digest, including software when it gains an explicit level; unqualified argv and digest remain unchanged |
@@ -714,7 +714,18 @@ the GPT prompt in §6).
 
 ### 5.4 M4 — re-qualify the SDR ruling on the named devices, then print `CODECS`
 
-No code lands until the device run reports. The run uses
+**2026-10-01 ordering ruling:** implementation may be prepared and integrated
+on the effort branch before physical-device qualification. This does not
+waive the device acceptance below or qualify a release. The bounded M4
+implementation freezes explicit video and audio component provenance;
+unknown components do not gain a fabricated AAC or universal AVC label.
+Qualified encoder output or the actual M2 AVC init supplies video identity;
+the resolved output-audio decision supplies audio identity, including proven
+absence. SDR `CODECS` is emitted only when both components are complete.
+HDR declarations, variant topology and prepared-owner identity are retained.
+There is no runtime gate or temporary diagnostic switch.
+
+The required qualification run uses
 `master_playlist_diagnostic`'s existing shapes
 (`?diagnostic=video-only`, `video-only-codecs`) so one attribute changes at
 a time, against a build carrying M2 and M3 but with §3.6 not yet applied
@@ -750,6 +761,32 @@ and one HDR master.
 ### 5.5 M5 — peak and average, measured
 
 Code: §3.4 and §3.5.
+
+**2026-10-01 phased implementation ruling and arithmetic correction:** start
+with one bounded metadata reducer and the existing VOD sink's successfully
+materialized full mux bytes. Complete coverage means every immutable entry,
+including audio tails, with the exact output identity. A complete retained
+artifact receipt can supply a compatible **new** frozen presentation; later
+observations must never rewrite an issued master or update a successor from
+its predecessor. Partial coverage, conflicting duplicates, invalid durations,
+gaps or checked-arithmetic overflow remain unknown, not a measured bound.
+No duplicate payload buffers or new scheduler are needed.
+
+RFC 8216 §4.1 defines peak over contiguous windows whose total duration is
+0.5–1.5 target durations. Average is total media bits divided by total wire
+`EXTINF` duration, not the unweighted mean of segment rates. The stronger
+original per-segment burst acceptance remains a separate measurement.
+The sample shell calculation below is a legacy burst diagnostic, not the RFC
+peak or duration-weighted average algorithm.
+
+Rolling-copy/PUT collection and arbitrary cold-copy exact first-publication
+bounds remain a finite follow-up, explicitly open. A prefix, video-only index,
+nominal encoder rate or guessed container overhead cannot prove them. Complete
+background preparation costs full-source I/O and remux work (plus an audio
+encode when selected); retaining the actual completed rendition avoids the
+separate byte-count/boundary regeneration proof. No hidden whole-film startup
+wait, forced transcode or rejection of playable titles is authorized. Device,
+corpus, fetched-wire equality and prepared-successor acceptance remain open.
 
 Measurement protocol, on media1 against the `scripts/bench` corpus
 (`scripts/bench fixtures` builds it; the fixtures are `1080p-h264`,
