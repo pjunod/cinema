@@ -1336,7 +1336,18 @@ mod tests {
             .put_fragment_index(42, index, 1)
             .await
             .expect("publish");
-        let before = crate::store::fragment_index_unpack_calls();
+        let counter = crate::store::fragment_index_unpack_counter(&path);
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(sidecar
+            .fragment_index(42, source.clone())
+            .await
+            .expect("full-reader control")
+            .is_some());
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
         let wanted = vec![(42, source.clone()), (43, source.clone())];
         let answers = sidecar
             .fragment_index_status(wanted.clone())
@@ -1345,7 +1356,7 @@ mod tests {
         assert_eq!(answers[0].presence, crate::store::IndexPresence::Ready);
         assert_eq!(answers[0].fragments, 4100);
         assert_eq!(answers[1].presence, crate::store::IndexPresence::Absent);
-        assert_eq!(crate::store::fragment_index_unpack_calls(), before);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
         let conn = Connection::open(&path).expect("legacy fixture connection");
         conn.execute("UPDATE fragment_indexes SET validated_revision = 0", [])
             .expect("legacy");

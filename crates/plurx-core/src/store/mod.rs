@@ -5061,10 +5061,14 @@ pub struct FragmentIndexStatus {
     pub outcome: Option<crate::segplan::FragmentIndexOutcome>,
 }
 
-/// Test-only packed-index decoding counter, also visible to daemon tests.
+/// Test-only decoder counter scoped to one owned file-backed database.
+/// Its strong handle controls the registration lifetime; parallel tests on
+/// other databases cannot affect its positive/negative control.
 #[cfg(any(test, feature = "fixtures"))]
-pub fn fragment_index_unpack_calls() -> usize {
-    fragindex::unpack_calls()
+pub fn fragment_index_unpack_counter(
+    database: &std::path::Path,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    fragindex::unpack_counter(database)
 }
 
 #[async_trait]
