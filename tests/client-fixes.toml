@@ -2183,9 +2183,20 @@ test_anchor = "fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus()"
 id = "android.playback-heap-budget"
 commits = ["f49a1d7ed"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackLoadControl.kt"
-source_anchor = ".setTargetBufferBytes(playbackBufferTargetBytes(memoryClass))"
+source_anchor = ".setTargetBufferBytes(target)"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackLoadControlTest.kt"
 test_anchor = "fun byteBudgetStopsLoadingBeforeTimeTargetForNetworkAndLocalMedia()"
+
+# D-01 retained the allocator-budget behavior while binding each role to the
+# actual Runtime.maxMemory grant. Keep the prior fix association above and
+# anchor the new corrective commit to its already-landed JVM regression.
+[[fixes]]
+id = "android.actual-granted-heap-budget"
+commits = ["1ffaae2a48d652c9fb4b30af6aa748043370ae64"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackBufferBudget.kt"
+source_anchor = "minOf(existingCeiling.toLong(), (grantedHeapBytes / 8).coerceAtLeast(1)).toInt()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackBufferBudgetTest.kt"
+test_anchor = "fun actualGrantedHeapClampsEveryRoleWithoutRaisingTheExistingCeiling()"
 
 [[fixes]]
 id = "apple.prepared-fallback-epoch-ownership"

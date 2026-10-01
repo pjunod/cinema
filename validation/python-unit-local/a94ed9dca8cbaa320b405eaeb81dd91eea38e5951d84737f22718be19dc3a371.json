@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/effort-web-static-contracts",
+  "suite": "operations",
+  "test_file": "tests/operations/test_contracts.py",
+  "test_file_sha256": "611f8f4d99e447d2bb3c3ea69a16d1a618b6d5ac92500039e230568e0a66ba63",
+  "source_commit": null,
+  "command": "PYTHONPATH=tests/operations python3 -m unittest test_contracts.OperationsContractCase.test_effort_web_lints_source_without_provisioning_behavior_browser test_contracts.OperationsContractCase.test_main_qualification_is_full_and_effort_prs_are_compile_only -v",
+  "test_ids": [
+    "test_contracts.OperationsContractCase.test_effort_web_lints_source_without_provisioning_behavior_browser",
+    "test_contracts.OperationsContractCase.test_main_qualification_is_full_and_effort_prs_are_compile_only"
+  ],
+  "output": "Observed local tool chunk 7ca4f9, exit 0: both named tests ... ok; Ran 2 tests in 0.220s; OK. Source was uncommitted owned-clone work on a3b795a37db1c796353a622028b0cf4d383f3c26; no CI-run attribution.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 2}
+}
