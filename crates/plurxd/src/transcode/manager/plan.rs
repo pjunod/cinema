@@ -15,7 +15,7 @@ impl TranscodeManager {
     /// [`PlanSourceBinding::CatalogRow`] and callers that need proof must
     /// refuse them. It no longer enters any artifact key — the key uses
     /// [`DecodeCacheIdentity`], which every path computes identically.
-    fn plan_source_identity(
+    pub(super) fn plan_source_identity(
         file: &plurx_core::domain::MediaFile,
     ) -> Result<DecodeSourceIdentity, String> {
         let mut digest = Sha256::new();
@@ -286,6 +286,11 @@ impl TranscodeManager {
             encoder,
             TranscodeMediaOptions::from_options_with_facts(file, options, facts),
         );
+        let request = if options.normalized_geometry {
+            request.with_normalized_geometry()
+        } else {
+            request
+        };
         let request = match options.auto_quality_rate_profile {
             Some(profile) => request.with_auto_quality_rate_profile(profile),
             None => request,
@@ -356,6 +361,9 @@ impl TranscodeManager {
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
         let Some(probe) = self.decode_probe_identity.as_ref() else {
+            if options.normalized_geometry {
+                return Err("candidate_geometry_unavailable: no bound FFprobe identity".to_owned());
+            }
             return self.resolve_movie_plan(file, options, encoder).await;
         };
         let catalog = DecodeCatalogMetadata::from_media_file(file)
@@ -458,6 +466,9 @@ impl TranscodeManager {
                     %error,
                     "bound decoder planning fell back to stored probe facts"
                 );
+                if options.normalized_geometry {
+                    return Err(format!("candidate_geometry_unavailable: {error}"));
+                }
                 self.resolve_movie_plan(file, options, encoder).await
             }
         }
@@ -973,6 +984,7 @@ impl TranscodeManager {
         let hdr10 = grade == OutputGrade::Hdr10;
         TranscodeOptions {
             auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height,
             software_threads,
             video_bitrate_kbps: bitrate_for_height(target_height),

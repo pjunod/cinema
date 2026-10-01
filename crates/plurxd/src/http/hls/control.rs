@@ -600,6 +600,27 @@ async fn settle_preparation_control(
             .preparation_directive
         {
             crate::playback_control::PreparationDirective::Commit { .. } => {
+                if !candidate_snapshot_current(
+                    state,
+                    staged_incarnation_id,
+                    request.capabilities.as_ref(),
+                )
+                .await
+                {
+                    if executor
+                        .reject_commit(staged_incarnation_id, unix_ms())
+                        .await
+                        .is_ok_and(|rejected| rejected)
+                    {
+                        retire_prepared_incarnation(
+                            state,
+                            staged_incarnation_id,
+                            "candidate target or decoder snapshot changed before commit",
+                        )
+                        .await;
+                    }
+                    return PreparationSettlement::Rejected;
+                }
                 let planned_commit_guard =
                     match active_preparation.as_ref().map(|active| active.purpose) {
                         Some(PreparationPurpose::PlannedRelocation(fence)) => {
@@ -1806,6 +1827,52 @@ pub(super) fn control_start_response(route: &MediaSessionRoute) -> Option<StartR
 /// row. The owner-local [`crate::playback_control::ControlState`] checks the
 /// matching preparation slot once more when it accepts the exchange; this
 /// read therefore proposes an action but cannot create a second authority.
+async fn candidate_snapshot_current(
+    state: &AppState,
+    staged_incarnation: &str,
+    latest: Option<&crate::playback_control::DynamicCapabilities>,
+) -> bool {
+    let Ok(Some(route)) = state
+        .store
+        .media_session_route_by_incarnation(staged_incarnation)
+        .await
+    else {
+        return false;
+    };
+    let Ok(recipe) = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json) else {
+        return false;
+    };
+    if recipe.candidate_id.is_none() {
+        return true;
+    }
+    let Some(latest) = latest else { return false };
+    if latest.presentation_target != recipe.presentation_target
+        || latest.decoder_caps != recipe.decoder_caps
+    {
+        return false;
+    }
+    let Some(snapshot) = latest.decoder_caps.as_ref() else {
+        return false;
+    };
+    let Ok(Some(file)) = state.store.get_file(recipe.request.file_id).await else {
+        return false;
+    };
+    let candidates = state
+        .transcode
+        .quality_candidates(
+            &file,
+            &snapshot.device_caps(),
+            recipe.request.audio_index,
+            recipe.request.audio_offset_ms,
+            recipe.request.subtitle_burn,
+            recipe.request.presentation,
+        )
+        .await;
+    candidates
+        .iter()
+        .any(|candidate| Some(candidate.id) == recipe.candidate_id && candidate.decoder_compatible)
+}
+
 async fn staged_successor_action(
     state: &AppState,
     predecessor: &MediaSessionRoute,
@@ -2191,7 +2258,15 @@ pub(super) async fn control_local_with_settlement_capacity(
     // This binary is a parser-floor owner, not a candidate-route owner.
     // Structural validation above also runs on relaying ingress; semantic
     // refusal belongs here, after routing, before any owner mutation.
-    if request.demand != crate::playback_control::PlaybackDemand::End
+    let display_aware_enabled = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|value| value.trim() == "1");
+    if !display_aware_enabled
+        && request.demand != crate::playback_control::PlaybackDemand::End
         && (request
             .capabilities
             .as_ref()

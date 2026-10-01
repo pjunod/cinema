@@ -205,6 +205,27 @@ function fallBackDirectedChange(p,change,why){
   if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
+  // A voluntary trial may fail without interrupting a healthy incumbent.
+  // Abort its one successor, restore the standing selection and back off.
+  if(change.autoMove&&change.autoMove.retainIncumbent){
+    const move=change.autoMove, now=performance.now();
+    const staged=preparedState(p);
+    if(staged) abandonPreparedReplacement(p,"aborted","auto_trial_failed");
+    p.autoRequestedHeight=null;
+    if(p.abr){
+      p.abr.requestedCandidateId=move.previousCandidateId||null;
+      const state=p.abr.candidateState||{};
+      state.failedUntilMs={...(state.failedUntilMs||{}),[move.candidateId]:now+300000};
+      state.upgradeSinceMs=null;
+      p.abr.candidateState=state;
+      p.abr.switching=false;
+    }
+    releaseAutoFallback(p);
+    notifyPlaybackControl();
+    clientLog(Object.assign({level:"info",event:"auto_quality_decision",detail:why,
+      message:"Automatic quality trial did not complete; keeping the current stream"},playbackContext()));
+    return true;
+  }
   const v=document.getElementById("video");
   const pos=positionForPlaybackIntent(v,p);
   // The reopen's own create carries the rung explicitly, so the ask on the
@@ -245,10 +266,21 @@ function settleDirectedChange(p,change,why,detail){
   // exchange succeeds: changing to plain Auto here makes the server reject
   // the commit as a different ask and retire the stream we just exposed.
   if(why!=="committed"||!owned.autoMove) p.autoRequestedHeight=null;
+  if(why!=="committed"&&owned.autoMove&&owned.autoMove.candidateId&&p.abr)
+    p.abr.requestedCandidateId=owned.autoMove.previousCandidateId||null;
   if(owned.autoMove&&p.abr){
     if(why==="committed"){
       const now=performance.now(), move=owned.autoMove;
-      p.autoHeight=move.to;
+      if(move.candidateId){
+        p.qualityCandidateId=move.candidateId;
+        const state=p.abr.candidateState||{};
+        state.lastSwitchMs=now;
+        state.upgradeSinceMs=null;
+        if(!move.emergency) state.switchTimesMs=(state.switchTimesMs||[])
+          .filter(at=>now-at<3600000).concat(now).slice(-6);
+        p.abr.candidateState=state;
+      }
+      p.autoHeight=typeof move.to==='number'?move.to:null;
       Object.assign(p.abr,{lastSwitchAtMs:now,stableSinceMs:now,
         mildSamples:0,upgradeSinceMs:null,previousRunway:null});
       recordAutoSwitch(p,move.from,move.to,move.switchReason,
@@ -556,6 +588,25 @@ async function openSession(fileId, opts, signal=null, requestId=null){
   // selection and a readiness-directed re-fetch stay inside the current video
   // item rather than reopening it.
   const player=typeof PLAYER!=="undefined"?PLAYER:null;
+  if(player&&qualityForce()==='auto'&&SERVER&&SERVER.playback_display_aware_auto
+    &&SERVER.display_aware_auto_protocol==='route-v1'){
+    const id=body.candidate_id||player.abr&&player.abr.requestedCandidateId||player.qualityCandidateId;
+    const candidate=qualityCatalogSelectionCurrent(player)
+      &&(player.qualityCandidates||[]).find(row=>row.id===id);
+    const selection=playbackControlSelection(player);
+    if(candidate&&((candidate.route==='encode')===!body.copy)
+      &&(body.height==null||body.height===candidate.target_height)){
+      selection.quality={mode:'auto',candidate_id:id,
+        ...(candidate.route==='encode'?{height:candidate.target_height}:{})};
+    }else{
+      // A compatibility recovery may change route without choosing a catalog
+      // recipe. Never let the incumbent's identity undo that explicit change.
+      selection.quality={mode:'auto',...(!body.copy&&body.height>0?{height:body.height}:{})};
+    }
+    body.quality_auto=true;
+    body.intent=qualityMediaIntent(player,selection);
+  }
+  delete body.candidate_id;
   const natives=(player&&player.subs||[]).filter(s=>s.native===true);
   if(natives.length){
     body.native_subtitles=true;
@@ -770,6 +821,12 @@ function attachSession(v, t, info, wantSec){
   t.streamId=null;
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
+  t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
+  t.qualityCandidateId=info.quality_candidate_id||null;
+  if(t.abr){
+    t.abr.requestedCandidateId=t.qualityCandidateId;
+    t.abr.catalogSelectionKey=qualityCatalogSelectionKey(t);
+  }
   if(info.prior_kbps>0) t.priorKbps=info.prior_kbps;
   // The one site every session passes through — transcode start, startCopyHls,
   // startTranscodeFallback, the subtitle burn, rung and audio re-opens — so the

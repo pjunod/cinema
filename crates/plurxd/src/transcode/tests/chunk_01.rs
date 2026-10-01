@@ -2348,6 +2348,7 @@
         .expect("fixture inventory");
         let options = TranscodeOptions {
             auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             ..Default::default()
         };

@@ -1,6 +1,12 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(crate) fn candidate_production_proof(&self, recipe: [u8; 32]) -> Option<u32> {
+        self.candidate_production_proofs
+            .get(recipe)
+            .map(|proof| proof.milli_realtime)
+    }
+
     pub(super) fn rolling_retirement_context(&self) -> RollingRetirementContext {
         RollingRetirementContext {
             sessions: Arc::downgrade(&self.sessions),
@@ -64,6 +70,9 @@ impl TranscodeManager {
             hooks: crate::seam_hooks::HookSlot::new(&NoopTranscodeManagerHooks),
             decode_facts: crate::decode_facts::DecodeFactCache::new(),
             decode_probe_identity: None,
+            candidate_production_proofs: Arc::new(
+                crate::vodencode::CandidateProductionProofs::default(),
+            ),
             pipeline,
             admissions: Admissions::new(),
             cache: None,

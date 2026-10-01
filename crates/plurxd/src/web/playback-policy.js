@@ -2127,7 +2127,165 @@
     return { state: next, surface: surfaceFrom(next), log };
   }
 
+  // Route identity, rather than a height, keeps copied originals, cached
+  // encodes and live encodes distinct throughout one automatic transition.
+  function compatibleQualityCandidates(candidates) {
+    return (Array.isArray(candidates) ? candidates : []).filter(candidate =>
+      candidate && /^[0-9a-f]{32}$/.test(candidate.id)
+      && Array.isArray(candidate.recipe_digest) && candidate.recipe_digest.length === 32
+      && candidate.recipe_digest.every(byte => Number.isInteger(byte) && byte >= 0 && byte <= 255)
+      && ["original", "remux", "encode"].includes(candidate.route)
+      && Number.isInteger(candidate.width) && candidate.width > 0 && candidate.width <= 16384
+      && Number.isInteger(candidate.height) && candidate.height > 0 && candidate.height <= 16384
+      && candidate.decoder_compatible === true);
+  }
+  function playableQualityCandidates(candidates) {
+    return compatibleQualityCandidates(candidates).filter(candidate =>
+      candidate.sustainable === true || candidate.complete_cache === true);
+  }
+  function qualityTransferBps(transfer) {
+    if (!transfer || transfer.completed !== true || transfer.from_cache !== false
+      || transfer.producer_paced !== false || !(transfer.bytes > 0)
+      || !(transfer.elapsed_ms > 0) || !(transfer.age_ms >= 0 && transfer.age_ms <= 15000)) return null;
+    const bps = transfer.bytes * 8000 / transfer.elapsed_ms;
+    return Number.isFinite(bps) && bps > 0 ? bps : null;
+  }
+  function qualityEncodeProof(health, candidateId, receiptAgeMs = 0) {
+    return !!health && health.active_encode_candidate_id === candidateId
+      && Number.isFinite(receiptAgeMs) && receiptAgeMs >= 0
+      && Number.isFinite(health.active_encode_age_ms) && health.active_encode_age_ms >= 0
+      && health.active_encode_age_ms + receiptAgeMs <= 15000
+      && health.active_encode_segments >= 2 && health.active_encode_active_ms >= 2000
+      && Number.isFinite(health.active_encode_milli_realtime) && health.active_encode_milli_realtime > 0;
+  }
+  function qualityOriginalTrialMargin(transfers) {
+    const seen = new Set();
+    const samples = (Array.isArray(transfers) ? transfers : []).filter(row => {
+      if (!row || !row.segment_id || seen.has(row.segment_id)
+        || !qualityTransferBps(row) || !Number.isFinite(row.media_duration_ms)
+        || row.media_duration_ms <= 0) return false;
+      seen.add(row.segment_id);
+      return true;
+    });
+    if (samples.length < 2 || samples.reduce((sum,row) => sum + row.media_duration_ms,0) < 2000) return false;
+    const observedPeak = Math.max(...samples.map(row => row.bytes * 8000 / row.media_duration_ms));
+    return Math.min(...samples.map(qualityTransferBps)) >= observedPeak * 1.8;
+  }
+  function selectQualityCandidate({candidates, target = null, aspect = null, transfer = null, linkLimitBps = null, allowTrial = false}) {
+    const completedLink = qualityTransferBps(transfer);
+    const link = Number.isFinite(linkLimitBps) && linkLimitBps > 0
+      ? Math.min(completedLink || Infinity,linkLimitBps) : completedLink;
+    const eligible = (allowTrial ? compatibleQualityCandidates(candidates) : playableQualityCandidates(candidates)).filter(candidate =>
+      !(link > 0 && candidate.peak_bps > link));
+    const area = candidate => candidate.width * candidate.height;
+    const copied = eligible.filter(candidate => candidate.route !== "encode")
+      .sort((a, b) => area(b) - area(a));
+    if (copied.length) return copied[0];
+    const encodes = eligible.filter(candidate => candidate.route === "encode")
+      .sort((a, b) => area(a) - area(b) || (a.peak_bps || 0) - (b.peak_bps || 0));
+    if (target && target.width_px > 0 && target.height_px > 0 && aspect > 0) {
+      const width = Math.min(target.width_px, target.height_px * aspect);
+      const height = Math.min(target.height_px, target.width_px / aspect);
+      const covering = encodes.find(candidate => width * 10 <= candidate.width * 11
+        && height * 10 <= candidate.height * 11);
+      if (covering) return encodes.find(candidate => candidate.complete_cache
+        && candidate.grade === covering.grade && area(candidate) >= area(covering)) || covering;
+    }
+    return encodes.at(-1) || null;
+  }
+  function decideCandidateTransition({state, sample, candidates, currentId, target = null, aspect = null}) {
+    const now = sample.now_ms;
+    const next = {...state, switchTimesMs:(state.switchTimesMs || []).filter(at =>
+      at <= now && now - at < 3600000), blockedCandidates:[...(state.blockedCandidates || [])]};
+    const hold = reason => ({state:next, candidate:null, transition:"hold", reason});
+    if (!sample.automatic || !sample.presenting || sample.paused || sample.seeking || sample.move_in_flight) {
+      next.upgradeSinceMs = null;
+      next.mildSamples = 0;
+      return hold("playback busy");
+    }
+    const current = (candidates || []).find(candidate => candidate.id === currentId);
+    if (!current) return hold("current route unknown");
+    if (sample.cause_age_ms > 15000 || ["hold", "authority"].includes(sample.cause)) {
+      next.upgradeSinceMs = null;
+      return hold("delivery authority or hold");
+    }
+    if (sample.cause === "decode") {
+      if (next.blockedCandidates.includes(currentId)) return hold("decoder recovery owns repeated failure");
+      next.blockedCandidates.push(currentId);
+    }
+    const eligible = compatibleQualityCandidates(candidates).filter(candidate => (candidate.grade === current.grade || candidate.route !== "encode")
+      && !next.blockedCandidates.includes(candidate.id));
+    const completedLink = qualityTransferBps(sample.transfer);
+    const progressLink = sample.link_pressure_age_ms >= 0 && sample.link_pressure_age_ms <= 15000
+      && Number.isFinite(sample.link_pressure_bps) && sample.link_pressure_bps > 0
+      ? sample.link_pressure_bps : null;
+    // Incomplete bodies may prove a cliff, but never upgrade headroom.
+    const link = progressLink ? Math.min(completedLink || Infinity,progressLink) : completedLink;
+    const draining = sample.stalled || next.previousRunwayMs != null
+      && sample.runway_ms < next.previousRunwayMs;
+    next.previousRunwayMs = sample.runway_ms;
+    const severe = sample.cause === "link" && link > 0 && current.peak_bps > 0
+      && link * 10 < current.peak_bps * 7 && draining;
+    const lowMargin = sample.cause === "link" && link > 0 && current.peak_bps > 0
+      && link < current.peak_bps * 1.2 && draining;
+    next.mildSamples = lowMargin ? (next.mildSamples || 0) + 1 : 0;
+    const emergency = severe || sample.cause === "decode";
+    const pressure = severe || next.mildSamples >= 2 || ["encode", "decode"].includes(sample.cause);
+    const area = candidate => candidate.width * candidate.height;
+    let chosen;
+    if (pressure) {
+      const lower = playableQualityCandidates(eligible).filter(candidate => area(candidate) < area(current))
+        .sort((a, b) => area(b) - area(a));
+      chosen = severe ? lower.find(candidate => candidate.peak_bps > 0 && candidate.peak_bps <= link * 0.95) : lower[0];
+    } else chosen = selectQualityCandidate({candidates:eligible,target,aspect,transfer:sample.transfer,
+      allowTrial:!sample.natural_boundary});
+    if (!chosen || chosen.id === currentId) {
+      next.upgradeSinceMs = null;
+      return hold("current route retained");
+    }
+    const upgrade = area(chosen) > area(current) || chosen.route !== "encode" && current.route === "encode";
+    if (!emergency && !sample.natural_boundary && next.switchTimesMs.length >= 6) return hold("voluntary switch budget");
+    if (upgrade) {
+      if (now < Number((next.failedUntilMs || {})[chosen.id] || 0)) return hold("failed trial backoff");
+      if (!sample.natural_boundary && link > 0 && chosen.peak_bps > 0 && link * 10 < chosen.peak_bps * 18) {
+        next.upgradeSinceMs = null;
+        return hold("fresh transfer margin missing");
+      }
+      if (!sample.natural_boundary) {
+        if (sample.last_stall_ms != null && now - sample.last_stall_ms < 60000
+          || next.lastCliffMs != null && now - next.lastCliffMs < 90000) {
+          next.upgradeSinceMs = null;
+          return hold("recent playback pressure");
+        }
+        // This starts a bounded trial. The owner reserves only spare capacity;
+        // actual successor frames/buffer prove dual decode before committing.
+        if (sample.stalled || !(sample.runway_ms >= 10000)) {
+          next.upgradeSinceMs = null;
+          return hold("safe preparation evidence missing");
+        }
+        if (next.upgradeCandidateId !== chosen.id) {
+          next.upgradeCandidateId = chosen.id;
+          next.upgradeSinceMs = now;
+        }
+        if (next.upgradeSinceMs == null) next.upgradeSinceMs = now;
+        if (now - next.upgradeSinceMs < 45000) return hold("upgrade observation window");
+      }
+    } else if (!pressure && !sample.natural_boundary) return hold("waiting for natural boundary");
+    if (!emergency && !sample.natural_boundary && next.lastSwitchMs != null && now - next.lastSwitchMs < 60000)
+      return hold("switch cooldown");
+    if (severe) next.lastCliffMs = now;
+    return {state:next,candidate:chosen,upgrade,emergency,
+      transition:sample.natural_boundary ? "natural_boundary" : sample.stalled ? "recover" : "prepare",
+      reason:severe ? "bandwidth cliff" : pressure ? `${sample.cause} pressure` : "quality recovered"};
+  }
+
   return Object.freeze({
+    playableQualityCandidates,
+    qualityTransferBps,
+    qualityEncodeProof,
+    qualityOriginalTrialMargin,
+    selectQualityCandidate,
+    decideCandidateTransition,
     DEFAULTS,
     AUTO_DEFAULTS,
     DECODE_LIMIT_DEFAULTS,

@@ -1,6 +1,111 @@
 use super::*;
 
 impl VodServe {
+    /// A cache offer never creates a rendition or starts a producer. Only an
+    /// already resolved exact recipe with a complete durable manifest can
+    /// answer; cold/unverified disk directories remain unknown until adoption.
+    pub(crate) async fn complete_candidate_cache(
+        &self,
+        file_id: i64,
+        recipe_digest: [u8; 32],
+        plan_digest: &str,
+    ) -> bool {
+        let rendition = self
+            .shared
+            .renditions
+            .lock()
+            .await
+            .values()
+            .find(|rendition| {
+                rendition.recipe.file.id == file_id
+                    && !rendition.closed.load(Relaxed)
+                    && rendition.failure().is_none()
+                    && rendition.recipe.encoding.as_ref().is_some_and(|encoding| {
+                        encoding.candidate_recipe == Some(recipe_digest)
+                            && encoding.plan.plan_digest() == plan_digest
+                    })
+            })
+            .cloned();
+        let Some(rendition) = rendition else {
+            return false;
+        };
+        let verify = async {
+            let Some(encoding) = rendition.recipe.encoding.as_ref() else {
+                return false;
+            };
+            if !rendition
+                .source
+                .as_ref()
+                .is_some_and(|source| source.unchanged())
+                || !encoding
+                    .engine
+                    .is_current_with_executable(&encoding.executable)
+                    .await
+            {
+                return false;
+            }
+            let sizes = {
+                let manifest = rendition.manifest.lock().await;
+                if !manifest.is_admitted() || manifest.is_empty() || manifest.next_gap(0).is_some()
+                {
+                    return false;
+                }
+                (0..manifest.len() as u32)
+                    .map(|index| manifest.state(index).map_or(0, |state| state.bytes()))
+                    .collect::<Vec<_>>()
+            };
+            let expected_init = rendition
+                .identity
+                .lock()
+                .await
+                .identity
+                .as_ref()
+                .map(|identity| identity.served_init.clone());
+            let Some(expected_init) = expected_init else {
+                return false;
+            };
+            let Ok(init_meta) = tokio::fs::metadata(rendition.dir.path().join(INIT_NAME)).await
+            else {
+                return false;
+            };
+            if !init_meta.is_file()
+                || init_meta.len() == 0
+                || init_meta.len() > HEAD_REGENERATION_MAX_BYTES as u64
+            {
+                return false;
+            }
+            let Ok(init) = tokio::fs::read(rendition.dir.path().join(INIT_NAME)).await else {
+                return false;
+            };
+            if hex::encode(Sha256::digest(&init)) != expected_init {
+                return false;
+            }
+            // Compare with the materialization record, not mere nonzero size:
+            // a truncated restore cannot inherit a complete-cache claim.
+            for (index, size) in sizes.iter().enumerate() {
+                let path = rendition.dir.path().join(segment_name(index as u64));
+                let Ok(metadata) = tokio::fs::metadata(path).await else {
+                    return false;
+                };
+                if *size == 0 || !metadata.is_file() || metadata.len() != *size {
+                    return false;
+                }
+            }
+            !rendition.closed.load(Relaxed)
+                && rendition.failure().is_none()
+                && rendition
+                    .source
+                    .as_ref()
+                    .is_some_and(|source| source.unchanged())
+                && rendition.manifest.lock().await.is_admitted()
+        };
+        // A slow or unavailable volume is not a reason to delay playback or
+        // call unverified bytes complete. This read never repairs/deletes them.
+        tokio::time::timeout(Duration::from_millis(500), verify)
+            .await
+            .unwrap_or(false)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn spawn_terminal_cleanup(
         &self,
@@ -583,8 +688,27 @@ impl VodServe {
                 crate::playback_control::RenderState::Ended => "ended",
                 crate::playback_control::RenderState::Failed => "failed",
             });
+        let active_production = rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .and_then(|encoding| encoding.active_production_evidence());
         Some(VodPublication {
             result: Ok(VodSessionInfo {
+                active_encode_milli_realtime: active_production.map(|proof| proof.milli_realtime),
+                active_encode_age_ms: active_production.map(|proof| {
+                    u32::try_from(proof.observed_at.elapsed().as_millis()).unwrap_or(u32::MAX)
+                }),
+                active_encode_active_ms: active_production.map(|proof| proof.active_ms),
+                active_encode_segments: active_production.map(|proof| proof.completed_segments),
+                active_encode_candidate_id: active_production.and_then(|_| {
+                    rendition
+                        .recipe
+                        .encoding
+                        .as_ref()
+                        .and_then(|encoding| encoding.candidate_recipe)
+                        .map(plurx_core::playback::candidate::CandidateId::for_recipe_digest)
+                }),
                 id: session_id.to_owned(),
                 file_id: rendition.recipe.file.id,
                 target_height,

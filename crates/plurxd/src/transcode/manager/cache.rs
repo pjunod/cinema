@@ -193,6 +193,19 @@ impl TranscodeManager {
     /// again. Unqualified bytes may still be served to the viewer waiting for
     /// them; refusing to reuse them is a decision for the paths that publish
     /// and claim, not for the one that says which node already has the film.
+    pub(super) async fn candidate_complete_vod_cache(
+        &self,
+        file_id: i64,
+        plan: &ResolvedTranscode,
+    ) -> bool {
+        let Ok(recipe) = self.candidate_recipe_digest(plan, super::Presentation::Vod) else {
+            return false;
+        };
+        self.vod
+            .complete_candidate_cache(file_id, recipe, &plan.plan_digest())
+            .await
+    }
+
     pub(super) async fn verified_cache_hit(&self, plan: &ResolvedTranscode) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;

@@ -349,10 +349,12 @@ function preparedSelectionText(selection){
 }
 function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
+  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
   const hls=new Hls({
-    maxBufferLength:tgt.fwd,
-    backBufferLength:tgt.back,
+    maxBufferLength:voluntary?Math.min(12,tgt.fwd):tgt.fwd,
+    ...(voluntary?{maxMaxBufferLength:12}:{}),
+    backBufferLength:voluntary?0:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
     ...(StockLoader?{loader:createPreparedHlsLoader(StockLoader,p,state)}:{}),
     fragLoadPolicy:vodClientContract().fragLoadPolicy,
@@ -377,7 +379,7 @@ function preparedHlsAttach(p,state,spare){
   // failed/aborted preparation and after at most six seconds if no handoff occurred.
   const incumbent=p&&p.hls;
   const pauseMs=Math.min(6000,Math.max(0,(bufferRunway(document.getElementById("video"))-3)*1000));
-  if(pauseMs>0&&incumbent&&typeof incumbent.stopLoad==="function"
+  if(!voluntary&&pauseMs>0&&incumbent&&typeof incumbent.stopLoad==="function"
      &&typeof incumbent.startLoad==="function"){
     try{
       incumbent.stopLoad();
@@ -460,6 +462,8 @@ function createPreparedHlsLoader(StockLoader,p,state){
           const kbps=PlaybackPolicy.transferSampleKbps({loadedBytes:bytes,
             loadingStartMs:previous.at,loadingEndMs:now});
           if(kbps&&p.abr){
+            if(xhr.getResponseHeader("X-Plurx-Producer-Paced")==="0")
+              p.abr.qualityPressureTransfer={bps:kbps*1000,atMs:now,attachment:p.mediaAttachment};
             p.abr.recentEstimateKbps=kbps;
             p.abr.recentEstimateAtMs=now;
             p.abr.recentEstimateSource='progress';
@@ -473,6 +477,19 @@ function createPreparedHlsLoader(StockLoader,p,state){
   };
 }
 function notePreparedHlsFragmentLoaded(p,state,d){
+  if(preparedState(p)===state&&d&&d.frag&&d.frag.type==='main'){
+    const stats=d.frag.stats||d.stats||{};
+    const proof=completedQualityTransfer(d.networkDetails,d.frag.url,stats.loading,performance.now());
+    if(proof){
+      state.qualityTransfer=proof;
+      const samples=state.qualityTransfers||[];
+      const segmentId=String(d.frag.url||'');
+      state.qualityTransfers=samples.filter(row=>row.segment_id!==segmentId
+        &&proof.atMs-row.atMs<=15000).slice(-7);
+      state.qualityTransfers.push({...proof,segment_id:segmentId,media_duration_ms:d.frag.duration*1000});
+      notePreparedBuffer(p,state);
+    }
+  }
   if(!attachedPreparedHls(p,state)||!p.abr) return;
   const stats=d&&((d.frag&&d.frag.stats)||d.stats);
   const loaded=stats&&(stats.loaded||stats.total);
@@ -482,7 +499,7 @@ function notePreparedHlsFragmentLoaded(p,state,d){
       loadingStartMs:loading.start,loadingEndMs:loading.end}):null;
   if(!kbps) return;
   const now=performance.now(),url=String(d.frag.url||'');
-  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now);
+  if(d.frag.type==='main') noteCompletedAutoTransfer(p,loaded,loading,now,d.networkDetails,d.frag.url);
   // A completed request can average bytes from both sides of a cliff. Keep
   // the fresher within-request progress delta until a new request measures it.
   if(p.abr.recentEstimateSource==='progress'&&p.abr.recentEstimateUrl===url
@@ -548,9 +565,60 @@ function preparedBufferedThroughMs(state,spare){
   }catch(e){}
   return null;
 }
+function preparedQualityProofReady(p,state){
+  const id=p.directedChange?.autoMove?.candidateId;
+  if(!id||state.selection?.candidate_id!==id) return false;
+  const candidate=(p.qualityCandidates||[]).find(row=>row.id===id);
+  const now=performance.now(), proof=state.qualityTransfer;
+  const bps=PlaybackPolicy.qualityTransferBps(proof?{...proof,age_ms:now-proof.atMs}:null);
+  if(!candidate) return false;
+  if(candidate.peak_bps>0){
+    if(!(bps>=candidate.peak_bps*1.8)) return false;
+  }else if(candidate.route==="encode"||!PlaybackPolicy.qualityOriginalTrialMargin(
+    (state.qualityTransfers||[]).map(row=>({...row,age_ms:now-row.atMs})))) return false;
+  return candidate.route!=="encode"||candidate.complete_cache===true
+    ||state.qualityHealthAtMs!=null
+      &&PlaybackPolicy.qualityEncodeProof(state.qualityHealth,id,now-state.qualityHealthAtMs)
+      &&state.qualityHealth.active_encode_milli_realtime>=1150;
+}
+// Reuse the existing health timer only while a voluntary successor is staged.
+// Receipt and exact staging identity fence every response; incumbent health
+// cannot establish that the successor's different encoder recipe can keep up.
+async function pollPreparedQualityHealth(p){
+  const state=preparedState(p), move=p?.directedChange?.autoMove;
+  if(!state||!move?.retainIncumbent||PREPARED_TERMINAL_STATES.includes(state.state)
+    ||state.qualityHealthInFlight||!state.sessionId) return;
+  const candidate=(p.qualityCandidates||[]).find(row=>row.id===move.candidateId);
+  if(!candidate||candidate.route!=="encode"||candidate.complete_cache) return;
+  const now=performance.now();
+  if(state.qualityHealthPollAtMs!=null&&now-state.qualityHealthPollAtMs<2000) return;
+  state.qualityHealthPollAtMs=now;
+  state.qualityHealthInFlight=true;
+  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),2000);
+  try{
+    const health=await api(`/hls/${encodeURIComponent(state.sessionId)}/status`,{signal:controller.signal});
+    if(PLAYER!==p||preparedState(p)!==state||p.directedChange?.autoMove!==move
+      ||!playbackOwnsAttachedMedia(p)||PREPARED_TERMINAL_STATES.includes(state.state)) return;
+    state.qualityHealth=health;
+    state.qualityHealthAtMs=performance.now();
+    notePreparedBuffer(p,state);
+  }catch(e){}finally{clearTimeout(timer);state.qualityHealthInFlight=false;}
+}
 function notePreparedBuffer(p,state){
-  const v=document.getElementById("video"), spare=preparedVideoElement();
+  const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")), spare=preparedVideoElement();
   if(!v||!spare) return;
+  if(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent
+    &&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10)){
+    failPreparedReplacement(p,state,"incumbent pressure during voluntary trial");
+    return;
+  }
+  if(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent){
+    const id=p.directedChange.autoMove.candidateId;
+    if(!state.selection||state.selection.candidate_id!==id){
+      failPreparedReplacement(p,state,"prepared route identity changed");return;
+    }
+    if(!preparedQualityProofReady(p,state)) return;
+  }
   const through=preparedBufferedThroughMs(state,spare);
   if(through==null) return;
   const filmMs=playbackFilmPositionMs(v,p);
@@ -679,6 +747,11 @@ function preparedAlignedBuffered(spare){
 // a queued pre-seek frame can otherwise step the visible picture backward.
 // Keep the incumbent's audio with its visible picture through this proof.
 function exposePreparedReplacementAtFrame(p,state,v,spare){
+  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  if(voluntary&&streamHasVideo(p,spare)&&typeof spare.requestVideoFrameCallback!=="function"){
+    failPreparedReplacement(p,state,"no parallel video presentation proof");
+    return false;
+  }
   if(!streamHasVideo(p,spare)||typeof spare.requestVideoFrameCallback!=="function")
     return exposePreparedReplacement(p,state,v,spare,playbackFilmPositionMs(v,p));
   // Buffer readiness can precede the first warm callback. The aligned,
@@ -704,6 +777,10 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
+    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10||!preparedQualityProofReady(p,state))){
+      failPreparedReplacement(p,state,"quality proof expired or incumbent pressure before voluntary commit");
+      return;
+    }
     if(ready){
       state.overlapProofReadyAtMs=performance.now();
       clientLog(Object.assign({level:"info",event:"prepared_replacement",
@@ -839,6 +916,8 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   state.overlapPhase="exposed";
   state.predecessor={hls:predecessor,element:retired,sessionId:p.sessionId,
     probeUrl:p.probeUrl,offset:p.offset,wantsPlayback:p.wantsPlayback,
+    method:p.method,copyHls:p.copyHls,autoHeight:p.autoHeight,encoder:p.encoder,
+    qualityCandidateId:p.qualityCandidateId,deliveredRange:p.deliveredRange,
     health:p.health,healthObservedAt:p.healthObservedAt,
     presentationAdvancedAt:p.presentationAdvancedAt,
     muted:intent.muted,volume:intent.volume,playbackRate:intent.playbackRate,
@@ -849,6 +928,15 @@ function exposePreparedReplacement(p,state,v,spare,filmMs){
   p.sessionId=state.sessionId;
   p.probeUrl=state.playlistUrl;
   p.offset=state.mediaOriginMs/1000;
+  const candidate=(p.qualityCandidates||[]).find(row=>row.id===state.selection?.candidate_id);
+  if(candidate){
+    p.qualityCandidateId=candidate.id;
+    p.method=candidate.route==='encode'?'transcode':'remux';
+    p.copyHls=candidate.route!=='encode';
+    p.autoHeight=candidate.route==='encode'?candidate.target_height:null;
+    p.encoder=null;
+    p.deliveredRange=candidate.grade;
+  }
   p.health=null;
   p.healthObservedAt=null;
   p.presentationAdvancedAt=null;

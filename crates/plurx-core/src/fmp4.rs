@@ -8827,6 +8827,7 @@ mod tests {
         };
         let options = TranscodeOptions {
             auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 360,
             ..TranscodeOptions::default()
         };

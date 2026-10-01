@@ -220,6 +220,8 @@ pub struct QualityCandidate {
     pub route: CandidateRoute,
     pub width: u32,
     pub height: u32,
+    /// Requested encoder rung; distinct from a cropped/source-ceiling raster.
+    pub target_height: u32,
     pub average_bps: Option<u64>,
     pub peak_bps: Option<u64>,
     pub grade: crate::transcode::OutputGrade,
@@ -272,7 +274,7 @@ impl NetworkTransferEvidence {
             || self.producer_paced
             || self.bytes == 0
             || self.elapsed_ms == 0
-            || self.age_ms > 10_000
+            || self.age_ms > 15_000
         {
             return None;
         }
@@ -324,6 +326,19 @@ pub fn select_quality_candidate(
         if let Some(candidate) = eligible.iter().find(|candidate| {
             aspect.covered_by(target, (candidate.width, candidate.height)) == Some(true)
         }) {
+            let minimum_area = u64::from(candidate.width) * u64::from(candidate.height);
+            if let Some(cached) = eligible
+                .iter()
+                .filter(|cached| {
+                    cached.complete_cache
+                        && cached.grade == candidate.grade
+                        && u64::from(cached.width) * u64::from(cached.height) >= minimum_area
+                        && aspect.covered_by(target, (cached.width, cached.height)) == Some(true)
+                })
+                .max_by_key(|cached| u64::from(cached.width) * u64::from(cached.height))
+            {
+                return Some(cached);
+            }
             return Some(candidate);
         }
     }
@@ -367,6 +382,10 @@ pub enum AutoTransition {
 #[derive(Clone, Debug, Default)]
 pub struct AutoRuntimeState {
     pub last_switch_ms: Option<u64>,
+    pub last_stall_ms: Option<u64>,
+    pub last_cliff_ms: Option<u64>,
+    pub target_revision: Option<u64>,
+    pub target_changed_ms: Option<u64>,
     pub upgrade_since_ms: Option<u64>,
     pub mild_samples: u8,
     pub switch_times_ms: Vec<u64>,
@@ -424,7 +443,6 @@ pub fn decide_auto_transition(
         || sample.paused
         || sample.seeking
         || sample.move_in_flight
-        || state.switch_times_ms.len() >= 6
     {
         state.upgrade_since_ms = None;
         state.mild_samples = 0;
@@ -442,6 +460,14 @@ pub fn decide_auto_transition(
         state.upgrade_since_ms = None;
         return hold;
     }
+    if sample.stalled {
+        state.last_stall_ms = Some(sample.now_ms);
+    }
+    if state.target_revision != target.map(|target| target.revision) {
+        state.target_revision = target.map(|target| target.revision);
+        state.target_changed_ms = Some(sample.now_ms);
+        state.upgrade_since_ms = None;
+    }
     let current_area = u64::from(current.width) * u64::from(current.height);
     if sample.cause == AutoCause::Decode {
         if !state.blocked_candidates.contains(&current_id) {
@@ -454,13 +480,26 @@ pub fn decide_auto_transition(
     let eligible: Vec<_> = candidates
         .iter()
         .filter(|candidate| {
-            candidate.playable()
-                && candidate.grade == current.grade
+            (candidate.playable()
+                || (!sample.natural_boundary
+                    && candidate.identity_matches()
+                    && candidate.decoder_compatible
+                    && candidate.width > 0
+                    && candidate.height > 0))
+                && (candidate.grade == current.grade || candidate.route != CandidateRoute::Encode)
                 && !state.blocked_candidates.contains(&candidate.id)
         })
         .cloned()
         .collect();
-    let picked = select_quality_candidate(&eligible, aspect, target, sample.transfer);
+    let trials: Vec<_> = eligible
+        .iter()
+        .cloned()
+        .map(|mut candidate| {
+            candidate.sustainable = true;
+            candidate
+        })
+        .collect();
+    let picked = select_quality_candidate(&trials, aspect, target, sample.transfer);
     let link = sample
         .transfer
         .and_then(NetworkTransferEvidence::usable_bps);
@@ -469,12 +508,28 @@ pub fn decide_auto_transition(
             (Some(link), Some(peak)) => u128::from(link) * 10 < u128::from(peak) * 7,
             _ => false,
         };
-    let pressure = severe || matches!(sample.cause, AutoCause::Encode | AutoCause::Decode);
+    if severe {
+        state.last_cliff_ms = Some(sample.now_ms);
+    }
+    let mild = sample.cause == AutoCause::Link
+        && match (link, current.peak_bps) {
+            (Some(link), Some(peak)) => u128::from(link) * 10 < u128::from(peak) * 13,
+            _ => false,
+        };
+    state.mild_samples = if mild {
+        state.mild_samples.saturating_add(1)
+    } else {
+        0
+    };
+    let pressure = severe
+        || state.mild_samples >= 2
+        || matches!(sample.cause, AutoCause::Encode | AutoCause::Decode);
     let chosen = if pressure {
         let mut lower: Vec<_> = eligible
             .iter()
             .filter(|candidate| {
-                u64::from(candidate.width) * u64::from(candidate.height) < current_area
+                candidate.playable()
+                    && u64::from(candidate.width) * u64::from(candidate.height) < current_area
             })
             .collect();
         lower.sort_by_key(|candidate| u64::from(candidate.width) * u64::from(candidate.height));
@@ -501,28 +556,34 @@ pub fn decide_auto_transition(
     let upgrade = chosen_area > current_area
         || chosen.route != CandidateRoute::Encode && current.route == CandidateRoute::Encode;
     if upgrade {
-        let link_margin = match (link, chosen.peak_bps) {
-            (Some(link), Some(peak)) => u128::from(link) * 10 >= u128::from(peak) * 18,
-            _ => false,
-        };
-        let encode_margin = chosen.complete_cache
-            || chosen.route != CandidateRoute::Encode
-            || sample
-                .active_encode_milli_realtime
-                .is_some_and(|speed| speed >= 1150);
-        if !link_margin
-            || !encode_margin
-            || !sample.speculative_admission
-            || !sample.parallel_decoder_safe
-            || sample.stalled
-            || sample.runway_ms.is_none_or(|runway| runway < 10_000)
+        if !sample.natural_boundary
+            && (state
+                .last_stall_ms
+                .is_some_and(|at| sample.now_ms.saturating_sub(at) < 60_000)
+                || state
+                    .last_cliff_ms
+                    .is_some_and(|at| sample.now_ms.saturating_sub(at) < 90_000))
         {
             state.upgrade_since_ms = None;
             return hold;
         }
-        let since = *state.upgrade_since_ms.get_or_insert(sample.now_ms);
-        if sample.now_ms.saturating_sub(since) < 45_000 {
+        let link_margin = match (link, chosen.peak_bps) {
+            (Some(link), Some(peak)) => u128::from(link) * 10 >= u128::from(peak) * 18,
+            (None, _) | (_, None) => true,
+        };
+        // Production is proved by the successor before commit, not before requesting its bounded slot.
+        if (!sample.natural_boundary && !link_margin)
+            || (!sample.natural_boundary
+                && (sample.stalled || sample.runway_ms.is_none_or(|runway| runway < 10_000)))
+        {
+            state.upgrade_since_ms = None;
             return hold;
+        }
+        if !sample.natural_boundary {
+            let since = *state.upgrade_since_ms.get_or_insert(sample.now_ms);
+            if sample.now_ms.saturating_sub(since) < 45_000 {
+                return hold;
+            }
         }
     } else if !pressure {
         // A smaller container is advisory; resize recovery waits for a safe
@@ -531,7 +592,19 @@ pub fn decide_auto_transition(
             return hold;
         }
     }
+    if !pressure
+        && !sample.natural_boundary
+        && state
+            .target_changed_ms
+            .is_some_and(|at| sample.now_ms.saturating_sub(at) < 5_000)
+    {
+        return hold;
+    }
+    if !severe && !sample.natural_boundary && state.switch_times_ms.len() >= 6 {
+        return hold;
+    }
     if !severe
+        && !sample.natural_boundary
         && state
             .last_switch_ms
             .is_some_and(|last| sample.now_ms.saturating_sub(last) < 60_000)
@@ -553,11 +626,13 @@ pub fn decide_auto_transition(
 
 impl AutoRuntimeState {
     /// Call only after the presentation owner confirms the switch landed.
-    pub fn committed(&mut self, now_ms: u64) {
+    pub fn committed(&mut self, now_ms: u64, voluntary: bool) {
         self.last_switch_ms = Some(now_ms);
         self.upgrade_since_ms = None;
         self.mild_samples = 0;
-        self.switch_times_ms.push(now_ms);
+        if voluntary {
+            self.switch_times_ms.push(now_ms);
+        }
         self.switch_times_ms
             .retain(|at| now_ms.saturating_sub(*at) < 3_600_000);
         self.switch_times_ms.truncate(6);
@@ -567,5 +642,280 @@ impl AutoRuntimeState {
         self.switch_times_ms.clear();
         self.upgrade_since_ms = None;
         self.mild_samples = 0;
+    }
+}
+
+/// A prepared request may be issued from spare capacity before these receipts
+/// exist; commit requires both the exact server reservation and successfully
+/// staged decoder. The incumbent survives refusal or expiry.
+pub fn auto_prepared_commit_allowed(
+    requested: CandidateId,
+    reserved: Option<CandidateId>,
+    sample: AutoRuntimeSample,
+    presentation_revision_matches: bool,
+    decoder_revision_matches: bool,
+) -> bool {
+    reserved == Some(requested)
+        && sample.speculative_admission
+        && sample.parallel_decoder_safe
+        && presentation_revision_matches
+        && decoder_revision_matches
+        && sample.automatic
+        && sample.presenting
+        && !sample.paused
+        && !sample.seeking
+}
+
+#[cfg(test)]
+mod policy_regressions {
+    use super::*;
+    use crate::playback::geometry::DisplayAspect;
+    fn candidate(
+        height: u32,
+        route: CandidateRoute,
+        sustainable: bool,
+        cached: bool,
+    ) -> QualityCandidate {
+        let recipe_digest = [height as u8; 32];
+        QualityCandidate {
+            id: CandidateId::for_recipe_digest(recipe_digest),
+            recipe_digest,
+            route,
+            width: height * 16 / 9,
+            height,
+            target_height: height,
+            average_bps: Some(u64::from(height) * 8_000),
+            peak_bps: Some(u64::from(height) * 12_000),
+            grade: crate::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: cached,
+            sustainable,
+        }
+    }
+    fn aspect() -> DisplayAspect {
+        DisplayAspect::from_source(3840, 2160, Some((1, 1)), Some(0))
+            .expect("fixture supplies a valid policy input")
+    }
+    fn target(width: i64) -> PresentationTarget {
+        PresentationTarget {
+            width_px: width,
+            height_px: 1600,
+            revision: 1,
+        }
+    }
+    fn sample(now_ms: u64) -> AutoRuntimeSample {
+        AutoRuntimeSample {
+            now_ms,
+            automatic: true,
+            presenting: true,
+            paused: false,
+            seeking: false,
+            move_in_flight: false,
+            cause: AutoCause::Unknown,
+            cause_age_ms: 0,
+            runway_ms: Some(12_000),
+            stalled: false,
+            natural_boundary: false,
+            speculative_admission: false,
+            parallel_decoder_safe: false,
+            active_encode_milli_realtime: None,
+            transfer: None,
+        }
+    }
+    #[test]
+    fn fit_boundary_and_complete_cache_use_one_catalog() {
+        let candidates = [
+            candidate(1080, CandidateRoute::Encode, true, false),
+            candidate(1440, CandidateRoute::Encode, true, false),
+        ];
+        assert_eq!(
+            select_quality_candidate(&candidates, aspect(), Some(target(2112)), None)
+                .expect("fixture supplies a valid policy input")
+                .height,
+            1080
+        );
+        assert_eq!(
+            select_quality_candidate(&candidates, aspect(), Some(target(2113)), None)
+                .expect("fixture supplies a valid policy input")
+                .height,
+            1440
+        );
+        let mut cached = candidates.to_vec();
+        cached.push(candidate(2160, CandidateRoute::Encode, false, true));
+        assert_eq!(
+            select_quality_candidate(&cached, aspect(), Some(target(2400)), None)
+                .expect("fixture supplies a valid policy input")
+                .height,
+            2160
+        );
+    }
+    #[test]
+    fn compatible_original_priority_and_unknown_peak_probe_preserve_incumbent() {
+        let mut original = candidate(2160, CandidateRoute::Remux, true, false);
+        original.peak_bps = None;
+        let candidates = [
+            candidate(1080, CandidateRoute::Encode, true, false),
+            original,
+        ];
+        assert_eq!(
+            select_quality_candidate(&candidates, aspect(), Some(target(2400)), None)
+                .expect("fixture supplies a valid policy input")
+                .route,
+            CandidateRoute::Remux
+        );
+        let mut state = AutoRuntimeState {
+            target_revision: Some(1),
+            upgrade_since_ms: Some(0),
+            ..Default::default()
+        };
+        let result = decide_auto_transition(
+            &mut state,
+            sample(60_000),
+            &candidates,
+            candidates[0].id,
+            aspect(),
+            Some(target(2400)),
+        );
+        assert_eq!(result.transition, AutoTransition::Prepare);
+        assert!(!auto_prepared_commit_allowed(
+            candidates[1].id,
+            None,
+            sample(60_000),
+            true,
+            true
+        ));
+    }
+    #[test]
+    fn unproved_encode_is_trial_only_and_stall_cliff_windows_are_enforced() {
+        let candidates = [
+            candidate(1080, CandidateRoute::Encode, true, false),
+            candidate(1440, CandidateRoute::Encode, false, false),
+        ];
+        assert_eq!(
+            select_quality_candidate(&candidates, aspect(), Some(target(2400)), None)
+                .expect("fixture supplies a valid policy input")
+                .height,
+            1080
+        );
+        let mut state = AutoRuntimeState {
+            target_revision: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                sample(0),
+                &candidates,
+                candidates[0].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Hold
+        );
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                sample(45_000),
+                &candidates,
+                candidates[0].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Prepare
+        );
+        state.last_stall_ms = Some(45_000);
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                sample(104_999),
+                &candidates,
+                candidates[0].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Hold
+        );
+        state.last_stall_ms = None;
+        state.last_cliff_ms = Some(45_000);
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                sample(134_999),
+                &candidates,
+                candidates[0].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Hold
+        );
+        let mut boundary = sample(134_999);
+        boundary.natural_boundary = true;
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                boundary,
+                &candidates,
+                candidates[0].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Hold
+        );
+    }
+    #[test]
+    fn severe_link_pressure_skips_voluntary_budget_without_using_stale_samples() {
+        let candidates = [
+            candidate(480, CandidateRoute::Encode, true, false),
+            candidate(720, CandidateRoute::Encode, true, false),
+            candidate(1080, CandidateRoute::Encode, true, false),
+            candidate(1440, CandidateRoute::Encode, true, false),
+        ];
+        let mut state = AutoRuntimeState {
+            switch_times_ms: vec![0; 6],
+            last_switch_ms: Some(99_999),
+            target_revision: Some(1),
+            ..Default::default()
+        };
+        let mut pressure = sample(100_000);
+        pressure.cause = AutoCause::Link;
+        pressure.transfer = Some(NetworkTransferEvidence {
+            bytes: 1_000_000,
+            elapsed_ms: 1000,
+            age_ms: 0,
+            completed: true,
+            from_cache: false,
+            producer_paced: false,
+        });
+        let result = decide_auto_transition(
+            &mut state,
+            pressure,
+            &candidates,
+            candidates[3].id,
+            aspect(),
+            Some(target(2400)),
+        );
+        assert_eq!(result.candidate_id, Some(candidates[0].id));
+        pressure
+            .transfer
+            .as_mut()
+            .expect("fixture supplies a valid policy input")
+            .age_ms = 15_001;
+        assert_eq!(
+            decide_auto_transition(
+                &mut state,
+                pressure,
+                &candidates,
+                candidates[3].id,
+                aspect(),
+                Some(target(2400))
+            )
+            .transition,
+            AutoTransition::Hold
+        );
     }
 }

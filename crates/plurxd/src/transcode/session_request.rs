@@ -480,7 +480,7 @@ pub struct SessionRecoveryIdentity {
 pub struct CandidateExecutionContext {
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
     pub recipe_digest: [u8; 32],
-    pub profile: plurx_core::transcode::AutoQualityRateProfile,
+    pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

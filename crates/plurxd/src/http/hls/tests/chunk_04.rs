@@ -343,6 +343,9 @@
             ..staged_candidate_request()
         };
         let response = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -465,6 +468,9 @@
             request: request.clone(),
         };
         let start = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -2005,6 +2011,9 @@
                 .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
                 .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
                 response_json: serde_json::to_string(&StartResponse {
+                    display_aware_auto_protocol: Some("route-v1".to_owned()),
+                    quality_candidate_id: None,
+                    quality_candidates: None,
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                     duration_ms: Some(60_000),

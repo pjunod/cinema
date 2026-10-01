@@ -94,8 +94,31 @@ function playbackControlCapabilities(){
     * Math.max(1, window.devicePixelRatio||1);
   const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
   const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
-  return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
+  const capabilities={platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
     codecs,dynamic_ranges:ranges,dual_player_preparation:preparedHandoffOffered(PLAYER)};
+  if(SERVER&&SERVER.playback_display_aware_auto&&SERVER.display_aware_auto_protocol==='route-v1'){
+    const caps=currentCapsDocument(), target=measuredPresentationTarget();
+    const video=caps.video.map(entry=>({codec:entry.codec,profiles:entry.profiles||[],available:true,
+      dynamic_ranges:(entry.present||[]).map(range=>range==='pq'?'hdr10':range).filter(range=>range==='sdr'||range==='hdr10'),
+      dv_profiles:entry.dv_profiles||[],...(entry.max_height?{max_height:entry.max_height}:{})}));
+    const key=JSON.stringify(video);
+    const p=PLAYER;
+    if(p&&p.abr){
+      if(p.abr.decoderSnapshotKey!==key){
+        p.abr.decoderSnapshotKey=key;
+        p.abr.decoderRevision=Math.min(Number.MAX_SAFE_INTEGER,(p.abr.decoderRevision||0)+1);
+      }
+      Object.assign(capabilities,{decoder_caps:{revision:p.abr.decoderRevision,video}});
+    }
+    if(target) Object.assign(capabilities,{presentation_target:target});
+  }
+  return capabilities;
+}
+function qualityCatalogSelectionKey(p){
+  return JSON.stringify([selectedAudioIndex(p),p.curSub,p.burnedSub,p.aoffset]);
+}
+function qualityCatalogSelectionCurrent(p){
+  return !!p?.abr&&p.abr.catalogSelectionKey===qualityCatalogSelectionKey(p);
 }
 function playbackControlSelection(p){
   const requested=playQuality();
@@ -112,6 +135,11 @@ function playbackControlSelection(p){
       // sent at 720, the server's digest is unchanged, and the exchange is not
       // a selection change at all - so no successor is ever staged for it.
       // Absent means plain Auto, which digests exactly as it always has.
+      : (p&&p.abr&&p.abr.requestedCandidateId&&qualityCatalogSelectionCurrent(p)&&SERVER&&SERVER.playback_display_aware_auto
+        &&SERVER.display_aware_auto_protocol==='route-v1')
+        ? {mode:"auto",candidate_id:p.abr.requestedCandidateId,
+          ...((p.qualityCandidates||[]).find(candidate=>candidate.id===p.abr.requestedCandidateId)?.route==='encode'
+            ?{height:(p.qualityCandidates||[]).find(candidate=>candidate.id===p.abr.requestedCandidateId).target_height}:{})}
       : (p&&p.autoRequestedHeight>0)
         ? {mode:"auto",height:Math.max(144,Math.min(2160,Math.round(p.autoRequestedHeight)))}
         : {mode:"auto"};
@@ -122,6 +150,23 @@ function playbackControlSelection(p){
   const audioOffset=Math.max(-15000,Math.min(15000,Math.round(p&&p.aoffset||0)));
   return {quality,audio_track:audioTrack,subtitle,
     audio_offset_ms:audioOffset,codec:"auto",dynamic_range:"auto"};
+}
+function qualityMediaIntent(p,wireSelection){
+  if(!p||!p.abr||!SERVER||SERVER.display_aware_auto_protocol!=='route-v1'
+    ||!SERVER.playback_display_aware_auto) return null;
+  const wire=wireSelection||playbackControlSelection(p);
+  const subtitles=wire.subtitle.mode==='off'?{mode:'off'}:{mode:wire.subtitle.mode,track:wire.subtitle.track};
+  const selection={quality:wire.quality,codec:wire.codec,dynamic_range:wire.dynamic_range,
+    audio_track:wire.audio_track,audio_offset_ms:wire.audio_offset_ms,subtitles};
+  const key=JSON.stringify(selection), state=p.abr.mediaIntent||{
+    lifetimeId:newRequestId(),recipeRevision:0,transportRevision:0};
+  if(state.recipeKey!==key){state.recipeKey=key;state.recipeRevision++;}
+  const video=/** @type {HTMLVideoElement|null} */ (document.getElementById('video'));
+  const transport=JSON.stringify([p.wantsPlayback!==false,video&&video.playbackRate||1]);
+  if(state.transportKey!==transport){state.transportKey=transport;state.transportRevision++;}
+  p.abr.mediaIntent=state;
+  return {lifetime_id:state.lifetimeId,recipe_revision:state.recipeRevision,
+    destination_revision:(p.controlSeekSequence||0)+1,transport_revision:state.transportRevision,selection};
 }
 function playbackControlBufferedRange(v,p,positionMs){
   try{
@@ -231,6 +276,8 @@ function playbackControlSnapshot(v,p){
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
+  const intent=qualityMediaIntent(p,snapshot.selection);
+  if(intent) Object.assign(snapshot,{intent});
   // A commit and terminal demand are both true, but the protocol deliberately
   // refuses them in one exchange: publishing the successor has to win before
   // ending the newly-published session. Carry the commit on one synthetic
@@ -242,4 +289,3 @@ function playbackControlSnapshot(v,p){
   }
   return snapshot;
 }
-

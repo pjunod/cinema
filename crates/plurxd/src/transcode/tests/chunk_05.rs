@@ -2466,6 +2466,7 @@
     fn execution_options_for_retry() -> TranscodeOptions {
         TranscodeOptions {
             auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             video_bitrate_kbps: 8_000,
             effective_rate_control: EffectiveRateControl::Vbr,

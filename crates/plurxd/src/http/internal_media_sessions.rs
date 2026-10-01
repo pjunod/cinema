@@ -166,7 +166,7 @@ pub(crate) async fn start(
         .ok_or(RemoteStartError::RestartDrain)?;
     let (serving_authority, admitted_serving_generation) =
         admit_remote_start_serving_authority(&state)?;
-    let request = serde_json::from_slice::<RemoteStartRequest>(&body)
+    let mut request = serde_json::from_slice::<RemoteStartRequest>(&body)
         .ok()
         .filter(RemoteStartRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
@@ -179,6 +179,11 @@ pub(crate) async fn start(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    state
+        .transcode
+        .restore_candidate_context(&mut request)
+        .await
+        .map_err(|_| StatusCode::CONFLICT)?;
     let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
@@ -1110,6 +1115,9 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.to_owned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),

@@ -126,6 +126,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         .as_secs() as i64;
     let options = TranscodeOptions {
         auto_quality_rate_profile: None,
+        normalized_geometry: false,
         target_height: 144,
         video_bitrate_kbps: 300,
         software_threads: Some(2),
@@ -137,6 +138,10 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
+        candidate_recipe: None,
+        production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
+        active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
+        nonpreemptive_trial: false,
         source_object_version: crate::fragment_index_cluster::open_source_fence(&file, None)
             .await
             .expect("source identity")
@@ -205,6 +210,60 @@ async fn encoded_identity_never_shares_a_renderer_across_processes() {
     .expect("other process");
     let other = mutable.identity(&file, 96.0);
     assert_ne!(first, other, "different nodes must never share encoded bytes");
+}
+
+#[tokio::test]
+async fn candidate_vod_cache_requires_exact_complete_present_members() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("candidate cache proof");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let candidate = [9; 32];
+    Arc::get_mut(&mut encoding).expect("unique recipe").candidate_recipe = Some(candidate);
+    let file_id = file.id;
+    let plan_digest = encoding.plan.plan_digest();
+    let serve = bare_serve(&base.path().join("renditions"));
+    let rendition = serve.shared.build_rendition(
+        "candidate-cache", None, Recipe {
+            file, audio_index: None, aac: true,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: Some(encoding.source_object_version.clone()),
+            cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
+        }, encoding.grid.plan(8_000, 428_000), &settings(),
+    ).await.expect("resolved rendition without producer");
+    serve.shared.renditions.lock().await.insert(rendition.key.clone(), Arc::clone(&rendition));
+    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    let init = b"identity-bound init fixture";
+    rendition.dir.write_init(init).await.expect("init");
+    *rendition.identity.lock().await = IdentityState {
+        identity: Some(InitIdentity {
+            muxer_init: "fixture".into(),
+            served_init: hex::encode(Sha256::digest(init)),
+            promotion: Default::default(),
+        }), from_disk: false,
+    };
+    {
+        let mut manifest = rendition.manifest.lock().await;
+        for index in 0..manifest.len() as u32 {
+            rendition.dir.materialize(&mut manifest, index, b"complete segment fixture", now_ms())
+                .await.expect("publication");
+        }
+        manifest.complete(&Budgets {
+            working_set_bytes: u64::MAX, admission_sizing_bytes: u64::MAX, admission_share: 0.5,
+        }).expect("complete manifest");
+    }
+    assert!(serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    assert!(!serve.complete_candidate_cache(file_id, [8; 32], &plan_digest).await);
+    assert!(!serve.complete_candidate_cache(file_id, candidate, "different plan").await);
+    let member = rendition.dir.path().join(segment_name(0));
+    tokio::fs::write(&member, b"short").await.expect("simulate truncated restore");
+    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    tokio::fs::write(&member, b"complete segment fixture").await.expect("restore member");
+    tokio::fs::write(rendition.dir.path().join(INIT_NAME), b"wrong init")
+        .await.expect("simulate init corruption");
+    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    tokio::fs::remove_file(&member).await.expect("simulate missing member");
+    assert!(!serve.complete_candidate_cache(file_id, candidate, &plan_digest).await);
+    assert_eq!(encoding.admissions.software_in_use(), 0, "lookup never starts a producer");
 }
 
 #[tokio::test]
@@ -350,6 +409,10 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
+        candidate_recipe: None,
+        production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
+        active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
+        nonpreemptive_trial: false,
         source_object_version: crate::fragment_index_cluster::open_source_fence(&file, None)
             .await
             .expect("new source fence")

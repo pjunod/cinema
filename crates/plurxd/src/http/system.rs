@@ -26,6 +26,8 @@ use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, 
 
 #[derive(Serialize)]
 pub struct ServerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_aware_auto_protocol: Option<String>,
     pub name: String,
     /// Bare semver — clients compare this.
     pub version: &'static str,
@@ -85,6 +87,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
+        display_aware_auto_protocol: Some("route-v1".to_owned()),
         name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,

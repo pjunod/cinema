@@ -1075,7 +1075,7 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
-    body: CreateSession,
+    mut body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         state,
@@ -1088,7 +1088,135 @@ pub(crate) async fn resolve_plan(
         .as_ref()
         .map(|review| review.hdr10)
         .unwrap_or(body.hdr10 == Some(true));
-    let height = resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let mut height =
+        resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let mut candidate_context = None;
+    let mut candidate_copy = false;
+    if body.copy == Some(true) {
+        if let (Some(source), Some(caps)) = (
+            source,
+            body.caps.as_ref().filter(|caps| {
+                caps.video
+                    .iter()
+                    .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
+            }),
+        ) {
+            if let Some(facts) = state.transcode.quality_source_facts(source).await {
+                if let (Some(width), Some(height)) = (facts.width(), facts.height()) {
+                    let rate = facts
+                        .frame_rate()
+                        .value()
+                        .map(|rate| (rate.numerator(), rate.denominator()));
+                    let fits = caps
+                        .video
+                        .iter()
+                        .filter(|entry| source.video_codec.as_deref() == Some(entry.codec.as_str()))
+                        .any(|entry| {
+                            entry.geometry_admission(width, height, rate) != Some(false)
+                                && (entry.max_frame_rate.is_none() || rate.is_some())
+                        });
+                    if !fits {
+                        if body.quality_auto == Some(true) {
+                            body.copy = Some(false);
+                        } else {
+                            return Err(ApiError::Conflict(
+                                "original_decoder_geometry_or_cadence_unavailable".to_owned(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
+        let enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+            .await?
+            .is_some_and(|value| value.trim() == "1");
+        let requested = body
+            .intent
+            .as_ref()
+            .and_then(|intent| match intent.selection.quality {
+                plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
+                _ => None,
+            });
+        if requested.is_some() && !enabled {
+            return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
+        }
+        if enabled
+            && (requested.is_some()
+                || body.height == Some(1440)
+                || (body.quality_auto == Some(true) && body.copy != Some(true)))
+        {
+            body.audio = state
+                .transcode
+                .candidate_audio_index(source, body.audio)
+                .await;
+            let catalog = state
+                .transcode
+                .quality_candidates(
+                    source,
+                    caps,
+                    body.audio,
+                    body.audio_offset_ms.unwrap_or(0),
+                    body.subtitle_burn,
+                    crate::transcode::Presentation::Vod,
+                )
+                .await;
+            let picked = if requested.is_none() && body.height != Some(1440) {
+                state
+                    .transcode
+                    .quality_display_aspect(source)
+                    .await
+                    .and_then(|aspect| {
+                        plurx_core::playback::candidate::select_quality_candidate(
+                            &catalog,
+                            aspect,
+                            caps.display
+                                .as_ref()
+                                .and_then(|display| display.presentation_target),
+                            None,
+                        )
+                    })
+                    .or_else(|| {
+                        catalog.iter().find(|candidate| {
+                            candidate.target_height == height as u32
+                                && candidate.decoder_compatible
+                                && candidate.route
+                                    == plurx_core::playback::candidate::CandidateRoute::Encode
+                        })
+                    })
+            } else {
+                catalog.iter().find(|candidate| {
+                    requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)
+                        && candidate.decoder_compatible
+                })
+            };
+            let candidate = picked.ok_or_else(|| {
+                ApiError::Conflict("candidate_recipe_changed_or_decoder_unavailable".to_owned())
+            })?;
+            candidate_copy =
+                candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
+            height = i64::from(candidate.target_height);
+            candidate_context = Some(crate::transcode::TranscodeManager::candidate_context(
+                candidate,
+            ));
+        }
+    } else if body.intent.as_ref().is_some_and(|intent| {
+        matches!(
+            intent.selection.quality,
+            plurx_core::playback::DesiredQuality::Auto {
+                candidate_id: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(ApiError::BadRequest(
+            "candidate_requires_current_capabilities".to_owned(),
+        ));
+    }
     let native_subtitles = body.native_subtitles == Some(true);
     let native_subtitle = body.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
@@ -1104,6 +1232,7 @@ pub(crate) async fn resolve_plan(
         }
     }
     let mut request = body.into_request(file_id, height);
+    request.candidate_context = candidate_context;
     if request
         .request_id
         .as_ref()
@@ -1127,6 +1256,20 @@ pub(crate) async fn resolve_plan(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
+    if request.candidate_context.is_some() {
+        request.kind = if candidate_copy {
+            match request.kind {
+                crate::transcode::SessionKind::Copy { .. } => request.kind,
+                _ => {
+                    return Err(ApiError::Conflict(
+                        "candidate_copy_no_longer_compatible".to_owned(),
+                    ))
+                }
+            }
+        } else {
+            crate::transcode::SessionKind::Transcode { height }
+        };
+    }
     Ok(ResolvedPlan {
         request,
         height,
@@ -1266,17 +1409,6 @@ async fn create_with_purpose(
     // must still activate, or the first play of every title would be refused.
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
-    if req.intent.as_ref().is_some_and(|intent| {
-        matches!(
-            intent.selection.quality,
-            plurx_core::playback::DesiredQuality::Auto {
-                candidate_id: Some(_),
-                ..
-            }
-        )
-    }) {
-        return Err(ApiError::BadRequest("candidate_unsupported".to_owned()));
-    }
     let mut recorded_ask_revision: Option<i64> = None;
     if let Some(intent) = req.intent.as_ref() {
         intent
@@ -1353,6 +1485,20 @@ async fn create_with_purpose(
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
     // exactly the population these lines exist to count down to zero.
+    let candidate_decoder_caps = req.caps.as_ref().and_then(|caps| {
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(
+            caps,
+            caps.display
+                .as_ref()
+                .and_then(|display| display.presentation_target)
+                .map_or(1, |target| target.revision),
+        )
+    });
+    let candidate_target = req.caps.as_ref().and_then(|caps| {
+        caps.display
+            .as_ref()
+            .and_then(|display| display.presentation_target)
+    });
     let client_build = client_build_label(req.caps.as_ref(), &headers);
     // E4: the client's echo stops being an instruction the moment it sends
     // the capabilities the plan was derived from. Everything below reads the
@@ -1646,9 +1792,15 @@ async fn create_with_purpose(
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
-        candidate_id: None,
-        presentation_target: None,
-        decoder_caps: None,
+        candidate_id: request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        presentation_target: request.candidate_context.as_ref().and(candidate_target),
+        decoder_caps: request
+            .candidate_context
+            .as_ref()
+            .and(candidate_decoder_caps.clone()),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
@@ -2105,7 +2257,38 @@ async fn create_with_purpose(
     } else {
         info.playlist_url
     };
+    let display_aware_enabled = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     let response = StartResponse {
+        display_aware_auto_protocol: Some("route-v1".to_owned()),
+        quality_candidate_id: request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        quality_candidates: if let (true, Some(source), Some(caps)) = (
+            display_aware_enabled,
+            source.as_ref(),
+            candidate_decoder_caps.as_ref(),
+        ) {
+            Some(
+                state
+                    .transcode
+                    .quality_candidates(
+                        source,
+                        &caps.device_caps(),
+                        request.audio_index,
+                        request.audio_offset_ms,
+                        request.subtitle_burn,
+                        request.presentation,
+                    )
+                    .await,
+            )
+        } else {
+            None
+        },
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,

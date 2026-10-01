@@ -1217,8 +1217,7 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    request.candidate_id.is_none()
-        && request.decoder_caps.is_none()
+    (request.candidate_id.is_none() || request.decoder_caps.is_some())
         && request.protocol_version == crate::media_pool::PROTOCOL_VERSION
         && uuid::Uuid::parse_str(&request.incarnation_id).is_ok()
         && request.user_id > 0
@@ -3260,6 +3259,8 @@ fn relay_response_with_limits_observed(
         header::ETAG,
         header::LAST_MODIFIED,
         header::CONTENT_DISPOSITION,
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        HeaderName::from_static("x-plurx-producer-paced"),
     ] {
         if let Some(value) = response.headers().get(name.as_str()) {
             let name = HeaderName::from_bytes(name.as_str().as_bytes())

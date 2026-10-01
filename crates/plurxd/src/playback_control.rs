@@ -628,6 +628,33 @@ pub(crate) struct RuntimeFrameRate {
     pub denominator: u32,
 }
 
+impl DecoderCapsSnapshot {
+    pub(crate) fn from_device_caps(
+        caps: &plurx_core::playback::DeviceCaps,
+        revision: u64,
+    ) -> Option<Self> {
+        let video: Vec<_> = caps.video.iter().map(|entry| serde_json::json!({
+            "codec": entry.codec, "profiles": entry.profiles, "available": true,
+            "dynamic_ranges": entry.present.iter().filter_map(|transfer| match transfer {
+                plurx_core::playback::Transfer::Sdr => Some("sdr"), plurx_core::playback::Transfer::Pq => Some("hdr10"), plurx_core::playback::Transfer::Hlg => Some("hlg"), _ => None,
+            }).chain((!entry.dv_profiles.is_empty()).then_some("dolby_vision")).collect::<Vec<_>>(),
+            "dv_profiles": entry.dv_profiles, "max_width": entry.max_width, "max_height": entry.max_height,
+            "max_frame_rate": entry.max_frame_rate, "max_bitrate_bps": entry.max_bitrate_bps,
+        })).collect();
+        serde_json::from_value(serde_json::json!({"revision": revision, "video": video})).ok()
+    }
+
+    pub(crate) fn device_caps(&self) -> plurx_core::playback::DeviceCaps {
+        let video: Vec<_> = self.video.iter().filter(|entry| entry.available).map(|entry| serde_json::json!({
+            "codec": entry.codec, "profiles": entry.profiles, "max_width": entry.max_width, "max_height": entry.max_height,
+            "max_frame_rate": entry.max_frame_rate, "max_bitrate_bps": entry.max_bitrate_bps,
+            "dv_profiles": entry.dv_profiles,
+            "present": entry.dynamic_ranges.iter().filter_map(|grade| match grade { DynamicRangePolicy::Sdr => Some("sdr"), DynamicRangePolicy::Hdr10 | DynamicRangePolicy::DolbyVision => Some("pq"), DynamicRangePolicy::Hlg => Some("hlg"), _ => None }).collect::<Vec<_>>(),
+        })).collect();
+        serde_json::from_value(serde_json::json!({"v": 2, "video": video, "audio": ["aac"], "containers": ["mp4"], "transports": ["hls"]})).expect("validated runtime constraints preserve capability schema")
+    }
+}
+
 impl TryFrom<DecoderCapsSnapshotWire> for DecoderCapsSnapshot {
     type Error = &'static str;
 
@@ -1381,7 +1408,9 @@ impl EffectiveSelection {
         delivered_height: i64,
         dynamic_range: Option<String>,
     ) -> Self {
-        Self::from_request(&recipe.request, delivered_height, dynamic_range)
+        let mut effective = Self::from_request(&recipe.request, delivered_height, dynamic_range);
+        effective.candidate_id = recipe.candidate_id;
+        effective
     }
 
     /// The same view, from the request alone.
@@ -1406,7 +1435,10 @@ impl EffectiveSelection {
             SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
-            candidate_id: None,
+            candidate_id: request
+                .candidate_context
+                .as_ref()
+                .map(|context| context.candidate_id),
             quality_auto: request.automatic,
             height: delivered_height,
             audio_track: request.audio_index,
@@ -15901,6 +15933,11 @@ mod tests {
         delivered_bps: Option<i64>,
     ) -> HlsSessionInfo {
         HlsSessionInfo::Vod(Box::new(crate::vodserve::VodSessionInfo {
+            active_encode_milli_realtime: None,
+            active_encode_age_ms: None,
+            active_encode_active_ms: None,
+            active_encode_segments: None,
+            active_encode_candidate_id: None,
             // A plausible total, not a rate divided by eight: a fixture that
             // encodes the wrong unit is how the wrong unit gets copied.
             delivered_bytes: delivered_bps.map_or(0, |_| 4_194_304),

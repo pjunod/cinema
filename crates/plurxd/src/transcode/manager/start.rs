@@ -421,7 +421,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
-        candidate_profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+        candidate_context: Option<&super::CandidateExecutionContext>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
@@ -496,10 +496,13 @@ impl TranscodeManager {
             None,
             grade,
         );
-        if let Some(profile) = candidate_profile {
-            opts.auto_quality_rate_profile = Some(profile);
-            opts.video_bitrate_kbps = profile.video_bitrate_kbps();
-            opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+        if let Some(context) = candidate_context {
+            opts.normalized_geometry = true;
+            if let Some(profile) = context.profile {
+                opts.auto_quality_rate_profile = Some(profile);
+                opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+                opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
         }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
@@ -621,10 +624,13 @@ impl TranscodeManager {
             sw_permit.as_ref().map(|p| p.threads() as u32),
             grade,
         );
-        if let Some(profile) = candidate_profile {
-            opts.auto_quality_rate_profile = Some(profile);
-            opts.video_bitrate_kbps = profile.video_bitrate_kbps();
-            opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+        if let Some(context) = candidate_context {
+            opts.normalized_geometry = true;
+            if let Some(profile) = context.profile {
+                opts.auto_quality_rate_profile = Some(profile);
+                opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+                opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
         }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;

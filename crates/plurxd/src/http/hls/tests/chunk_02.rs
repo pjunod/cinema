@@ -2513,6 +2513,9 @@
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),

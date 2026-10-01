@@ -1,6 +1,6 @@
 # Automatic quality — the best sustainable picture on each display
 
-**Status:** M0/B-R1 source implementation in progress; combined feature
+**Status:** combined server/client implementation in progress; combined feature
 qualification remains open · Paul authorized GPT-6.1 Sol implementation on
 2026-09-30
 · **Written:** 2026-09-30 · **Original source baseline:** `ceb7dd8cc`
@@ -1287,3 +1287,41 @@ general scanning retains Jellyfin FFprobe unchanged. The build checks static
 closure on each target architecture. x86 compilation and production installation
 are not claimed. Receipt files remain under the external task artifact directory
 `/private/tmp/plurx-auto-static-probe/compiled/docs`; no production mutation occurred.
+
+
+### 9.8 Connected route and runtime source batch
+
+The negotiated `route-v1` response carries canonical full-recipe candidates and
+an active candidate ID. Decision, manual 1440 create and prepared Auto requests
+now resolve through the catalog. Worker envelopes retain candidate/target/decoder
+snapshots and reconstruct the internal context before execution; a different
+worker recipe is refused rather than relabelled. Final prepared commit compares
+the latest target and decoder snapshot with the staged recipe. Explicit candidate
+recovery bypasses legacy height reinterpretation after predecessor ownership is
+verified. The catalog retains unknown sustainability separately from compatible
+manual choices and bounded speculative trials; initial Auto does not treat an
+unknown production sample as proof.
+
+An unproved compatible route may obtain a nonpreemptive prepared slot while the
+incumbent keeps running. Actual successor frame/buffer/link and live encode
+production evidence gates commit. Completed unpaced production measurements are
+candidate-specific and require at least two segments and two seconds of active
+wall time; permit waits, suspension and retries reset the window. Transfer proof
+requires completed network bodies, excludes cache and producer pacing, and expires
+at 15 seconds. The six-per-hour voluntary budget excludes severe recovery and
+natural viewer discontinuities. Original source peak bitrate remains unknown
+unless independently measured; source average is not promoted into peak proof.
+
+For a bounded return to an original with unknown global peak, the clients can
+use at least two successor segments covering two seconds of media: completed
+unpaced network throughput must exceed 1.8 times the maximum observed segment
+wire bitrate. This is empirical evidence for those segments, not a claimed
+whole-title peak. Missing media durations or provenance leave that path unknown;
+natural-boundary recovery still follows the original-first compatibility rule.
+
+Rust1.97.1 daemon all-target compiler checks passed after the catalog, relay and
+commit-fence integration. Web syntax/types and native compilers remain source
+checks; new focused regression definitions have not been run under the user's
+batched workflow. Full client controller integration, exact cache offering and
+final adversarial/fast-lane qualification remain in progress. No physical D3,
+TCL playback, source-grade 1440 throughput or production deployment is claimed.
