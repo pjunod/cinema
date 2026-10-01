@@ -190,15 +190,16 @@ impl VodServe {
         ids
     }
 
-    async fn try_create_with_release_fence(
+    /// Resolve immutable media without attaching a public playback handle.
+    /// The returned build guard protects the lookup/reader-attachment gap;
+    /// callers must commit their parent-owned reader graph before dropping it.
+    async fn prepare_rendition(
         &self,
         prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
-        attribution: VodAttribution<'_>,
-        session_id: String,
-        fences: VodCreateFences<'_>,
-    ) -> Result<VodStart, String> {
+        viewer: Option<&crate::state::PlaybackViewerDemand>,
+    ) -> Result<RenditionAttachment, String> {
         // The one funnel every create passes through: the plain entry point,
         // the cluster one that every shipped caller actually uses, and the
         // resurrection of a session from its durable route. Applying the
@@ -273,8 +274,7 @@ impl VodServe {
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
-                .await
+            self.try_cluster_fragment_index(file, video, viewer).await
         } else {
             Ok(None)
         };
@@ -362,7 +362,7 @@ impl VodServe {
                                 file,
                                 video,
                                 Some(&current),
-                                fences.viewer.as_ref(),
+                                viewer,
                             )
                             .await
                             {
@@ -403,7 +403,7 @@ impl VodServe {
                             file,
                             video,
                             None,
-                            fences.viewer.as_ref(),
+                            viewer,
                         )
                         .await
                         {
@@ -458,8 +458,7 @@ impl VodServe {
             encoding: prepared.encoding,
         };
         let key = rendition_key(&recipe, &identity);
-        let attachment = self
-            .shared
+        self.shared
             .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
             .await?
             .ok_or_else(|| {
@@ -467,7 +466,22 @@ impl VodServe {
                     "vod_source_unsupported",
                     "the fragment index produced an empty VOD plan",
                 )
-            })?;
+            })
+    }
+
+    async fn try_create_with_release_fence(
+        &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        fences: VodCreateFences<'_>,
+    ) -> Result<VodStart, String> {
+        let req = prepared.request;
+        let attachment = self
+            .prepare_rendition(prepared, file, settings, fences.viewer.as_ref())
+            .await?;
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);

@@ -1492,3 +1492,14 @@ could resume a paused viewer or undo a newer Play. The authored regression
 covers both directions and checks that the incumbent has one restored owner.
 Its focused command is `node tests/playback/web-control.test.js --prepared-rollback`;
 execution remains deferred to the final fast lane.
+
+### 10.21 Prepare immutable children without public sessions
+
+The VOD create funnel now separates immutable rendition preparation from
+public session registration. Both ordinary and cluster creation use the
+extracted preparation path. It returns the existing rendition build guard,
+which stays held until the caller commits its reader graph; source attestation,
+recipe resolution, cache adoption and cancellation-independent build settlement
+retain their prior ordering. This is the seam for parent-owned children, not
+activation of continuous delivery. Pinned workspace/all-target compilation
+passed; no unit execution was added during implementation.
