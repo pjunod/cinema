@@ -1741,6 +1741,7 @@ dependencies = [
  "dotenvy",
  "fastwebsockets",
  "flume",
+ "fs4",
  "getrandom 0.4.3",
  "hex",
  "hiqlite-derive",

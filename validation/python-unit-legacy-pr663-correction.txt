@@ -1,0 +1,28 @@
+# P02 #663 — Linux packaging correction
+
+Candidate157e0b3cfd52eae074f674379f924a6b442eb6b8,
+tree6eba9191f49ee673dec536316c408ed6ccf08c54, effortec79.
+Prior gate API3703/UI3682 failed policy preflight:603 tests, one error,
+package-windows exit127. Read-only host inventory confirms bash/python3/
+sha256sum present, zip absent. No compilation ran in that failed gate.
+
+Use already-required Python zipfile CLI for real archive creation. Test
+puts an executable failing zip on PATH, checks retained executable/PDB bytes
+inside the archive, and retains missing-PDB refusal. Old command mutation
+fails127; restored PDB6/docs4 pass. No skip or fake archive.
+
+Normal hook catalog2586/fmt/Clippy-D1m10/70JS pass. Exact pinned Rust1.97.1
+workspace/all-target check54.85s exit0, artifact16/docs4 pass1.805s, all21
+fields resolve. Original real GNU6-unit positive remains retained.
+
+Committed three-file source-only archive ran PDB6 under Linux Python3.14.4
+on nynuc: PASS0.325s. Owned root /var/tmp/plurx-p02-zip-proof.7UQCsl was
+removed by its exact mktemp-root exit trap. Initial archive named absent
+namespace init files, failed before extraction; its owned root
+/var/tmp/plurx-p02-zip-proof.RlP7AX was independently verified absent before
+the corrected run. No .git, credential, production data or package install.
+
+Fresh maine82=>1b2 is #662 runtime/OPS/census work, no P02 artifact/profile/
+workflow/plan overlap. Newer main is not overwritten. Root target lease
+released to D01 after check terminal completion. Exactly one formal review27
+remains; previous findings disposed, new current-head gate still required.

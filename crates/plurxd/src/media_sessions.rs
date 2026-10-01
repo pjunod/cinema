@@ -5942,6 +5942,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
         })
@@ -5953,6 +5954,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
         })
@@ -5967,6 +5969,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
         })
@@ -8996,6 +8999,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
                 },

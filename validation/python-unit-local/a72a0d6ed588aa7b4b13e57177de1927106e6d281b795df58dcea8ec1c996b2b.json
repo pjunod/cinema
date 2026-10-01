@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/python-unit-pr-receipts",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "f579c9ed9c4454c5c292a4ff9f2af6d917332b5cac7f4b1bec2b49b37f69c908",
+  "command": "python3 -m unittest tests.validation.test_python_unit_receipts.PythonReceiptCase.test_missing_expired_and_concurrent_attempts_refuse_before_units tests.validation.test_python_unit_receipts.PythonReceiptCase.test_manual_dispatch_rejects_wrong_repo_head_base_and_ambiguity -v",
+  "output": "Both named tests ... ok; Ran 2 tests in 0.000s; OK; exit 0",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_missing_expired_and_concurrent_attempts_refuse_before_units",
+    "test_python_unit_receipts.PythonReceiptCase.test_manual_dispatch_rejects_wrong_repo_head_base_and_ambiguity"
+  ],
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 2
+  },
+  "source_attribution": "Original uncommitted worktree execution after adding these two IDs; first five tests were not repeated. No claim changed later implementation executed again."
+}
