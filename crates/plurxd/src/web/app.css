@@ -709,7 +709,7 @@
   .ptransport-spacer{flex:1 1 auto}
   .player.idle .ptransport,.player.idle .ptimeline,.player.idle .pskip{opacity:0;pointer-events:none;visibility:hidden;transition:opacity .2s,visibility 0s .2s}
   .picon{background:transparent;border:0;color:#fff;font-size:17px;line-height:1;cursor:pointer;padding:4px;opacity:.92;text-shadow:0 1px 4px rgba(0,0,0,.6)}
-  .pseek-seconds{font:700 12px/1 ui-sans-serif,system-ui,sans-serif;margin-left:2px}
+  .pseek-arrows{display:block;width:32px;height:24px}
   .picon:hover{opacity:1;color:var(--accent)}
   /* CC sits in the transport (where people look for subtitles) and lights up
      while a track is on; it opens the same menu as the top bar's button. */
