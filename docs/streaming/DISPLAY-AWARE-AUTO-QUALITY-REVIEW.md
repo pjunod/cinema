@@ -11,7 +11,8 @@ ranked findings, with the author's subsequent dispositions recorded separately.
 No runtime changes, encoder benchmarks or physical playback tests were made
 during that planning review.
 The [independent Opus review](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) was
-subsequently supplied by Paul and is preserved unchanged. Its verdict was
+subsequently supplied by Paul; its [source text](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt)
+is preserved unchanged behind a lifecycle wrapper. Its verdict was
 **revise first, narrowly**. §4 records this later reconciliation; the earlier
 internal findings below are historical dispositions, not a claim that Opus
 approved the revised plan. The [handoff](DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md)
@@ -153,7 +154,7 @@ prerequisites.
 
 **Received:** 2026-09-30 · **Reviewer identified in supplied text:**
 claude-opus-5-5 (Cowork) · **Its inspected baseline:** `ceb7dd8cc`.
-The original text is [preserved here](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md).
+The original text is [preserved here](DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt).
 Reconciliation spot-checked relevant source at `b8f3c7587` after the user's
 checkout moved to another task branch; it did not fetch or claim current-main
 evidence. No unrelated files were changed.
