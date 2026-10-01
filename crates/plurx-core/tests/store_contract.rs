@@ -313,6 +313,7 @@ const DVR_METHODS: &[&str] = &[
     "dvr_overview_rows",
     "list_dvr_schedule_window",
     "transition_dvr_recording",
+    "purge_dvr_recording_catalog",
     "transition_dvr_recording_with_event",
     "progress_dvr_recording",
     "request_dvr_stop",
@@ -18081,7 +18082,8 @@ fn contract_inventory_matches_every_store_method() {
     // E1 adds a bounded named-settings snapshot for playback preferences.
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
-    assert_eq!(declared.len(), 449, "review the Store method count");
+    // DVR physical cleanup adds the atomic linked-catalog purge.
+    assert_eq!(declared.len(), 450, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

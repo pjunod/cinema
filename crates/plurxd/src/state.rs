@@ -1607,6 +1607,11 @@ const MAX_ANALYSIS_PROGRESS: usize = 64;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub struct AnalysisProgress {
     pub job_id: String,
+    /// Explicit correlation; legacy job_id may be an artifact key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub durable_fence: Option<i64>,
     pub file_id: i64,
     pub item_id: i64,
     pub title: String,
@@ -1643,6 +1648,8 @@ impl AnalysisProgress {
     pub(crate) fn test_row(job_id: &str, title: &str) -> Self {
         Self {
             job_id: job_id.to_owned(),
+            durable_job_id: None,
+            durable_fence: None,
             file_id: 1,
             item_id: 1,
             title: title.to_owned(),
@@ -1944,11 +1951,43 @@ impl AnalysisRuntimeMetrics {
     }
 }
 
-struct AnalysisProgressGuard {
+pub(crate) struct AnalysisProgressGuard {
     jobs: Arc<JobManager>,
     job_id: String,
     target_node_id: String,
     registry_epoch: u64,
+}
+
+impl AnalysisProgressGuard {
+    pub(crate) fn stage(&self, stage: &str) {
+        let mut rows = self
+            .jobs
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(row) = rows.get_mut(&(self.job_id.clone(), self.target_node_id.clone())) {
+            if row.registry_epoch == self.registry_epoch {
+                self.jobs.analysis_metrics.transition(&row.stage, stage);
+                row.stage = stage.into();
+                row.updated_at_ms = clock_ms();
+                row.elapsed_ms = row.updated_at_ms.saturating_sub(row.started_at_ms).max(0);
+            }
+        }
+    }
+
+    fn attach_attempt(&self, token: &plurx_core::store::background_jobs::JobToken) {
+        let mut rows = self
+            .jobs
+            .analysis_progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(row) = rows.get_mut(&(self.job_id.clone(), self.target_node_id.clone())) {
+            if row.registry_epoch == self.registry_epoch {
+                row.durable_job_id = Some(token.job_id.clone());
+                row.durable_fence = Some(token.fence);
+            }
+        }
+    }
 }
 
 impl Drop for AnalysisProgressGuard {
@@ -4438,6 +4477,24 @@ impl JobManager {
             .load(Ordering::Relaxed)
     }
 
+    pub(crate) fn start_probe_progress(
+        self: &Arc<Self>,
+        token: &plurx_core::store::background_jobs::JobToken,
+        file_id: i64,
+        total_bytes: u64,
+    ) -> AnalysisProgressGuard {
+        let guard = self.start_analysis_progress(
+            (&token.job_id, ""),
+            file_id,
+            "media_probe",
+            "probing",
+            total_bytes,
+            0,
+        );
+        guard.attach_attempt(token);
+        guard
+    }
+
     fn start_analysis_progress(
         self: &Arc<Self>,
         identity: (&str, &str),
@@ -4473,6 +4530,8 @@ impl JobManager {
             progress_key,
             AnalysisProgress {
                 job_id: job_id.to_owned(),
+                durable_job_id: None,
+                durable_fence: None,
                 file_id,
                 item_id: 0,
                 title: String::new(),
@@ -9094,6 +9153,9 @@ impl JobManager {
             job.source_size.max(0) as u64,
             0,
         );
+        if let Some(token) = fence.snapshot().await {
+            _progress.attach_attempt(&token);
+        }
         let node_id = self.coordinator.node_id().to_owned();
         let lost = fence.loss_token();
         let retry_identity = format!("{}:{}", job.cache_key, job.target_node_id);
@@ -11583,6 +11645,49 @@ mod tests {
             policy.backoff_max_ms,
             "a large attempt cannot overflow or exceed the configured ceiling"
         );
+    }
+
+    #[test]
+    fn durable_progress_attachment_cannot_relabel_a_replacement_execution() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = crate::test_tempdir().expect("artwork");
+        let jobs = manager(store, artwork.path());
+        let old = jobs.start_analysis_progress(
+            ("cache", "node"),
+            1,
+            "fragment_index",
+            "verifying",
+            100,
+            0,
+        );
+        let current = jobs.start_analysis_progress(
+            ("cache", "node"),
+            1,
+            "fragment_index",
+            "fragment_index",
+            100,
+            0,
+        );
+        let token = plurx_core::store::background_jobs::JobToken {
+            job_id: uuid::Uuid::new_v4().to_string(),
+            node_id: "node".into(),
+            boot_id: uuid::Uuid::new_v4().to_string(),
+            claim_id: uuid::Uuid::new_v4().to_string(),
+            fence: 2,
+            revision: 1,
+            lease_expires_ms: clock_ms() + 30_000,
+        };
+        old.attach_attempt(&token);
+        assert!(jobs.analysis_progress_snapshot()[0]
+            .durable_job_id
+            .is_none());
+        current.attach_attempt(&token);
+        drop(old);
+        let row = &jobs.analysis_progress_snapshot()[0];
+        assert_eq!(row.durable_job_id.as_deref(), Some(token.job_id.as_str()));
+        assert_eq!(row.durable_fence, Some(2));
+        drop(current);
+        assert!(jobs.analysis_progress_snapshot().is_empty());
     }
 
     #[test]

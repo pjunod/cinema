@@ -308,6 +308,7 @@ failures.
 | File | Answers | |
 |---|---|---|
 | [STATUS-HISTORY.md](cluster/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
+| [CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md) | Activity tabs, exact worker/job visibility, and reviewed throughput improvements with playback and storage constraints. | open |
 | [CLOCK-SKEW-GUARD-DESIGN.md](cluster/CLOCK-SKEW-GUARD-DESIGN.md) | Design decision from the 2026-09-20 architecture review: how the existing signed peer timestamp becomes a conservative offset interval without widening the 30 s/5 s auth windows, which actions refuse, and what fleet evidence must precede implementation. | open |
 | [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md](cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | Implementation plan from the 2026-09-20 architecture review: why ten store modules never run the three-voter lane, and what a `?N` validator plus a discarded-result audit would catch. | built |
 | [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md](cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | Implementation plan from the 2026-09-20 architecture review: who owns the hiqlite fork, and which dependency edges pull two crypto backends and an ML stack into every build. | open |
