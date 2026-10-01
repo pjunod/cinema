@@ -978,6 +978,7 @@ function buildPlayer(attempt,decided,prepared){
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
     qualityCandidates:Array.isArray(decision.quality_candidates)?decision.quality_candidates:null,
+    measuredCandidateOutputs:Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null,
     qualityCandidateId:decision.quality_candidate_id||null,
     bandwidthSeedBps:replacementBandwidthSeed,
     abr:{requestedCandidateId:decision.quality_candidate_id||null,

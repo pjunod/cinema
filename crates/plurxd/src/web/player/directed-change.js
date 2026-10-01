@@ -822,6 +822,7 @@ function attachSession(v, t, info, wantSec){
   t.vod=!!info.vod;
   if(Array.isArray(info.ladder)&&info.ladder.length) t.ladder=info.ladder;
   t.qualityCandidates=Array.isArray(info.quality_candidates)?info.quality_candidates:null;
+  t.measuredCandidateOutputs=Array.isArray(info.measured_candidate_outputs)?info.measured_candidate_outputs:null;
   t.qualityCandidateId=info.quality_candidate_id||null;
   t.qualityProtocol=info.display_aware_auto_protocol==='route-v1'?'route-v1':null;
   if(t.abr){

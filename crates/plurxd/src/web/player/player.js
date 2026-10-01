@@ -120,6 +120,7 @@
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
+ * @property {any[]|null} [measuredCandidateOutputs] bounded HTTP-only full-output cost provenance
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
  * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback

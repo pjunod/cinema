@@ -9887,6 +9887,7 @@ extension PlayerController {
         autoRouteProtocol = hls.displayAwareAutoProtocol
         if hls.displayAwareAutoProtocol == "route-v1" {
             if let candidates = hls.qualityCandidates { decision?.qualityCandidates = candidates }
+            decision?.measuredCandidateOutputs = hls.measuredCandidateOutputs
             autoActiveCandidateId = hls.qualityCandidateId
         }
         guard let bootstrap = hls.control, bootstrap.isValid else {
@@ -10105,6 +10106,7 @@ extension PlayerController {
                   self.decision?.fileId == fileId else { return }
             if fresh?.decision.displayAwareAutoProtocol == "route-v1" {
                 self.decision?.qualityCandidates = fresh?.decision.qualityCandidates
+                self.decision?.measuredCandidateOutputs = fresh?.decision.measuredCandidateOutputs
             }
             // A decision is a plan; it cannot relabel the attached presentation.
         }
@@ -10118,11 +10120,22 @@ extension PlayerController {
         if autoPreparing { autoDesiredCandidate = nil; autoPreparing = false }
     }
 
+    private func measuredCostCatalog(_ offered: [QualityCandidate]) -> [QualityCandidate] {
+        offered.map { candidate in
+            var measured = candidate
+            let outputs = decision?.measuredCandidateOutputs
+            measured.peakBps = measuredCandidatePeak(candidate, outputs: outputs)
+            measured.averageBps = measured.peakBps == nil ? nil : outputs?.first(where: { $0.matches(candidate) })?.averageBps
+            return measured
+        }
+    }
+
     private func selectAutoStallRecoveryCandidate() {
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
               selectedHeight == nil, !selectedQualityIsOriginal, wantsPlayback,
-              seekState.pendingMs == nil, let candidates = decision?.qualityCandidates,
+              seekState.pendingMs == nil, let offered = decision?.qualityCandidates,
+              case let candidates = measuredCostCatalog(offered),
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
         else { return }
         let now = PlaybackControlSession.monotonicMs()
@@ -10179,10 +10192,16 @@ extension PlayerController {
     }
 
     private func autoStagedOriginalAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
-        guard autoPreparing, autoVoluntary, let desired = autoDesiredCandidate,
-              desired.route != "encode", desired.peakBps == nil else { return true }
-        return autoOriginalTransferMarginProven(autoStagedTransfers, sessionId: action.sessionId,
-                                               nowMs: PlaybackControlSession.monotonicMs())
+        guard autoPreparing, autoVoluntary, let desired = autoDesiredCandidate else { return true }
+        guard let peak = measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs) else { return false }
+        let now = PlaybackControlSession.monotonicMs()
+        let samples = autoStagedTransfers.filter { sample in
+            sample.segmentId.contains("/\(action.sessionId)/") && sample.receipt != nil && sample.etag != nil
+                && sample.statusCode == 200 && sample.networkLoad && !sample.fromLocalCache
+                && sample.producerPaced == false && sample.ageMs(nowMs: now) <= 15_000
+                && (sample.bodyDurationSeconds ?? 0) > 0 && sample.bodyBytes > 0
+        }
+        return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= Double(peak) * 1.8 }
     }
 
     private func autoStagedProductionAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
@@ -10215,7 +10234,8 @@ extension PlayerController {
               player.rate > 0, surface.presenting, seekState.pendingMs == nil, !autoPreparing,
               preparedPlayer == nil, preparedReplacement.shouldAskForPreparation,
               let target = presentationTarget,
-              let candidates = decision?.qualityCandidates,
+              let offered = decision?.qualityCandidates,
+              case let candidates = measuredCostCatalog(offered),
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
         else { autoUpgradeSinceMs = nil; return }
         if sessionStatusAgeMs.map({ $0 <= 15_000 }) == true, sessionStatus?.producerState == "held" {
@@ -10266,7 +10286,7 @@ extension PlayerController {
             autoUpgradeSinceMs = nil
         } else {
             let fitting = eligible.filter { candidate in
-                link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? (candidate.route != "encode") } == true
+                link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? false } == true
             }
             chosen = autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
             guard let chosen,

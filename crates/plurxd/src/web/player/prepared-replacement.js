@@ -573,10 +573,8 @@ function preparedQualityProofReady(p,state){
   const now=performance.now(), proof=state.qualityTransfer;
   const bps=PlaybackPolicy.qualityTransferBps(proof?{...proof,age_ms:now-proof.atMs}:null);
   if(!candidate) return false;
-  if(candidate.peak_bps>0){
-    if(!(bps>=candidate.peak_bps*1.8)) return false;
-  }else if(candidate.route==="encode"||!PlaybackPolicy.qualityOriginalTrialMargin(
-    (state.qualityTransfers||[]).map(row=>({...row,age_ms:now-row.atMs})))) return false;
+  const output=measuredCandidateOutput(p,candidate);
+  if(!output||!(bps>=output.peak_bps*1.8)) return false;
   return candidate.route!=="encode"||candidate.complete_cache===true
     ||state.qualityHealthAtMs!=null
       &&PlaybackPolicy.qualityEncodeProof(state.qualityHealth,id,now-state.qualityHealthAtMs)

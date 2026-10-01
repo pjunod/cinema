@@ -6,6 +6,33 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 qualified full-output sidecar is required for positive candidate margin", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const begin=source.indexOf("function measuredCandidateOutput(");
+  const end=source.indexOf("\nasync function ",begin+1);
+  const context=vm.createContext({PlaybackPolicy:policy});
+  vm.runInContext(source.slice(begin,end),context);
+  const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"encode",width:1920,height:1080,
+    target_height:1080,decoder_compatible:true,complete_cache:true,sustainable:true,average_bps:1,peak_bps:1};
+  const player={measuredCandidateOutputs:null};
+  const transfer={bytes:3750000,elapsed_ms:1000,age_ms:0,completed:true,from_cache:false,producer_paced:false};
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"planned/cache fields are not proof");
+  const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:"encode",
+    artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),
+    qualification:"complete_full_mux_rfc8216_v1",average_bps:12000000,peak_bps:14000000};
+  player.measuredCandidateOutputs=[output];
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),true);
+  output.peak_bps=20000000;
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"fresh 30M acquisition cannot prove 1.8x20M margin");
+  output.peak_bps=14000000; output.recipe_digest[0]=5;
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"full recipe mismatch");
+  output.recipe_digest[0]=4; output.qualification="planned";
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false);
+  output.qualification="complete_full_mux_rfc8216_v1";
+  player.measuredCandidateOutputs=[output,{...output}];
+  assert.equal(context.candidatePositiveMargin(player,candidate,transfer),false,"ambiguous duplicate descriptor");
+});
+
 test("a05 genuine completed body carries the response receipt without cache promotion", () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
   const begin=source.indexOf("function completedQualityTransfer(");

@@ -608,6 +608,7 @@ async function refreshQualityCandidates(p){
     if(PLAYER!==p||p.mediaAttachment!==attachment||p.controlIntentGeneration!==intent
       ||candidateQualityContext(p)!==key) return false;
     p.qualityCandidates=Array.isArray(decision.quality_candidates)?decision.quality_candidates:null;
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     p.capsSnapshot=decision._capsSnapshot||currentCapsDocument();
     p.abr.candidateContext=key;
     p.abr.catalogSelectionKey=qualityCatalogSelectionKey(p);
@@ -622,6 +623,37 @@ function candidateTransferEvidence(p,now){
   return transfer&&transfer.attachment===p.mediaAttachment
     ? {...transfer,age_ms:now-transfer.atMs}:null;
 }
+function measuredCandidateOutput(p,candidate){
+  const outputs=p.measuredCandidateOutputs;
+  if(!candidate||!Array.isArray(outputs)||outputs.length>64
+    ||!/^[0-9a-f]{32}$/.test(candidate.id)||!['original','remux','encode'].includes(candidate.route)
+    ||!Array.isArray(candidate.recipe_digest)||candidate.recipe_digest.length!==32
+    ||!candidate.recipe_digest.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)) return null;
+  const matches=outputs.filter(row=>row&&row.candidate_id===candidate.id&&row.route===candidate.route
+    &&Array.isArray(row.recipe_digest)&&row.recipe_digest.length===32
+    &&row.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index])
+    &&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(row.artifact_id)
+    &&/^[0-9a-f]{64}$/.test(row.output_identity)&&row.qualification==='complete_full_mux_rfc8216_v1'
+    &&Number.isSafeInteger(row.average_bps)&&row.average_bps>0
+    &&Number.isSafeInteger(row.peak_bps)&&row.peak_bps>=row.average_bps);
+  return matches.length===1?matches[0]:null;
+}
+function measuredCandidateCatalog(p,candidates){
+  return (candidates||[]).map(candidate=>{
+    const output=measuredCandidateOutput(p,candidate);
+    return {...candidate,average_bps:output?.average_bps??null,peak_bps:output?.peak_bps??null};
+  });
+}
+function candidatePositiveMargin(p,candidate,transfer){
+  const output=measuredCandidateOutput(p,candidate),link=PlaybackPolicy.qualityTransferBps(transfer);
+  return !!output&&link>0&&link>=output.peak_bps*1.8;
+}
+function candidateAdmissionCatalog(p,candidates,current,transfer){
+  return measuredCandidateCatalog(p,candidates).filter(candidate=>candidate.id===current.id
+    ||candidate.width*candidate.height<=current.width*current.height
+      &&!(current.route==='encode'&&candidate.route!=='encode')
+    ||candidatePositiveMargin(p,candidate,transfer));
+}
 async function naturalBoundaryQualityCandidate(p,seekIntent){
   if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto
     ||p.qualityProtocol!=='route-v1'||!Array.isArray(p.qualityCandidates)) return null;
@@ -633,11 +665,14 @@ async function naturalBoundaryQualityCandidate(p,seekIntent){
     if(PLAYER!==p||p.controlSeek!==seekIntent||p.controlIntentGeneration!==generation
       ||qualityForce()!=='auto'||!Array.isArray(decision.quality_candidates)) return null;
     const candidates=decision.quality_candidates;
+    p.measuredCandidateOutputs=Array.isArray(decision.measured_candidate_outputs)?decision.measured_candidate_outputs:null;
     const current=(p.qualityCandidates||[]).find(candidate=>candidate.id===p.qualityCandidateId);
     const progress=p.abr.qualityPressureTransfer, now=performance.now();
     const limit=progress&&progress.attachment===p.mediaAttachment&&now-progress.atMs<=15000?progress.bps:null;
     const blocked=p.abr.candidateState?.blockedCandidates||[];
-    const picked=PlaybackPolicy.selectQualityCandidate({candidates:candidates.filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
+    const picked=PlaybackPolicy.selectQualityCandidate({candidates:current
+      ?candidateAdmissionCatalog(p,candidates,current,candidateTransferEvidence(p,now)).filter(row=>!blocked.includes(row.id))
+      :measuredCandidateCatalog(p,candidates).filter(row=>!blocked.includes(row.id)),target:measuredPresentationTarget(),
       aspect:current?current.width/current.height:null,
       transfer:candidateTransferEvidence(p,now),linkLimitBps:limit});
     p.qualityCandidates=candidates;
@@ -653,7 +688,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
   if(!await refreshQualityCandidates(p)||PLAYER!==p||!playbackOwnsAttachedMedia(p)) return;
   now=performance.now();
   const transfer=candidateTransferEvidence(p,now);
-  const current=p.qualityCandidates.find(candidate=>candidate.id===p.qualityCandidateId);
+  const current=measuredCandidateCatalog(p,p.qualityCandidates).find(candidate=>candidate.id===p.qualityCandidateId);
   if(!current) return;
   let cause='unknown';
   if(['authority-refused','producer-failed','delivery-refused'].includes(causeEvidence.kind)) cause='authority';
@@ -673,7 +708,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     &&speed<1000) cause='encode';
   reportCandidateLinkSample(p,v,cause,now);
   const result=PlaybackPolicy.decideCandidateTransition({
-    state:p.abr.candidateState||{},candidates:p.qualityCandidates,currentId:current.id,
+    state:p.abr.candidateState||{},candidates:candidateAdmissionCatalog(p,p.qualityCandidates,current,transfer),currentId:current.id,
     aspect:current.width/current.height,target:measuredPresentationTarget(),
     sample:{now_ms:now,automatic:qualityForce()==='auto',presenting:p.started,
       paused:v.paused,seeking:v.seeking||!!p.controlSeek,move_in_flight:!!p.pendingMediaChange||p.abr.switching,
