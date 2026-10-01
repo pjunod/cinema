@@ -76,6 +76,17 @@ order and retained fence/errors; both negative controls failed and were
 restored. Draft review preparation is in progress; the independent formal
 review and Effort development gate remain open. Joins remain later work.
 
+**S-14 join continuation, 2026-10-01 (gpt-6.1-sol,
+agent:/root/p02_663_resume_sol61):** `codex/s14-join-lifecycle`, based on
+effort `903201a24`, owns the existing membership manager and lifecycle child,
+the canonical plan, its index description and this S-14 continuation claim.
+Removal [#666](http://192.168.4.7:3000/noirr/plurx/pulls/666) is merged; the
+historical row and its original authors remain intact. The new attempt-local
+join effects feed actual reservation repair/publication and committed-role
+finalization, without changing SQL, protocol transport or adopting the
+unchecked promotion projection. Focused proofs, a separate independent review
+and the effort gate remain required. This is not final effort qualification.
+
 Every executing session follows this exactly. The reason for each rule is the
 failure it prevents.
 
