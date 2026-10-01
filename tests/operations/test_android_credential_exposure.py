@@ -650,12 +650,13 @@ class ShipPhysicalReleaseVariantCase(unittest.TestCase):
         bin_dir = cwd / "bin"
         bin_dir.mkdir(exist_ok=True)
         _write_executable(bin_dir / "uname", "#!/bin/sh\necho Darwin\n")
+        _write_executable(bin_dir / "adb", "#!/bin/sh\nexit 0\n")
         return subprocess.run(
             [str(SHIP_PHYSICAL), "--android", "--dry-run"],
             cwd=cwd,
             env=_clean_environment(
                 PATH=f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
-                PLURX_ADB="/bin/true",
+                PLURX_ADB=str(bin_dir / "adb"),
                 PLURX_REPO=str(cwd / "not-a-repo"),
                 PLURX_RELEASE_ROOT=str(cwd / "release"),
                 **env,
