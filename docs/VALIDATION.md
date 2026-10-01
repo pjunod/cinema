@@ -458,8 +458,8 @@ suspend-resume assertions run on a build that honours
 `-readrate_initial_burst`, rather than being skipped on ffmpeg 8. The nightly
 deep-validation lane also remains on its `ffmpeg-6` runner label.
 
-The five full-sweep jobs in `ci.yml` — `check`, `cluster_daemon`, `web_layout`,
-`vod_web` and `coverage` — use one digest-pinned CI container built from the
+The four full-sweep jobs in `ci.yml` — `check`, `cluster_daemon`, `web_layout`
+and `vod_web` — use one digest-pinned CI container built from the
 Dockerfile's `runtime-assets` stage. That stage supplies the same
 `jellyfin-ffmpeg8` package as the shipped image; its CI layer adds the pinned
 Rust 1.97.1 toolchain, Node 22, and Playwright/Chromium. Both the daemon's
