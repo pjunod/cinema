@@ -13,9 +13,11 @@ enum PlayerControl: Hashable {
     case signIn
     case progress
     case marker
+    case skipBack30
     case skipBack
     case playPause
     case skipForward
+    case skipForward30
     case pictureInPicture
     case audio
     case subtitles
@@ -27,7 +29,7 @@ enum PlayerControl: Hashable {
 extension PlayerControl {
     var isTransportControl: Bool {
         switch self {
-        case .skipBack, .playPause, .skipForward, .pictureInPicture,
+        case .skipBack30, .skipBack, .playPause, .skipForward, .skipForward30, .pictureInPicture,
              .audio, .subtitles, .quality, .settings, .stats:
             true
         default:
@@ -2245,9 +2247,11 @@ struct PlayerView: View {
 
     private var transportControlGroup: some View {
         HStack(spacing: 8) {
+            skipBack30Button
             skipBackButton
             playPauseButton
             skipForwardButton
+            skipForward30Button
         }
     }
 
@@ -2288,6 +2292,22 @@ struct PlayerView: View {
         #endif
     }
 
+    private var skipBack30Button: some View {
+        Button {
+            controller.skip(seconds: -30)
+            revealControls()
+        } label: {
+            Image(systemName: "gobackward.30")
+        }
+        .accessibilityLabel("Back 30 seconds")
+        .accessibilityIdentifier("player-skip-back-30")
+        #if os(tvOS)
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .skipBack30)
+        #endif
+    }
+
     private var playPauseButton: some View {
         Button {
             controller.togglePlayPause()
@@ -2318,6 +2338,22 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .skipForward)
+        #endif
+    }
+
+    private var skipForward30Button: some View {
+        Button {
+            controller.skip(seconds: 30)
+            revealControls()
+        } label: {
+            Image(systemName: "goforward.30")
+        }
+        .accessibilityLabel("Forward 30 seconds")
+        .accessibilityIdentifier("player-skip-forward-30")
+        #if os(tvOS)
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .skipForward30)
         #endif
     }
 

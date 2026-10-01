@@ -47,11 +47,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Forward10
+import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PictureInPictureAlt
 import androidx.compose.material.icons.filled.Replay10
+import androidx.compose.material.icons.filled.Replay30
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -346,9 +348,11 @@ internal fun playerRuntimeLabel(milliseconds: Long): String {
 internal enum class PlayerPanel { Tracks, Settings, Info }
 
 internal enum class PlayerControlId {
+    SkipBack30,
     SkipBack,
     PlayPause,
     SkipForward,
+    SkipForward30,
     Tracks,
     Settings,
     Info,
@@ -361,9 +365,11 @@ internal enum class PlayerControlId {
 }
 
 internal class PlayerControlFocus {
+    val skipBack30 = FocusRequester()
     val skipBack = FocusRequester()
     val playPause = FocusRequester()
     val skipForward = FocusRequester()
+    val skipForward30 = FocusRequester()
     val tracks = FocusRequester()
     val settings = FocusRequester()
     val info = FocusRequester()
@@ -372,9 +378,11 @@ internal class PlayerControlFocus {
     val marker = FocusRequester()
 
     fun requester(control: PlayerControlId): FocusRequester = when (control) {
+        PlayerControlId.SkipBack30 -> skipBack30
         PlayerControlId.SkipBack -> skipBack
         PlayerControlId.PlayPause -> playPause
         PlayerControlId.SkipForward -> skipForward
+        PlayerControlId.SkipForward30 -> skipForward30
         PlayerControlId.Tracks -> tracks
         PlayerControlId.Settings -> settings
         PlayerControlId.Info -> info
@@ -1561,8 +1569,10 @@ private fun PlayerContent(
                     }
                 },
                 onPlayPause = { controller.playPause(); poke() },
+                onSeekBack30 = { controller.seekBy(-30_000); poke() },
                 onSeekBack = { controller.seekBy(-10_000); poke() },
                 onSeekForward = { controller.seekBy(10_000); poke() },
+                onSeekForward30 = { controller.seekBy(30_000); poke() },
                 onScrub = { pendingMs = it.coerceIn(0L, plan.durationMs.coerceAtLeast(0L)) },
                 onScrubEnd = {
                     pendingMs?.let(::seekWithMarkerUndo)
@@ -1783,8 +1793,10 @@ internal fun Controls(
     onTimelineFocused: (Boolean) -> Unit = {},
     onClose: () -> Unit,
     onPlayPause: () -> Unit,
+    onSeekBack30: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
+    onSeekForward30: () -> Unit,
     onScrub: (Long) -> Unit,
     onScrubEnd: () -> Unit,
     onTracks: (() -> Unit)?,
@@ -1880,7 +1892,8 @@ internal fun Controls(
                         listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f)),
                     ),
                 )
-                .padding(start = 28.dp, top = 72.dp, end = 28.dp, bottom = 22.dp),
+                .padding(horizontal = if (formFactor == FormFactor.Compact) 12.dp else 28.dp)
+                .padding(top = 72.dp, bottom = 22.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             Text(
@@ -1953,8 +1966,10 @@ internal fun Controls(
                             focus = resolvedFocus,
                             onFocused = onControlFocused,
                             onPlayPause = onPlayPause,
+                            onSeekBack30 = onSeekBack30,
                             onSeekBack = onSeekBack,
                             onSeekForward = onSeekForward,
+                            onSeekForward30 = onSeekForward30,
                         )
                         Spacer(Modifier.weight(1f))
                         TransportOptions()
@@ -1968,8 +1983,10 @@ internal fun Controls(
                                 focus = resolvedFocus,
                                 onFocused = onControlFocused,
                                 onPlayPause = onPlayPause,
+                                onSeekBack30 = onSeekBack30,
                                 onSeekBack = onSeekBack,
                                 onSeekForward = onSeekForward,
+                                onSeekForward30 = onSeekForward30,
                             )
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
@@ -1999,8 +2016,10 @@ private fun TransportButtons(
     focus: PlayerControlFocus,
     onFocused: (PlayerControlId) -> Unit,
     onPlayPause: () -> Unit,
+    onSeekBack30: () -> Unit,
     onSeekBack: () -> Unit,
     onSeekForward: () -> Unit,
+    onSeekForward30: () -> Unit,
 ) {
     fun modifier(control: PlayerControlId, size: Dp): Modifier = Modifier
         .size(size)
@@ -2012,6 +2031,14 @@ private fun TransportButtons(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        TvIconButton(onClick = onSeekBack30, modifier = modifier(PlayerControlId.SkipBack30, 48.dp)) {
+            Icon(
+                Icons.Filled.Replay30,
+                contentDescription = "Back 30 seconds",
+                tint = Color.White,
+                modifier = Modifier.size(34.dp),
+            )
+        }
         TvIconButton(onClick = onSeekBack, modifier = modifier(PlayerControlId.SkipBack, 48.dp)) {
             Icon(
                 Icons.Filled.Replay10,
@@ -2035,6 +2062,14 @@ private fun TransportButtons(
             Icon(
                 Icons.Filled.Forward10,
                 contentDescription = "Forward 10 seconds",
+                tint = Color.White,
+                modifier = Modifier.size(34.dp),
+            )
+        }
+        TvIconButton(onClick = onSeekForward30, modifier = modifier(PlayerControlId.SkipForward30, 48.dp)) {
+            Icon(
+                Icons.Filled.Forward30,
+                contentDescription = "Forward 30 seconds",
                 tint = Color.White,
                 modifier = Modifier.size(34.dp),
             )

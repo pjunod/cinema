@@ -38,7 +38,7 @@
     ],
     "vertical_seek_seconds": null,
     "notes": [
-      "skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.",
+      "skip_seconds is the default for the 10-second buttons and FF/REW media keys. Dedicated skip_back_30 and skip_forward_30 buttons seek 30 seconds in either direction through the same seek path.",
       "preview_acceleration applies to a HELD direction while scrubbing: repeats 0\u20134 move 10 s, 5\u20139 move 30 s, 10+ move 60 s. A released key resets the ladder.",
       "vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."
     ]
@@ -83,9 +83,11 @@
       {
         "id": "transport",
         "items": [
+          "skip_back_30",
           "skip_back",
           "play_pause",
           "skip_forward",
+          "skip_forward_30",
           "spacer",
           "audio",
           "subtitles",
@@ -106,7 +108,7 @@
           "fullscreen": "web only \u2014 a native player is already full screen",
           "larger": "web only, non-narrow watch browser; absent from the DOM on narrow web"
         },
-        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement.",
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement; constrained overlay players wrap their options based on player width to preserve touch target sizes.",
         "surface_placement": {
           "info": {
             "desktop": {

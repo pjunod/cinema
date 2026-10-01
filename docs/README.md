@@ -34,6 +34,8 @@ Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-
 
 Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
 
+Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-seek-controls.md).
+
 ## Find it fast
 
 | You want to know… | Read |
