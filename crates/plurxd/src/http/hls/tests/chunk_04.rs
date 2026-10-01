@@ -380,6 +380,8 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -456,6 +458,8 @@
             ..staged_candidate_request()
         };
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -1749,6 +1753,8 @@
 
     fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
         RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,

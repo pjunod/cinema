@@ -64,7 +64,11 @@ impl FrozenHlsPresentation {
     ) -> Self {
         let normalized = contract.filter(|contract| contract.normalized_geometry().is_some());
         if let Some(contract) = normalized {
-            context.bandwidth = contract.output_bandwidth();
+            context.bandwidth = context
+                .codec_facts
+                .as_ref()
+                .and_then(FrozenHlsCodecFacts::retained_bandwidth)
+                .or_else(|| contract.output_bandwidth());
             if let Some(codecs) = contract.hls_codecs() {
                 // The normalized contract owns video identity. The producer's
                 // frozen context already owns the actual delivered audio.
@@ -97,6 +101,10 @@ impl FrozenHlsPresentation {
             "supplemental_codecs": &context.supplemental_codecs,
             "frame_rate": context.frame_rate,
         });
+        // Preserve the exact legacy shape when component evidence is absent.
+        if let Some(facts) = &context.codec_facts {
+            identity["codec_facts"] = serde_json::json!(facts);
+        }
         if let Some(bandwidth) = context.bandwidth {
             identity["output_bandwidth"] = serde_json::json!(bandwidth);
         }

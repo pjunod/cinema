@@ -1232,6 +1232,7 @@
         supplemental_codecs: Option<&str>,
     ) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 5615,
             start_seconds: 0.0,
@@ -1244,6 +1245,25 @@
 
     fn sdr_context() -> crate::transcode::HlsContext {
         hls_context("avc1.640034,mp4a.40.2", None)
+    }
+
+    #[test]
+    fn sdr_master_declares_only_complete_frozen_output_components() {
+        let file = hls_file(vec![]);
+        let mut context = sdr_context();
+        assert!(!master_playlist(&file, None, &context).contains("CODECS="));
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, true, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        context.codec_facts = Some(facts);
+        assert!(!master_playlist(&file, None, &context).contains("CODECS="));
+        let mut facts = crate::transcode::FrozenHlsCodecFacts::audio(None, false, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        context.codec_facts = Some(facts);
+        let master = master_playlist(&file, None, &context);
+        assert!(master.contains("CODECS=\"avc1.64001F\""), "{master}");
+        assert!(!master.contains("mp4a.40.2"));
+        assert!(!master.contains("VIDEO-RANGE="));
+        assert_eq!(master.matches("#EXT-X-STREAM-INF:").count(), 1);
     }
 
     #[test]
@@ -1647,6 +1667,7 @@
 
     fn hls_context_with(codecs: &str, supplemental: Option<&str>) -> crate::transcode::HlsContext {
         crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1874,6 +1895,26 @@
     }
 
     #[tokio::test]
+    async fn actual_avc_init_binds_video_without_inventing_missing_audio_facts() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-facts").await;
+        fixture.make_segment_window_servable().await;
+        let init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid avcC").expect("AVC codec");
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes).await.expect("write init");
+        let mut context = hls_context_with("avc1,mp4a.40.2", None);
+        context.codec_facts = Some(crate::transcode::FrozenHlsCodecFacts::audio(None, true, false));
+        let resolved = exact_hls_context(&fixture.state, "avc-facts", context.clone()).await.expect("unknown audio resolves without declaration");
+        assert_eq!(resolved.codec_facts.expect("component facts").complete_sdr_codecs(), None);
+        context.codec_facts = Some(crate::transcode::FrozenHlsCodecFacts::audio(None, false, false));
+        let resolved = exact_hls_context(&fixture.state, "avc-facts", context).await.expect("video-only init resolves");
+        let facts = resolved.codec_facts.expect("component facts");
+        assert_eq!(facts.complete_sdr_codecs(), Some(expected));
+        assert!(serde_json::to_string(&facts).expect("serializable facts").contains("OutputInit"));
+    }
+
+    #[tokio::test]
     async fn an_fmp4_avc_session_normalises_its_codec_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-init").await;
@@ -1887,6 +1928,7 @@
             .expect("AVC init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1914,6 +1956,7 @@
             .await
             .expect("ambiguous AVC init");
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1940,6 +1983,7 @@
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "mpegts-avc").await;
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2050,6 +2094,7 @@
             .expect("dolby vision init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2081,6 +2126,7 @@
             .expect("dolby vision init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2108,6 +2154,7 @@
             .expect("init without dvcC");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -2681,6 +2728,8 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    retained_output: None,
+                    retained_output_receiver: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,
