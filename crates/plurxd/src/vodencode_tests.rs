@@ -225,6 +225,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let serve = bare_serve(&base.path().join("renditions"));
     let rendition = serve.shared.build_rendition(
         "candidate-cache", None, Recipe {
+            measured_candidate: None,
             file, audio_index: None, aac: true,
             audio_delivery: None,
             video: CopyVideoOptions::new(false, false),
@@ -270,6 +271,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     assert!(!legacy_encoding.options.normalized_geometry, "fixture is the ordinary legacy recipe");
     let legacy = serve.shared.build_rendition(
         "legacy-candidate-cache", None, Recipe {
+            measured_candidate: None,
             audio_delivery: None,
             file: rendition.recipe.file.clone(), audio_index: None, aac: true,
             video: CopyVideoOptions::new(false, false),
@@ -391,6 +393,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+            measured_candidate: None,
+            retained_capture: RetainedOutputCapture::New,
             request: &req,
             encoding: Some(Arc::clone(&encoding)),
         },
@@ -438,6 +442,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
                 request: &req,
                 encoding: Some(Arc::clone(&encoding)),
             },
@@ -488,6 +494,8 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+            measured_candidate: None,
+            retained_capture: RetainedOutputCapture::New,
             request: &req,
             encoding: Some(fresh),
         },
@@ -627,6 +635,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                measured_candidate: None,
                 file,
                 audio_index: None,
                aac: true,
@@ -1037,6 +1046,8 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
+                measured_candidate: None,
+                retained_capture: RetainedOutputCapture::New,
                 request: &req,
                 encoding: Some(Arc::clone(encoding)),
             },
@@ -1372,6 +1383,8 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
+                    measured_candidate: None,
+                    retained_capture: RetainedOutputCapture::New,
                     request: &req,
                     encoding: Some(Arc::clone(&encoding)),
                 },

@@ -478,6 +478,9 @@ pub struct SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// Private exact artifact chosen using a live measured-cost proof. The
+    /// actual dispatch reacquires it; this is never client-supplied authority.
+    pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -928,6 +931,7 @@ impl SessionRequest {
 }
 
 pub struct StartInfo {
+    pub(crate) retained_output: Option<super::RetainedOutputFacts>,
     pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
     pub session_id: String,
     pub playlist_url: String,

@@ -862,14 +862,13 @@ impl TranscodeManager {
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
         };
-        let cached_codecs = audio_delivery_hls_codecs(
-            transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
-            opts.audio.as_ref(),
-        );
+        let cached_codecs =
+            audio_delivery_hls_codecs(transcoded_hls_codecs_for_plan(plan), opts.audio.as_ref());
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(plan)),
                 bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,
@@ -1022,6 +1021,7 @@ impl TranscodeManager {
         )
         .await;
         Some(StartInfo {
+            retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,

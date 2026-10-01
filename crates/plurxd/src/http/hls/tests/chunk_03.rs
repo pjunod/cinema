@@ -367,6 +367,8 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -622,6 +624,8 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    retained_output: None,
+                    retained_output_receiver: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,

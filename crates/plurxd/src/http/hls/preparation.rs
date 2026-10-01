@@ -1600,6 +1600,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let staged_recipe = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
         candidate_id: candidate
             .candidate_context
             .as_ref()

@@ -926,6 +926,9 @@ pub struct EncoderCaps {
     pub forced_idr: ForcedIdr,
     #[serde(default)]
     pub quality_rc: QualityRc,
+    /// Completed exact-node experiments; absent cells retain legacy flags.
+    #[serde(default)]
+    pub sdr_avc: Vec<super::QualifiedSdrAvc>,
 }
 
 impl EncoderCaps {
@@ -988,6 +991,7 @@ pub fn parse_encoder_list(output: &str) -> EncoderCaps {
         // that is what `validate` measures.
         forced_idr: ForcedIdr::default(),
         quality_rc: QualityRc::default(),
+        sdr_avc: Vec::new(),
     }
 }
 
@@ -1483,6 +1487,7 @@ pub async fn detect_encoders(ffmpeg_bin: &str) -> EncoderCaps {
         validate_quality_rate_control(ffmpeg_bin, Encoder::Software, software_quality, false).await;
     caps.quality_rc
         .set_supported(Encoder::Software, software_quality_rc);
+    caps.sdr_avc = super::avc_qualification::qualify(ffmpeg_bin, &caps).await;
     tracing::info!(
         nvenc = caps.nvenc,
         qsv = caps.qsv,

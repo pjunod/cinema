@@ -83,7 +83,7 @@
                 None,
                 None,
                 None,
-                Priority::Live,
+                (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
             )
             .await
             .expect("create");
@@ -97,7 +97,7 @@
                 None,
                 None,
                 None,
-                Priority::Live,
+                (Priority::Live, crate::vodserve::RetainedOutputCapture::New),
             )
             .await
             .expect("replay");

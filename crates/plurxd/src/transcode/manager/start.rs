@@ -747,10 +747,8 @@ impl TranscodeManager {
         let session_kind = SessionKind::Transcode {
             height: target_height,
         };
-        let hls_codecs = audio_delivery_hls_codecs(
-            transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
-            opts.audio.as_ref(),
-        );
+        let hls_codecs =
+            audio_delivery_hls_codecs(transcoded_hls_codecs_for_plan(&plan), opts.audio.as_ref());
         let probe_json = match self.store.get_file_probe_json(file_id).await {
             Ok(probe_json) => probe_json,
             Err(error) => {
@@ -762,6 +760,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -1220,6 +1219,7 @@ impl TranscodeManager {
         );
 
         Ok(StartInfo {
+            retained_output: None,
             audio_delivery: opts.audio.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
@@ -1534,6 +1534,11 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::audio(
+                    audio_delivery,
+                    !file.audio_streams.is_empty(),
+                    served.transcode_audio,
+                )),
                 bandwidth: None,
                 file_id,
                 start_seconds,
@@ -1853,6 +1858,7 @@ impl TranscodeManager {
         .await;
 
         Ok(StartInfo {
+            retained_output: None,
             audio_delivery: audio_delivery.cloned(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             session_id,
