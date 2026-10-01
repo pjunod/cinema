@@ -22,6 +22,14 @@ def require(value, message):
         raise ValueError(message)
 
 
+def bounded_text(path, cap):
+    """Read at most cap+1 bytes even if a private input grows during reading."""
+    with path.open("rb") as source:
+        data = source.read(cap + 1)
+    require(len(data) <= cap, "input bound")
+    return data.decode("utf-8")
+
+
 def digest(path):
     h = hashlib.sha256()
     with path.open("rb") as source:
@@ -65,6 +73,7 @@ def playlist_entries(data):
     pending = None
     result = []
     for line in lines[1:]:
+        require(not line.startswith("#EXT-X-MAP"), "unsupported init context: TS-only census")
         if line.startswith("#EXTINF:"):
             require(pending is None, "unpaired EXTINF")
             try:
@@ -74,7 +83,8 @@ def playlist_entries(data):
             require(0 < pending <= 10, "invalid EXTINF range")
         elif line and not line.startswith("#"):
             require(pending is not None, "URI without EXTINF")
-            require(re.fullmatch(r"seg[0-9]+\.(?:ts|m4s)", line), "foreign/URL segment")
+            require(not line.endswith(".m4s"), "unsupported fMP4 init context: TS-only census")
+            require(re.fullmatch(r"seg[0-9]+\.ts", line), "foreign/URL segment")
             require(line not in {name for name, _ in result}, "duplicate segment")
             result.append((line, pending))
             pending = None
@@ -112,11 +122,11 @@ def evaluate(root, receipt):
         version_receipt = receipt["tool_version_receipt"]
         version = owned_file(root, version_receipt["name"])
         require(digest(version) == version_receipt["sha256"]
-                and version.read_text().splitlines()[0] == receipt["provenance"]["tool_version"],
+                and bounded_text(version, 65536).splitlines()[0] == receipt["provenance"]["tool_version"],
                 "tool version receipt changed")
     playlist = owned_file(root, receipt["playlist"]["name"])
     require(digest(playlist) == receipt["playlist"]["sha256"], "playlist changed")
-    entries = playlist_entries(playlist.read_text())
+    entries = playlist_entries(bounded_text(playlist, 1024 * 1024))
     rows = receipt.get("segments", [])
     require(len(rows) == len(entries), "missing segment/probe evidence")
     total = 0
@@ -124,6 +134,7 @@ def evaluate(root, receipt):
     keys = 0
     durations = []
     extra_keys = 0
+    span_deviations = []
     for (name, extinf), row in zip(entries, rows):
         require(row.get("name") == name, "segment evidence order mismatch")
         media = owned_file(root, name)
@@ -132,7 +143,7 @@ def evaluate(root, receipt):
         require(media.stat().st_size > 0 and total <= MAX_BYTES, "media bound/empty segment")
         require(raw.stat().st_size <= 16 * 1024 * 1024, "probe output bound")
         require(digest(media) == row["sha256"] and digest(raw) == row["probe_sha256"], "media/probe changed")
-        probe = json.loads(raw.read_text())
+        probe = json.loads(bounded_text(raw, 16 * 1024 * 1024))
         streams = probe.get("streams", [])
         require(len(streams) == 1 and Fraction(streams[0]["avg_frame_rate"]) == cadence,
                 "probe cadence differs from output contract")
@@ -147,8 +158,12 @@ def evaluate(root, receipt):
         tick = Fraction(streams[0]["time_base"])
         require(tick <= 1 / cadence and len(ordered) >= math.ceil(2 * cadence) - 1,
                 "coarse clock or incomplete completed-segment packet evidence")
-        require(all(abs((b - a) - 1 / cadence) <= 2 * tick
+        require(all(b > a for a, b in zip(ordered, ordered[1:])), "duplicate presentation timestamps")
+        require(all(abs((b - a) - 1 / cadence) <= min(2 * tick, 1 / (2 * cadence))
                     for a, b in zip(ordered, ordered[1:])), "packet clock does not prove claimed cadence")
+        span = ordered[-1] - ordered[0] + 1 / cadence
+        require(span >= 2 - 1 / cadence, "incomplete packet span")
+        span_deviations.append(abs(span - extinf))
         # PTS can be reordered by B frames: use presentation start, not demux order.
         first = min(range(len(times)), key=times.__getitem__)
         starts.append(times[first])
@@ -162,11 +177,12 @@ def evaluate(root, receipt):
     # but cannot masquerade as a completed two-second measurement segment.
     require(all(duration >= 2 - frame for duration in durations), "short/truncated census segment")
     clock_deviations = [abs((b - a) - 2) for a, b in zip(starts, starts[1:])]
-    max_error = max(deviations + clock_deviations)
+    max_error = max(deviations + clock_deviations + span_deviations)
     return {"segments": len(rows), "extinf_min": float(min(durations)),
             "extinf_median": float(statistics.median(durations)), "extinf_max": float(max(durations)),
             "keyframe_at_start_count": keys, "internal_extra_keys": extra_keys,
             "max_grid_error_ms": float(max_error * 1000), "max_grid_error_frames": float(max_error / frame),
+            "max_packet_span_extinf_error_ms": float(max(span_deviations) * 1000),
             "verdict": "no-drift" if max_error <= frame and keys == len(rows) else "drift",
             "limits": "keyframe flags are not an independent IDR/CRA proof; provenance is supplied, not server-authenticated; one cell is not full M3 acceptance"}
 
@@ -203,7 +219,7 @@ def capture(source, output, tool, facts):
     provenance(facts)
     require(tool.is_absolute() and tool.is_file() and digest(tool) == facts["tool_sha256"], "tool identity mismatch")
     playlist = owned_file(source, "index.m3u8")
-    entries = playlist_entries(playlist.read_text())
+    entries = playlist_entries(bounded_text(playlist, 1024 * 1024))
     # Preflight all objects before creating any copied campaign.
     require(sum(owned_file(source, name).stat().st_size for name, _ in entries) <= MAX_BYTES,
             "source media exceeds copy bound")
@@ -213,7 +229,7 @@ def capture(source, output, tool, facts):
     (output / "capture-intent.json").write_text(json.dumps(receipt, indent=2) + "\n")
     version = output / "tool-version.txt"
     probe_tool(tool, None, version)
-    require(version.read_text().splitlines()[0] == facts["tool_version"], "actual tool version mismatch")
+    require(bounded_text(version, 65536).splitlines()[0] == facts["tool_version"], "actual tool version mismatch")
     receipt["tool_version_receipt"] = {"name": version.name, "sha256": digest(version)}
     bounded_copy(playlist, output / "index.m3u8", 1024 * 1024)
     receipt["playlist"] = {"name": "index.m3u8", "sha256": digest(output / "index.m3u8")}
@@ -249,10 +265,12 @@ def main():
     parser.add_argument("--provenance", type=Path)
     args = parser.parse_args()
     if args.mode == "validate":
-        result = evaluate(args.root, json.loads(owned_file(args.root, "receipt.json").read_text()))
+        result = evaluate(args.root, json.loads(bounded_text(owned_file(args.root, "receipt.json"), 1024 * 1024)))
     else:
         require(args.output and args.ffprobe and args.provenance, "capture parameters missing")
-        result = capture(args.root, args.output, args.ffprobe, json.loads(args.provenance.read_text()))
+        owned_root(args.provenance.parent)
+        facts = owned_file(args.provenance.parent, args.provenance.name)
+        result = capture(args.root, args.output, args.ffprobe, json.loads(bounded_text(facts, 65536)))
     print(json.dumps(result, indent=2))
 
 
