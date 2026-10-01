@@ -34,7 +34,6 @@
             transport: None,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
         };
 
         let plain = copy(false);

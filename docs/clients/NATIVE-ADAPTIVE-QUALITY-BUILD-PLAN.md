@@ -279,6 +279,20 @@ see a cliff at all). §7.6 is M0's; §7.7 is M4's; the rest are D3's to inform.
 
 ## Execution log
 
+**2026-10-01 ownership reconciliation:** the newer combined display-aware Auto
+implementation in #669 supersedes #670's legacy Android height-only M3 candidate.
+#670 removes that duplicate tick/controller/meter, Auto-height wire extension and
+server numeric decode clamping; it does not introduce a second controller or
+gate. Android source remains the current effort's implementation. The retained
+server continuation is typed authenticated cause evidence and Link-only network
+prior ingestion: CPU Encode pressure is not network pressure. Durable decoder
+exclusions must bind the server-owned candidate ID and full32-byte recipe digest,
+restored with retained candidate context, not a height that can desynchronize the
+new catalog. This portion is developed against the verified #669 dependency;
+unmerged #669 feature code is not published through #670. Original D3 physical
+acceptance remains open. The original candidate row below is historical evidence,
+not a claim that its removed regressions or implementation remain current.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;

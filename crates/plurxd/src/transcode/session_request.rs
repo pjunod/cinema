@@ -498,11 +498,6 @@ pub struct SessionRequest {
     /// typed [`ReopenReason`].
     pub previous_session_id: Option<String>,
     pub reopen_reason: Option<ReopenReason>,
-    /// Server-normalized decode evidence retained by the durable playback
-    /// recipe. Public create has no corresponding field. Sorted unique legal
-    /// ladder heights bound this evidence by the finite ladder, not a timer.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub decode_blocked_heights: Vec<i64>,
     pub kind: SessionKind,
     pub start_seconds: f64,
     pub audio_index: Option<i64>,
@@ -754,9 +749,7 @@ pub enum SessionKind {
 }
 
 /// Why a client is replacing an existing session. This is deliberately typed
-/// The legacy `stall` retains its existing semantics. Typed adaptation causes
-/// distinguish measured link/encode pressure from decode and ownership facts;
-/// an unknown future value is refused rather than coerced into a stall.
+/// with closed cause vocabulary: unknown future values must be refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
@@ -799,195 +792,6 @@ pub(super) struct SessionOwner<'a> {
 }
 
 impl SessionRequest {
-    pub(crate) fn retain_prepared_decode_evidence(
-        &mut self,
-        user_id: i64,
-        route: &plurx_core::domain::MediaSessionRoute,
-        now_ms: i64,
-    ) -> Result<(), String> {
-        // A new selection inherits the playback's evidence, not the historical
-        // failure that originally produced its incumbent recipe.
-        self.previous_session_id = None;
-        self.reopen_reason = None;
-        self.retain_adaptive_decode_evidence(user_id, Some(route), now_ms)
-    }
-
-    pub(crate) fn clamp_to_retained_decode_blocks(&mut self) -> Result<(), String> {
-        if !self.decode_blocks_are_valid() {
-            return Err("invalid retained decode blocks".to_owned());
-        }
-        if self.automatic && !self.decode_blocked_heights.is_empty() {
-            let requested = match self.kind {
-                SessionKind::Transcode { height } => height,
-                SessionKind::Copy { .. } => {
-                    return Err("decode-blocked Auto cannot copy".to_owned())
-                }
-            };
-            let height = LADDER_HEIGHTS
-                .iter()
-                .rev()
-                .copied()
-                .find(|height| {
-                    *height <= requested && !self.decode_blocked_heights.contains(height)
-                })
-                .ok_or_else(|| "every available Auto rung is decode-blocked".to_owned())?;
-            self.kind = SessionKind::Transcode { height };
-        }
-        Ok(())
-    }
-
-    pub(crate) fn decode_blocks_are_valid(&self) -> bool {
-        self.decode_blocked_heights.len() <= LADDER_HEIGHTS.len()
-            && self
-                .decode_blocked_heights
-                .iter()
-                .all(|height| LADDER_HEIGHTS.contains(height))
-            && self
-                .decode_blocked_heights
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-    }
-
-    /// Only ingress calls this with a Store-owned current playback route.
-    /// The public body cannot supply blocks. The normalized recipe, rather
-    /// than a process-local cache, carries them through placement/takeover.
-    pub(crate) fn retain_adaptive_decode_evidence(
-        &mut self,
-        user_id: i64,
-        route: Option<&plurx_core::domain::MediaSessionRoute>,
-        now_ms: i64,
-    ) -> Result<(), String> {
-        let typed = self
-            .reopen_reason
-            .filter(|reason| *reason != ReopenReason::Stall);
-        let Some(route) = route else {
-            return if typed.is_some() {
-                Err(invalid_reopen_error(
-                    "the adaptive predecessor has no active playback route",
-                ))
-            } else {
-                Ok(())
-            };
-        };
-        if route.user_id != user_id || route.playback_id != self.playback_id {
-            return Err(invalid_reopen_error(
-                "the retained playback route belongs to another viewer",
-            ));
-        }
-        let retained: crate::media_sessions::RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json)
-                .map_err(|_| invalid_reopen_error("the retained playback recipe is invalid"))?;
-        if retained.user_id != user_id
-            || retained.incarnation_id != route.incarnation_id
-            || retained.request.playback_id != self.playback_id
-            || !retained.request.decode_blocks_are_valid()
-        {
-            return Err(invalid_reopen_error(
-                "the retained recipe no longer describes its playback route",
-            ));
-        }
-        if retained.request.file_id != self.file_id {
-            return if typed.is_some() {
-                Err(invalid_reopen_error(
-                    "the adaptive predecessor belongs to another file",
-                ))
-            } else {
-                Ok(())
-            };
-        }
-        if typed.is_none() && retained.request.decode_blocked_heights.is_empty() {
-            // No additive evidence: preserve the legacy create/repair path,
-            // including an owner-loss repair of an already expired route.
-            return Ok(());
-        }
-        if route.state != "active" || route.lease_expires_at_ms <= now_ms || route.owner_epoch <= 0
-        {
-            return Err(invalid_reopen_error(
-                "the retained playback route is not an active owner",
-            ));
-        }
-        if typed.is_some() && self.previous_session_id.as_deref() != Some(route.session_id.as_str())
-        {
-            return Err(invalid_reopen_error(
-                "the adaptive predecessor is no longer current",
-            ));
-        }
-        self.decode_blocked_heights = retained.request.decode_blocked_heights;
-        let previous_height = serde_json::from_str::<serde_json::Value>(&route.response_json)
-            .ok()
-            .and_then(|response| response.get("height").and_then(serde_json::Value::as_i64));
-        if let Some(reason) = typed {
-            let previous_height = previous_height
-                .filter(|height| LADDER_HEIGHTS.contains(height))
-                .ok_or_else(|| {
-                    invalid_reopen_error("the adaptive predecessor has no legal delivered rung")
-                })?;
-            match reason {
-                ReopenReason::Link | ReopenReason::Encode => {
-                    if self.automatic {
-                        let requested = match self.kind {
-                            SessionKind::Transcode { height } => height,
-                            _ => previous_height,
-                        };
-                        self.kind = SessionKind::Transcode {
-                            height: one_rung_below(previous_height).min(requested),
-                        };
-                    }
-                }
-                ReopenReason::Decode => {
-                    if !self.automatic {
-                        return Err(invalid_reopen_error(
-                            "decode adaptation requires viewer Auto",
-                        ));
-                    }
-                    if !self.decode_blocked_heights.is_empty() {
-                        return Err(invalid_reopen_error(
-                            "this playback already consumed its decode adaptation",
-                        ));
-                    }
-                    if matches!(retained.request.kind, SessionKind::Copy { .. }) {
-                        return Err(invalid_reopen_error(
-                            "decode adaptation cannot change delivery method",
-                        ));
-                    }
-                    self.decode_blocked_heights.push(previous_height);
-                    self.decode_blocked_heights.sort_unstable();
-                    self.decode_blocked_heights.dedup();
-                    self.kind = SessionKind::Transcode {
-                        height: one_rung_below(previous_height),
-                    };
-                }
-                ReopenReason::Hold | ReopenReason::Authority => {
-                    self.kind = match retained.request.kind {
-                        SessionKind::Transcode { .. } => SessionKind::Transcode {
-                            height: previous_height,
-                        },
-                        copy => copy,
-                    };
-                }
-                ReopenReason::Stall => unreachable!("legacy stall is normalized by its worker"),
-            }
-        }
-        if self.automatic && !self.decode_blocked_heights.is_empty() {
-            let requested = match self.kind {
-                SessionKind::Transcode { height } => height,
-                _ => previous_height.unwrap_or(MAX_HEIGHT),
-            };
-            let height = LADDER_HEIGHTS
-                .iter()
-                .rev()
-                .copied()
-                .find(|height| {
-                    *height <= requested && !self.decode_blocked_heights.contains(height)
-                })
-                .ok_or_else(|| {
-                    invalid_reopen_error("all eligible Auto rungs are decode-blocked")
-                })?;
-            self.kind = SessionKind::Transcode { height };
-        }
-        Ok(())
-    }
-
     /// The client's request intent before server-owned Auto normalization.
     /// This is the only idempotency identity: it is what `claim_request`
     /// compares when a `request_id` is replayed, so every field that changes
@@ -1038,11 +842,6 @@ impl SessionRequest {
             format!("{kind}+vod")
         } else {
             kind
-        };
-        let kind = if self.decode_blocked_heights.is_empty() {
-            kind
-        } else {
-            format!("{kind}+decode_blocks={:?}", self.decode_blocked_heights)
         };
         // These strings are client-controlled. A typed JSON tuple keeps a
         // colon inside a username, playback id, or session id from producing

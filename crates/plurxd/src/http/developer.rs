@@ -107,6 +107,23 @@ pub(crate) struct DeveloperReadiness {
     pub items: Vec<DeveloperEnableItem>,
 }
 
+fn clock_measurement(state: &AppState) -> DeveloperEnableItem {
+    use plurx_core::cluster::clock::{ClusterClockState, CLOCK_OFFSET_REFUSAL_MS};
+    let snapshot = state.membership.clock_guard().snapshot();
+    let (status, coverage, worst) = match snapshot.state {
+        ClusterClockState::NoPeers => (RequirementStatus::Met, "No committed remote peers".to_owned(), None),
+        ClusterClockState::Bounded { worst_abs_upper_us } => (RequirementStatus::Met, format!("{} / {} committed remote peers bounded", snapshot.peers.len(), snapshot.peers.len()), Some(worst_abs_upper_us)),
+        ClusterClockState::Incomplete { unknown_peers, worst_abs_upper_us } => (RequirementStatus::Unknown, format!("{} / {} committed remote peers bounded; {unknown_peers} unknown or roster unproved", snapshot.peers.len().saturating_sub(unknown_peers), snapshot.peers.len()), (snapshot.peers.len() > unknown_peers).then_some(worst_abs_upper_us)),
+    };
+    DeveloperEnableItem { id: "cluster_clock", title: "Cluster clock observation", enabled: None, setting: None,
+        requirements: vec![
+            DeveloperRequirement { id: "contract", title: "Clock contract", status: RequirementStatus::Met, evidence: "measurement-only; no acquisition or readiness consumer in this binary".to_owned() },
+            DeveloperRequirement { id: "coverage", title: "Observation coverage", status, evidence: coverage },
+            DeveloperRequirement { id: "upper_bound", title: "Worst observed upper bound", status: if worst.is_some() { status } else { RequirementStatus::Unobservable }, evidence: worst.map_or_else(|| "No peer offset observation applies".to_owned(), |value| format!("{} ms among bounded observations; unknown peers have no numeric offset", value as f64 / 1_000.0)) },
+            DeveloperRequirement { id: "consequence", title: "Readiness consequence", status: RequirementStatus::Met, evidence: format!("Advisory only; compiled future refusal bound {CLOCK_OFFSET_REFUSAL_MS} ms. Enforcement waits for the identified measurement fleet receipt") },
+        ] }
+}
+
 /// `GET /api/v1/developer/readiness` — admin, read-only, advisory.
 pub(crate) async fn readiness(
     _admin: AdminUser,
@@ -212,6 +229,7 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         observed_at_ms: crate::state::clock_ms(),
         items: vec![
+            clock_measurement(&state),
             durable_cluster_work(&state).await,
             bounded_catalogue_reads(
                 &state,

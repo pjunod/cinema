@@ -1239,10 +1239,7 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.decode_blocks_are_valid()
-        && (!request.automatic || request.decode_blocked_heights.is_empty()
-            || matches!(request.kind, SessionKind::Transcode { height } if !request.decode_blocked_heights.contains(&height)))
-        && request.file_id > 0
+    request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -5553,7 +5550,10 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         return Err("takeover source revision changed".to_owned());
     }
     let (frontier_offset_ms, restart_ms) = takeover_resume(&route, &envelope.request.kind);
-    normalize_takeover_request(&mut envelope.request, restart_ms);
+    envelope.request.start_seconds = restart_ms as f64 / 1_000.0;
+    envelope.request.request_id = None;
+    envelope.request.previous_session_id = None;
+    envelope.request.reopen_reason = None;
     let target_height = match envelope.request.kind {
         SessionKind::Transcode { height } => height,
         SessionKind::Copy { .. } => file.height.unwrap_or(crate::transcode::MIN_HEIGHT),
@@ -5643,14 +5643,6 @@ fn takeover_start_number(media_sequence: i64, next_epoch: i64) -> Option<i64> {
 /// dies during a fifteen-second copy segment has published a frontier well
 /// past what the client holds. Anything less than a full segment of overlap
 /// leaves media that no generation ever produces.
-fn normalize_takeover_request(request: &mut SessionRequest, restart_ms: i64) {
-    request.start_seconds = restart_ms as f64 / 1_000.0;
-    request.request_id = None;
-    request.previous_session_id = None;
-    request.reopen_reason = None;
-    // Retained blocks belong to the playback recipe, not the former worker.
-}
-
 fn takeover_resume(route: &MediaSessionRoute, kind: &SessionKind) -> (i64, i64) {
     let overlap_ms = resume_overlap_ms(Some(kind));
     let frontier_offset_ms = route
@@ -5857,7 +5849,6 @@ mod tests {
                 automatic: true,
                 previous_session_id: None,
                 reopen_reason: None,
-                decode_blocked_heights: Vec::new(),
                 kind: SessionKind::Transcode { height: 720 },
                 start_seconds: 12.5,
                 audio_index: Some(1),
@@ -5869,279 +5860,6 @@ mod tests {
                 transport: None,
             },
         }
-    }
-
-    fn adaptive_route_fixture() -> (MediaSessionRoute, SessionRequest) {
-        let mut route = takeover_eligible_route(
-            "00000000-0000-4000-8000-0000000000a2",
-            "00000000-0000-4000-8000-0000000000a1",
-        );
-        route.state = "active".into();
-        route.lease_expires_at_ms = 10_000;
-        route.owner_epoch = 1;
-        route.response_json = serde_json::json!({"height":720}).to_string();
-        let retained: RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json).expect("retained recipe");
-        route.user_id = retained.user_id;
-        route.playback_id = retained.request.playback_id.clone();
-        let mut request = retained.request;
-        request.previous_session_id = Some(route.session_id.clone());
-        request.kind = SessionKind::Transcode { height: 1080 };
-        (route, request)
-    }
-
-    fn assert_typed_adaptive_normalization(cause: ReopenReason, requested: i64, expected: i64) {
-        let (route, mut request) = adaptive_route_fixture();
-        request.kind = SessionKind::Transcode { height: requested };
-        request.reopen_reason = Some(cause);
-        request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .expect("normalize actual ingress recipe");
-        assert!(
-            matches!(request.kind, SessionKind::Transcode { height } if height == expected),
-            "{cause:?}: {:?}",
-            request.kind
-        );
-        assert_eq!(
-            request.decode_blocked_heights,
-            if cause == ReopenReason::Decode {
-                vec![720]
-            } else {
-                vec![]
-            }
-        );
-    }
-
-    #[test]
-    fn adaptive_link_normalizes_the_actual_retained_recipe() {
-        assert_typed_adaptive_normalization(ReopenReason::Link, 1080, 480);
-    }
-
-    #[test]
-    fn adaptive_encode_normalizes_the_actual_retained_recipe() {
-        assert_typed_adaptive_normalization(ReopenReason::Encode, 1080, 480);
-    }
-
-    #[test]
-    fn adaptive_decode_blocks_the_failed_delivered_rung() {
-        assert_typed_adaptive_normalization(ReopenReason::Decode, 1080, 480);
-    }
-
-    #[test]
-    fn adaptive_hold_preserves_the_delivered_rung() {
-        assert_typed_adaptive_normalization(ReopenReason::Hold, 360, 720);
-    }
-
-    #[test]
-    fn adaptive_authority_preserves_the_delivered_rung() {
-        assert_typed_adaptive_normalization(ReopenReason::Authority, 360, 720);
-    }
-
-    #[test]
-    fn retained_decode_blocks_survive_owner_change_unbound_auto_and_recipe_replay() {
-        let (mut route, mut request) = adaptive_route_fixture();
-        request.reopen_reason = Some(ReopenReason::Decode);
-        request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .expect("decode");
-        let mut recipe: RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json).expect("recipe");
-        recipe.request = request.clone();
-        route.recipe_json = serde_json::to_string(&recipe).expect("retained normalized recipe");
-        route.response_json = serde_json::json!({"height":480}).to_string();
-        route.owner_node_id = "replacement-owner".into();
-        route.owner_epoch += 1;
-        // The takeover consumer clears the predecessor cause, not the blocks.
-        let mut taken_over: RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json).expect("takeover consumer");
-        normalize_takeover_request(&mut taken_over.request, 0);
-        assert_eq!(taken_over.request.decode_blocked_heights, vec![720]);
-        let mut unbound = request.clone();
-        unbound.decode_blocked_heights.clear();
-        unbound.previous_session_id = None;
-        unbound.reopen_reason = None;
-        unbound.kind = SessionKind::Transcode { height: 720 };
-        let public_fingerprint = unbound.durable_intent_fingerprint(route.user_id);
-        unbound
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 2)
-            .expect("unbound Auto inherits actual owned playback");
-        assert!(matches!(
-            unbound.kind,
-            SessionKind::Transcode { height: 480 }
-        ));
-        assert_eq!(unbound.decode_blocked_heights, vec![720]);
-        assert_ne!(
-            unbound.durable_intent_fingerprint(route.user_id),
-            public_fingerprint
-        );
-        assert_eq!(
-            serde_json::from_str::<SessionRequest>(
-                &serde_json::to_string(&unbound).expect("serialize")
-            )
-            .expect("replay")
-            .decode_blocked_heights,
-            vec![720]
-        );
-    }
-
-    #[test]
-    fn retained_decode_evidence_refuses_stale_foreign_and_malformed_routes() {
-        let (route, mut request) = adaptive_route_fixture();
-        request.reopen_reason = Some(ReopenReason::Decode);
-        for corrupt in 0..5 {
-            let mut stale = route.clone();
-            match corrupt {
-                0 => stale.user_id += 1,
-                1 => stale.playback_id = "other-playback".into(),
-                2 => stale.session_id = "other-predecessor".into(),
-                3 => stale.lease_expires_at_ms = 1,
-                _ => stale.recipe_json = "{}".into(),
-            }
-            assert!(
-                request
-                    .clone()
-                    .retain_adaptive_decode_evidence(route.user_id, Some(&stale), 1)
-                    .is_err(),
-                "corruption {corrupt}"
-            );
-        }
-        request.file_id += 1;
-        assert!(request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .is_err());
-        request.reopen_reason = None;
-        request.previous_session_id = None;
-        request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .expect("different file does not inherit blocks");
-        assert!(request.decode_blocked_heights.is_empty());
-        for blocks in [vec![720, 720], vec![720, 480], vec![719]] {
-            request.decode_blocked_heights = blocks;
-            assert!(!request.decode_blocks_are_valid());
-        }
-    }
-
-    #[test]
-    fn adaptive_recipe_defaults_refuse_unknown_causes_and_blocked_worker_targets() {
-        let original = valid_start_request();
-        let fingerprint = original
-            .request
-            .durable_intent_fingerprint(original.user_id);
-        let mut json = serde_json::to_value(&original).expect("legacy recipe");
-        assert!(json["request"].get("decode_blocked_heights").is_none());
-        let recovered: RemoteStartRequest =
-            serde_json::from_value(json.clone()).expect("legacy absent field");
-        assert!(recovered.request.decode_blocked_heights.is_empty());
-        assert_eq!(
-            recovered
-                .request
-                .durable_intent_fingerprint(original.user_id),
-            fingerprint
-        );
-        json["request"]["reopen_reason"] = serde_json::json!("new_unqualified_cause");
-        assert!(serde_json::from_value::<RemoteStartRequest>(json).is_err());
-        let mut blocked = original.request;
-        blocked.automatic = true;
-        blocked.decode_blocked_heights = vec![720];
-        blocked.kind = SessionKind::Transcode { height: 720 };
-        assert!(!worker_session_request_fields_are_valid(&blocked));
-        blocked
-            .clamp_to_retained_decode_blocks()
-            .expect("legacy repair must skip blocked rung");
-        assert!(matches!(
-            blocked.kind,
-            SessionKind::Transcode { height: 480 }
-        ));
-        assert!(worker_session_request_fields_are_valid(&blocked));
-        blocked.decode_blocked_heights = crate::transcode::LADDER_HEIGHTS.to_vec();
-        assert!(blocked.clamp_to_retained_decode_blocks().is_err());
-    }
-
-    #[test]
-    fn accepted_adaptive_sender_folds_only_link_and_encode_into_the_actual_prior() {
-        let network = crate::telemetry::NetworkIdentity {
-            client_class: "android".into(),
-            network_fingerprint: "192.0.2.0/24".into(),
-            credential_generation: Some(plurx_core::domain::CredentialGeneration::from(
-                "test-gen".to_owned(),
-            )),
-            user_id: Some(7),
-        };
-        for cause in [
-            ReopenReason::Link,
-            ReopenReason::Encode,
-            ReopenReason::Decode,
-            ReopenReason::Hold,
-            ReopenReason::Authority,
-        ] {
-            let (route, mut request) = adaptive_route_fixture();
-            request.reopen_reason = Some(cause);
-            request
-                .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-                .expect("accepted authoritative predecessor");
-            let event = crate::telemetry::adaptive_reopen_event(&request, &route, 1)
-                .expect("actual sender event");
-            assert_eq!(event.height, Some(720));
-            assert!(event.bandwidth_kbps.is_none());
-            assert!(event.delivered_bps.is_none());
-            let prior = crate::telemetry::prior_observation(&event, Some(&network));
-            if matches!(cause, ReopenReason::Link | ReopenReason::Encode) {
-                assert_eq!(prior.expect("network cause").starved_rung_height, Some(720));
-            } else {
-                assert!(
-                    prior.is_none(),
-                    "{cause:?} must never poison the shared network prior"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn retained_playback_refuses_a_second_decode_step_and_copy_delivery_change() {
-        let (mut route, mut request) = adaptive_route_fixture();
-        let mut retained: RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json).expect("recipe");
-        retained.request.decode_blocked_heights = vec![720];
-        retained.request.kind = SessionKind::Transcode { height: 480 };
-        route.recipe_json = serde_json::to_string(&retained).expect("normalized recipe");
-        route.response_json = serde_json::json!({"height":480}).to_string();
-        request.reopen_reason = Some(ReopenReason::Decode);
-        assert!(request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .is_err());
-        retained.request.decode_blocked_heights.clear();
-        retained.request.kind = SessionKind::Copy {
-            aac: false,
-            preserve_dolby_vision: false,
-            convert_dolby_vision: false,
-        };
-        route.recipe_json = serde_json::to_string(&retained).expect("copy recipe");
-        request.decode_blocked_heights.clear();
-        assert!(request
-            .retain_adaptive_decode_evidence(route.user_id, Some(&route), 1)
-            .is_err());
-    }
-
-    #[test]
-    fn prepared_successor_inherits_blocks_without_replaying_predecessor_cause() {
-        let (mut route, mut request) = adaptive_route_fixture();
-        let mut retained: RemoteStartRequest =
-            serde_json::from_str(&route.recipe_json).expect("recipe");
-        retained.request.decode_blocked_heights = vec![720];
-        retained.request.reopen_reason = Some(ReopenReason::Decode);
-        route.recipe_json = serde_json::to_string(&retained).expect("retained failure recipe");
-        request.reopen_reason = Some(ReopenReason::Decode);
-        request.kind = SessionKind::Transcode { height: 720 };
-        request
-            .retain_prepared_decode_evidence(route.user_id, &route, 1)
-            .expect("actual prepared owner");
-        assert_eq!(request.previous_session_id, None);
-        assert_eq!(request.reopen_reason, None);
-        assert_eq!(request.decode_blocked_heights, vec![720]);
-        assert!(matches!(
-            request.kind,
-            SessionKind::Transcode { height: 480 }
-        ));
     }
 
     fn valid_prepare_request() -> RemotePrepareRequest {
@@ -6199,6 +5917,7 @@ mod tests {
     fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
         let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
         let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::CREATED,
             body: body.clone(),
         })
@@ -6210,6 +5929,7 @@ mod tests {
         );
 
         let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::ALREADY_REPORTED,
             body: body.clone(),
         })
@@ -6224,6 +5944,7 @@ mod tests {
         let mut legacy_info = valid_start_response();
         legacy_info.activation_generation = None;
         let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            clock_timing: None,
             status: reqwest::StatusCode::OK,
             body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
         })
@@ -9200,6 +8921,7 @@ mod tests {
         for disposition in ["accepted", "replayed"] {
             let response = validated_control_relay_response(
                 PeerResponse {
+                    clock_timing: None,
                     status: reqwest::StatusCode::OK,
                     body: body.clone(),
                 },

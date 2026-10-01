@@ -2482,7 +2482,6 @@
             automatic: true,
             previous_session_id: None,
             reopen_reason: None,
-            decode_blocked_heights: Vec::new(),
             kind: crate::transcode::SessionKind::Copy {
                 aac: false,
                 preserve_dolby_vision: false,

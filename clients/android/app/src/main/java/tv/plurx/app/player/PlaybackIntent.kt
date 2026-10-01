@@ -17,7 +17,6 @@ class PlaybackIntent(
     initialQuality: PlaybackQuality,
 ) {
     internal val targetPresentationDeadline = PlaybackTargetDeadline()
-    internal val autoQuality = AutoQualityState()
     data class PendingSeek(
         val sequence: Long,
         val targetMs: Long,
@@ -84,9 +83,7 @@ class PlaybackIntent(
     fun beginQualityChange(
         quality: PlaybackQuality,
         tappedAtMs: Long = monotonicNowMs(),
-        automatic: Boolean = false,
     ): PendingQualityChange {
-        if (!automatic) autoQuality.viewerChangedQuality()
         desiredQuality = quality
         return PendingQualityChange(++nextSequence, quality, tappedAtMs)
             .also { pendingQualityChange = it }

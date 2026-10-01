@@ -4,8 +4,8 @@ import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
-/** Pure decideRung port. Runners and the measurement adapter supply parameters
- * from the single shared JSON; the policy owns no timer, meter or setting. */
+/** Pure decideRung port only. No Controller, timer, bandwidth meter or setting
+ * calls it. M2's runner supplies parameters from the single shared JSON. */
 object AutoQualityPolicy {
     data class Defaults(
         val sampleMs: Double, val decisionMs: Double, val safeEstimateFactor: Double,
