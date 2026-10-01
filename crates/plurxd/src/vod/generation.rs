@@ -197,7 +197,13 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
             .entries
             .last()
             .map_or(0, |entry| entry.start_ticks + entry.duration_ticks);
-        let mut args = encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale));
+        let duration_seconds = if encoding.shared_audio.is_some() {
+            // Encoding maps the source duration onto the shared film end once.
+            file.duration_ms.unwrap_or(0) as f64 / 1_000.0
+        } else {
+            end as f64 / f64::from(plan.timescale)
+        };
+        let mut args = encoding.args(&file, start_seconds, duration_seconds);
         if attested && !file.audio_streams.is_empty() {
             let mut inputs = 0;
             for index in 0..args.len().saturating_sub(1) {

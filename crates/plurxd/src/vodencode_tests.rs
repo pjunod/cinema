@@ -235,6 +235,14 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     mutable.resources.cpu_threads = 1;
     assert_eq!(soundtrack_identity, mutable.identity(&file, 4.0));
     assert_eq!(mutable.media_plan(4_000).timescale, 48_000);
+    let soundtrack = mutable.media_plan(4_000);
+    let last = soundtrack.entries.last().expect("soundtrack tail");
+    let soundtrack_end = last.start_ticks + last.duration_ticks;
+    assert_eq!(soundtrack_end, mutable.grid.shared_audio_end_ticks(4_000));
+    let arguments = mutable.args(&file, 0.0, 4.0);
+    let duration_arg = arguments.windows(2).find(|pair| pair[0] == "-t").expect("audio duration");
+    let encoded_end: f64 = duration_arg[1].parse().expect("duration seconds");
+    assert!((encoded_end - soundtrack_end as f64 / 48_000.0).abs() < 1e-9);
     assert!(mutable.media_plan(4_000).entries.iter().all(|entry|
         entry.kind == plurx_core::segplan::PlanEntryKind::AudioTail));
     assert!(!mutable.resources().hardware_slot);
@@ -246,6 +254,19 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         Some("0".into()), Some("3".into()),
     )))).await.expect("audio admits without a video hardware slot");
     assert_eq!(encoding.admissions.software_in_use(), 3);
+    let recipe = Recipe {
+        file: file.clone(), audio_index: None, aac: true,
+        video: CopyVideoOptions::new(false, false),
+        source_object_version: Some(encoding.source_object_version.clone()),
+        cluster_cache_key: None, encoding: Some(Arc::clone(&encoding)),
+    };
+    let producer_args = recipe_pipe_args(&recipe, 0.0, false);
+    let duration_arg = producer_args.windows(2).find(|pair| pair[0] == "-t").expect("producer duration");
+    let producer_end: f64 = duration_arg[1].parse().expect("producer end");
+    let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
+    let tail = plan.entries.last().expect("planned tail");
+    assert!((producer_end - (tail.start_ticks + tail.duration_ticks) as f64 / 48_000.0).abs() < 1e-9,
+        "production must not round an already aligned end onto another frame");
     let output = tokio::process::Command::new(ffmpeg_bin())
         .args(["-hide_banner", "-loglevel", "error"])
         .args(encoding.args(&file, 0.0, 4.0))

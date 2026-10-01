@@ -528,7 +528,7 @@ impl Encoding {
 
     pub(crate) fn media_plan(&self, duration_ms: i64) -> plurx_core::segplan::SegmentPlan {
         if let Some(audio) = &self.shared_audio {
-            audio.plan(duration_ms)
+            audio.plan_on_grid(duration_ms, self.grid)
         } else {
             let audio_rate = if self.plan.options().input_has_audio {
                 self.options.audio_bitrate_kbps
@@ -548,8 +548,13 @@ impl Encoding {
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
         if let Some(audio) = &self.shared_audio {
+            // This input is the source duration, not an already rounded plan
+            // end. Re-rounding the latter could add another whole video frame.
+            let duration_ms = (duration_seconds * 1_000.0).round() as i64;
+            let end_seconds = self.grid.shared_audio_end_ticks(duration_ms) as f64
+                / f64::from(plurx_core::transcode::VOD_AUDIO_RATE);
             audio
-                .args(&execution, duration_seconds)
+                .args(&execution, end_seconds)
                 .expect("frozen soundtrack execution remains valid")
         } else {
             vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)

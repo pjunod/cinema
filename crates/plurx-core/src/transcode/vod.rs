@@ -20,6 +20,10 @@ pub fn vod_audio_anchor(start_seconds: f64) -> u64 {
 /// Video rung boundaries never duplicate or reset these audio intervals.
 pub fn vod_shared_audio_plan(duration_ms: i64, bitrate_kbps: u32) -> SegmentPlan {
     let duration = (duration_ms.max(0) as u64).saturating_mul(u64::from(VOD_AUDIO_RATE)) / 1_000;
+    shared_audio_plan_ticks(duration, bitrate_kbps)
+}
+
+fn shared_audio_plan_ticks(duration: u64, bitrate_kbps: u32) -> SegmentPlan {
     let span = 94 * VOD_AAC_FRAME_SAMPLES;
     let mut entries = Vec::new();
     let mut start = 0;
@@ -101,13 +105,25 @@ impl VodFrameGrid {
         u64::from(self.frames_per_segment) * u64::from(self.denominator)
     }
 
-    /// Round the final frame outward. Every advertised interval then has a
-    /// whole number of output frames, including a short final entry.
-    pub fn plan(self, duration_ms: i64, bits_per_second: u64) -> SegmentPlan {
+    fn duration_ticks(self, duration_ms: i64) -> u64 {
         let frames = (duration_ms.max(0) as u64)
             .saturating_mul(u64::from(self.numerator))
             .div_ceil(1_000 * u64::from(self.denominator));
-        let duration_ticks = frames.saturating_mul(u64::from(self.denominator));
+        frames.saturating_mul(u64::from(self.denominator))
+    }
+
+    /// Shared audio covers the last whole video frame. Round across clocks
+    /// once, outward to one audio sample, rather than adding an AAC interval.
+    pub fn shared_audio_end_ticks(self, duration_ms: i64) -> u64 {
+        let samples = (u128::from(self.duration_ticks(duration_ms)) * u128::from(VOD_AUDIO_RATE))
+            .div_ceil(u128::from(self.numerator));
+        u64::try_from(samples).unwrap_or(u64::MAX)
+    }
+
+    /// Round the final frame outward. Every advertised interval then has a
+    /// whole number of output frames, including a short final entry.
+    pub fn plan(self, duration_ms: i64, bits_per_second: u64) -> SegmentPlan {
+        let duration_ticks = self.duration_ticks(duration_ms);
         let mut entries = Vec::new();
         let mut start_ticks = 0;
         while start_ticks < duration_ticks {
@@ -698,6 +714,15 @@ impl VodSharedAudioRecipe {
 
     pub fn plan(&self, duration_ms: i64) -> SegmentPlan {
         vod_shared_audio_plan(duration_ms, self.audio_bitrate_kbps)
+    }
+
+    /// A presentation's soundtrack shares its film end with the frozen video
+    /// cadence while keeping independent, whole-AAC-frame interval boundaries.
+    pub fn plan_on_grid(&self, duration_ms: i64, grid: VodFrameGrid) -> SegmentPlan {
+        shared_audio_plan_ticks(
+            grid.shared_audio_end_ticks(duration_ms),
+            self.audio_bitrate_kbps,
+        )
     }
 
     /// The publisher removes priming and restores the film-global clock.
@@ -1406,6 +1431,40 @@ mod tests {
             .all(|entry| { entry.start_ticks % 1_001 == 0 && entry.duration_ticks % 1_001 == 0 }));
         assert_eq!(plan.target_duration, 3);
         assert!(plan.entries[0].est_bytes >= 250_000);
+    }
+
+    #[test]
+    fn shared_audio_tail_covers_the_final_whole_video_frame() {
+        for (numerator, denominator) in [(24_000, 1_001), (30_000, 1_001), (24, 1), (25, 1)] {
+            let grid = VodFrameGrid::new(numerator, denominator).expect("cadence");
+            for duration_ms in [1, 1_999, 2_000, 4_300, 96_000] {
+                let video = grid.plan(duration_ms, 1_000_000);
+                let last_video = video.entries.last().expect("video tail");
+                let video_end = last_video.start_ticks + last_video.duration_ticks;
+                let audio_end = grid.shared_audio_end_ticks(duration_ms);
+                let audio = shared_audio_plan_ticks(audio_end, 160);
+                let last_audio = audio.entries.last().expect("AAC tail");
+                assert_eq!(
+                    last_audio.start_ticks + last_audio.duration_ticks,
+                    audio_end
+                );
+                let coverage = u128::from(audio_end) * u128::from(video.timescale);
+                let required = u128::from(video_end) * u128::from(VOD_AUDIO_RATE);
+                assert!(coverage >= required, "AAC must cover the final video frame");
+                assert!(
+                    coverage - required < u128::from(video.timescale),
+                    "at most one audio sample of rounding"
+                );
+                for entry in audio.entries.iter().take(audio.entries.len() - 1) {
+                    assert_eq!(entry.duration_ticks, 94 * VOD_AAC_FRAME_SAMPLES);
+                    assert_eq!(entry.start_ticks % VOD_AAC_FRAME_SAMPLES, 0);
+                }
+            }
+            assert_eq!(grid.shared_audio_end_ticks(0), 0);
+            assert_eq!(grid.shared_audio_end_ticks(-1), 0);
+        }
+        let grid = VodFrameGrid::new(24_000, 1_001).expect("NTSC cadence");
+        assert_eq!(grid.shared_audio_end_ticks(4_300), 206_206);
     }
 
     #[test]

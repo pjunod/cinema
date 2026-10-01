@@ -1591,3 +1591,15 @@ current mute, volume and playback speed to the retained predecessor. The
 regression drives the shipped rollback with settings changed since preparation
 and verifies they survive alongside standing Play/Pause intent. Script syntax
 checks pass; unit execution remains deferred.
+
+### 10.29 Shared soundtrack covers the final video frame
+
+Continuous AAC plans and worker duration now end at the frozen video grid's
+last whole frame, rounded outward across clocks by less than one audio sample.
+Ordinary AAC intervals remain 94 frames; the final packet retains its trim.
+This avoids a short soundtrack without adding an entire AAC interval or
+changing the attested source duration. The encoded identity includes the
+changed worker duration, so older shorter media cannot inherit its cache key.
+The worker receives source duration to avoid rounding an already aligned tail
+onto another video frame. Regressions cover rational/integer cadences and the
+planner/worker duration agreement. Unit execution remains deferred.
