@@ -131,6 +131,51 @@ fixture/mixin inheritance. Those successes retain the same old-source run,
 not a fresh validation-suite execution. The corrected PDB ID is admitted only
 through the authenticated local-receipt path described above.
 
+## The bounded #674 discovery-failure recovery preserves 277 real passes
+
+On 2026-10-01, PR #674 gate API3719 / UI3698 / job39416 failed at
+`cd2e2f1467ab0e77e8e9e09c90b75580d6411294` after 277 validation methods
+passed individually in 22.126 seconds. Operations discovery then refused a
+relative fixture import in its top-level loader context. Root's original
+review35 disposition had not validated that CI loader context; the correction
+verified both import contexts without rerunning any successful method.
+
+The retained final journal is **incomplete**, has no fixture errors and has
+281 keys: 277 individually logged CI validation passes plus four previously
+authenticated local operations passes. Recovery never stamps it complete or
+calls operations executed. The small exact descriptor
+`validation/python-unit-discovery-failure3719.json` binds repository1/PR674/
+branch/base, original source, terminal failure attempt1 and these live objects:
+
+| Evidence | Exact identity and SHA-256 |
+|---|---|
+| Start marker | artifact1481, 755 bytes; `f2ba6e29cf1937d725017d940bab0f0f88ceed90955f911947504de5a3f6d3bb` |
+| Final journal | artifact1482, 7327 bytes; `71f6ca02aee13807b3373882e2b41b3742408487470b9bb28b0736dbe109f88d` |
+| Receipt job log | job39416; `1c7b7b0fd2738988a5e1aef91ebc7ad0c446e7d3882264b6b429fa665c2d0f40` |
+
+The real restore consumer verifies live run/job/artifact metadata, both ZIP
+hashes, original workflow/receipt-source hashes, and the log's phase ordering.
+All 277 unique individual positive events must exactly match the new validation
+journal keys and original commit/run attribution. The four unchanged start
+keys must still have current authenticated local-receipt evidence; CI cannot
+turn them into run3719 successes. Duplicate/missing events, foreign sources,
+operations execution, fixture errors, missing/expired artifacts and every
+unapproved incomplete case refuse recovery. No generic incomplete waiver or
+caller-selected record exists. Raw private logs and ZIPs remain outside Git.
+
+Future execution discovers **all suites before the first method**. A later
+suite's import refusal therefore executes no earlier methods and never stamps
+the attempt complete. This does not make unknown failed attempts automatically
+reusable; their exact evidence still needs reviewed recovery.
+
+Two focused synthetic-API regressions in
+`tests/validation/test_python_discovery_recovery.py` exercise the actual restore
+consumer, authenticated local baseline, individual-ID bijection, all-suite
+preflight and fourteen refusal modes. They are not actual CI run evidence.
+Separate read-only live restoration validated the genuine 277+4 keys using
+13 API requests and zero test methods. Original journal/source attribution
+remains unchanged; source compilation remains current-candidate evidence.
+
 ## Focused proof and limits
 
 The small fake-fixture tests in
