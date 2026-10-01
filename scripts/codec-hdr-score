@@ -236,6 +236,8 @@ def score_sdr(source, source_sha, reference, distorted, distorted_sha,
                             inspect(ffprobe, distorted, seconds), SDR_GRADE)
     if pairing["timestamps"] != parent["timestamps"]:
         raise Refusal("graded reference no longer has the source frame grid")
+    if (pairing["width"], pairing["height"]) != (parent["width"], parent["height"]):
+        raise Refusal("graded reference/output no longer have the source dimensions")
     with tempfile.TemporaryDirectory(prefix="plurx-sdr-vmaf-") as directory:
         stats = Path(directory) / "vmaf.json"
         graph = (f"[0:v:0]trim=duration={seconds},settb=AVTB,setpts=PTS-STARTPTS[a];"
