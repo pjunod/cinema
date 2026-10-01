@@ -109,6 +109,11 @@ preserves the foundation bytes after #675 landed; final same-record review
 publication and Effort gate remain required. This does not close typed
 recovery, decoder evidence, D3 or physical acceptance.
 
+The scoped A-05 reader-isolation follow-up removes legacy supply/aggregate
+rate hints only from actual negotiated candidate Auto policy. It preserves
+legacy/manual routes and does not claim the remaining attributable producer
+or candidate-aware negative selection; see the combined plan §9.9.
+
 ## How to claim, work and finish a plan
 
 **S-14 continuation, 2026-10-01 (gpt-6.1-sol,
