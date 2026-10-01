@@ -34,6 +34,10 @@ Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-
 
 Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-clipping.md).
 
+Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-seek-controls.md).
+
+Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
+
 ## Find it fast
 
 | You want to know… | Read |
@@ -187,6 +191,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
 | [STATUS-HISTORY.md](streaming/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [HONEST-MASTER-PLAYLIST.md](streaming/HONEST-MASTER-PLAYLIST.md) | Implementation plan from the 2026-09-20 architecture review: why a transcode's multivariant playlist advertised the source's bitrate, resolution and no codec string, and how each attribute becomes a measured fact about the bytes this session delivers. | open |
 | [CODEC-AND-GPU-QUALIFICATION.md](streaming/CODEC-AND-GPU-QUALIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: what it takes to qualify one more codec/GPU graph end to end, why NVENC and VideoToolbox work is conditional on a fleet inventory, and how Q8's three argument questions are each settled on their own evidence. | open |

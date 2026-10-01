@@ -55,6 +55,10 @@ function shippedSource(name) {
   assert.notEqual(start, undefined, `index.html no longer declares ${name}`);
   return sliceDeclaration(start);
 }
+function transportTelemetrySources(){
+  return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+}
+
 
 // Deliberately NOT `shippedSource`. The rescue-collision regression has to be
 // able to run against a build with no guard at all, or reverting the correction
@@ -198,7 +202,7 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
   // is gone, the facts are not.
   const helpers = new Function(
     `${shippedSource("esc")}\n${shippedSource("clockFromSec")}\n${shippedSource("fmtBytes")}\n${shippedSource("fmtMbps")}\n` +
-      `${shippedSource("activityMethodLabel")}\n${shippedSource("activityStreamState")}\n${shippedSource("activityStreamMeters")}\n` +
+      `${shippedSource("activityMethodLabel")}\n${shippedSource("activityObservedVodSession")}\n${shippedSource("activityStreamState")}\n${shippedSource("activityStreamMeters")}\n` +
       `${shippedSource("activityStreamDetails")}\n${shippedSource("activityStreamCell")}\n` +
       "return {activityStreamState,activityStreamMeters,activityStreamDetails,activityStreamCell};",
   )();
@@ -3477,7 +3481,7 @@ test("every other action is still its own effect", () => {
   }
 });
 
-test("the two stall prompts offer Keep waiting, and the create one does not", () => {
+test("exhausted and stopped prompts offer executable recovery actions", () => {
   // The two stall sites share one list and lead with the class's own first
   // action. The create-exhaustion site names its own, and Keep waiting is
   // deliberately not on it: nothing is attached there, so `armStall` would arm
@@ -3492,9 +3496,9 @@ test("the two stall prompts offer Keep waiting, and the create one does not", ()
     ].join("\n"),
   );
   assert.deepEqual(shared({ method: "remux" })({ method: "remux" }),
-    ["keep_waiting", "retry", "force_transcode", "close"]);
+    ["retry", "force_transcode", "close"]);
   assert.deepEqual(shared({ method: "transcode" })({ method: "transcode" }),
-    ["keep_waiting", "retry", "close"],
+    ["retry", "close"],
     "Force transcode is still not offered on a session that already is one");
   // …and a `stopped` terminal keeps the list it had: there is nothing left to
   // wait for when the server has ended the recipe.
@@ -3513,7 +3517,7 @@ test("the two stall prompts offer Keep waiting, and the create one does not", ()
   assert.equal(
     policy.SURFACE_CLASSES.exhausted.default_actions[0],
     "keep_waiting",
-    "and the fixture's own class default is what all three follow",
+    "the web raising sites override the shared default with executable actions",
   );
 });
 
@@ -3560,7 +3564,7 @@ test("the stall-recovery prompt stops the player before it raises", () => {
   // the class's own default action list. MUTATION: drop `keep_waiting` from
   // `playbackExhaustedActions` and this line fails.
   assert.deepEqual(raised.fault.actions,
-    ["keep_waiting", "retry", "force_transcode", "close"]);
+    ["retry", "force_transcode", "close"]);
 
   // The reducer's half of the same rule: without the stop this is a fixture
   // error and no surface at all.
@@ -3841,8 +3845,8 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
-    "playbackOwnsAttachedMedia", "completeHlsStartup", "settlePlaybackControlSeek",
-    [shippedSource("playbackProgressTick"), shippedSource("samplePreparedSwitchFrames"),
+    "playbackOwnsAttachedMedia", "completeHlsStartup", "settlePlaybackControlSeek", "PlaybackPolicy",
+    ["function clientLog(){}function playbackContext(){return {};}",shippedSource("playbackProgressTick"), shippedSource("samplePreparedSwitchFrames"),
      shippedBinding("const", "SWITCH_FRAME_SAMPLES_MAX"), "return playbackProgressTick;"].join("\n"),
   );
   const player = { started: true, wantsPlayback: true, attemptId: "g1" };
@@ -3852,7 +3856,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     player, { hidden: false }, { now: () => now },
     (event) => fed.push(event), (p) => (p && p.attemptId) || null,
     () => 0, () => false, () => {}, () => {}, () => {}, () => {}, () => 10, 8000,
-    () => true, () => {}, () => {},
+    () => true, () => {}, () => {}, policy,
   );
 
   tick(video, player);            // first sample: the watch is seeded, nothing moved
@@ -3872,6 +3876,14 @@ test("the shipped progress tick reports the advance it measured, not that it ran
 
   // And the tick is what ages the presenter's timed classes, before any guard.
   assert.ok(fed.some((event) => event.tick === true), "the tick drives the presenter's timers");
+  player.stallRecoveries=3;player.controlReporter={bootstrap:{next_exchange_ms:5000}};
+  player.controlLastExchangeAt=Date.now();
+  for(let i=0;i<61;i++){now+=500;video.currentTime+=0.5;tick(video,player);}
+  assert.equal(player.stallRecoveries,0,"the shipped sampler rearms a healthy separated episode");
+  player.stallRecoveries=2;player.controlLastError={status:503};
+  for(let i=0;i<65;i++){now+=500;video.currentTime+=0.5;tick(video,player);}
+  assert.equal(player.stallRecoveries,2,"advancing media with failed control cannot mint recovery allowance");
+
 });
 
 // MUTATION M10: delete the re-arm from `armStall` and this fails. §3.4's stop
@@ -5059,7 +5071,7 @@ function carryHarness(player) {
       shippedSource("rememberPlaybackSelection"),
       "function clearPlaybackControlWaiters(){}",
       shippedSource("supersedePlaybackControlIntent"),
-      shippedSource("pausePlaybackInternally"),
+      transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("resetMediaSource"),
       shippedSource("rememberPlaybackTransportIntent"),
@@ -6839,3 +6851,56 @@ test("cold original recovery can try an unproved compatible lower route within m
     process.stdout.write(`PASS ${name}\n`);
   }
 })();
+
+
+test("recovery allowance rearms only after continuous observed health",()=>{
+  let state=null,rearm=false;
+  for(let now=0;now<=30000;now+=500){
+    const sample=policy.recoveryHealthObservation(state,{nowMs:now,key:'attachment-1',healthy:true});
+    state=sample.state;rearm=sample.rearm;
+    assert.equal(rearm,now===30000);
+  }
+  assert.equal(policy.recoveryHealthObservation(state,{nowMs:30500,key:'attachment-1',healthy:false}).state,null);
+  const changed=policy.recoveryHealthObservation(state,{nowMs:30500,key:'attachment-2',healthy:true});
+  assert.equal(changed.rearm,false,'attach is not proof of a new healthy episode');
+  assert.equal(policy.recoveryHealthObservation(changed.state,{nowMs:34000,key:'attachment-2',healthy:true}).rearm,false,'missed/background ticks reset proof');
+});
+
+test("VOD activity distinguishes actual zero, missing control, stale control and producer hold",()=>{
+  const api=new Function([shippedSource("fmtBytes"),shippedSource("activityObservedVodSession"),shippedSource("activityStreamState"),shippedSource("activityStreamDetails"),"return {fmtBytes,activityStreamState,activityStreamDetails};"].join("\n"))();
+  assert.equal(api.fmtBytes(0),'0 B');assert.equal(api.fmtBytes(null),'');
+  const session={presentation:'vod',live_bytes:0,advertised_bytes:0,vod_observation:{control_demand:'active',render_state:'rendering',control_age_ms:100,producer_state:'held',producer_hold:'ahead'}};
+  assert.equal(api.activityStreamState(session).label,'Holding');
+  session.vod_observation.control_demand='hold';assert.equal(api.activityStreamState(session).label,'Paused');
+  session.vod_observation.control_age_ms=31000;assert.equal(api.activityStreamState(session).label,'Client observation stale');
+  session.vod_observation.control_age_ms=null;assert.equal(api.activityStreamState(session).label,'Client unobserved');
+  assert.ok(api.activityStreamDetails(session).every(row=>!['Live scratch','Advertised bytes'].includes(row[0])));
+  session.vod_observation.producer_state='failed';assert.equal(api.activityStreamState(session).label,'Producer failed');
+});
+
+test("watch delivery follows attachment rather than catalogue status",()=>{
+  const make=new Function('PLAYER','WATCH','playbackOwnsAttachedMedia','esc',shippedSource('watchDeliveryRow')+';return watchDeliveryRow;');
+  const p={fileId:7,sessionId:'vod-session',vod:true,method:'remux'};
+  const row=make(p,{accepted:true},()=>true,value=>value);
+  assert.match(row({id:7,vod_index_status:'pending'}),/>VOD HLS</);
+  p.vod=false;assert.match(row({id:7,vod_index_status:'indexed'}),/>Live HLS</);
+  const unopened=make(null,{accepted:false},()=>false,value=>value);
+  assert.match(unopened({id:7,vod_index_status:'indexed'}),/VOD analysis ready/);
+});
+
+
+test("peer VOD Activity cell preserves measured control and producer facts",()=>{
+  const cell=new Function("clockFromSec","fmtBytes","fmtMbps","esc",[
+    shippedSource("activityObservedVodSession"),shippedSource("activityMethodLabel"),
+    shippedSource("activityStreamState"),shippedSource("activityStreamMeters"),
+    shippedSource("activityStreamDetails"),shippedSource("activityStreamCell"),
+    "return activityStreamCell;"
+  ].join("\n"))(s=>`${s} s`,n=>`${n} B`,n=>`${n} bps`,String);
+  const html=cell({session_id:"peer-vod",presentation:"vod",method:"hls-copy",
+    delivered_bytes:0,delivered_bps:0,vod_observation:{control_demand:"hold",render_state:"rendering",
+      position_ms:12000,client_runway_ms:3000,control_age_ms:2000,producer_state:"held",producer_hold:"ahead"}},null,new Set());
+  for(const fact of ["Paused","Position","12 s","Client runway","3 s","Demand","hold","Render state","rendering","Producer","held","ahead","2 s ago","0 B"]){
+    assert.ok(html.includes(fact),`peer VOD cell omits ${fact}`);
+  }
+  assert.ok(!html.includes("Live scratch"));
+});

@@ -373,7 +373,7 @@ function teardownHls(){
     const video=document.getElementById("video");
     rememberPlaybackTransportIntent(video,PLAYER);
     PLAYER.internalMediaReset=true;
-    pausePlaybackInternally(video);
+    pausePlaybackInternally(video,"source_teardown");
     destroyHlsInstance(PLAYER,PLAYER.hls,video);
     PLAYER.hls=null;
   }
@@ -385,7 +385,7 @@ function resetMediaSource(v){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.internalMediaReset=true;
   }
-  try{ pausePlaybackInternally(v); v.removeAttribute("src"); v.load(); }
+  try{ pausePlaybackInternally(v,"source_teardown"); v.removeAttribute("src"); v.load(); }
   catch(e){} finally { resetPlaybackTransportEvents(v); }
 }
 // load()/src changes discard queued media tasks. Expectations belong to that
@@ -419,6 +419,8 @@ function beginPlaybackMediaAttachment(p){
   // A deliberate reopen mints a new attachment. Clear the retired attempt
   // only after the old attachment can no longer pass its identity closure.
   p.terminalStop=null;
+  p.sessionTerminal=null;
+  p.recoveryHealth=null;
   // Where this attempt's generation takes the picture: every attach on every
   // route runs through here, and faults about any other generation are dropped.
   // That is what bounds a fault's life — identity, not a clock. (`STREAM_FAILURE`
@@ -433,11 +435,42 @@ function applyPlaybackAttachmentPosition(v,p,attachment,startAt){
   const position=pending?Math.max(0,pending.targetMs/1000-(p.offset||0)):startAt;
   if(Number.isFinite(position)&&position>=0) try{v.currentTime=position;}catch(e){}
 }
-function pausePlaybackInternally(v){
+function playbackTransportRecord(v,p,action,origin,reason){
+  const sequence=p?(p._transportCommandSequence=(p._transportCommandSequence||0)+1):0;
+  return {command_id:`tc-${Date.now()}-${sequence}-${Math.random().toString(36).slice(2,10)}`,action,origin,reason,
+    attempt:p?.attemptId||null,session:p?.sessionId||null,
+    file_id:p?.fileId||null,title:p?.title||null,method:p?.method||null,vcodec:p?.source?.video_codec||null,
+    intent_generation:p?.controlIntentGeneration||0,
+    position_ms:Math.max(0,Math.round(((p?.offset||0)+(v?.currentTime||0))*1000)),
+    desired_before:p?.wantsPlayback??null,desired_after:origin==="internal"?(p?.wantsPlayback??null):action==="play",
+    media_paused:!!v?.paused,media_ended:!!v?.ended,client_timestamp_ms:Date.now()};
+}
+function logPlaybackTransportRecord(record,matched,v){
+  if(!record)return;
+  if(matched&&v)record=Object.assign({},record,{media_paused:!!v.paused,media_ended:!!v.ended});
+  if(typeof clientLog==="function")clientLog({level:"info",event:matched?"transport_event":"transport_command",
+    message:matched?"media event matched transport provenance":"playback transport intent",
+    attempt:record.attempt,session_id:record.session,file_id:record.file_id,
+    title:record.title,method:record.method,vcodec:record.vcodec,transport:record});
+}
+function queuePlaybackTransportCommand(v,p,action,origin,reason){
+  if(!v||!p)return;
+  const record=playbackTransportRecord(v,p,action,origin,reason);
+  p.transportCommand=record;
+  logPlaybackTransportRecord(record,false);
+}
+function playbackTransportMarker(v,p,action,reason){
+  const command=p?.transportCommand;
+  if(command?.action===action){p.transportCommand=null;return command;}
+  const record=playbackTransportRecord(v,p,action,"internal",reason);
+  logPlaybackTransportRecord(record,false);
+  return record;
+}
+function pausePlaybackInternally(v,reason="transport_intent"){
   if(!v) return;
   // pause dispatches its event later, possibly after PLAYER was replaced.
   // Tag the actual transition on the persistent element, not the old player.
-  if(!v.paused) playbackTransportEvents(v).pause.push({});
+  if(!v.paused) playbackTransportEvents(v).pause.push(playbackTransportMarker(v,PLAYER,"pause",reason));
   v.pause();
 }
 function rememberPlaybackTransportIntent(v,p){
@@ -449,7 +482,7 @@ function applyPlaybackTransportIntent(v,p){
   const proof=p.preparedCommitting;
   if(proof&&typeof proof.frameBudgetUpdate==="function") proof.frameBudgetUpdate();
   if(p.wantsPlayback){
-    const events=playbackTransportEvents(v), token={};
+    const events=playbackTransportEvents(v), token=playbackTransportMarker(v,p,"play","attach_or_resume");
     if(v.paused) events.play.push(token);
     v.play().catch(()=>{
       const index=events.play.indexOf(token);
@@ -460,7 +493,9 @@ function applyPlaybackTransportIntent(v,p){
 function handlePlaybackTransportEvent(v,p,event){
   if(!v||!p||PLAYER!==p) return;
   if(event==="pause"){
-    if(playbackTransportEvents(v).pause.shift()) return;
+    const record=playbackTransportEvents(v).pause.shift();
+    if(record){logPlaybackTransportRecord(record,true,v);return;}
+    logPlaybackTransportRecord(playbackTransportRecord(v,p,"pause","native_unknown","unmatched_media_event"),true,v);
     if(!v.paused) return; // queued native edge superseded by a newer Play
     if(v.ended||v.error) return;
     p.wantsPlayback=false;
@@ -481,7 +516,9 @@ function handlePlaybackTransportEvent(v,p,event){
     // above), which is right: this is the VIEWER's intent and nothing else.
     playbackSurfaceStep({playback_requested:false});
   }else if(event==="play"){
-    if(playbackTransportEvents(v).play.shift()) return;
+    const record=playbackTransportEvents(v).play.shift();
+    if(record){logPlaybackTransportRecord(record,true,v);return;}
+    logPlaybackTransportRecord(playbackTransportRecord(v,p,"play","native_unknown","unmatched_media_event"),true,v);
     if(v.paused) return; // queued native edge superseded by a newer Pause
     p.wantsPlayback=true;
     const proof=p.preparedCommitting;

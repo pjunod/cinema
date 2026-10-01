@@ -210,6 +210,10 @@ pub enum Terminal {
     AdminStop,
     Revoked,
     Replaced,
+    AuthorityFenced,
+    ControlExpired,
+    StartupExpired,
+    PauseExpired,
 }
 
 impl Terminal {
@@ -220,6 +224,10 @@ impl Terminal {
             Self::AdminStop => "admin_stop",
             Self::Revoked => "revoked",
             Self::Replaced => "replaced",
+            Self::AuthorityFenced => "authority_fenced",
+            Self::ControlExpired => "control_expired",
+            Self::StartupExpired => "startup_expired",
+            Self::PauseExpired => "pause_expired",
         }
     }
 
@@ -230,6 +238,10 @@ impl Terminal {
             Self::AdminStop => "stopped by admin",
             Self::Revoked => "credentials revoked",
             Self::Replaced => "file replaced",
+            Self::AuthorityFenced => "serving authority lost",
+            Self::ControlExpired => "control lease expired",
+            Self::StartupExpired => "presentation startup expired",
+            Self::PauseExpired => "pause grace expired",
         }
     }
 
@@ -240,6 +252,10 @@ impl Terminal {
             Some("admin_stop") => Some(Self::AdminStop),
             Some("revoked") => Some(Self::Revoked),
             Some("replaced") => Some(Self::Replaced),
+            Some("authority_fenced") => Some(Self::AuthorityFenced),
+            Some("control_expired") => Some(Self::ControlExpired),
+            Some("startup_expired") => Some(Self::StartupExpired),
+            Some("pause_expired") => Some(Self::PauseExpired),
             _ => None,
         }
     }
@@ -251,6 +267,10 @@ impl Terminal {
             Self::AdminStop,
             Self::Revoked,
             Self::Replaced,
+            Self::AuthorityFenced,
+            Self::ControlExpired,
+            Self::StartupExpired,
+            Self::PauseExpired,
         ]
         .into_iter()
         .find(|terminal| terminal.control_reason() == reason)
@@ -443,12 +463,67 @@ pub struct VodSessionInfo {
     pub final_: bool,
 }
 
+/// Cheap, bounded, additive Activity observations. No manifest or lease renewal.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct VodActivityObservation {
+    pub control_demand: Option<String>,
+    pub render_state: Option<String>,
+    pub position_ms: Option<i64>,
+    pub client_runway_ms: Option<i64>,
+    pub control_age_ms: Option<u64>,
+    pub producer_state: Option<String>,
+    pub producer_hold: Option<String>,
+}
+
+impl VodActivityObservation {
+    pub(crate) fn bounded(&self) -> bool {
+        [
+            &self.control_demand,
+            &self.render_state,
+            &self.producer_state,
+            &self.producer_hold,
+        ]
+        .iter()
+        .all(|value| value.as_ref().is_none_or(|text| text.len() <= 32))
+    }
+    pub(crate) fn demand(&self) -> Option<&'static str> {
+        match self.control_demand.as_deref() {
+            Some("active") => Some("active"),
+            Some("hold") => Some("hold"),
+            Some("end") => Some("end"),
+            _ => None,
+        }
+    }
+    pub(crate) fn render(&self) -> Option<&'static str> {
+        match self.render_state.as_deref() {
+            Some("starting") => Some("starting"),
+            Some("rendering") => Some("rendering"),
+            Some("waiting") => Some("waiting"),
+            Some("stalled") => Some("stalled"),
+            Some("seeking") => Some("seeking"),
+            Some("ended") => Some("ended"),
+            Some("failed") => Some("failed"),
+            _ => None,
+        }
+    }
+    pub(crate) fn producer(&self) -> &'static str {
+        match self.producer_state.as_deref() {
+            Some("failed") => "failed",
+            Some("held") => "held",
+            Some("running") => "running",
+            Some("absent") => "absent",
+            _ => "unknown",
+        }
+    }
+}
+
 /// The identity/lifetime slice needed by the shared activity inventory.
 /// Producer diagnostics stay in [`VodSessionInfo`]; this shape deliberately
 /// contains only facts that can be read without taking a rendition manifest
 /// lock for every open activity page.
 #[derive(Debug, Clone)]
 pub struct VodDeliveryInfo {
+    pub observation: Option<VodActivityObservation>,
     pub id: String,
     pub method: crate::delivery::Method,
     pub file_id: i64,

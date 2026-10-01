@@ -1531,3 +1531,15 @@ Production and unit-test Kotlin sources compiled successfully using the
 installed Android 37.0 SDK and Java 21 runtime. The pinned CI environment uses
 Java 25; this local compile is not a receipt for that environment. The surface
 transfer and native/device qualification remain unfinished.
+
+### 10.24 Integrate current playback ownership repairs
+
+Main through `3a512c890` adds terminal-owner lifetimes, captured-attachment End
+reporting, measured delivery Activity and the updated seek controls. The
+continuous-quality branch now integrates those changes. Two overlapping web
+conflicts retain both terminal Keep waiting refusal and the manual retained
+quality Retry action; the prepared harness includes both transport telemetry
+and cancellation dependencies. Unit execution remains deferred. Compiler
+evidence was refreshed against the merged tree: Rust workspace/all-targets,
+iOS production/test sources, tvOS, and Android production/test sources passed.
+No unit tests executed.

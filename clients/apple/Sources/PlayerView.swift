@@ -13,9 +13,11 @@ enum PlayerControl: Hashable {
     case signIn
     case progress
     case marker
+    case skipBack30
     case skipBack
     case playPause
     case skipForward
+    case skipForward30
     case pictureInPicture
     case audio
     case subtitles
@@ -27,7 +29,7 @@ enum PlayerControl: Hashable {
 extension PlayerControl {
     var isTransportControl: Bool {
         switch self {
-        case .skipBack, .playPause, .skipForward, .pictureInPicture,
+        case .skipBack30, .skipBack, .playPause, .skipForward, .skipForward30, .pictureInPicture,
              .audio, .subtitles, .quality, .settings, .stats:
             true
         default:
@@ -2245,9 +2247,11 @@ struct PlayerView: View {
 
     private var transportControlGroup: some View {
         HStack(spacing: 8) {
+            skipBack30Button
             skipBackButton
             playPauseButton
             skipForwardButton
+            skipForward30Button
         }
     }
 
@@ -2272,12 +2276,29 @@ struct PlayerView: View {
     }
     #endif
 
+    private func seekArrows(count: Int, backward: Bool) -> some View {
+        Path { path in
+            let start = count == 2 ? 7.0 : 2.0
+            for index in 0..<count {
+                let x = start + Double(index) * 10
+                path.move(to: CGPoint(x: x, y: 5))
+                path.addLine(to: CGPoint(x: x + 8, y: 12))
+                path.addLine(to: CGPoint(x: x, y: 19))
+                path.closeSubpath()
+            }
+        }
+        .fill(.primary)
+        .frame(width: 32, height: 24)
+        .scaleEffect(x: backward ? -1 : 1, y: 1)
+        .accessibilityHidden(true)
+    }
+
     private var skipBackButton: some View {
         Button {
             controller.skip(seconds: -10)
             revealControls()
         } label: {
-            Image(systemName: "gobackward.10")
+            seekArrows(count: 2, backward: true)
         }
         .accessibilityLabel("Back 10 seconds")
         .accessibilityIdentifier("player-skip-back")
@@ -2285,6 +2306,22 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .skipBack)
+        #endif
+    }
+
+    private var skipBack30Button: some View {
+        Button {
+            controller.skip(seconds: -30)
+            revealControls()
+        } label: {
+            seekArrows(count: 3, backward: true)
+        }
+        .accessibilityLabel("Back 30 seconds")
+        .accessibilityIdentifier("player-skip-back-30")
+        #if os(tvOS)
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .skipBack30)
         #endif
     }
 
@@ -2310,7 +2347,7 @@ struct PlayerView: View {
             controller.skip(seconds: 10)
             revealControls()
         } label: {
-            Image(systemName: "goforward.10")
+            seekArrows(count: 2, backward: false)
         }
         .accessibilityLabel("Forward 10 seconds")
         .accessibilityIdentifier("player-skip-forward")
@@ -2318,6 +2355,22 @@ struct PlayerView: View {
         .buttonStyle(TVPlayerControlButtonStyle())
         .focusEffectDisabled()
         .focused($focusedControl, equals: .skipForward)
+        #endif
+    }
+
+    private var skipForward30Button: some View {
+        Button {
+            controller.skip(seconds: 30)
+            revealControls()
+        } label: {
+            seekArrows(count: 3, backward: false)
+        }
+        .accessibilityLabel("Forward 30 seconds")
+        .accessibilityIdentifier("player-skip-forward-30")
+        #if os(tvOS)
+        .buttonStyle(TVPlayerControlButtonStyle())
+        .focusEffectDisabled()
+        .focused($focusedControl, equals: .skipForward30)
         #endif
     }
 

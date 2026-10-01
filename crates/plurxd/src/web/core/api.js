@@ -182,7 +182,7 @@ function clientLog(ev){
       vcodec:s.video_codec||null,
     }, ev||{});
     const control=p.controlReporter&&p.controlReporter.legacyContext();
-    if(control && body.control==null) body.control=control;
+    if(control && body.control==null && !body.transport) body.control=control;
     fetch(API+"/client-log",{method:"POST",keepalive:true,
       headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
       body:JSON.stringify(body)}).catch(()=>{});

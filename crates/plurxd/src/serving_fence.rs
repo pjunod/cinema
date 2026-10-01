@@ -789,6 +789,14 @@ impl ServingFence {
             Retain::Unchanged => {}
         }
         let desired = outcome.ready;
+        // Capture at the loss boundary, before media teardown can await. A later
+        // sampler timeout joins by sequence and cannot renew this generation.
+        if previous && !desired {
+            tracing::warn!(attempt = ?self.metrics.quorum_attempt(),
+                proof = ?self.metrics.snapshot(),
+                loss_generation = self.authority().state().loss_generation.saturating_add(1),
+                "serving authority expiring; in-flight quorum evidence");
+        }
         self.publish(desired).await;
         if previous != desired {
             if desired {

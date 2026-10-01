@@ -82,7 +82,7 @@ test("a paused rolling session's failure parks and Play reopens it", () => {
   const latch = toggle.indexOf("PlaybackPolicy.pausedRetirementCurrent(");
   assert.ok(latch >= 0 && latch < toggle.indexOf("resumeHlsStartup(v,PLAYER)"),
     "Play checks the latch before resuming the loader in place");
-  assert.ok(toggle.includes("seekTo(at,true,null,false)"), "the replacement is a forced reopen");
+  assert.match(toggle, /seekTo\(at,true,null,false(?:,|\))/, "the replacement is a forced reopen");
 
   const shell = shellSource().bodyScript;
   const errorListener = shell.slice(shell.indexOf('v.addEventListener("error",()=>{'));
