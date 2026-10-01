@@ -253,6 +253,70 @@ def pre_unit_recovery(api, scope, prior, jobs):
     return True
 
 
+def prepare_refusal_case():
+    """One reviewed actual failure; callers cannot enroll arbitrary attempts."""
+    path = Path('validation/python-unit-preunit-failure3747.json')
+    require(path.is_file() and not path.is_symlink(), 'Prepare refusal proof unavailable')
+    with path.open('rb') as source:
+        raw = source.read(MAX_BYTES + 1)
+    require(len(raw) <= MAX_BYTES, 'Prepare refusal descriptor exceeds byte cap')
+    require(hashlib.sha256(raw).hexdigest() ==
+            'd19d54eb94dadfef94ab0af765885131465386b1258e047fde5bee876836fbad',
+            'Unknown or corrupt prepare refusal proof')
+    return bounded_json(raw)
+
+
+def zero_unit_prepare_recovery(api, scope, prior, jobs):
+    """Authenticate a missing-journal prepare refusal; import no successes."""
+    proof = prepare_refusal_case()
+    require(set(proof) == {'version', 'scope', 'run', 'job', 'commit',
+                           'log_sha256', 'source_hashes', 'provenance'}
+            and proof['version'] == 1, 'Invalid prepare refusal descriptor')
+    if proof['scope'] != scope or proof['run'] != prior['id']:
+        return False
+    require(prior['commit_sha'] == proof['commit'], 'Prepare refusal prior source mismatch')
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual['id'] == proof['run']
+            and actual['repository']['id'] == scope['repository']
+            and actual['commit_sha'] == proof['commit']
+            and actual['prettyref'] == scope['branch']
+            and actual['workflow_id'] == 'effort-ci.yml' and actual['status'] == 'failure',
+            'Prepare refusal run metadata mismatch')
+    matching = [job for job in jobs if job['name'] == job_name(scope)]
+    require(len(matching) == 1 and matching[0]['id'] == proof['job']
+            and matching[0]['run_id'] == proof['run']
+            and matching[0]['repo_id'] == scope['repository']
+            and matching[0]['attempt'] == 1 and matching[0]['status'] == 'failure',
+            'Prepare refusal job metadata mismatch')
+    require(set(proof['source_hashes']) == {
+        '.github/workflows/effort-ci.yml', 'validation/python_unit_receipts.py'},
+        'Incomplete prepare source-order proof')
+    for path, expected in proof['source_hashes'].items():
+        require(hashlib.sha256(api.bytes('/raw/' + path, {'ref': proof['commit']})).hexdigest()
+                == expected, 'Prepare refusal exact-source hash mismatch')
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(hashlib.sha256(raw).hexdigest() == proof['log_sha256'],
+            'Prepare refusal log mismatch')
+    log = raw.decode('utf-8')
+    refusal = 'Python receipt refusal: ReceiptError: Local pass receipts await authenticated PR hash attestation'
+    start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
+    final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
+    require(proof['commit'] in log and log.count(refusal) == 1
+            and log.count(start) == 1 and log.count(final) == 1
+            and log.index(refusal) < min(log.index(start), log.index(final))
+            and not any(marker in log for marker in (
+                'discovered=', 'historical-passes=', 'pending=', 'Ran ',
+                'Unit discovery failed', 'fixture_errors', '... ok', '... FAIL', '... ERROR')),
+            'Prepare refusal contradicts zero-unit phase evidence')
+    require(not any(artifact['run_id'] == proof['run']
+                    for artifact in api.pages('/actions/artifacts', {'name': key(scope)}))
+            and not api.pages('/actions/artifacts', {'name': key(scope) + f"-start-{proof['run']}"})
+            and api.get(f"/actions/runs/{proof['run']}/artifacts") == [],
+            'Prepare refusal unexpectedly has start/final/run artifacts')
+    print(f"Recovered failed prepare run {proof['run']}/job {proof['job']}: zero units, no successes imported")
+    return True
+
+
 def validate_journal(journal, scope, run, commit, completed=True):
     require(journal.get("version") == VERSION and journal.get("scope") == scope,
             "Receipt repository/PR/branch/base mismatch")
@@ -419,6 +483,8 @@ def restore(api, scope, run):
         require(matching[0]["attempt"] == 1,
                 f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
         if matching[0]["status"] == "skipped":
+            continue
+        if rid not in indexed and zero_unit_prepare_recovery(api, scope, prior, jobs):
             continue
         require(rid in indexed, f"Missing final receipt for run {rid}; do not rerun possibly passed tests")
         markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
