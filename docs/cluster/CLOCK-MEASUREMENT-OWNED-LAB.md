@@ -192,6 +192,26 @@ to recover exact owner-matching IDs after a lost response; deletion itself
 uses those IDs. An incomplete owner marker, foreign object, incomplete log
 export or ambiguous process identity requires reviewed recovery, not guessing.
 
+**Transport diagnostics (2026-10-01):** a refused or timed-out SSH operation
+retains a private `stderr-evidence.json` under a new 0700
+`k06-remote-failure-*` temporary directory. The 0600 JSON records exit status
+or timeout, stderr byte count/SHA-256, tail truncation and a sanitized tail of
+at most 64 KiB. The existing per-file 2 MiB child output limit and 30-second
+transport timeout are unchanged; stdout remains the separate JSON channel
+and is never copied into failure evidence. Stderr is hashed in 64 KiB chunks,
+not accumulated in an unbounded pipe.
+
+Only exact whole-line capacity-policy refusals survive sanitization. Other
+SSH/worker text becomes `<redacted>` so an echoed credential cannot leak
+through an apparent policy prefix. A single recognized reason is rendered;
+otherwise the terminal reports a generic transport refusal and the private
+evidence path. An arbitrary command failure therefore still has no inferred
+cause. Evidence does not retry, waive admission or authorize another launch;
+retain failed campaigns and obtain a fresh separately authorized window.
+The [diagnostic regressions](../../tests/operations/test_k06_transport_diagnostics.py)
+cover secret redaction, byte bounds, timeout refusal and JSON separation
+using only local fake transports.
+
 ## 4. Collect actual signed observations, then bounded network traffic
 
 ```bash
