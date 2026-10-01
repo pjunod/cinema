@@ -13,6 +13,7 @@ from unittest import mock
 
 from validation.release_artifact import BINARIES, create, verify
 from validation.release_aliases import alias_action
+from tests.operations.test_release_debug import packed_pair
 from validation.release_dockerfile import (
     render,
     render_binary_export,
@@ -468,11 +469,13 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         export.mkdir()
         environment = own_repository_environment()
         shutil.copy2(ROOT / "Dockerfile", source / "Dockerfile")
+        shutil.copy2(ROOT / "Cargo.toml", source / "Cargo.toml")
+        shutil.copy2(ROOT / "rust-toolchain.toml", source / "rust-toolchain.toml")
         subprocess.run(
             ["git", "init", "-q"], cwd=source, check=True, env=environment
         )
         subprocess.run(
-            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile"],
+            ["git", "-c", "user.name=CI", "-c", "user.email=ci@example.test", "add", "Dockerfile", "Cargo.toml", "rust-toolchain.toml"],
             cwd=source,
             check=True,
             env=environment,
@@ -501,7 +504,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             env=environment,
         ).stdout.strip()
         for name in BINARIES:
-            write_elf(export / name, "x86_64-unknown-linux-gnu", name.encode())
+            packed_pair(export, name)
         (export / "rustc-version").write_text(
             "rustc 1.97.1 (fixture)\nbinary: rustc\n", encoding="utf-8"
         )
@@ -548,8 +551,12 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     "build-manifest.json",
                     "plurxd",
                     "plurxd.sha256",
+                    "plurxd.dwp",
+                    "plurxd.dwp.sha256",
                     "plurx-cluster-check",
                     "plurx-cluster-check.sha256",
+                    "plurx-cluster-check.dwp",
+                    "plurx-cluster-check.dwp.sha256",
                 },
             )
             self.assertIn(

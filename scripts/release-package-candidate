@@ -59,6 +59,29 @@ for name in "${binaries[@]}"; do
   artifact_args+=(--binary "$name")
 done
 
+debug_output=$(
+  PYTHONPATH="$packaging_root" python3 -m validation.release_dockerfile \
+    --list-debug-binaries "$source_root/Dockerfile"
+) || die "cannot derive the tagged debug contract"
+if [ -n "$debug_output" ]; then
+  rustc_release=$(python3 - "$source_root" <<'PY'
+import pathlib, sys, tomllib
+root = pathlib.Path(sys.argv[1])
+profile = tomllib.loads((root / 'Cargo.toml').read_text())['profile']['release']
+if (profile.get('debug'), profile.get('strip'), profile.get('split-debuginfo')) != ('line-tables-only', 'none', 'packed'):
+    raise SystemExit('tagged packed-debug runtime does not match profile C')
+print(tomllib.loads((root / 'rust-toolchain.toml').read_text())['toolchain']['channel'])
+PY
+  ) || die "cannot verify the tagged profile/toolchain contract"
+  artifact_args+=(--packed-debug --rustc-release "$rustc_release")
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    [ -f "$export_root/$name.dwp" ] && [ ! -L "$export_root/$name.dwp" ] \
+      || die "binary export is missing regular packed debug $name.dwp"
+    install -m 0644 "$export_root/$name.dwp" "$artifact_root/$name.dwp"
+  done <<< "$debug_output"
+fi
+
 PYTHONPATH="$packaging_root" python3 -m validation.release_artifact create \
   --directory "$artifact_root" \
   --git-tree "$git_tree" \
