@@ -3,6 +3,11 @@ name: validation nightly
 on:
   workflow_dispatch:
     inputs:
+      fuzz_only:
+        description: Run only the five bounded parser fuzz campaigns
+        required: false
+        type: boolean
+        default: false
       seed_pgs_crash:
         description: Prove the fuzz failure gate with a disposable harness panic
         required: false
@@ -14,6 +19,7 @@ env:
 
 jobs:
   deep-validation:
+    if: ${{ !inputs.fuzz_only }}
     name: playback, recovery, bounds, clients, UI, and packaging
     # The deep tier is the gate's own evidence run one level further, so it uses
     # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
@@ -103,9 +109,11 @@ jobs:
           PLURX_FUZZ_SEEDED_CRASH: ${{ inputs.seed_pgs_crash && '1' || '' }}
         run: |
           mkdir -p target/validation
+          before="$(find fuzz/corpus/inspect_sup -type f | wc -l | tr -d ' ')"
+          echo "corpus_before=$before" >> "$GITHUB_OUTPUT"
           set -o pipefail
           cargo +nightly-2026-08-01 fuzz run inspect_sup fuzz/corpus/inspect_sup \
-            -- -max_total_time=900 2>&1 | tee target/validation/pgs-fuzz.log
+            -- -max_total_time=900 -print_final_stats=1 2>&1 | tee target/validation/pgs-fuzz.log
       - name: Upload PGS fuzz evidence
         if: always()
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -118,7 +126,7 @@ jobs:
           retention-days: 14
       - name: Summarize the PGS campaign
         if: always()
-        run: scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log ${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }}
+        run: scripts/fuzz-campaign --summarize inspect_sup target/validation/pgs-fuzz.log ${{ steps.pgs_fuzz.outcome == 'failure' && 1 || 0 }} "${{ steps.pgs_fuzz.outputs.corpus_before }}"
       - name: Fail when the PGS fuzzer finds a crash
         if: always() && steps.pgs_fuzz.outcome == 'failure'
         run: |
@@ -198,6 +206,7 @@ jobs:
   # owns (validation/points.toml), so when #386 changes what the probe reports,
   # this lane is where the change meets a real ffmpeg 8 rather than a mock.
   ffmpeg8-pacing:
+    if: ${{ !inputs.fuzz_only }}
     name: pacing capability contract on ffmpeg 8
     # The container tag is the pin here — `ubuntu:26.04` is where ffmpeg 8 comes
     # from, and it moves only when this line does. The final step restores the
@@ -242,6 +251,7 @@ jobs:
           chown -R "$owner" "$GITHUB_WORKSPACE"
 
   mutation:
+    if: ${{ !inputs.fuzz_only }}
     name: report-only weekly mutation spot-check
     # Mutants are judged by whether the suite kills them, and the suite spawns
     # ffmpeg, so this needs the same pinned build. See .github/actions/ffmpeg.

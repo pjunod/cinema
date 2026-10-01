@@ -52,10 +52,10 @@ jobs:
           echo "mode=$mode" >> "$GITHUB_OUTPUT"
 
   preflight:
-    name: ${{ needs.scope.outputs.receipt_job }}
+    name: Python unit receipts
     needs: scope
     concurrency:
-      group: python-unit-${{ needs.scope.outputs.receipt_key }}
+      group: python-unit-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: false
     runs-on: [self-hosted, Linux, X64, lab, general]
     # Match the main lane: history and contract checks exceeded three minutes
@@ -74,7 +74,7 @@ jobs:
       - name: Publish Python attempt-start marker
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
-          name: ${{ needs.scope.outputs.receipt_key }}-start-${{ github.run_id }}
+          name: ${{ steps.receipts.outputs.receipt_key }}-start-${{ github.run_id }}
           path: .python-unit-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90
@@ -94,7 +94,7 @@ jobs:
         if: always() && steps.receipts.outcome == 'success'
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
         with:
-          name: ${{ needs.scope.outputs.receipt_key }}
+          name: ${{ steps.receipts.outputs.receipt_key }}
           path: .python-unit-receipts/receipt.json
           if-no-files-found: error
           retention-days: 90

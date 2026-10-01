@@ -1588,5 +1588,44 @@ class RateControlBenchCase(unittest.TestCase):
                 BENCH["write_json"](Path(directory) / "nan.json", {"value": float("nan")})
 
 
+class CodecQualificationFixtureTests(unittest.TestCase):
+    def test_pq_tags_do_not_establish_genuine_profile_five(self):
+        fake = SimpleNamespace(returncode=0, stdout=json.dumps({"streams": [{
+            "codec_type": "video", "codec_name": "hevc", "color_transfer": "smpte2084",
+        }]}), stderr="")
+        with mock.patch.dict(G, sh=mock.Mock(return_value=fake)):
+            with self.assertRaisesRegex(BENCH["BenchError"], "genuine Profile 5"):
+                BENCH["probe_fixture"]("input.mkv", "dv-p5")
+            fake.stdout = json.dumps({"streams": [{"codec_type": "video", "codec_name": "hevc", "side_data_list": [{"dv_profile": 5, "rpu_present_flag": 1}]}]})
+            self.assertEqual(len(BENCH["probe_fixture"]("input.mkv", "dv-p5")), 1)
+
+    def test_pgs_fixture_carries_a_real_subtitle_not_preburned_pixels(self):
+        with tempfile.TemporaryDirectory() as directory:
+            commands = []
+            def run(command):
+                commands.append(command)
+                if command[0] == "ffprobe":
+                    return SimpleNamespace(returncode=0, stdout=json.dumps({"streams": [{"codec_type": "video"}, {"codec_name": "hdmv_pgs_subtitle"}]}), stderr="")
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+            with mock.patch.dict(G, sh=run):
+                BENCH["build_fixture"](directory, "burn-pgs", BENCH["FIXTURES"]["burn-pgs"])
+            mux = next(command for command in commands if command[0] == "ffmpeg")
+            self.assertIn("2:s:0", mux)
+            self.assertEqual(mux[mux.index("-c:s") + 1], "copy")
+            self.assertNotIn("-filter_complex", mux)
+            self.assertNotIn("-shortest", mux)
+            self.assertEqual(mux[mux.index("-t") + 1], str(BENCH["DURATION"]))
+            self.assertTrue(any(command[0] == "ffprobe" for command in commands))
+
+    def test_missing_dv_input_and_failed_generator_fail_loudly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.dict(os.environ, {"PLURX_DV_P5_FIXTURE": ""}):
+                with self.assertRaisesRegex(BENCH["BenchError"], "genuine Profile 5"):
+                    BENCH["build_fixture"](directory, "dv-p5", BENCH["FIXTURES"]["dv-p5"])
+            with mock.patch.dict(G, sh=mock.Mock(return_value=SimpleNamespace(returncode=1, stdout="", stderr="encode failure"))):
+                with self.assertRaisesRegex(BENCH["BenchError"], "fixture encode failed"):
+                    BENCH["build_fixture"](directory, "sport", BENCH["FIXTURES"]["sport"])
+
+
 if __name__ == "__main__":
     unittest.main()

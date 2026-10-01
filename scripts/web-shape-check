@@ -86,6 +86,82 @@ function infoShape(fields) {
     assert.ok(!labels.has(label), "duplicate info label in section"); labels.add(label);
     for (const client of field.available_on || []) assert.ok(["web", "apple", "android"].includes(client));
   }
+  for (const required of ["container", "server_ready", "http_wait", "client_loaded", "presentation", "status", "subtitles", "stalls"]) {
+    assert.ok(ids.has(required), `missing diagnostic field ${required}`);
+  }
+  for (const banned of ["Ahead", "Buffer ahead", "Encode", "Delivery", "Output", "Range"]) {
+    assert.ok(!fields.fields.some(field => field.label === banned), `ambiguous diagnostic label ${banned}`);
+  }
+}
+
+function inputExtraShape(contract) {
+  const outcomes = new Set(Object.keys(contract.outcomes));
+  const states = Object.keys(contract.states).sort();
+  assert.deepEqual(Object.keys(contract.watch.routing).sort(), ["browser", "fullscreen"]);
+  for (const chromes of Object.values(contract.watch.routing)) {
+    assert.deepEqual(Object.keys(chromes).sort(), ["inline", "overlay"]);
+    for (const surfaces of Object.values(chromes)) {
+      assert.deepEqual(Object.keys(surfaces).sort(), Object.keys(contract.surfaces).sort());
+      for (const rows of Object.values(surfaces)) {
+        assert.deepEqual(Object.keys(rows).sort(), states);
+        for (const row of Object.values(rows)) {
+          assert.deepEqual(Object.keys(row), contract.inputs);
+          for (const outcome of Object.values(row)) assert.ok(outcomes.has(outcome), "undefined watch outcome");
+        }
+      }
+    }
+  }
+  assert.deepEqual(Object.keys(contract.close_control).filter(key => key !== "notes").sort(), states);
+  for (const state of states) {
+    const steps = contract.close_control[state];
+    assert.ok(Array.isArray(steps) && steps.length > 0);
+    for (const step of steps) assert.ok(outcomes.has(step), "undefined close outcome");
+    assert.equal(steps.indexOf("exit"), steps.length - 1, "close must end in exit");
+    assert.ok(!steps.includes("hide"), "close may not merely hide the player");
+  }
+  const rows = contract.controls.rows, seen = new Set();
+  assert.equal(new Set(rows.map(row => row.id)).size, rows.length, "duplicate control row");
+  assert.deepEqual(rows.find(row => row.id === "timeline")?.focusable, ["timeline"]);
+  for (const row of rows) for (const item of row.items) {
+    assert.ok(item === "spacer" || !seen.has(item), "duplicate control placement");
+    seen.add(item);
+  }
+  assert.ok(seen.has(contract.controls.initial_focus), "initial focus is not a control");
+  const ladder = contract.steps.preview_acceleration;
+  assert.ok(Array.isArray(ladder) && ladder.length > 0);
+  assert.equal(ladder[0].from_repeat, 0);
+  assert.equal(ladder[0].step_seconds, contract.steps.preview_step_seconds);
+  for (let i = 1; i < ladder.length; i++) {
+    assert.ok(ladder[i].from_repeat > ladder[i - 1].from_repeat, "repeat thresholds do not ascend");
+    assert.ok(ladder[i].step_seconds > ladder[i - 1].step_seconds, "preview steps do not ascend");
+  }
+}
+
+function surfaceExtraShape(surface) {
+  const offered = new Set(), reasons = new Set([
+    "presenting", "presenting_after_raise", "presenting_new_attached", "presenting_continuous_ms",
+    "intent_settled", "intent_superseded", "attached_retired", "owner_success", "timer", "user",
+    "playback_not_requested", "system_resumed",
+  ]);
+  for (const source of surface.sources) {
+    if (source.class && surface.classes[source.class]?.blocking === true) {
+      assert.equal(source.requires?.player_stopped, true, "blocking source has no stop declaration");
+    }
+    for (const reason of source.retired_by || []) assert.ok(reasons.has(reason), "unknown source retirement reason");
+  }
+  const continuous = {refused: "refused_progress_ms", degraded: "disagreement_notice_ms"};
+  for (const [name, cls] of Object.entries(surface.classes)) {
+    for (const action of cls.default_actions || []) offered.add(action);
+    for (const reason of cls.retired_by || []) {
+      assert.ok(reasons.has(reason), "unknown class retirement reason");
+      if (reason === "presenting_continuous_ms") assert.ok(surface.timings[continuous[name]] != null);
+      if (reason === "timer") assert.ok(cls.timed_ms != null);
+    }
+  }
+  for (const item of surface.cases) for (const row of [...item.events, ...item.expect]) {
+    for (const action of row.actions || []) offered.add(action);
+  }
+  for (const action of surface.actions) assert.ok(offered.has(action), "unreachable vocabulary action");
 }
 
 function fixtureShape() {
@@ -102,7 +178,9 @@ function fixtureShape() {
       }
     }
   }
+  inputExtraShape(contract);
   infoShape(fields);
+  surfaceExtraShape(surface);
   assert.equal(new Set(surface.sources.map(s => s.id)).size, surface.sources.length, "duplicate surface source");
   for (const source of surface.sources) if (source.class !== null) assert.ok(Object.hasOwn(surface.classes, source.class));
   for (const cls of Object.values(surface.classes)) {
@@ -260,5 +338,5 @@ function main() {
   console.log("web-shape-check: current-source assets, graph, DOM, embeds and Player shape OK (no behavior fixtures)");
 }
 
-module.exports = {tableRows, assetShape, exactBlock, fixtureShape, infoShape, jsconfigShape, domShape};
+module.exports = {tableRows, assetShape, exactBlock, fixtureShape, infoShape, inputExtraShape, surfaceExtraShape, jsconfigShape, domShape};
 if (require.main === module) main();
