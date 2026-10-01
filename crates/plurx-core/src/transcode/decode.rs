@@ -2008,7 +2008,8 @@ pub enum VideoSampleEnvelope {
 }
 
 /// Level 5.0 frame-size and macroblock-rate limits, using the exact rational
-/// output cadence. VBR admission also bounds its 3/2 peak below High's limit.
+/// output cadence. VBR admission bounds both the 3/2 peak and the two-second
+/// coded-picture buffer below High's conservative VCL limits.
 pub(super) fn continuous_avc_envelope_accepts(
     width: u32,
     height: u32,
@@ -2031,6 +2032,7 @@ pub(super) fn continuous_avc_envelope_accepts(
         && height_mbs * height_mbs <= 8 * 22_080
         && frame_mbs * u64::from(rate_numerator) <= 589_824 * u64::from(rate_denominator)
         && u64::from(bitrate_kbps) * 3 <= 337_500
+        && u64::from(bitrate_kbps) * 2 <= 168_750
 }
 
 /// Semantic subset of today's transcode options. Execution coordinates,

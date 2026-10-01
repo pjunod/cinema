@@ -925,8 +925,8 @@ mod tests {
         assert!(!accepts(4096, 2304, 24, 1, 40_000));
         assert!(!accepts(1921, 1080, 24, 1, 12_000));
         assert!(!accepts(1920, 1080, 24, 0, 12_000));
-        assert!(accepts(640, 360, 24, 1, 112_500));
-        assert!(!accepts(640, 360, 24, 1, 112_501));
+        assert!(accepts(640, 360, 24, 1, 84_375));
+        assert!(!accepts(640, 360, 24, 1, 84_376));
     }
 
     #[test]

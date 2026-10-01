@@ -1386,3 +1386,18 @@ Workspace/all-target compilation passed without unit execution.
 The family actor still needs its versioned stored request and attachment
 contract, creation/admission, audio pairing and routing. The normal options
 carry media semantics, not a user feature readiness gate.
+
+### 10.15 Codec buffer bound and final test accounting
+
+The continuous High level 5.0 recipe now bounds its two-second coded-picture
+buffer as well as peak bitrate. The conservative High VCL limit is 168,750
+kbits, so this recipe accepts at most 84,375 kbit/s; the boundary regression
+covers that exact limit. The level and profile factors come from
+[FFmpeg's H.264 level table](https://www.ffmpeg.org/doxygen/4.4/h264__levels_8c_source.html).
+This corrects a recipe admission bound before family creation uses it.
+
+At final qualification, each fast-lane test needs one passing result for the
+code being merged. Record individual results and rerun failures individually.
+A repair invalidates prior passing evidence only for tests affected by that
+repair; it does not trigger an unconditional full-lane rerun. No unit tests
+run during implementation.
