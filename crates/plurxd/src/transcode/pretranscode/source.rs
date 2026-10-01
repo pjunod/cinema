@@ -5,7 +5,7 @@ use super::*;
 /// Short, because this interval *is* the latency a viewer pays to preempt it:
 /// a quarter-second of polling plus a kill is well inside the five seconds a
 /// live start is willing to queue, and the poll itself costs nothing.
-pub(super) const PRODUCER_POLL: Duration = Duration::from_millis(250);
+pub(crate) const PRODUCER_POLL: Duration = Duration::from_millis(250);
 
 /// How long a producer waits before asking for a slot again after being
 /// refused one. Longer than the poll: it has already been told a viewer is

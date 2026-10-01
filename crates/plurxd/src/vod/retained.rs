@@ -113,6 +113,7 @@ impl VodServe {
 
 #[derive(Debug)]
 pub(crate) struct RetainedVodArtifact {
+    pub(super) private_preparation_origin: std::sync::OnceLock<PreparedOrigin>,
     pub(super) id: uuid::Uuid,
     pub(super) observation: CompleteOutputObservation,
     pub(super) directory: PathBuf,
@@ -127,6 +128,14 @@ pub(crate) struct RetainedVodArtifact {
     pub(super) logical: Option<super::retained_manifest::LogicalOutput>,
     pub(super) validated: AtomicBool,
     pub(super) sealed_identity: std::sync::OnceLock<[u8; 32]>,
+}
+
+/// Process-private provenance minted only by post-settlement exposure. It is
+/// absent from manifests, facts and every public/worker envelope.
+#[derive(Debug)]
+pub(super) struct PreparedOrigin {
+    _reservation: uuid::Uuid,
+    artifact_id: uuid::Uuid,
 }
 
 impl RetainedVodArtifact {
@@ -317,12 +326,29 @@ struct RetainedState {
     entries: HashMap<[u8; 32], RetainedEntry>,
     retired: VecDeque<Arc<RetainedVodArtifact>>,
     bytes: u64,
+    preparations: HashMap<uuid::Uuid, u64>,
     assembling: bool,
     namespace_owner: Option<std::fs::File>,
     namespace: Option<PathBuf>,
     startup_scan: Option<std::fs::ReadDir>,
     startup_done: bool,
     orphans: VecDeque<PathBuf>,
+}
+
+struct PreparationAssemblyOutcome {
+    preparation: Option<Arc<super::copy_preparation::CopyPreparation>>,
+    completed: bool,
+}
+
+impl Drop for PreparationAssemblyOutcome {
+    fn drop(&mut self) {
+        if let Some(preparation) = self.preparation.as_ref() {
+            if !self.completed {
+                preparation.fail();
+            }
+            preparation.progress.notify_waiters();
+        }
+    }
 }
 
 #[derive(Default)]
@@ -332,9 +358,77 @@ pub(super) struct RetainedArtifactRegistry {
 }
 
 impl RetainedArtifactRegistry {
+    #[cfg(test)]
+    pub(super) fn test_has_artifact(&self, facts: &crate::transcode::RetainedOutputFacts) -> bool {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .entries
+            .values()
+            .any(|entry| entry.artifact.facts() == *facts)
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_preparation_count(&self) -> usize {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .preparations
+            .len()
+    }
+
+    pub(super) async fn reserve_preparation(
+        shared: &Arc<Shared>,
+        cap: u64,
+        budget: u64,
+    ) -> Option<Arc<super::copy_preparation::PreparationAllowance>> {
+        if cap == 0 || cap > budget || !shared.retained_artifacts.own_namespace(&shared.base).await
+        {
+            return None;
+        }
+        shared.retained_artifacts.collect_orphans().await;
+        let mut state = shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock");
+        let reserved = state
+            .preparations
+            .values()
+            .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))?;
+        if !state.startup_done
+            || !state.orphans.is_empty()
+            || state.entries.len() + state.retired.len() + state.preparations.len() >= MAX_ARTIFACTS
+            || state.bytes.checked_add(reserved)?.checked_add(cap)? > budget
+        {
+            return None;
+        }
+        let nonce = uuid::Uuid::new_v4();
+        state.preparations.insert(nonce, cap);
+        Some(Arc::new(
+            super::copy_preparation::PreparationAllowance::new(shared, nonce, cap),
+        ))
+    }
+
+    pub(super) fn release_preparation(&self, nonce: uuid::Uuid) {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .preparations
+            .remove(&nonce);
+    }
+    pub(super) fn retire_prepared(&self, artifact: Arc<RetainedVodArtifact>) {
+        self.state
+            .lock()
+            .expect("retained registry lock")
+            .retired
+            .push_back(artifact);
+    }
+
     /// Reuses the existing maintenance owner for a refused/busy completion;
     /// there is no second scheduler and no payload or cold-title scan.
     pub(super) fn offer(shared: &Arc<Shared>, rendition: &Arc<Rendition>) -> bool {
+        let preparation = rendition.preparation();
         let measurement = rendition
             .output_measurement
             .lock()
@@ -343,6 +437,9 @@ impl RetainedArtifactRegistry {
             return false;
         };
         let Some(reservation) = Self::reserve(shared, rendition, &rates) else {
+            if let Some(preparation) = preparation.as_ref() {
+                preparation.fail();
+            }
             return false;
         };
         let Some(observation) = measurement.complete_observation() else {
@@ -354,7 +451,7 @@ impl RetainedArtifactRegistry {
         tokio::spawn(async move {
             shared
                 .retained_artifacts
-                .assemble(&shared, &rendition, observation, reservation)
+                .assemble(&shared, &rendition, observation, reservation, preparation)
                 .await;
         });
         true
@@ -587,7 +684,11 @@ impl RetainedArtifactRegistry {
         (artifact.facts() == *facts
             && artifact.logical == *incoming_logical
             && (artifact.recipe_key == rendition.key
-                || (artifact.durable
+                || ((artifact.durable
+                    || artifact
+                        .private_preparation_origin
+                        .get()
+                        .is_some_and(|origin| origin.artifact_id == artifact.id))
                     && artifact.logical.is_some()
                     && artifact.observation.preimage.playlist.as_slice()
                         == rendition.playlist.as_slice()))
@@ -718,22 +819,46 @@ impl RetainedArtifactRegistry {
         rendition: &Rendition,
         rates: &plurx_core::output_measurement::CompleteOutputRates,
     ) -> Option<AssemblyReservation> {
+        let preparation = rendition.preparation();
+        let prepare_nonce = preparation.as_ref().map(|prepare| prepare.allowance.nonce);
+        if preparation
+            .as_ref()
+            .is_some_and(|prepare| prepare.allowance.footprint().is_none())
+        {
+            return None;
+        }
         let mut state = shared
             .retained_artifacts
             .state
             .lock()
             .expect("retained registry lock");
+        let reserved = state
+            .preparations
+            .values()
+            .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))?;
+        let own_cap = prepare_nonce
+            .and_then(|nonce| state.preparations.get(&nonce).copied())
+            .unwrap_or(0);
+        let reserved = reserved.checked_sub(own_cap)?;
         if state.assembling
             || state.entries.contains_key(&rates.identity)
-            || state.entries.len() + state.retired.len() >= MAX_ARTIFACTS
+            || state.entries.len() + state.retired.len() + state.preparations.len()
+                - usize::from(own_cap > 0)
+                >= MAX_ARTIFACTS
             || state
                 .bytes
-                .checked_add(rates.wire_bytes)
+                .checked_add(reserved)
+                .and_then(|bytes| bytes.checked_add(rates.wire_bytes))
                 .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
         {
             return None;
         }
         state.bytes += rates.wire_bytes;
+        if let Some(nonce) = prepare_nonce {
+            if own_cap > 0 {
+                state.preparations.insert(nonce, 0);
+            }
+        }
         state.assembling = true;
         Some(AssemblyReservation {
             shared: Arc::clone(shared),
@@ -751,7 +876,12 @@ impl RetainedArtifactRegistry {
         rendition: &Arc<Rendition>,
         observation: CompleteOutputObservation,
         mut reservation: AssemblyReservation,
+        preparation: Option<Arc<super::copy_preparation::CopyPreparation>>,
     ) {
+        let mut completion = PreparationAssemblyOutcome {
+            preparation: preparation.clone(),
+            completed: false,
+        };
         let Ok(preparing) = self.collector.try_lock() else {
             return;
         };
@@ -778,11 +908,19 @@ impl RetainedArtifactRegistry {
         drop(preparing);
         {
             let mut state = self.state.lock().expect("retained registry lock");
+            let Some(reserved) = state
+                .preparations
+                .values()
+                .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))
+            else {
+                return;
+            };
             if !state.startup_done
                 || !state.orphans.is_empty()
                 || state
                     .bytes
-                    .checked_add(extra_charge)
+                    .checked_add(reserved)
+                    .and_then(|bytes| bytes.checked_add(extra_charge))
                     .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
                 return;
@@ -793,6 +931,7 @@ impl RetainedArtifactRegistry {
         let id = uuid::Uuid::new_v4();
         let directory = shared.base.join(".retained").join(id.to_string());
         let artifact = Arc::new(RetainedVodArtifact {
+            private_preparation_origin: std::sync::OnceLock::new(),
             id,
             observation,
             directory,
@@ -817,6 +956,20 @@ impl RetainedArtifactRegistry {
             tracing::debug!(target: "plurxd::vodserve", %error, artifact = %artifact.id,
                 "complete retained artifact assembly unavailable");
         }
+        if let Some(preparation) = preparation {
+            // The origin captured at offer time remains private until the
+            // exact job settlement and post-statement source revalidation.
+            // A revoked origin must never fall through to ordinary exposure.
+            if result.is_ok()
+                && preparation.live(rendition).await
+                && preparation.stage(Arc::clone(&artifact))
+            {
+                reservation.published = true;
+                completion.completed = true;
+            }
+            preparation.progress.notify_waiters();
+            return;
+        }
         let mut state = self.state.lock().expect("retained registry lock");
         if result.is_ok() {
             state.entries.insert(
@@ -829,6 +982,55 @@ impl RetainedArtifactRegistry {
             );
             reservation.published = true;
         }
+    }
+
+    /// A successful queue statement is historical evidence, not registry
+    /// authority. Expose only the still-held private body after independent
+    /// post-statement source, engine and complete observation checks.
+    pub(super) async fn expose_prepared(
+        &self,
+        shared: &Arc<Shared>,
+        rendition: &Arc<Rendition>,
+        preparation: &super::copy_preparation::CopyPreparation,
+        artifact: &Arc<RetainedVodArtifact>,
+    ) -> bool {
+        let _gate = shared
+            .rendition_build_gate(&rendition.key)
+            .lock_owned()
+            .await;
+        let readers = rendition.readers.lock().await;
+        if !readers.is_empty()
+            || !preparation.publication_current(rendition)
+            || !preparation
+                .engine
+                .is_current_with_executable(&preparation.executable)
+                .await
+            || !recipe_engine_is_current(&rendition.recipe).await
+            || !rendition
+                .output_measurement
+                .lock()
+                .expect("output measurement lock")
+                .complete_observation()
+                .is_some_and(|current| current == artifact.observation)
+        {
+            return false;
+        }
+        preparation.publish_staged(rendition, artifact, |artifact| {
+            let mut state = self.state.lock().expect("retained registry lock");
+            let _ = artifact.private_preparation_origin.set(PreparedOrigin {
+                _reservation: preparation.allowance.nonce,
+                artifact_id: artifact.id,
+            });
+            state.preparations.remove(&preparation.allowance.nonce);
+            state.entries.insert(
+                artifact.observation.rates.identity,
+                RetainedEntry {
+                    artifact,
+                    used: Instant::now(),
+                    idle_since: None,
+                },
+            );
+        })
     }
 
     async fn link_complete(

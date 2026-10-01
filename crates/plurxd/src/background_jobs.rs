@@ -562,6 +562,55 @@ impl JobFence {
         }
     }
 
+    pub(crate) async fn publish_copy_output(
+        &self,
+        intent: plurx_core::store::background_jobs::CopyOutputIntent,
+        output: plurx_core::store::background_jobs::CopyOutputJobOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if self.0.kind != plurx_core::store::background_jobs::JobKind::CopyOutputPrepare
+            || !self.0.authority.may_execute_job(self.0.kind).await
+            || !self.may_publish()
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs::PublishCopyOutputJob {
+            token,
+            intent,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_copy_output_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_copy_output_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
+    }
+
     pub(crate) async fn publish_transcode(
         &self,
         output: TranscodeJobOutput,
@@ -1040,6 +1089,19 @@ impl JobFence {
 /// Find a compatible candidate without letting an unreadable high-priority
 /// item hide every lower item. Keyset pages bound each read; the active-row
 /// cap bounds a complete pass. Admission is held through ambiguous claims.
+pub(crate) enum PreparationClaim {
+    Transcode(
+        plurx_core::domain::PretranscodeJob,
+        ActiveBackgroundJob,
+        crate::transcode::PretranscodeFence,
+    ),
+    Copy(
+        plurx_core::store::background_jobs::BackgroundJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    ),
+}
+
 pub(crate) async fn claim_pretranscode(
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
@@ -1047,20 +1109,19 @@ pub(crate) async fn claim_pretranscode(
     node: &str,
     capabilities: &plurx_core::domain::PretranscodeWorkerCapabilities,
     excluded: &[String],
-) -> Result<
-    Option<(
-        plurx_core::domain::PretranscodeJob,
-        ActiveBackgroundJob,
-        crate::transcode::PretranscodeFence,
-    )>,
-    StoreError,
-> {
+) -> Result<Option<PreparationClaim>, StoreError> {
     use plurx_core::store::background_jobs::{
         CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+    let mut kinds = Vec::new();
+    for kind in [JobKind::TranscodePrepare, JobKind::CopyOutputPrepare] {
+        if authority.may_execute_job(kind).await {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
         return Ok(None);
     }
     let mut cursor = None;
@@ -1068,7 +1129,7 @@ pub(crate) async fn claim_pretranscode(
         let page = store
             .job_candidates(CandidateQuery {
                 node_id: node.into(),
-                kinds: vec![JobKind::TranscodePrepare],
+                kinds: kinds.clone(),
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
@@ -1092,6 +1153,49 @@ pub(crate) async fn claim_pretranscode(
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
+            if let JobPayload::CopyOutputPrepare {
+                intent,
+                scratch_bytes,
+                ..
+            } = &payload
+            {
+                if intent.target_node_id != node || *scratch_bytes > capabilities.scratch_bytes {
+                    continue;
+                }
+                let Some(admission) = transcode.admit_fragment().await else {
+                    return Ok(None);
+                };
+                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                    continue;
+                }
+                let now_ms = unix_ms()?;
+                let request = ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::CopyOutputPrepare,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                };
+                let Some((job, deadline)) =
+                    claim_with_resolution(store.as_ref(), &candidate, request).await?
+                else {
+                    continue;
+                };
+                let active = ActiveBackgroundJob::start(
+                    Arc::clone(&store),
+                    Arc::clone(&authority),
+                    job.token.clone().ok_or_else(|| {
+                        StoreError::Task("claimed copy job has no ownership token".into())
+                    })?,
+                    deadline,
+                    JobKind::CopyOutputPrepare,
+                )?;
+                return Ok(Some(PreparationClaim::Copy(job, active, admission)));
+            }
             let JobPayload::TranscodePrepare {
                 requirements,
                 target_height,
@@ -1101,7 +1205,8 @@ pub(crate) async fn claim_pretranscode(
             else {
                 continue;
             };
-            if !requirements.compatible_with(capabilities)
+            if !capabilities.validate()
+                || !requirements.compatible_with(capabilities)
                 || i64::from(*target_height) > capabilities.max_target_height
             {
                 continue;
@@ -1154,7 +1259,7 @@ pub(crate) async fn claim_pretranscode(
                 active.fence(),
                 admission,
             );
-            return Ok(Some((projection, active, fence)));
+            return Ok(Some(PreparationClaim::Transcode(projection, active, fence)));
         }
         cursor = page.next;
         if cursor.is_none() {

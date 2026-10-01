@@ -1,6 +1,341 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Queue exact complete-copy work without waiting for its full body in
+    /// the foreground. This budget is a hard allocation cap, not wire cost.
+    pub(super) async fn enqueue_copy_output(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        settings: &crate::vodserve::VodSettings,
+    ) -> Result<(), String> {
+        use plurx_core::store::background_jobs::{
+            CopyOutputIntent, CopyOutputProfile, EnqueueJob, JobPayload, JobRequest,
+        };
+        let SessionKind::Copy {
+            aac,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        } = request.kind
+        else {
+            return Ok(());
+        };
+        let Some(context) = request
+            .candidate_context
+            .as_ref()
+            .filter(|context| context.normalized_geometry)
+        else {
+            return Ok(());
+        };
+        let Some(node) = context.owner_node_id.as_ref() else {
+            return Ok(());
+        };
+        let Some(audio_delivery) = request.audio_delivery.clone() else {
+            return Ok(());
+        };
+        if request.subtitle_burn.is_some() || request.audio_claim.is_none() {
+            return Ok(());
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        let probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(convert_dolby_vision);
+        let identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
+        let width = file
+            .width
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("copy width unavailable")?;
+        let height = file
+            .height
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or("copy height unavailable")?;
+        let actual = super::manager_candidates::copy_candidate_recipe_digest(
+            file,
+            request.audio_index,
+            request.audio_offset_ms,
+            None,
+            (aac, preserve_dolby_vision, convert_dolby_vision),
+            Some(source.object_version()),
+            Some(&executable.digest),
+            Some(&engine.digest),
+            (width, height),
+        );
+        if actual != context.recipe_digest
+            || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                != context.candidate_id
+            || super::manager_candidates::copy_candidate_grade(file) != context.grade
+        {
+            return Ok(());
+        }
+        if !source.unchanged() {
+            return Ok(());
+        }
+        let cap = u64::try_from(file.size)
+            .ok()
+            .and_then(|bytes| bytes.checked_mul(2))
+            .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
+            .map(|bytes| bytes.min(settings.completed_cache_bytes))
+            .filter(|bytes| *bytes > 0)
+            .ok_or("copy preparation allocation cap unavailable")?;
+        let intent = CopyOutputIntent {
+            target_node_id: node.clone(),
+            audio_index: request.audio_index,
+            audio_offset_ms: request.audio_offset_ms,
+            audio_claim: request.audio_claim.clone(),
+            audio_delivery,
+            aac,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+            grade: context.grade,
+            hdr10_requested: request.hdr10,
+            normalized_geometry: context.normalized_geometry,
+            profile: context.profile.map(|profile| match profile {
+                plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1 => {
+                    CopyOutputProfile::H264Sdr1440P30V1
+                }
+            }),
+            width: file
+                .width
+                .and_then(|width| u32::try_from(width).ok())
+                .ok_or("copy width unavailable")?,
+            height: file
+                .height
+                .and_then(|height| u32::try_from(height).ok())
+                .ok_or("copy height unavailable")?,
+            video_identity: identity,
+            pipeline_identity: crate::ffmpeg::fragment_index_engine_digest().await,
+        };
+        let payload = JobPayload::CopyOutputPrepare {
+            copy_output_version: 1,
+            file_id: file.id,
+            source_generation: source.object_version().to_owned(),
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_object_version: source.object_version().to_owned(),
+            policy_generation: "copy_output_v1".to_owned(),
+            intent,
+            scratch_bytes: i64::try_from(cap).map_err(|_| "copy cap overflow")?,
+            reason: "recent_demand".to_owned(),
+        };
+        let digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&payload).map_err(|error| error.to_string())?,
+        ));
+        let now = crate::media_sessions::unix_ms();
+        self.store
+            .enqueue_job(EnqueueJob {
+                id: uuid::Uuid::new_v4().to_string(),
+                payload,
+                dedupe_key: digest.clone(),
+                priority: 1,
+                not_before_ms: now,
+                now_ms: now,
+                request: JobRequest {
+                    scope: "copy_output_prepare".to_owned(),
+                    request_id: digest.clone(),
+                    request_digest: digest,
+                    consumer_kind: "copy_output".to_owned(),
+                    consumer_ref: file.id.to_string(),
+                    target_node_id: Some(node.clone()),
+                    deadline_ms: None,
+                    retain_identity: false,
+                },
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    /// Actual copy preparation uses the existing claimed/admitted worker lane
+    /// and VOD driver, not a playback session or a second producer scheduler.
+    pub(crate) async fn produce_copy_output_job(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        job: &plurx_core::store::background_jobs::BackgroundJob,
+        fence: crate::background_jobs::JobFence,
+        admission: &FragmentAdmission,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        use plurx_core::store::background_jobs::{CopyOutputProfile, JobPayload};
+        let payload = job.supported_payload().map_err(|error| error.to_string())?;
+        let JobPayload::CopyOutputPrepare {
+            copy_output_version: 1,
+            file_id,
+            source_size,
+            source_mtime,
+            source_object_version,
+            intent,
+            scratch_bytes,
+            ..
+        } = &payload
+        else {
+            return Err("unsupported copy output payload".to_owned());
+        };
+        if file.id != *file_id
+            || file.size != *source_size
+            || file.mtime != *source_mtime
+            || !intent.valid()
+            || !self.fragment_worker_idle(admission)
+            || file.width.and_then(|v| u32::try_from(v).ok()) != Some(intent.width)
+            || file.height.and_then(|v| u32::try_from(v).ok()) != Some(intent.height)
+            || super::manager_candidates::copy_candidate_grade(file) != intent.grade
+            || crate::ffmpeg::fragment_index_engine_digest().await != intent.pipeline_identity
+        {
+            return Err("copy output current facts differ".to_owned());
+        }
+        let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+        if !source.unchanged() || source.object_version() != source_object_version {
+            return Err("copy output source changed".to_owned());
+        }
+        let selected_audio = intent.audio_index.map_or_else(
+            || file.audio_streams.first(),
+            |index| {
+                file.audio_streams
+                    .iter()
+                    .find(|stream| stream.index == index)
+            },
+        );
+        let claim = intent
+            .audio_claim
+            .as_ref()
+            .ok_or("copy output audio claim unavailable")?;
+        let audio = plurx_core::playback::audio::resolve_audio(
+            selected_audio,
+            &claim.profile(),
+            plurx_core::playback::audio::AudioRoute::Progressive,
+            intent.audio_offset_ms,
+        );
+        if audio != intent.audio_delivery {
+            return Err("copy output audio delivery changed".to_owned());
+        }
+        let probe = self
+            .store
+            .get_file_probe_json(file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+            file,
+            probe.as_deref(),
+            crate::ffmpeg::has_dovi_rpu().await,
+            intent.preserve_dolby_vision,
+        )
+        .with_dolby_vision_conversion(intent.convert_dolby_vision);
+        if crate::fragindex::identity_for(file, video).argv_fingerprint != intent.video_identity {
+            return Err("copy output video identity changed".to_owned());
+        }
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await?;
+        let engine = crate::ffmpeg::EncodedEngine::capture(None).await?;
+        let digest = super::manager_candidates::copy_candidate_recipe_digest(
+            file,
+            intent.audio_index,
+            intent.audio_offset_ms,
+            None,
+            (
+                intent.aac,
+                intent.preserve_dolby_vision,
+                intent.convert_dolby_vision,
+            ),
+            Some(source.object_version()),
+            Some(&executable.digest),
+            Some(&engine.digest),
+            (intent.width, intent.height),
+        );
+        let request = SessionRequest {
+            candidate_context: Some(CandidateExecutionContext {
+                retained_output: None,
+                owner_node_id: Some(intent.target_node_id.clone()),
+                candidate_id: plurx_core::playback::candidate::CandidateId::for_recipe_digest(
+                    digest,
+                ),
+                recipe_digest: digest,
+                normalized_geometry: intent.normalized_geometry,
+                grade: intent.grade,
+                profile: intent.profile.map(|profile| match profile {
+                    CopyOutputProfile::H264Sdr1440P30V1 => {
+                        plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                    }
+                }),
+            }),
+            file_id: file.id,
+            playback_id: String::new(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: intent.aac,
+                preserve_dolby_vision: intent.preserve_dolby_vision,
+                convert_dolby_vision: intent.convert_dolby_vision,
+            },
+            start_seconds: 0.0,
+            audio_index: intent.audio_index,
+            audio_claim: Some(claim.clone()),
+            audio_delivery: Some(audio),
+            subtitle_burn: None,
+            audio_offset_ms: intent.audio_offset_ms,
+            hdr10: intent.hdr10_requested,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let settings = self
+            .vod_settings(&request)
+            .await?
+            .ok_or("copy output VOD policy unavailable")?;
+        let binding = request
+            .candidate_context
+            .as_ref()
+            .expect("fresh copy context");
+        let prepared_request = crate::vodserve::VodRecipeRequest {
+            request: &request,
+            encoding: None,
+            retained_capture: crate::vodserve::RetainedOutputCapture::New,
+            measured_candidate: Some(crate::vodserve::RetainedCandidateBinding {
+                kind: request.kind,
+                normalized_geometry: binding.normalized_geometry,
+                profile: binding.profile,
+                candidate_id: binding.candidate_id,
+                recipe_digest: binding.recipe_digest,
+                file_id: file.id,
+                audio_index: request.audio_index,
+                audio_offset_ms: request.audio_offset_ms,
+                subtitle_burn: None,
+                grade: binding.grade,
+                route: plurx_core::playback::candidate::CandidateRoute::Remux,
+            }),
+        };
+        let prepared = self
+            .vod
+            .prepare_copy_output(
+                prepared_request,
+                file,
+                &settings,
+                source_object_version,
+                u64::try_from(*scratch_bytes).map_err(|_| "copy output cap invalid")?,
+                fence,
+                deadline,
+                self.admissions.clone(),
+                (Arc::new(executable), engine),
+                || self.fragment_worker_idle(admission),
+            )
+            .await?;
+        if !source.unchanged() || !self.fragment_worker_idle(admission) {
+            return Ok(false);
+        }
+        prepared.settle_and_expose(intent).await
+    }
+
     /// Pre-transcode one file at one rung, so the next viewer gets a cache hit.
     ///
     /// Runs at background priority and is expected to be interrupted: an encode

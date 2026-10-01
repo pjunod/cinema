@@ -136,6 +136,16 @@ control authentication/accepted-actor/staged registration, typed recovery and
 physical acceptance remain explicitly open; see combined plan §9.10. Missing
 observational proof remains Unknown, never an ordinary-playback enable gate.
 
+The S-10 remaining-output claim uses real rolling-copy/PUT commits and a
+distinct finite `CopyOutputPrepare` in the existing worker/VOD-driver lane.
+Private full-body reservation, successful exact settlement and independent
+post-await exposure precede compatible new-session capture; successful
+foreground attachments yield unfinished preparation without revoking issued
+bodies. Eight new focused IDs passed once; current-base checks and one
+independent review remain required. Manual-copy first-publication, rolling/PUT
+retained-consumer and original corpus/device acceptance remain open. See the
+dated claim in [the canonical S-10 plan](../streaming/HONEST-MASTER-PLAYLIST.md).
+
 The local prepared-observation follow-up supplies optional independently
 authenticated HTTP context, exact accepted-actor desired lifetime and a separate
 actual stage-writer lifetime token. Registration follows successful local prime;
@@ -145,6 +155,15 @@ JSON, commit authority and original deadlines. Web/Apple/Android adapters carry
 only per-call or exact staged-attachment receipts. See combined plan §9.11;
 formal review, current-source gate and physical/typed-recovery acceptance remain
 separate and open.
+
+The next native A-05 source task (gpt-6.1-sol,
+agent:/root/a05_current_remaining_sol61) separates routine producer pacing
+from fresh exact-session/candidate active-work saturation and adds attachment-
+bound 60-second stall-free / 90-second post-cliff upgrade observations. It
+preserves the newer combined controller, existing owners and advisory switches;
+see combined plan §9.12. A-05 remains code-in-progress and physically unqualified,
+not an evidence-only or completed row. Unknown-cost trials, natural-boundary
+integration and typed recovery disposition remain separately open.
 
 ## How to claim, work and finish a plan
 
