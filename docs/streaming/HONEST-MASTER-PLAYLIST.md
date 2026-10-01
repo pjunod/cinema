@@ -722,6 +722,9 @@ unknown components do not gain a fabricated AAC or universal AVC label.
 Qualified encoder output or the actual M2 AVC init supplies video identity;
 the resolved output-audio decision supplies audio identity, including proven
 absence. SDR `CODECS` is emitted only when both components are complete.
+The copied codec name `aac` alone does not prove AAC-LC rather than HE-AAC;
+without a frozen output AudioSpecificConfig it remains incomplete. Resolved
+AAC encoding retains the native encoder's established output contract.
 HDR declarations, variant topology and prepared-owner identity are retained.
 There is no runtime gate or temporary diagnostic switch.
 
