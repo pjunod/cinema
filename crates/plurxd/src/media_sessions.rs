@@ -1218,6 +1218,15 @@ impl RemoteStartRequest {
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
     (request.candidate_id.is_none() || request.decoder_caps.is_some())
+        // An explicit snapshot is a current capability constraint, including
+        // on ordinary negotiated routes. Empty/all-unavailable is decoder
+        // loss, not permission to fall back to legacy unconstrained dispatch.
+        && request.decoder_caps.as_ref().is_none_or(|snapshot| {
+            snapshot
+                .video
+                .iter()
+                .any(|entry| entry.available && !entry.dynamic_ranges.is_empty())
+        })
         && request.protocol_version == crate::media_pool::PROTOCOL_VERSION
         && uuid::Uuid::parse_str(&request.incarnation_id).is_ok()
         && request.user_id > 0
@@ -6628,6 +6637,65 @@ mod tests {
             "explicit decoder loss must not be ignored without a candidate"
         );
         assert!(!takeover_recipe_is_valid(&request));
+        let snapshot = request
+            .decoder_caps
+            .as_mut()
+            .expect("decoder snapshot fixture");
+        snapshot
+            .video
+            .push(crate::playback_control::RuntimeVideoConstraint {
+                codec: "h264".to_owned(),
+                profiles: vec!["high".to_owned()],
+                available: false,
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dv_profiles: vec![],
+                max_width: Some(1920),
+                max_height: Some(1080),
+                max_frame_rate: None,
+                max_bitrate_bps: None,
+            });
+        assert!(
+            !request.is_valid(),
+            "all-unavailable means decoder loss too"
+        );
+        request
+            .decoder_caps
+            .as_mut()
+            .expect("decoder snapshot fixture")
+            .video[0]
+            .available = true;
+        assert!(
+            request.is_valid(),
+            "ordinary negotiated routes retain usable caps"
+        );
+        let mut rolling = request.clone();
+        rolling.request.presentation = crate::transcode::Presentation::Live;
+        assert!(takeover_recipe_is_valid(&rolling));
+        rolling
+            .decoder_caps
+            .as_mut()
+            .expect("decoder snapshot fixture")
+            .video[0]
+            .available = false;
+        assert!(!takeover_recipe_is_valid(&rolling));
+        rolling
+            .decoder_caps
+            .as_mut()
+            .expect("decoder snapshot fixture")
+            .video
+            .clear();
+        assert!(!takeover_recipe_is_valid(&rolling));
+        let mut missing_grade = request.clone();
+        missing_grade
+            .decoder_caps
+            .as_mut()
+            .expect("decoder snapshot fixture")
+            .video[0]
+            .dynamic_ranges
+            .clear();
+        assert!(!missing_grade.is_valid());
+        missing_grade.request.presentation = crate::transcode::Presentation::Live;
+        assert!(!takeover_recipe_is_valid(&missing_grade));
         request.candidate_id = Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
         request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
             width_px: 2400,
@@ -6642,10 +6710,19 @@ mod tests {
             value
         );
         assert!(
-            !parsed.is_valid(),
-            "a parser-floor worker must not reinterpret the route"
+            parsed.is_valid(),
+            "the completed protocol accepts a usable snapshot structurally; exact recipe revalidation still precedes dispatch"
         );
-        assert!(!takeover_recipe_is_valid(&parsed));
+        assert!(
+            !takeover_recipe_is_valid(&parsed),
+            "VOD is not a rolling takeover recipe"
+        );
+        let mut missing_snapshot = parsed.clone();
+        missing_snapshot.decoder_caps = None;
+        assert!(
+            !missing_snapshot.is_valid(),
+            "candidate execution requires its snapshot"
+        );
         let mut unknown = value;
         unknown["unexpected"] = true.into();
         assert!(serde_json::from_value::<RemoteStartRequest>(unknown).is_err());
