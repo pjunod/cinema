@@ -112,7 +112,15 @@ class PdbPairCase(unittest.TestCase):
             (root / "deploy/windows/README.md").write_text("own fixture\n")
             release = root / "build/x86_64-pc-windows-msvc/release"; release.mkdir(parents=True)
             pair(release)
-            environment = {**os.environ, "CARGO_TARGET_DIR": str(root / "build")}
+            # Minimal preflight hosts have Python (required by verification),
+            # not Info-ZIP. A hostile executable proves packaging does not
+            # accidentally rely on a developer machine's installed `zip`.
+            tools = root / "tools"; tools.mkdir()
+            zip_command = tools / "zip"
+            zip_command.write_text("#!/bin/sh\necho unexpected external zip >&2\nexit 127\n")
+            zip_command.chmod(0o755)
+            environment = {**os.environ, "CARGO_TARGET_DIR": str(root / "build"),
+                           "PATH": str(tools) + os.pathsep + os.environ.get("PATH", os.defpath)}
             command = [str(root / "scripts/package-windows")]
             subprocess.run(command, env=environment, check=True, capture_output=True)
             archive = root / "target/windows-package/plurxd-windows-x86_64.zip"
@@ -120,6 +128,10 @@ class PdbPairCase(unittest.TestCase):
                 names = set(zipped.namelist())
                 self.assertIn("plurx-windows-x86_64/plurxd.exe", names)
                 self.assertIn("plurx-windows-x86_64/plurxd.pdb", names)
+                self.assertEqual(zipped.read("plurx-windows-x86_64/plurxd.exe"),
+                                 (release / "plurxd.exe").read_bytes())
+                self.assertEqual(zipped.read("plurx-windows-x86_64/plurxd.pdb"),
+                                 (release / "plurxd.pdb").read_bytes())
             (release / "plurxd.pdb").unlink()
             result = subprocess.run(command, env=environment, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
