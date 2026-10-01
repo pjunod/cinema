@@ -69,7 +69,7 @@ class PlaybackControlAskTest {
                 assertTrue(Thread.currentThread() === sourceThread, "Media3 observation stays on source thread")
                 reads += 1
                 observation().copy(positionMs = position)
-            }, PlaybackControlTransport("https://cinema.example", client, json))
+            }, transport = PlaybackControlTransport("https://cinema.example", client, json))
             session.clearVerdict()
             position = 7_000
             session.reportEvidence()
@@ -287,7 +287,7 @@ class PlaybackControlAskTest {
             session.begin(
                 bootstrap(),
                 ::observation,
-                transport("hold", reason = "no_room", sequence = sequence),
+                transport = transport("hold", reason = "no_room", sequence = sequence),
             )
             awaitFirstExchange(sequence)
             var published = false
@@ -314,7 +314,7 @@ class PlaybackControlAskTest {
             session.begin(
                 bootstrap(),
                 ::observation,
-                transport("terminal", message = "No decoder for this.", sequence = sequence),
+                transport = transport("terminal", message = "No decoder for this.", sequence = sequence),
             )
             awaitFirstExchange(sequence)
             val verdict = session.askForAction(boundMs = 5_000, capMs = 8_000, publish = {})
@@ -337,7 +337,7 @@ class PlaybackControlAskTest {
             session.begin(
                 bootstrap(),
                 ::observation,
-                heldTerminalTransport(sequence, terminalArrived, releaseTerminal),
+                transport = heldTerminalTransport(sequence, terminalArrived, releaseTerminal),
             )
             awaitFirstExchange(sequence)
             session.playerChanged()
@@ -374,7 +374,7 @@ class PlaybackControlAskTest {
                 session.begin(
                     bootstrap(),
                     ::observation,
-                    subtitleReadinessTransport(sequence),
+                    transport = subtitleReadinessTransport(sequence),
                     onSubtitleReady = { retries += 1 },
                 )
                 awaitFirstExchange(sequence)
@@ -383,7 +383,7 @@ class PlaybackControlAskTest {
                 assertTrue(queued != null, "subtitle readiness never queued for $transition")
 
                 when (transition) {
-                    "replacement" -> session.begin(bootstrap(), ::observation, transport("none"))
+                    "replacement" -> session.begin(bootstrap(), ::observation, transport = transport("none"))
                     "end" -> session.end()
                     "new-intent" -> session.clearVerdict()
                 }
@@ -412,7 +412,7 @@ class PlaybackControlAskTest {
         val session = PlaybackControlSession(scope)
         try {
             val sequence = AtomicLong(0)
-            session.begin(bootstrap(), ::observation, transport("none", sequence = sequence))
+            session.begin(bootstrap(), ::observation, transport = transport("none", sequence = sequence))
             awaitFirstExchange(sequence)
             val before = session.controlSequence()
             session.end()
@@ -459,7 +459,7 @@ class PlaybackControlAskTest {
         val scope = scope()
         val session = PlaybackControlSession(scope)
         try {
-            session.begin(bootstrap(), ::observation, refusingTransport())
+            session.begin(bootstrap(), ::observation, transport = refusingTransport())
             val startedAt = monotonicNowMs()
             val verdict = session.askForAction(
                 boundMs = CONTROL_ASK_MS,
@@ -483,7 +483,7 @@ class PlaybackControlAskTest {
         val session = PlaybackControlSession(scope)
         try {
             val sequence = AtomicLong(0)
-            session.begin(bootstrap(), ::observation, ownerChangingTransport(sequence))
+            session.begin(bootstrap(), ::observation, transport = ownerChangingTransport(sequence))
             awaitFirstExchange(sequence)
             val startedAt = monotonicNowMs()
             val verdict = session.askForAction(boundMs = 5_000, capMs = 8_000, publish = {})
