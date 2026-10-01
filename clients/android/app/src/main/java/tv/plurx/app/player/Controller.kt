@@ -671,6 +671,7 @@ class Controller internal constructor(
      * wasteful.
      */
     private var autoCatalog = plan.qualityCandidates
+    private var autoMeasuredOutputs = emptyList<tv.plurx.app.data.MeasuredCandidateOutput>()
     private var autoDesiredCandidate: tv.plurx.app.data.QualityCandidate? = null
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
@@ -2693,6 +2694,7 @@ class Controller internal constructor(
         autoRouteProtocol = hls.display_aware_auto_protocol
         if (hls.display_aware_auto_protocol == "route-v1") {
             autoCatalog = hls.quality_candidates
+            autoMeasuredOutputs = hls.measured_candidate_outputs
             autoActiveCandidateId = hls.quality_candidate_id
         }
         endPlaybackControl()
@@ -2998,7 +3000,10 @@ class Controller internal constructor(
                     PlaybackQuality.Auto, target, selectionKey.third).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
-            if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog = fresh.quality_candidates
+            if (fresh.display_aware_auto_protocol == "route-v1") {
+                autoCatalog = fresh.quality_candidates
+                autoMeasuredOutputs = fresh.measured_candidate_outputs
+            }
             // Only an attached-session receipt may change the active identity.
         }
     }
@@ -3020,7 +3025,8 @@ class Controller internal constructor(
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
             !player.playWhenReady || playbackIntent.pendingSeek != null) return
-        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val policyCatalog = measuredCostCatalog()
+        val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
         val now = monotonicNowMs()
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
@@ -3041,7 +3047,7 @@ class Controller internal constructor(
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
-        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected,
+        val next = autoRecoveryCandidate(policyCatalog, current, autoDecoderRejected,
             link.takeIf { severe || mild }) ?: return
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
@@ -3077,7 +3083,8 @@ class Controller internal constructor(
             return
         }
         val target = autoPresentationTarget ?: return
-        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val policyCatalog = measuredCostCatalog()
+        val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
         if (sessionStatusAgeMs?.let { it <= 15_000L } == true && sessionStatus?.producer_state == "held") {
             autoUpgradeSinceMs = null
             return
@@ -3092,7 +3099,7 @@ class Controller internal constructor(
         } else null
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         val area = current.width.toLong() * current.height
-        val eligible = autoCatalog.filter {
+        val eligible = policyCatalog.filter {
             it.hasValidIdentity && it.id !in autoDecoderRejected && it.width > 0 && it.height > 0 &&
             it.decoder_compatible && (it.route != "encode" || it.grade == current.grade) && (autoBlockedUntil[it.id] ?: 0L) <= now }
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
@@ -3120,7 +3127,7 @@ class Controller internal constructor(
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
                 link.takeIf { severe || autoMildSamples >= 2 })
         } else {
-            val fitting = eligible.filter { candidate -> link?.let { bps -> (candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: (candidate.route != "encode")) } == true }
+            val fitting = eligible.filter { candidate -> link?.let { bps -> candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } == true } == true }
             val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
                     current.route == "encode" && pick.route != "encode") ||
@@ -3189,6 +3196,12 @@ class Controller internal constructor(
                 sample.mediaDurationMs, establishedPlayback && presentationForeground,
                 player.playbackState == Player.STATE_BUFFERING, runway)))
         autoLinkClaims[receipt] = sample.completedAtMs to negative
+    }
+
+    private fun measuredCostCatalog(): List<tv.plurx.app.data.QualityCandidate> = autoCatalog.map { candidate ->
+        val peak = tv.plurx.app.data.measuredCandidatePeak(candidate, autoMeasuredOutputs)
+        val output = if (peak == null) null else autoMeasuredOutputs.firstOrNull { it.matches(candidate) }
+        candidate.copy(average_bps = output?.average_bps, peak_bps = peak)
     }
 
     private fun failAutoPreparation() {
@@ -4167,9 +4180,13 @@ class Controller internal constructor(
             if (desired.route == "encode" && !desired.complete_cache &&
                 !autoStagedEncodeProof(autoStagedStatus, autoStagedStatusObservedMs, monotonicNowMs(),
                     action.sessionId ?: return, desired.id)) return
-            if (desired.route != "encode" && desired.peak_bps == null &&
-                !autoOriginalTransferMarginProven(autoTransfersByPlayer[successor]?.recent().orEmpty(),
-                    action.sessionId ?: return, monotonicNowMs())) return
+            val peak = tv.plurx.app.data.measuredCandidatePeak(desired, autoMeasuredOutputs) ?: return
+            val now = monotonicNowMs()
+            val margin = autoTransfersByPlayer[successor]?.recent().orEmpty().any { sample ->
+                sample.segmentId.contains("/${action.sessionId ?: return}/") && sample.receipt != null && sample.etag != null &&
+                    sample.statusCode == 200 && autoCompletedTransferBps(sample, now, 15_000L)?.let { it >= peak * 1.8 } == true
+            }
+            if (!margin) return
         }
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
