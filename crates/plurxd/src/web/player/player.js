@@ -89,6 +89,10 @@
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
+ * @property {{sessionId:string|null,attachment:any,reason:string|null}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
+ * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
+ * @property {any} [transportCommand] original transport command awaiting an actual element transition
+ * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
  * @property {any} [terminalStop]          the stop that ended this player, once one did
  * @property {boolean} [samplingStopped]
  * @property {number} [_mediaAttachmentOrdinal] the last attachment token's id (beginPlaybackMediaAttachment)
