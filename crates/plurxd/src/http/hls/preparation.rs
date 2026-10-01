@@ -1184,7 +1184,7 @@ pub(super) async fn process_preparation_candidate(
         crate::playback_control::record_preparation_staged(false);
         return;
     }
-    let candidate = match plan_preparation_candidate(
+    let mut candidate = match plan_preparation_candidate(
         &state,
         &recipe,
         planning_caps.as_ref(),
@@ -1206,6 +1206,15 @@ pub(super) async fn process_preparation_candidate(
         }
     };
     if pending.cancelled() {
+        crate::playback_control::record_preparation_staged(false);
+        return;
+    }
+    if let Err(error) = candidate.retain_prepared_decode_evidence(route.user_id, &route, unix_ms())
+    {
+        tracing::warn!(
+            ?error,
+            "prepared successor retained decode evidence was refused"
+        );
         crate::playback_control::record_preparation_staged(false);
         return;
     }

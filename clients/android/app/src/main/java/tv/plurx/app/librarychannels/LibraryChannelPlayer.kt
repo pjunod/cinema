@@ -340,7 +340,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
             errorCode = null,
             errorDetail = null,
             selection = ClientSelection(
-                quality = QualitySelection.Auto,
+                quality = QualitySelection.Auto(),
                 subtitle = SubtitleSelection(SubtitleMode.OFF),
                 audioOffsetMs = 0,
                 codec = CodecPolicy.AUTO,

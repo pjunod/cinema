@@ -22,6 +22,10 @@ object Session {
     @Volatile
     var displayModeMatch: Boolean = false
 
+    /** Existing replicated Auto policy; absent on older servers means off. */
+    @Volatile
+    var playbackAutoAbr: Boolean = false
+
     private val nodeLock = Any()
     private var mediaFailoverOrigins: List<String> = emptyList()
     private var mediaFailoverIndex: Int = 0

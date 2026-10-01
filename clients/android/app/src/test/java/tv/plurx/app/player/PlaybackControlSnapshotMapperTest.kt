@@ -8,7 +8,7 @@ import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 private fun mapperSelection() = ClientSelection(
-    quality = QualitySelection.Auto,
+    quality = QualitySelection.Auto(),
     audioTrack = 0,
     subtitle = SubtitleSelection(SubtitleMode.OFF),
     audioOffsetMs = 0,

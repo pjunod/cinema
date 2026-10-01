@@ -185,6 +185,7 @@ impl CreateSession {
             automatic,
             previous_session_id: self.previous_session_id,
             reopen_reason: self.reopen_reason,
+            decode_blocked_heights: Vec::new(),
             kind,
             start_seconds: self.start.unwrap_or(0.0).max(0.0),
             audio_index: self.audio.filter(|a| *a >= 0),
@@ -1408,7 +1409,7 @@ async fn create_with_purpose(
         req,
     )
     .await?;
-    let request = resolved.request;
+    let mut request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
@@ -1629,6 +1630,23 @@ async fn create_with_purpose(
         true,
     );
 
+    // The public idempotency claim above still fingerprints only client intent.
+    // Inherit decode evidence from the actual active playback, never the body,
+    // before retaining the recipe placement and takeover will consume.
+    let activation_predecessor = state
+        .store
+        .media_session_route_for_playback(user.id, &request.playback_id)
+        .await
+        .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    request
+        .retain_adaptive_decode_evidence(user.id, activation_predecessor.as_ref(), unix_ms())
+        .map_err(|error| session_start_error(id, error))?;
+    if let Some(event) = activation_predecessor
+        .as_ref()
+        .and_then(|route| crate::telemetry::adaptive_reopen_event(&request, route, unix_ms()))
+    {
+        crate::telemetry::emit_with_network(state.store.clone(), event, identity.clone(), None);
+    }
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
@@ -1675,11 +1693,6 @@ async fn create_with_purpose(
     // commit-unknown reconciler the identity it must terminalize; allowing an
     // unfenced last-writer-wins activation loses that identity after the
     // pointer moves to the successor.
-    let activation_predecessor = state
-        .store
-        .media_session_route_for_playback(user.id, &request.playback_id)
-        .await
-        .map_err(|error| session_store_error("reading the predecessor route", error))?;
     // One mint for this start, bound here rather than called twice.
     //
     // `recovery_epoch_for` is not a pure function: with no predecessor it

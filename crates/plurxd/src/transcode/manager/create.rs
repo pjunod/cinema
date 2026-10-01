@@ -1598,6 +1598,30 @@ impl TranscodeManager {
         request: &SessionRequest,
         supersession_user: &str,
     ) -> Result<(SessionRequest, Option<i64>), String> {
+        // Typed adaptation was bound to the durable playback route at public
+        // ingress, before its server-owned recipe was sent to this worker.
+        // Repeating the legacy link step here would double-step that answer;
+        // a predecessor may also live on a different owner after placement.
+        if request
+            .reopen_reason
+            .is_some_and(|reason| reason != ReopenReason::Stall)
+        {
+            if !request.decode_blocks_are_valid() {
+                return Err(invalid_reopen_error("invalid retained decode blocks"));
+            }
+            let target = match request.kind {
+                SessionKind::Transcode { height } => Some(height),
+                SessionKind::Copy { .. } => None,
+            };
+            if request.automatic
+                && target.is_some_and(|height| request.decode_blocked_heights.contains(&height))
+            {
+                return Err(invalid_reopen_error(
+                    "the normalized Auto target is decode-blocked",
+                ));
+            }
+            return Ok((request.clone(), target));
+        }
         let Some(previous_session_id) = request.previous_session_id.as_deref() else {
             let target_height = match request.kind {
                 SessionKind::Transcode { height } => Some(height),
@@ -1687,7 +1711,10 @@ impl TranscodeManager {
             kind
         };
 
-        let target_height = if wedged {
+        normalized
+            .clamp_to_retained_decode_blocks()
+            .map_err(|detail| invalid_reopen_error(&detail))?;
+        let target_height = if wedged && normalized.decode_blocked_heights.is_empty() {
             previous_height
         } else {
             match normalized.kind {
