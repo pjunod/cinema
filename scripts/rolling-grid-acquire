@@ -71,7 +71,8 @@ def private_file(path):
     return path
 
 
-def validate(manifest):
+def admit_owner(manifest):
+    """Cheap bounded ownership admission; never hash or inspect media/tools."""
     if set(manifest) != {"nonce", "root", "source", "source_sha256", "probe", "height", "page", "test_binary", "test_binary_sha256", "browser", "browser_sha256", "hls_sha256", "ffmpeg", "ffmpeg_sha256", "ffprobe", "ffprobe_sha256"}:
         raise ValueError("unknown or missing manifest fields")
     nonce = manifest["nonce"]
@@ -84,6 +85,11 @@ def validate(manifest):
         raise ValueError("root must be owned and mode700")
     if read_json(root / "owner.json") != {"nonce": nonce}:
         raise ValueError("owner mismatch")
+    return root
+
+
+def validate(manifest):
+    root = admit_owner(manifest)
     if manifest["height"] not in (360, 480, 720, 1080):
         raise ValueError("unsupported cell rung")
     for key in ("source", "probe", "page", "test_binary", "browser", "ffmpeg", "ffprobe"):
@@ -238,12 +244,12 @@ def supervise_owned(process, group, deadline, stop, record):
 
 
 def acquire(manifest):
-    root = validate(manifest)
+    deadline = time.monotonic() + 600
+    root = admit_owner(manifest)
     envelope = execution_envelope()
     # Normal unprivileged Docker private PID namespace; no cgroup delegation,
     # Docker socket, host-PID sharing or writable kernel mounts are required.
     group = OwnedNamespace(manifest['nonce'])
-    deadline = time.monotonic() + 600
     (root / 'execution-envelope.json').write_text(json.dumps(envelope))
     manifest_path = root / 'supervised-manifest.json'
     manifest_path.write_text(json.dumps(manifest))
@@ -425,7 +431,7 @@ def main():
 if __name__ == "__main__":
     if len(sys.argv)==4 and sys.argv[1]=='--exec-owned-cell':
         manifest = read_json(sys.argv[2])
-        root = validate(manifest)
+        root = admit_owner(manifest)
         if os.getppid() != 1:
             raise ValueError('worker must belong to exact PID1 supervisor')
         acquire_worker(manifest, float(sys.argv[3]))
