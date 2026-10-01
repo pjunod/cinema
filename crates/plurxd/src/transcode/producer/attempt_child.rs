@@ -58,7 +58,7 @@ impl FrozenHlsPresentation {
             file.width = geometry.map(|(width, _)| width);
             file.height = geometry.map(|(_, height)| height);
         }
-        let identity = serde_json::json!({
+        let mut identity = serde_json::json!({
             "version": 2,
             "file": &file,
             "kind": kind,
@@ -68,6 +68,10 @@ impl FrozenHlsPresentation {
             "supplemental_codecs": &context.supplemental_codecs,
             "frame_rate": context.frame_rate,
         });
+        // Preserve the exact legacy shape when component evidence is absent.
+        if let Some(facts) = &context.codec_facts {
+            identity["codec_facts"] = serde_json::json!(facts);
+        }
         let contract_fingerprint = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
         let master_requires_attempt_init = context.codecs.split(',').next().is_some_and(|video| {
             let video = video.trim();

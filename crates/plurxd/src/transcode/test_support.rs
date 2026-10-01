@@ -343,6 +343,7 @@ impl HlsDeliveryFixture {
         raw_session.frozen_presentation = Some(FrozenHlsPresentation::new(
             frozen_file,
             HlsContext {
+                codec_facts: None,
                 file_id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,

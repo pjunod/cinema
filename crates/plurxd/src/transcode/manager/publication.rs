@@ -920,6 +920,7 @@ impl TranscodeManager {
                 }
                 return HlsPresentationResolution::Ready(
                     HlsContext {
+                        codec_facts: Some(FrozenHlsCodecFacts::encoded(&encoding.plan)),
                         file_id: file.id,
                         start_seconds: 0.0,
                         media_origin_seconds: 0.0,
@@ -965,6 +966,11 @@ impl TranscodeManager {
             let codecs = audio_delivery_hls_codecs(codecs, facts.audio_delivery.as_ref());
             return HlsPresentationResolution::Ready(
                 HlsContext {
+                    codec_facts: Some(FrozenHlsCodecFacts::audio(
+                        facts.audio_delivery.as_ref(),
+                        !facts.file.audio_streams.is_empty(),
+                        facts.aac,
+                    )),
                     file_id: facts.file.id,
                     start_seconds: 0.0,
                     media_origin_seconds: 0.0,

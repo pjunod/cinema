@@ -116,7 +116,16 @@ pub(super) fn audio_delivery_hls_codecs(
         return codecs;
     };
     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
-    let audio_codec = match audio.codec() {
+    let audio_codec = audio_sample_type(audio.codec());
+    if let Some(audio_codec) = audio_codec {
+        codecs.push(',');
+        codecs.push_str(audio_codec);
+    }
+    codecs
+}
+
+pub(super) fn audio_sample_type(codec: Option<&str>) -> Option<&'static str> {
+    match codec {
         Some("aac") => Some("mp4a.40.2"),
         Some("ac3" | "ac-3") => Some("ac-3"),
         Some("eac3" | "eac-3" | "ec-3") => Some("ec-3"),
@@ -124,12 +133,7 @@ pub(super) fn audio_delivery_hls_codecs(
         Some("alac") => Some("alac"),
         Some("flac") => Some("fLaC"),
         _ => None,
-    };
-    if let Some(audio_codec) = audio_codec {
-        codecs.push(',');
-        codecs.push_str(audio_codec);
     }
-    codecs
 }
 
 pub fn advertised_ladder_with_audio(

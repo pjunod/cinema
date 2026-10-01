@@ -1689,6 +1689,7 @@
             .expect("oversized init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -1729,6 +1730,7 @@
             .expect("unreadable init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             file_id: 1,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,

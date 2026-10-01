@@ -843,6 +843,7 @@ impl TranscodeManager {
         let frozen_presentation = FrozenHlsPresentation::new(
             file.clone(),
             HlsContext {
+                codec_facts: Some(FrozenHlsCodecFacts::encoded(plan)),
                 file_id: file.id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
