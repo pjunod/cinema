@@ -2355,6 +2355,7 @@ final class PlayerController: ObservableObject {
     /// commit gave up on — reporting into a later one.
     private var preparedAlignmentOutcome: Bool?
     private var preparedAlignmentGeneration = 0
+    private var preparedFrameBudget: PreparedActiveWallBudget?
     /// How long the viewer's picture was interrupted the last time a prepared
     /// handoff fell back, in milliseconds. Nil until one does. Published so
     /// the developer surfaces can show the number that is currently missing
@@ -2702,6 +2703,10 @@ final class PlayerController: ObservableObject {
     private(set) var wantsPlayback = true {
         didSet {
             guard wantsPlayback != oldValue else { return }
+            preparedFrameBudget?.update(
+                nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
+                playbackRequested: wantsPlayback
+            )
             autoTransportRevision = min(autoTransportRevision + 1, 9_007_199_254_740_991)
             present(.playbackRequested(wantsPlayback))
         }
@@ -10789,11 +10794,22 @@ extension PlayerController: PreparedSuccessorHost {
     /// display by `AVPlayerLayer` — the same caveat the seek monitor carries —
     /// so device qualification still has to verify the final boundary.
     private func awaitPreparedFirstFrame(boundaryMs: Int) async -> Int? {
-        guard let output = preparedSeekVideoOutput() else { return nil }
-        let deadline = ProcessInfo.processInfo.systemUptime
-            + Double(PreparedReplacementBounds.firstFrameMs) / 1_000
-        while ProcessInfo.processInfo.systemUptime < deadline {
-            if Task.isCancelled { return nil }
+        guard let output = preparedSeekVideoOutput(), let item = player.currentItem else {
+            return nil
+        }
+        preparedFrameBudget = PreparedActiveWallBudget(
+            boundMs: PreparedReplacementBounds.firstFrameMs,
+            nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
+            playbackRequested: wantsPlayback
+        )
+        defer { preparedFrameBudget = nil }
+        while true {
+            guard !Task.isCancelled, started, player.currentItem === item,
+                  seekVideoOutput === output else { return nil }
+            if preparedFrameBudget?.update(
+                nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
+                playbackRequested: wantsPlayback
+            ) != false { return nil }
             let itemTime = output.itemTime(forHostTime: ProcessInfo.processInfo.systemUptime)
             var displayTime = CMTime.invalid
             if itemTime.isValid,
@@ -10813,7 +10829,6 @@ extension PlayerController: PreparedSuccessorHost {
                 nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000
             )
         }
-        return nil
     }
 
     /// A frame may legitimately land a keyframe's worth before the boundary

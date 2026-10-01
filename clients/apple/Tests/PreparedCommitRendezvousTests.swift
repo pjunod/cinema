@@ -14,6 +14,27 @@ import XCTest
 /// `AppleClientTests`); a mutation that exposes before aligning fails it.
 @MainActor
 final class PreparedCommitRendezvousTests: XCTestCase {
+    func testFirstFrameBudgetSuspendsExplicitPauseAndResumesRemainingTime() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 100, playbackRequested: true)
+        XCTAssertFalse(budget.update(nowMs: 2_100, playbackRequested: false))
+        XCTAssertEqual(budget.remainingMs, 4_000)
+        XCTAssertFalse(budget.update(nowMs: 62_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 4_000)
+        XCTAssertFalse(budget.update(nowMs: 66_099, playbackRequested: true))
+        XCTAssertTrue(budget.update(nowMs: 66_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 0)
+    }
+
+    func testFirstFrameBudgetBoundsStallsAndIgnoresBackwardClockSamples() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 100, playbackRequested: true)
+        XCTAssertFalse(budget.update(nowMs: 3_100, playbackRequested: true))
+        XCTAssertFalse(budget.update(nowMs: 2_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 3_000)
+        XCTAssertTrue(budget.update(nowMs: 6_100, playbackRequested: true))
+        XCTAssertEqual(budget.remainingMs, 0)
+        XCTAssertTrue(budget.update(nowMs: 90_000, playbackRequested: false))
+    }
+
     private func playerControllerSource() throws -> String {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()

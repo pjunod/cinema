@@ -418,6 +418,31 @@ func awaitBoundedValue<Value>(
     }
 }
 
+/// Monotonic presentation time spent while the viewer requests Play.
+/// A decoder stall does not pause this clock; explicit transport intent does.
+struct PreparedActiveWallBudget: Equatable {
+    private(set) var remainingMs: Int
+    private var lastUpdateMs: Int
+    private var playbackRequested: Bool
+
+    init(boundMs: Int, nowMs: Int, playbackRequested: Bool) {
+        remainingMs = max(0, boundMs)
+        lastUpdateMs = max(0, nowMs)
+        self.playbackRequested = playbackRequested
+    }
+
+    @discardableResult
+    mutating func update(nowMs: Int, playbackRequested: Bool) -> Bool {
+        let current = max(lastUpdateMs, nowMs)
+        if self.playbackRequested {
+            remainingMs -= min(remainingMs, current - lastUpdateMs)
+        }
+        lastUpdateMs = current
+        self.playbackRequested = playbackRequested
+        return remainingMs == 0
+    }
+}
+
 // MARK: - Waiting for the offer with the picture up
 
 /// What a directed selection change is waiting for after it has been

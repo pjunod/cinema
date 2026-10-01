@@ -1503,3 +1503,17 @@ recipe resolution, cache adoption and cancellation-independent build settlement
 retain their prior ordering. This is the seam for parent-owned children, not
 activation of continuous delivery. Pinned workspace/all-target compilation
 passed; no unit execution was added during implementation.
+
+### 10.22 Apple prepared first-frame active-wall budget
+
+The Apple first-frame wait now spends its six-second proof budget only while
+Play is requested. Transport intent updates the monotonic budget on the
+Pause/Play edge, and polling never mistakes decoder stalls for viewer Pause.
+The proof also rejects a detached item or replaced video output, so a queued
+pixel from an old attachment cannot settle the new one. Pure regressions
+cover remaining-budget resume, long Pause, active stalls, saturation and
+backward clock samples; execution is deferred to the final lane.
+
+iOS and tvOS arm64 simulator compilation passed with Xcode 27.0; this is
+compile evidence, not device or physical-display qualification. The existing
+item-transfer prepared exposure still needs repair and qualification.
