@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-real-rolling-acquisition",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_rolling_grid_acquire.py",
+  "test_file_sha256": "f6bb1a91fc3b1ec989226f4437fbfa5ad74c95ccaf3a2c9dd5c8d20d78617148",
+  "test_ids": ["test_rolling_grid_acquire.RollingAcquireOwnershipTests.test_cleanup_refuses_foreign_process_identity_then_reaps_exact_owned_child"],
+  "command": "python3 -m unittest tests.operations.test_rolling_grid_acquire.RollingAcquireOwnershipTests.test_cleanup_refuses_foreign_process_identity_then_reaps_exact_owned_child",
+  "output": ".\n----------------------------------------------------------------------\nRan 1 test in 0.003s\n\nOK\n",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}
+}

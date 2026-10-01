@@ -827,6 +827,81 @@ extra internal keys are reported separately, not treated as grid drift.
 Physical/graph acceptance, authenticated campaign provenance and the original
 full census below remain open. No production GOP flag changes follow here.
 
+**2026-10-01 real-owner acquisition candidate:**
+[`scripts/rolling-grid-acquire`](../../scripts/rolling-grid-acquire) and the
+feature-enabled ignored `rolling_grid_campaign::owned_real_rolling_cell`
+entry point provide a private loopback acquisition path. They do not add a
+public Live create field, force a VOD refusal or change production flags.
+The internal Live request runs the existing manager/producer, then real
+in-memory Store claim/assign/activate APIs bind its active route. The bridge
+delegates to shipped playlist/segment handlers and their actual downstream
+EOF pump: buffering bridge bytes is never an extra delivery commit.
+
+The active viewport video runs at1× with vendored hls.js. Real
+`requestVideoFrameCallback` media time/presented-frame observations are sampled
+at500ms, not every33ms; two actually accepted advancing observations must
+satisfy the existing30s startup policy. No test-only presented marks, download
+frontier relabel or synthetic Rendering is permitted. Nonce, session,
+generation and producer attempt fence callbacks; absolute origin is applied
+once at server control ingestion. Missing callbacks, stalls, refusal or changed
+source preserve partial evidence, never a completed cell.
+
+Supply an existing hash-pinned browser and reviewed feature-enabled test
+binary; no build/download/install occurs in this controller. Its manifest pins
+source, FFmpeg, ffprobe, browser, test binary and vendored hls.js. Source must
+provide≥64s without looping and support the requested360/480/720/1080 rung.
+Prepare the exact reviewed page only in a fresh owned mode700 root, then
+validate without launching:
+
+```bash
+python3 scripts/rolling-grid-acquire --page-template /private/tmp/owned-cell/page.html
+python3 scripts/rolling-grid-acquire /private/tmp/owned-cell/manifest.json
+```
+
+Operational `--execute` needs a separately authorized owned Linux cgroup
+ceiling≤2CPU/2GiB/256PID for the complete local producer/browser tree, with this
+controller as PID 1 in a fresh private PID namespace; bare-host, shared-PID or
+already populated namespace execution refuses. A normal owned container can
+provide this without writable cgroup delegation or privileged mounts. The
+independent PID 1 supervisor bounds synchronous browser/body/drain/close calls:
+585 s work plus a 15 s cleanup reserve within the absolute 600 s deadline.
+The deadline starts before cheap bounded owner/root admission and launch
+setup; full source/tool hashing, probe and page validation run only inside the
+supervised worker, with no deadline reset. At operational execution, the outer
+owner must also impose a 600 s container wall watchdog plus bounded exact-ID
+terminal cleanup, recording nonce/labels/container ID/start/deadline/exit and
+namespace termination. This protects against controller setup or filesystem
+syscalls themselves failing to return; an internal receipt cannot prove that
+external terminal condition. No operational container/watchdog ran here.
+Cleanup signals only pidfd-bound identities in the initially empty task-owned
+namespace, reaps descendants (including detached sessions), and refuses success
+unless only PID 1 remains. Kernel namespace teardown on PID 1 exit is the final
+backstop; the later operational owner must retain exact container identity and
+terminal state, not infer them from a worker receipt. Stop, receipt or browser
+errors cannot bypass subtree cleanup. Require successful `supervisor-final.json`
+alongside `complete.json`; completion alone is not clean terminal evidence.
+One browser/page/cell,≤4 concurrent media response bodies,
+≤4096 observations/snapshots,≤256 segments/512MiB media,64MiB logs and10min wall
+deadline. The fresh standalone child limiter caps file/CPU resources without
+threaded post-fork callbacks. The later16-cell serial campaign retains its
+160min aggregate bound; this tool does not authorize that campaign or reserve
+K06 hosts. Pin actual browser build separately in the operational receipt.
+
+Raw playlist revisions and exact served object names/hashes remain immutable;
+an accumulated sliding window is derived evidence, not an original server
+playlist. Completion requires≥30 distinct contiguous fully consumed segments,
+≥60s of their actual advertised durations and actual browser media progress.
+The census still measures packet/GOP facts; browser callbacks are not NAL IDR
+proof. This is test-binary/internal-manager/shipped-handler/headless-browser
+presentation evidence, NOT public create-route, physical, native, artist-HDR,
+GPU or whole-M3 qualification. No actual acquisition has run for this candidate.
+Two initial synthetic ownership contracts and two later supervisor failure
+contracts passed once. The latter model blocked operations and detached
+descendants; they do not execute browser, encoder or kernel namespace cleanup.
+The old candidate lacks the supervisor consumer and refuses those new tests;
+no previous unit successes repeated. Review 50's deadline and cleanup findings
+are repaired in this same candidate, pending independent disposition.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).

@@ -91,6 +91,30 @@ the record imports no success. Every unknown or contradictory attempt refuses
 instead of treating an absent journal as a fresh run. This is not a generic
 failed-attempt exemption.
 
+PR #690's first gate API3747/job39644 failed prepare before any marker or
+method because ROOT had not yet published the four local-pass attestations.
+Comments7174–7177 subsequently authenticated those original hashes. No test
+failed and no journal exists for3747; missing evidence is not silently reset.
+The separate bounded descriptor
+`validation/python-unit-preunit-failure3747.json` pins repository1/PR690,
+branch/base, sourcee3ba7cf2c, literal receipt job/attempt1, exact original
+workflow/receipt-code hashes, and115485-byte log SHA-256
+`8bf64b85652ac5ac328d3f8519e9ed661ad724bbfc84f2a2e0ab3486d6b164df`.
+The actual restore consumer verifies live terminal run/job/source/log facts,
+the specific attestation prepare refusal before skipped start/final publication
+steps, no discovery/unit/fixture phase, and empty3747 start/final/run artifacts.
+It imports zero successes and never synthesizes or completes a journal.
+Unknown missing journals, source/metadata/hash contradictions, started attempts,
+fixture/discovery/unit failures or any3747 artifacts still refuse. Later valid
+other-run journals remain separately attributable, not a contradiction of this
+zero-unit attempt. Original3705 recovery remains unchanged.
+
+Two new fake-API table methods exercise actual restore acceptance and seventeen
+refusal modes; fake fixtures are not actual CI evidence. Read-only live restore
+verified the real3747 zero-unit refusal and retained exactly four authenticated
+local successes with their original null run/commit and comment provenance.
+No methods, local initial journal or CI artifacts were created by that check.
+
 Non-method fixture errors (module/class setup, teardown or cleanup) remain
 explicit unresolved evidence even when every method already succeeded. A
 retry refuses those journals and reports the originating run and fixture ID;

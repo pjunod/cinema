@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s11-real-rolling-acquisition",
+  "suite": "operations",
+  "source_commit": null,
+  "test_file": "tests/operations/test_known_red.py",
+  "test_file_sha256": "d01d3261df1a5ed4b256c759ddebe63f01ec350701353652b329c2e6ea184cf1",
+  "test_ids": [
+    "test_known_red.KnownRedContractTest.test_every_checked_in_entry_is_current_and_ignored"
+  ],
+  "command": "python3 -m unittest tests.operations.test_known_red.KnownRedContractTest.test_every_checked_in_entry_is_current_and_ignored",
+  "output": ".\n----------------------------------------------------------------------\nRan 1 test in 28.875s\n\nOK\n",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 1
+  }
+}
