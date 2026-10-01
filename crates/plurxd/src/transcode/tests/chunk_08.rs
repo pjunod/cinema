@@ -1937,7 +1937,7 @@ scope = "test"
             ExitDisposition::CleanEnd
         );
         assert_eq!(
-            part_exit_disposition(&PartEnd::Preempted),
+            part_exit_disposition(&PartEnd::Preempted("foreground_demand")),
             ExitDisposition::IntentionalYield
         );
         assert_eq!(

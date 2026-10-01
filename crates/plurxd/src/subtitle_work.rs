@@ -107,6 +107,7 @@ impl JobManager {
             if let Err(error) = active
                 .fence()
                 .settle(JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: None,
                     not_before_ms: clock_ms().saturating_add(5_000),
                 })
@@ -280,6 +281,7 @@ impl JobManager {
                 charge_attempt: false,
                 ..
             }) => Some(JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms: clock_ms().saturating_add(5_000),
             }),
