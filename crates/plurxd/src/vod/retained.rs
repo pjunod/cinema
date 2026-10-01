@@ -115,21 +115,34 @@ impl VodServe {
 pub(crate) struct RetainedVodArtifact {
     pub(super) id: uuid::Uuid,
     pub(super) observation: CompleteOutputObservation,
-    directory: PathBuf,
-    charge: u64,
-    init_bytes: u64,
-    repair: Mutex<()>,
-    recipe_key: String,
-    source_version: String,
-    candidate: Option<RetainedCandidateBinding>,
-    audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    pub(super) directory: PathBuf,
+    pub(super) charge: u64,
+    pub(super) init_bytes: u64,
+    pub(super) repair: Mutex<()>,
+    pub(super) recipe_key: String,
+    pub(super) source_version: String,
+    pub(super) candidate: Option<RetainedCandidateBinding>,
+    pub(super) audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    pub(super) durable: bool,
+    pub(super) logical: Option<super::retained_manifest::LogicalOutput>,
+    pub(super) validated: AtomicBool,
+    pub(super) sealed_identity: std::sync::OnceLock<[u8; 32]>,
 }
 
 impl RetainedVodArtifact {
     pub(super) fn facts(&self) -> crate::transcode::RetainedOutputFacts {
         crate::transcode::RetainedOutputFacts {
             artifact_id: self.id.to_string(),
-            output_identity: hex::encode(self.observation.rates.identity),
+            output_identity: if self.logical.is_some() {
+                self.sealed_identity
+                    .get()
+                    .map(hex::encode)
+                    .unwrap_or_default()
+            } else {
+                // Private runtime-only legacy observations have no durable
+                // manifest. They cannot be discovered/adopted after restart.
+                hex::encode(self.observation.rates.identity)
+            },
             average_bps: self.observation.rates.average_bps,
             peak_bps: self.observation.rates.rfc_peak_bps,
         }
@@ -198,6 +211,10 @@ impl RetainedVodArtifact {
         digest: &str,
         index: Option<u32>,
     ) -> io::Result<()> {
+        if self.durable {
+            // Verified old bytes are never authority for a new producer.
+            return Err(io::ErrorKind::InvalidData.into());
+        }
         let gate = shared.rendition_build_gate(&rendition.key);
         let _gate = gate.lock().await;
         let init = rendition.identity.lock().await.identity.clone();
@@ -311,7 +328,7 @@ struct RetainedState {
 #[derive(Default)]
 pub(super) struct RetainedArtifactRegistry {
     state: StdMutex<RetainedState>,
-    collector: Mutex<()>,
+    collector: Arc<Mutex<()>>,
 }
 
 impl RetainedArtifactRegistry {
@@ -435,15 +452,13 @@ impl RetainedArtifactRegistry {
             // Directory reads may block. The iterator is never advanced while
             // holding the registry lock or on the async maintenance executor.
             // Cancellation leaves None, causing a conservative restart.
-            let room = MAX_ARTIFACTS.saturating_sub(
-                self.state
-                    .lock()
-                    .expect("retained registry lock")
-                    .orphans
-                    .len(),
-            );
+            let room = MAX_ARTIFACTS.saturating_sub({
+                let state = self.state.lock().expect("retained registry lock");
+                state.orphans.len() + state.entries.len() + state.retired.len()
+            });
             let batch = tokio::task::spawn_blocking(move || {
                 let mut paths = Vec::new();
+                let mut durable = Vec::new();
                 let mut done = false;
                 let mut error = None;
                 for _ in 0..RETAINED_GC_BATCH.min(room) {
@@ -458,7 +473,15 @@ impl RetainedArtifactRegistry {
                                 .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
                                 && uuid::Uuid::parse_str(&name.to_string_lossy()).is_ok()
                             {
-                                paths.push(entry.path());
+                                let path = entry.path();
+                                // Only bounded manifest metadata is read at
+                                // startup. Payload authority remains absent.
+                                match super::retained_manifest::ArtifactManifest::read(&path)
+                                    .and_then(|manifest| manifest.into_artifact(path.clone()))
+                                {
+                                    Ok(artifact) => durable.push(Arc::new(artifact)),
+                                    Err(_) => paths.push(path),
+                                }
                             } else {
                                 // Never delete or silently stop accounting for
                                 // unknown occupants of the private namespace.
@@ -476,10 +499,10 @@ impl RetainedArtifactRegistry {
                         }
                     }
                 }
-                (scan, paths, done, error)
+                (scan, paths, durable, done, error)
             })
             .await;
-            let Ok((scan, paths, done, error)) = batch else {
+            let Ok((scan, paths, durable, done, mut error)) = batch else {
                 return;
             };
             let mut state = self.state.lock().expect("retained registry lock");
@@ -487,6 +510,28 @@ impl RetainedArtifactRegistry {
                 if !state.orphans.contains(&path) {
                     state.orphans.push_back(path);
                 }
+            }
+            for artifact in durable {
+                let identity = artifact.observation.rates.identity;
+                if let Some(existing) = state.entries.get(&identity) {
+                    if existing.artifact.id != artifact.id {
+                        error = Some(io::ErrorKind::InvalidData.into());
+                    }
+                    continue;
+                }
+                let Some(bytes) = state.bytes.checked_add(artifact.charge) else {
+                    error = Some(io::ErrorKind::InvalidData.into());
+                    continue;
+                };
+                state.bytes = bytes;
+                state.entries.insert(
+                    identity,
+                    RetainedEntry {
+                        artifact,
+                        used: Instant::now(),
+                        idle_since: None,
+                    },
+                );
             }
             if let Some(error) = error {
                 tracing::warn!(target: "plurxd::vodserve", %error, "retained orphan discovery remains unresolved");
@@ -529,18 +574,111 @@ impl RetainedArtifactRegistry {
         if !facts.valid() {
             return None;
         }
-        let identity: [u8; 32] = hex::decode(&facts.output_identity).ok()?.try_into().ok()?;
-        let artifact = self.acquire(&identity)?;
+        let origin = {
+            let state = self.state.lock().expect("retained registry lock");
+            *state
+                .entries
+                .iter()
+                .find(|(_, entry)| entry.artifact.facts() == *facts)?
+                .0
+        };
+        let artifact = self.acquire(&origin)?;
         (artifact.facts() == *facts
-            && artifact.recipe_key == rendition.key
+            && (artifact.recipe_key == rendition.key
+                || (artifact.durable
+                    && artifact.logical.is_some()
+                    && artifact.logical == rendition.recipe.retained_logical
+                    && artifact.observation.preimage.playlist.as_slice()
+                        == rendition.playlist.as_slice()))
             && rendition.source.as_ref().is_some_and(|source| {
                 source.unchanged() && source.object_version() == artifact.source_version
             }))
         .then_some(artifact)
     }
+
+    /// Only an exact issued proof may request lazy full-byte validation. The
+    /// registry lease protects it from GC throughout the blocking operation.
+    pub(super) async fn reacquire_expected(
+        &self,
+        facts: &crate::transcode::RetainedOutputFacts,
+        shared: &Shared,
+        rendition: &Arc<Rendition>,
+        budget: Duration,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        if let Some(artifact) = self.acquire_expected(facts, rendition) {
+            return Some(artifact);
+        }
+        if !facts.valid() {
+            return None;
+        }
+        let deadline = Instant::now().checked_add(budget)?;
+        let validator = Arc::clone(&self.collector).try_lock_owned().ok()?;
+        if !self.own_namespace(&shared.base).await {
+            return None;
+        }
+        self.collect_orphans().await;
+        let artifact = {
+            let state = self.state.lock().expect("retained registry lock");
+            Arc::clone(
+                &state
+                    .entries
+                    .values()
+                    .find(|entry| entry.artifact.facts() == *facts)?
+                    .artifact,
+            )
+        };
+        if artifact.facts() != *facts
+            || !artifact.durable
+            || artifact.logical.is_none()
+            || artifact.logical != rendition.recipe.retained_logical
+            || artifact.observation.preimage.playlist.as_slice() != rendition.playlist.as_slice()
+            || !rendition
+                .source
+                .as_ref()
+                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+        {
+            return None;
+        }
+        let lease = Arc::clone(&artifact);
+        let expected_rendition = Arc::clone(rendition);
+        let expected_logical = artifact.logical.clone();
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        let validated = tokio::time::timeout(
+            remaining,
+            tokio::task::spawn_blocking(move || {
+                // Timeout/cancellation cannot release the single validation owner
+                // while blocking file reads still hold their artifact lease.
+                let _reservation = validator;
+                let manifest = super::retained_manifest::ArtifactManifest::read(&lease.directory)?;
+                if !manifest.matches(&expected_rendition)
+                    || manifest.id != lease.id.to_string()
+                    || Some(&manifest.logical) != expected_logical.as_ref()
+                    || Some(&manifest.seal()?) != lease.sealed_identity.get()
+                    || manifest.observation()?.rates != lease.observation.rates
+                {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                manifest.validate_files(&lease.directory, deadline)
+            }),
+        )
+        .await;
+        if !matches!(validated, Ok(Ok(Ok(()))))
+            || !rendition
+                .source
+                .as_ref()
+                .is_some_and(|s| s.unchanged() && s.object_version() == artifact.source_version)
+        {
+            return None;
+        }
+        artifact.validated.store(true, Release);
+        self.acquire_expected(facts, rendition)
+    }
     pub(super) fn acquire(&self, identity: &[u8; 32]) -> Option<Arc<RetainedVodArtifact>> {
         let mut state = self.state.lock().expect("retained registry lock");
         let entry = state.entries.get_mut(identity)?;
+        if !entry.artifact.validated.load(Acquire) {
+            return None;
+        }
         entry.used = Instant::now();
         entry.idle_since = None;
         Some(Arc::clone(&entry.artifact))
@@ -597,7 +735,15 @@ impl RetainedArtifactRegistry {
             return;
         };
         let init_bytes = init_metadata.len();
-        let Some(charge) = observation.rates.wire_bytes.checked_add(init_bytes) else {
+        let manifest_charge = if rendition.recipe.retained_logical.is_some() {
+            super::retained_manifest::MAX_MANIFEST
+        } else {
+            0
+        };
+        let Some(extra_charge) = init_bytes.checked_add(manifest_charge) else {
+            return;
+        };
+        let Some(charge) = observation.rates.wire_bytes.checked_add(extra_charge) else {
             return;
         };
         drop(preparing);
@@ -607,12 +753,12 @@ impl RetainedArtifactRegistry {
                 || !state.orphans.is_empty()
                 || state
                     .bytes
-                    .checked_add(init_bytes)
+                    .checked_add(extra_charge)
                     .is_none_or(|bytes| bytes > rendition.completed_cache_budget)
             {
                 return;
             }
-            state.bytes += init_bytes;
+            state.bytes += extra_charge;
             reservation.charge = charge;
         }
         let id = uuid::Uuid::new_v4();
@@ -631,9 +777,17 @@ impl RetainedArtifactRegistry {
                 .map_or(String::new(), |source| source.object_version().to_owned()),
             candidate: rendition.recipe.measured_candidate.clone(),
             audio_delivery: rendition.recipe.audio_delivery.clone(),
+            durable: false,
+            logical: rendition.recipe.retained_logical.clone(),
+            validated: AtomicBool::new(true),
+            sealed_identity: std::sync::OnceLock::new(),
         });
         reservation.staging = Some(Arc::clone(&artifact));
         let result = self.link_complete(shared, rendition, &artifact).await;
+        if let Err(error) = &result {
+            tracing::debug!(target: "plurxd::vodserve", %error, artifact = %artifact.id,
+                "complete retained artifact assembly unavailable");
+        }
         let mut state = self.state.lock().expect("retained registry lock");
         if result.is_ok() {
             state.entries.insert(
@@ -663,7 +817,6 @@ impl RetainedArtifactRegistry {
         }
         let valid = || {
             !rendition.closed.load(Acquire)
-                && rendition.gen_epoch.load(Acquire) == artifact.observation.epoch
                 && rendition
                     .source
                     .as_ref()
@@ -676,7 +829,7 @@ impl RetainedArtifactRegistry {
                     .lock()
                     .expect("output measurement lock")
                     .complete_observation()
-                    .is_some_and(|now| now.rates == artifact.observation.rates)
+                    .is_some_and(|now| now == artifact.observation)
         };
         if !valid() || !recipe_engine_is_current(&rendition.recipe).await {
             return Err(io::ErrorKind::InvalidData.into());
@@ -720,6 +873,19 @@ impl RetainedArtifactRegistry {
         }
         if !valid() {
             return Err(io::ErrorKind::InvalidData.into());
+        }
+        if let Some(logical) = rendition.recipe.retained_logical.clone() {
+            let manifest =
+                super::retained_manifest::ArtifactManifest::from_artifact(artifact, logical);
+            let seal = manifest.seal()?;
+            let lease = Arc::clone(artifact);
+            tokio::task::spawn_blocking(move || manifest.commit(&lease.directory))
+                .await
+                .map_err(io::Error::other)??;
+            artifact
+                .sealed_identity
+                .set(seal)
+                .map_err(|_| io::ErrorKind::InvalidData)?;
         }
         Ok(())
     }
@@ -822,7 +988,11 @@ async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
         };
         let name = entry.file_name();
         let name = name.to_str().ok_or(io::ErrorKind::InvalidData)?;
-        if name != INIT_NAME && planned_index(name).is_none() {
+        if name != INIT_NAME
+            && planned_index(name).is_none()
+            && name != super::retained_manifest::MANIFEST_NAME
+            && name != ".complete.tmp"
+        {
             return Err(io::ErrorKind::InvalidData.into());
         }
         if !entry.file_type().await?.is_file() {
@@ -836,6 +1006,449 @@ async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn durable_fixture() -> (
+        tempfile::TempDir,
+        Arc<VodServe>,
+        Arc<Rendition>,
+        crate::transcode::RetainedOutputFacts,
+    ) {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("durable fixture");
+        let serve = crate::vodserve::tests::bare_serve(temp.path());
+        let mut rendition = crate::vodserve::tests::synthetic_rendition(temp.path()).await;
+        let source_path = temp.path().join("source.bin");
+        tokio::fs::write(&source_path, b"exact durable source")
+            .await
+            .expect("source");
+        let file = crate::vodserve::tests::media_file_at(source_path, 10_000);
+        let request = SessionRequest {
+            candidate_context: None,
+            file_id: file.id,
+            playback_id: "durable".into(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let owned = Arc::get_mut(&mut rendition).expect("unshared rendition");
+        owned.key = "a".repeat(64);
+        owned.source = Some(
+            crate::fragment_index_cluster::open_source_fence(&file, None)
+                .await
+                .expect("fence"),
+        );
+        owned.recipe.retained_logical =
+            Some(super::super::retained_manifest::LogicalOutput::resolve(
+                &request,
+                None,
+                &file,
+                owned.recipe.video,
+            ));
+        owned.recipe.file = file;
+        let init = b"actual retained fixture init";
+        let digest = hex::encode(Sha256::digest(init));
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity {
+                muxer_init: digest.clone(),
+                served_init: digest,
+                promotion: Default::default(),
+            }),
+            from_disk: false,
+        };
+        tokio::fs::write(rendition.dir.path().join(INIT_NAME), init)
+            .await
+            .expect("init");
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+        };
+        for index in 0..rendition.plan.len() {
+            sink.materialize(index as u32, vec![index as u8; 1000 + index])
+                .await
+                .expect("actual sink commit");
+        }
+        sink.completed_output().await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let artifact = loop {
+            let rates = rendition
+                .output_measurement
+                .lock()
+                .expect("measurement")
+                .complete_rates()
+                .expect("full coverage");
+            if let Some(artifact) = serve.shared.retained_artifacts.acquire(&rates.identity) {
+                break artifact;
+            }
+            assert!(Instant::now() < deadline, "assembly did not complete");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let facts = artifact.facts();
+        drop(artifact);
+        drop(sink);
+        (temp, serve, rendition, facts)
+    }
+
+    #[tokio::test]
+    async fn durable_manifest_commits_only_complete_exact_full_mux_observation() {
+        let (_temp, serve, rendition, facts) = durable_fixture().await;
+        let artifact = serve
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .expect("issued artifact");
+        let manifest = super::super::retained_manifest::ArtifactManifest::read(&artifact.directory)
+            .expect("atomic complete manifest");
+        assert_eq!(
+            manifest.observation().expect("recomputed reducer").rates,
+            artifact.observation.rates
+        );
+        assert_eq!(
+            manifest.origin.identity(),
+            artifact.observation.rates.identity
+        );
+        assert!(manifest.matches(&rendition));
+        let incomplete = artifact
+            .directory
+            .parent()
+            .expect("namespace")
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&incomplete).expect("interrupted directory");
+        std::fs::write(incomplete.join(".complete.tmp"), b"{partial").expect("crash residue");
+        assert!(super::super::retained_manifest::ArtifactManifest::read(&incomplete).is_err());
+        let mut incomplete_observation = PublishedOutputMeasurement::default();
+        let init = rendition
+            .identity
+            .lock()
+            .await
+            .identity
+            .clone()
+            .expect("init");
+        incomplete_observation.observe(
+            &rendition,
+            &init,
+            0,
+            0,
+            artifact.observation.members[0].clone(),
+        );
+        incomplete_observation.complete(0, true);
+        assert!(incomplete_observation.complete_observation().is_none());
+    }
+
+    #[tokio::test]
+    async fn durable_manifest_refuses_paths_duplicates_bounds_and_contradictory_identity() {
+        let (_temp, serve, rendition, facts) = durable_fixture().await;
+        let artifact = serve
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .expect("artifact");
+        let path = artifact
+            .directory
+            .join(super::super::retained_manifest::MANIFEST_NAME);
+        let original = std::fs::read(&path).expect("manifest");
+        let value: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
+        for altered in [
+            {
+                let mut v = value.clone();
+                v["version"] = 2.into();
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["members"] = serde_json::json!([]);
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["origin"]["served_init"] = "not-a-digest".into();
+                v
+            },
+            {
+                let mut v = value.clone();
+                v["id"] = uuid::Uuid::new_v4().to_string().into();
+                v
+            },
+        ] {
+            std::fs::write(&path, serde_json::to_vec(&altered).expect("encode"))
+                .expect("negative fixture");
+            assert!(
+                super::super::retained_manifest::ArtifactManifest::read(&artifact.directory)
+                    .is_err()
+            );
+        }
+        let duplicate = format!(
+            "{{\"version\":1,{}",
+            std::str::from_utf8(&original)
+                .expect("utf8")
+                .trim_start_matches('{')
+        );
+        std::fs::write(&path, duplicate).expect("duplicate field");
+        assert!(
+            super::super::retained_manifest::ArtifactManifest::read(&artifact.directory).is_err()
+        );
+        std::fs::write(
+            &path,
+            vec![b' '; super::super::retained_manifest::MAX_MANIFEST as usize + 1],
+        )
+        .expect("bounded refusal fixture");
+        assert!(
+            super::super::retained_manifest::ArtifactManifest::read(&artifact.directory).is_err()
+        );
+        std::fs::write(&path, &original).expect("restore fixture");
+        let mut manifest =
+            super::super::retained_manifest::ArtifactManifest::read(&artifact.directory)
+                .expect("original");
+        manifest.origin.playlist = String::from_utf8(manifest.origin.playlist)
+            .expect("playlist")
+            .replace(&segment_name(0), "../outside.m4s")
+            .into_bytes();
+        assert!(manifest.observation().is_err());
+    }
+
+    #[tokio::test]
+    async fn durable_artifact_lazy_reacquisition_validates_bytes_without_startup_scan() {
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        let directory = old
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .expect("artifact")
+            .directory
+            .clone();
+        drop(old);
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        let identity = super::super::retained_manifest::ArtifactManifest::read(&directory)
+            .expect("manifest")
+            .origin
+            .identity();
+        assert!(
+            fresh.shared.retained_artifacts.acquire(&identity).is_none(),
+            "metadata is not payload validation"
+        );
+        let artifact = fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::from_secs(5))
+            .await
+            .expect("exact lazy restore");
+        assert!(artifact.durable);
+        assert!(
+            artifact.candidate.is_none(),
+            "old execution is not new proposal authority"
+        );
+        assert_eq!(artifact.facts(), facts);
+        drop(artifact);
+        drop(fresh);
+        std::fs::write(directory.join(segment_name(0)), b"contradictory bytes")
+            .expect("corruption");
+        let refusing = crate::vodserve::tests::bare_serve(temp.path());
+        assert!(refusing
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &refusing.shared, &rendition, Duration::from_secs(5))
+            .await
+            .is_none());
+        assert!(refusing
+            .shared
+            .retained_artifacts
+            .acquire(&identity)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn durable_validation_and_get_leases_block_gc_until_last_owner_releases() {
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        drop(old);
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        let charged = fresh
+            .shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("registry")
+            .bytes;
+        assert!(
+            charged > 0,
+            "discovered bytes are charged before validation"
+        );
+        assert!(fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::ZERO)
+            .await
+            .is_none());
+        assert_eq!(
+            fresh
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("registry")
+                .bytes,
+            charged
+        );
+        let artifact = fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::from_secs(5))
+            .await
+            .expect("validated lease");
+        let directory = artifact.directory.clone();
+        let init = artifact
+            .open(
+                None,
+                &Arc::new(crate::meter::Meter::default()),
+                &fresh.shared,
+                &rendition,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("private init GET");
+        let media = artifact
+            .open(
+                Some(0),
+                &Arc::new(crate::meter::Meter::default()),
+                &fresh.shared,
+                &rendition,
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("private media GET");
+        let identity = artifact.observation.rates.identity;
+        drop(artifact);
+        {
+            let mut state = fresh
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("registry");
+            state.entries.get_mut(&identity).expect("entry").idle_since =
+                Some(Instant::now() - SESSION_IDLE_TTL);
+        }
+        fresh.shared.retained_artifacts.collect(temp.path()).await;
+        assert!(
+            directory.exists(),
+            "init/media response leases protect the private incarnation"
+        );
+        drop(init);
+        drop(media);
+        {
+            let mut state = fresh
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("registry");
+            state.entries.get_mut(&identity).expect("entry").idle_since =
+                Some(Instant::now() - SESSION_IDLE_TTL);
+        }
+        for _ in 0..4 {
+            fresh.shared.retained_artifacts.collect(temp.path()).await;
+        }
+        assert!(
+            !directory.exists(),
+            "GC removes only the unleased incarnation"
+        );
+        assert_eq!(
+            fresh
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("registry")
+                .bytes,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_content_seal_refuses_same_cost_body_and_logical_manifest_forgery() {
+        let (temp, old, rendition, facts) = durable_fixture().await;
+        let artifact = old
+            .shared
+            .retained_artifacts
+            .acquire_expected(&facts, &rendition)
+            .expect("sealed artifact");
+        let directory = artifact.directory.clone();
+        let path = directory.join(super::super::retained_manifest::MANIFEST_NAME);
+        let original = std::fs::read(&path).expect("manifest");
+        let mut value: serde_json::Value = serde_json::from_slice(&original).expect("JSON");
+        let bytes = value["members"][0]["bytes"]
+            .as_u64()
+            .expect("actual member length") as usize;
+        let forged_body = vec![99_u8; bytes];
+        value["members"][0]["digest"] =
+            serde_json::to_value(<[u8; 32]>::from(Sha256::digest(&forged_body))).expect("digest");
+        std::fs::write(directory.join(segment_name(0)), forged_body)
+            .expect("same-length contradictory body");
+        std::fs::write(&path, serde_json::to_vec(&value).expect("encode"))
+            .expect("contradictory manifest");
+        let forged = super::super::retained_manifest::ArtifactManifest::read(&directory)
+            .expect("structurally valid hint");
+        assert_eq!(
+            forged.origin.identity(),
+            artifact.observation.rates.identity,
+            "execution origin alone cannot bind members"
+        );
+        assert_eq!(
+            forged.observation().expect("rates").rates,
+            artifact.observation.rates,
+            "same cost is not same bytes"
+        );
+        assert_ne!(
+            hex::encode(forged.seal().expect("seal")),
+            facts.output_identity
+        );
+        drop(artifact);
+        drop(old);
+        let fresh = crate::vodserve::tests::bare_serve(temp.path());
+        assert!(fresh
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &fresh.shared, &rendition, Duration::from_secs(5))
+            .await
+            .is_none());
+        drop(fresh);
+        value["logical"]["audio_offset_ms"] = 17.into();
+        std::fs::write(&path, serde_json::to_vec(&value).expect("encode"))
+            .expect("forged logical facts");
+        let forged = super::super::retained_manifest::ArtifactManifest::read(&directory)
+            .expect("typed untrusted hint");
+        assert_ne!(
+            hex::encode(forged.seal().expect("seal")),
+            facts.output_identity
+        );
+        assert!(!forged.matches(&rendition));
+        let refusing = crate::vodserve::tests::bare_serve(temp.path());
+        assert!(refusing
+            .shared
+            .retained_artifacts
+            .reacquire_expected(&facts, &refusing.shared, &rendition, Duration::from_secs(5))
+            .await
+            .is_none());
+    }
 
     #[tokio::test]
     async fn measured_candidate_cost_requires_complete_actual_audio_route_source_and_digest() {

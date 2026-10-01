@@ -225,6 +225,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let serve = bare_serve(&base.path().join("renditions"));
     let rendition = serve.shared.build_rendition(
         "candidate-cache", None, Recipe {
+            retained_logical: None,
             measured_candidate: None,
             file, audio_index: None, aac: true,
             audio_delivery: None,
@@ -271,6 +272,7 @@ async fn candidate_vod_cache_requires_exact_complete_present_members() {
     assert!(!legacy_encoding.options.normalized_geometry, "fixture is the ordinary legacy recipe");
     let legacy = serve.shared.build_rendition(
         "legacy-candidate-cache", None, Recipe {
+            retained_logical: None,
             measured_candidate: None,
             audio_delivery: None,
             file: rendition.recipe.file.clone(), audio_index: None, aac: true,
@@ -635,6 +637,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
+                retained_logical: None,
                 measured_candidate: None,
                 file,
                 audio_index: None,
