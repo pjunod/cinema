@@ -2447,7 +2447,7 @@ pub async fn decision(
     // to Trakt, and a third-party call belongs nowhere near the click path.
     // The media endpoints announce it once delivery is actually happening.
 
-    let quality_candidates = if state
+    let mut quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
@@ -2487,6 +2487,12 @@ pub async fn decision(
     } else {
         None
     };
+    if let Some(catalog) = quality_candidates.take() {
+        quality_candidates = Some(
+            super::hls::link_receipts::filter_catalog(&state, identity.as_ref(), &file, catalog)
+                .await,
+        );
+    }
     // A negotiated catalog cannot reinterpret coarse legacy supply history
     // as completed-transfer evidence for its candidate recipes.
     let candidate_prior =

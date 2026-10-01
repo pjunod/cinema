@@ -1039,6 +1039,7 @@ pub(crate) struct ResolvedPlan {
     pub request: crate::transcode::SessionRequest,
     /// Actual Auto policy after geometry/copy normalization, not wire intent.
     pub candidate_auto_policy: bool,
+    pub candidate_route: Option<plurx_core::playback::candidate::CandidateRoute>,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
     pub height: i64,
@@ -1067,6 +1068,7 @@ pub(crate) struct PlanInputs<'a> {
     pub file_id: i64,
     pub source: Option<&'a MediaFile>,
     pub network_prior: Option<&'a plurx_core::domain::NetworkPrior>,
+    pub network_identity: Option<&'a crate::telemetry::NetworkIdentity>,
 }
 
 /// Resolve a create body into the recipe it would produce.
@@ -1099,6 +1101,7 @@ pub(crate) async fn resolve_plan(
         file_id,
         source,
         network_prior,
+        network_identity,
     } = inputs;
     let hdr10_requested = review
         .as_ref()
@@ -1107,6 +1110,7 @@ pub(crate) async fn resolve_plan(
     let mut height =
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
+    let mut candidate_route = None;
     let mut candidate_copy = false;
     if body.copy == Some(true) {
         if let (Some(source), Some(caps)) = (
@@ -1203,10 +1207,14 @@ pub(crate) async fn resolve_plan(
                     },
                 )
                 .await;
-            let catalog: Vec<_> = worker_catalog
+            let mut catalog: Vec<_> = worker_catalog
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
+            if requested.is_none() && body.candidate_auto_policy() {
+                catalog =
+                    link_receipts::filter_catalog(state, network_identity, source, catalog).await;
+            }
             let picked = if requested.is_none() && body.height != Some(1440) {
                 state
                     .transcode
@@ -1239,6 +1247,7 @@ pub(crate) async fn resolve_plan(
             let candidate = picked.ok_or_else(|| {
                 ApiError::Conflict("candidate_recipe_changed_or_decoder_unavailable".to_owned())
             })?;
+            candidate_route = Some(candidate.route);
             candidate_copy =
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
@@ -1362,6 +1371,7 @@ pub(crate) async fn resolve_plan(
     Ok(ResolvedPlan {
         request,
         candidate_auto_policy,
+        candidate_route,
         height,
         intent_fingerprint: fingerprint,
         plan_notes,
@@ -1653,12 +1663,14 @@ async fn create_with_purpose(
             file_id: id,
             source: source.as_ref(),
             network_prior: network_prior.as_ref(),
+            network_identity: identity.as_ref(),
         },
         review,
         req,
     )
     .await?;
     let candidate_auto_policy = resolved.candidate_auto_policy;
+    let candidate_route = resolved.candidate_route;
     let request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
@@ -2746,6 +2758,25 @@ async fn create_with_purpose(
             .media_sessions
             .seed_owned_lease(&published_route)
             .await;
+        if candidate_auto_policy {
+            if let (Some(identity), Some(source), Some(context), Some(candidate_route)) = (
+                identity.as_ref(),
+                source.as_ref(),
+                request.candidate_context.as_ref(),
+                candidate_route,
+            ) {
+                if let Some(source) =
+                    link_receipts::binding(identity, source, context.recipe_digest, candidate_route)
+                {
+                    state.link_receipts.register(link_receipts::SessionBinding {
+                        source,
+                        session: published_route.session_id.clone(),
+                        incarnation: published_route.incarnation_id.clone(),
+                        owner_epoch: published_route.owner_epoch,
+                    });
+                }
+            }
+        }
     }
     if library_channel.is_none() {
         crate::playstart::note_playback_started(
