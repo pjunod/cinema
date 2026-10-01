@@ -1963,6 +1963,7 @@ fn staged_preparation(
     predecessor: &str,
 ) -> plurx_core::domain::MediaSessionPreparation {
     plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: None,
         expected_desired_revision: None,
         incarnation_id: incarnation_id.to_owned(),
         session_id: session_id.to_owned(),
@@ -35459,4 +35460,301 @@ async fn an_idle_classification_schedule_proposes_nothing_on_three_voters() {
         1,
         "the contest it replaces is a proposal even when it loses"
     );
+}
+
+#[tokio::test]
+async fn quality_cancellation_is_durable_exact_and_does_not_end_the_incumbent() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fc01";
+        let session = "00000000-0000-4000-8000-00000000fc02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "c".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 2,
+            client_instance_id: "00000000-0000-4000-8000-00000000fc03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        assert!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("wrong owner cancellation")
+                .is_none(),
+            "{backend}"
+        );
+        receipt.owner_epoch = 1;
+        let first = store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable receipt");
+        receipt.created_at_ms = 1600;
+        receipt.updated_at_ms = 1600;
+        assert_eq!(
+            store
+                .request_quality_cancellation(&receipt)
+                .await
+                .expect("replay"),
+            Some(first.clone()),
+            "{backend}"
+        );
+        assert!(store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 1)
+            .await
+            .expect("cancelled intent"));
+        assert!(!store
+            .quality_intent_cancelled(generation, &receipt.client_instance_id, "movie", 2)
+            .await
+            .expect("newer intent"));
+        assert!(!store
+            .settle_quality_cancellation(&receipt.receipt_key, "wrong-owner", 1, 2000)
+            .await
+            .expect("wrong cleanup owner"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2000)
+            .await
+            .expect("cleanup"));
+        assert!(store
+            .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2100)
+            .await
+            .expect("cleanup replay"));
+        let settled = store
+            .quality_cancellation_receipt(&receipt.receipt_key)
+            .await
+            .expect("read receipt")
+            .expect("receipt");
+        assert_eq!(settled.state, "settled");
+        assert_eq!(settled.updated_at_ms, 2000);
+        let current = store
+            .media_session_route_for_playback(user.id, "quality-cancel")
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn a_durable_quality_cancel_fences_late_preparation_admission() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-admission-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fb01";
+        let session = "00000000-0000-4000-8000-00000000fb02";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            "quality-cancel-admission",
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "b".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fb03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 1500,
+            updated_at_ms: 1500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("durable cancellation");
+        let mut target = staged_preparation(
+            user.id,
+            "quality-cancel-admission",
+            "00000000-0000-4000-8000-00000000fb04",
+            "00000000-0000-4000-8000-00000000fb05",
+            generation,
+        );
+        target.quality_cancellation_key = Some(receipt.receipt_key);
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("late prepare")
+                .is_none(),
+            "{backend}: cancelled target admitted"
+        );
+        assert!(store
+            .media_session_route(&target.session_id)
+            .await
+            .expect("target")
+            .is_none());
+        target.quality_cancellation_key = Some("d".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("new intent prepare")
+                .is_some(),
+            "{backend}: unrelated new intent refused"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, "quality-cancel-admission")
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation);
+        assert_eq!(current.state, "active");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("quality-cancel-commit-user", "hash", false)
+            .await
+            .expect("create user");
+        let generation = "00000000-0000-4000-8000-00000000fa01";
+        let session = "00000000-0000-4000-8000-00000000fa02";
+        let playback = "quality-cancel-commit";
+        current_media_session(
+            store.as_ref(),
+            user.id,
+            playback,
+            generation,
+            session,
+            backend,
+        )
+        .await;
+        let mut target = staged_preparation(
+            user.id,
+            playback,
+            "00000000-0000-4000-8000-00000000fa04",
+            "00000000-0000-4000-8000-00000000fa05",
+            generation,
+        );
+        target.quality_cancellation_key = Some("e".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("prepare")
+                .is_some(),
+            "{backend}"
+        );
+        let mut changed = target.clone();
+        changed.quality_cancellation_key = Some("f".repeat(64));
+        assert!(
+            store
+                .prepare_media_session(&changed)
+                .await
+                .expect("changed replay")
+                .is_none(),
+            "{backend}: replay changed ownership"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &changed)
+                .await
+                .expect("changed rejoin replay")
+                .is_none(),
+            "{backend}: rejoin changed ownership"
+        );
+        let receipt = plurx_core::store::QualityCancellationReceipt {
+            receipt_key: "e".repeat(64),
+            generation: generation.into(),
+            session_id: session.into(),
+            owner_node_id: "staged-node".into(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000fa03".into(),
+            lifetime_id: "movie".into(),
+            recipe_revision: 1,
+            accepted_sequence: 3,
+            state: "requested".into(),
+            created_at_ms: 2500,
+            updated_at_ms: 2500,
+        };
+        store
+            .request_quality_cancellation(&receipt)
+            .await
+            .expect("cancel")
+            .expect("receipt");
+        assert!(
+            !store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2600)
+                .await
+                .expect("premature settlement"),
+            "{backend}: active child acknowledged cleanup"
+        );
+        assert!(
+            store
+                .prepare_media_session(&target)
+                .await
+                .expect("cancelled replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .rejoin_media_session_preparation("00000000-0000-4000-8000-00000000fa06", &target)
+                .await
+                .expect("cancelled rejoin replay")
+                .is_none(),
+            "{backend}"
+        );
+        assert!(
+            store
+                .commit_media_session_preparation(
+                    user.id,
+                    playback,
+                    &preparation_commit_request(&target.incarnation_id, 2700, 900_000)
+                )
+                .await
+                .expect("cancelled commit")
+                .is_none(),
+            "{backend}: cancelled target committed"
+        );
+        assert!(
+            store
+                .settle_quality_cancellation(&receipt.receipt_key, "staged-node", 1, 2800)
+                .await
+                .expect("settled after retirement"),
+            "{backend}"
+        );
+        let current = store
+            .media_session_route_for_playback(user.id, playback)
+            .await
+            .expect("current")
+            .expect("incumbent");
+        assert_eq!(current.incarnation_id, generation, "{backend}");
+        assert_eq!(current.state, "active", "{backend}");
+    })
+    .await;
 }

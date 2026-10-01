@@ -26,6 +26,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                 film_time_ms: RESUME_ACCEPTED_PLAYHEAD_MS,
@@ -370,6 +371,7 @@
         };
         let now_ms = unix_ms();
         plurx_core::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: staged_incarnation_id.to_owned(),
             session_id: staged_session_id,
@@ -743,6 +745,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
@@ -817,6 +820,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
@@ -1069,6 +1073,7 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
@@ -1253,6 +1258,7 @@
             },
             Some(&staged_source_file()),
             AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
@@ -1443,6 +1449,7 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
@@ -1536,6 +1543,7 @@
                 &state.node_id,
                 PreparationPurpose::SelectionChange,
                 AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: Some(planning_cancellation),
                     film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,

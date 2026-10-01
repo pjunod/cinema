@@ -2731,6 +2731,7 @@
             &staged_candidate_request(),
             Some(&staged_source_file()),
             AcceptedAsk {
+                    planning_registration: None,
                     quality_intent: None,
                     planning_cancellation: None,
                 film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,

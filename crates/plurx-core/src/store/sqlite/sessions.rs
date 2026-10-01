@@ -35,6 +35,25 @@ const ROUTE_COLS: &str = "incarnation_id, session_id, user_id, playback_id, \
     media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms, recovery_epoch, \
     drain_deadline_ms";
 
+fn quality_cancellation_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<crate::store::QualityCancellationReceipt> {
+    Ok(crate::store::QualityCancellationReceipt {
+        receipt_key: row.get(0)?,
+        generation: row.get(1)?,
+        session_id: row.get(2)?,
+        owner_node_id: row.get(3)?,
+        owner_epoch: row.get(4)?,
+        client_instance_id: row.get(5)?,
+        lifetime_id: row.get(6)?,
+        recipe_revision: row.get(7)?,
+        accepted_sequence: row.get(8)?,
+        state: row.get(9)?,
+        created_at_ms: row.get(10)?,
+        updated_at_ms: row.get(11)?,
+    })
+}
+
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     Ok(MediaSessionRoute {
         incarnation_id: row.get(0)?,
@@ -221,7 +240,8 @@ fn desired_within(
 }
 
 fn validate_preparation(preparation: &MediaSessionPreparation) -> Result<(), StoreError> {
-    let valid = valid_uuid(&preparation.incarnation_id)
+    let valid = preparation.quality_cancellation_key.as_ref().is_none_or(|key| valid_fingerprint(key))
+        && valid_uuid(&preparation.incarnation_id)
         && valid_uuid(&preparation.session_id)
         && valid_uuid(&preparation.expected_predecessor_incarnation_id)
         // A successor staged against itself is not a successor. The pointer
@@ -334,6 +354,36 @@ fn prepare_within(
     tx: &rusqlite::Transaction<'_>,
     preparation: &MediaSessionPreparation,
 ) -> rusqlite::Result<Option<MediaSessionRoute>> {
+    let prior_key: Option<String> = tx.query_row("SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = ?1",
+        [&preparation.incarnation_id], |row| row.get(0)).optional()?;
+    if prior_key.as_deref()
+        != Some(
+            preparation
+                .quality_cancellation_key
+                .as_deref()
+                .unwrap_or(""),
+        )
+        && prior_key.is_some()
+    {
+        return Ok(None);
+    }
+    if let Some(key) = preparation.quality_cancellation_key.as_ref() {
+        let other: Option<String> = tx.query_row("SELECT staged_incarnation_id FROM quality_preparation_owners WHERE cancellation_key = ?1", [key], |row| row.get(0)).optional()?;
+        if other
+            .as_ref()
+            .is_some_and(|id| id != &preparation.incarnation_id)
+        {
+            return Ok(None);
+        }
+        let cancelled: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = ?1)",
+            [key],
+            |row| row.get(0),
+        )?;
+        if cancelled {
+            return Ok(None);
+        }
+    }
     let predecessor_is_authoritative = tx
         .query_row(
             "SELECT 1 FROM media_playback_pointers pointer
@@ -396,6 +446,9 @@ fn prepare_within(
         )
         .optional()?;
     if let Some(existing) = existing {
+        if preparation.quality_cancellation_key.is_some() && prior_key.is_none() {
+            return Ok(None);
+        }
         let replay = existing.staged_incarnation_id == preparation.incarnation_id
             && existing.expected_predecessor_incarnation_id
                 == preparation.expected_predecessor_incarnation_id;
@@ -551,6 +604,8 @@ fn prepare_within(
             preparation.now_ms,
         ],
     )?;
+    tx.execute("INSERT INTO quality_preparation_owners(staged_incarnation_id, cancellation_key) VALUES (?1, ?2)",
+        params![preparation.incarnation_id, preparation.quality_cancellation_key.as_deref().unwrap_or("")])?;
     Ok(tx
         .query_row(
             &format!("SELECT {ROUTE_COLS} FROM media_sessions WHERE incarnation_id = ?1"),
@@ -1840,6 +1895,18 @@ impl MediaSessionStore for SqliteStore {
                         == preparation.expected_predecessor_incarnation_id
             });
             if exact_replay {
+                let binding: Option<String> = tx.query_row(
+                    "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = ?1",
+                    [preparation.incarnation_id.as_str()], |row| row.get(0)).optional()?;
+                if binding.as_deref().unwrap_or("") != preparation.quality_cancellation_key.as_deref().unwrap_or("") {
+                    return Ok(None);
+                }
+                if let Some(key) = preparation.quality_cancellation_key.as_ref() {
+                    let cancelled: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = ?1)",
+                        [key], |row| row.get(0))?;
+                    if cancelled { return Ok(None); }
+                }
                 let route = tx
                     .query_row(
                         &format!(
@@ -2064,6 +2131,9 @@ impl MediaSessionStore for SqliteStore {
                     -- earlier and returning made this backend keep the row
                     -- while the replicated twin tore it down, which the
                     -- three-voter lane caught.
+                    AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+                      JOIN quality_cancellation_receipts receipt ON receipt.receipt_key = owner.cancellation_key
+                      WHERE owner.staged_incarnation_id = ?1)
                     AND (?8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                       WHERE user_id = ?3 AND playback_id = ?4 AND revision != ?8))",
                 params![
@@ -2673,6 +2743,103 @@ impl MediaSessionStore for SqliteStore {
                 .optional()?)
         })
         .await
+    }
+
+    async fn request_quality_cancellation(
+        &self,
+        receipt: &crate::store::QualityCancellationReceipt,
+    ) -> Result<Option<crate::store::QualityCancellationReceipt>, StoreError> {
+        if !receipt.valid_request() {
+            return Err(StoreError::Task("invalid quality cancellation".into()));
+        }
+        let receipt = receipt.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                crate::store::quality_cancellation::INSERT_CANCELLATION,
+                params![
+                    receipt.receipt_key,
+                    receipt.generation,
+                    receipt.session_id,
+                    receipt.owner_node_id,
+                    receipt.owner_epoch,
+                    receipt.client_instance_id,
+                    receipt.lifetime_id,
+                    receipt.recipe_revision,
+                    receipt.accepted_sequence,
+                    receipt.created_at_ms
+                ],
+            )?;
+            let sql = format!(
+                "SELECT {} FROM quality_cancellation_receipts WHERE receipt_key = ?1",
+                crate::store::quality_cancellation::CANCELLATION_COLS
+            );
+            let stored = tx
+                .query_row(&sql, [&receipt.receipt_key], quality_cancellation_from_row)
+                .optional()?;
+            tx.commit()?;
+            Ok(stored.filter(|stored| stored.same_request(&receipt)))
+        })
+        .await
+    }
+
+    async fn quality_cancellation_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> Result<Option<crate::store::QualityCancellationReceipt>, StoreError> {
+        if receipt_key.len() != 64 {
+            return Ok(None);
+        }
+        let key = receipt_key.to_owned();
+        self.with_read(move |conn| {
+            let sql = format!(
+                "SELECT {} FROM quality_cancellation_receipts WHERE receipt_key = ?1",
+                crate::store::quality_cancellation::CANCELLATION_COLS
+            );
+            Ok(conn
+                .query_row(&sql, [key], quality_cancellation_from_row)
+                .optional()?)
+        })
+        .await
+    }
+
+    async fn settle_quality_cancellation(
+        &self,
+        receipt_key: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let key = receipt_key.to_owned();
+        let owner = owner_node_id.to_owned();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = ?4
+                WHERE receipt_key = ?1 AND owner_node_id = ?2 AND owner_epoch = ?3
+                  AND state = 'requested' AND created_at_ms <= ?4
+                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+                    JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
+                    WHERE owner.cancellation_key = ?1 AND child.state = 'active')", params![key, owner, owner_epoch, now_ms])?;
+            let settled = tx.query_row("SELECT EXISTS(SELECT 1 FROM quality_cancellation_receipts
+                WHERE receipt_key = ?1 AND owner_node_id = ?2 AND owner_epoch = ?3 AND state = 'settled')",
+                params![key, owner, owner_epoch], |row| row.get(0))?;
+            tx.commit()?; Ok(settled)
+        }).await
+    }
+
+    async fn quality_intent_cancelled(
+        &self,
+        generation: &str,
+        client_instance_id: &str,
+        lifetime_id: &str,
+        recipe_revision: i64,
+    ) -> Result<bool, StoreError> {
+        let generation = generation.to_owned();
+        let client = client_instance_id.to_owned();
+        let lifetime = lifetime_id.to_owned();
+        self.with_read(move |conn| Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM quality_cancellation_receipts
+            WHERE generation = ?1 AND client_instance_id = ?2 AND lifetime_id = ?3 AND recipe_revision = ?4)",
+            params![generation, client, lifetime, recipe_revision], |row| row.get(0))?)).await
     }
 
     async fn record_media_session_terminal_ack(
@@ -3591,6 +3758,16 @@ impl MediaSessionStore for SqliteStore {
                     ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT ?2)",
                 params![now_ms, MAINTENANCE_BATCH],
             )?;
+            tx.execute("DELETE FROM quality_preparation_owners WHERE staged_incarnation_id IN (
+                SELECT owner.staged_incarnation_id FROM quality_preparation_owners owner
+                WHERE NOT EXISTS (SELECT 1 FROM media_sessions child WHERE child.incarnation_id = owner.staged_incarnation_id)
+                ORDER BY owner.staged_incarnation_id LIMIT ?1)", [MAINTENANCE_BATCH])?;
+            tx.execute("DELETE FROM quality_cancellation_receipts WHERE receipt_key IN (
+                SELECT receipt.receipt_key FROM quality_cancellation_receipts receipt
+                WHERE receipt.updated_at_ms < ?1 AND NOT EXISTS (SELECT 1 FROM media_sessions session
+                    WHERE session.incarnation_id = receipt.generation AND session.state = 'active')
+                ORDER BY receipt.updated_at_ms, receipt.receipt_key LIMIT ?2)",
+                params![now_ms.saturating_sub(60_000), MAINTENANCE_BATCH])?;
             tx.execute(
                 "DELETE FROM media_sessions WHERE rowid IN (
                    SELECT rowid FROM media_sessions

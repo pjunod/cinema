@@ -1646,8 +1646,21 @@ retires the incumbent. Repetition does not allocate or cancel a newer owner.
 Store cleanup. `observation_unknown` means this owner no longer has matching
 cancellable work; it may already have moved to commit ownership. Neither
 outcome is a `retained_current` settlement or permission to discard committed
-media. Durable terminal cancellation receipts and client retention settlement
-remain implementation work in the continuous-quality build.
+media. `cancelled` is an exact replayable cleanup receipt: planning has exited
+without a worker, or the registered successor's durable reservation and worker
+have both been retired. It is still not presentation evidence or permission to
+discard appended media. SQLite and replicated storage preserve the first
+receipt and settlement timestamps. The cancellation marker atomically fences
+late preparation admission and commit. A preparation's receipt binding cannot
+change on replay or rejoin.
+
+Receipts are bounded to 128 per active generation; exhaustion refuses new
+cancellation rather than evicting an active marker. Maintenance removes receipts
+only after the parent is inactive and the receipt is at least 60 seconds old,
+in batches of 256. A lost cleanup observation or owner change remains unknown
+until exact cleanup is acknowledged; it never fabricates retention. Client
+retention settlement remains implementation work in the continuous-quality
+build.
 
 The cluster hop uses `POST /internal/cluster/media/sessions/quality-control`,
 exact-write Ed25519 request authentication, an inherited deadline, and the

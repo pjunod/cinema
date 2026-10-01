@@ -15,6 +15,12 @@ pub(crate) struct QualityIntentIdentity {
     pub accepted_sequence: u64,
 }
 
+pub(super) fn quality_cancellation_receipt_key(identity: &QualityIntentIdentity) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(identity).expect("bounded quality identity serializes");
+    format!("{:x}", Sha256::digest(bytes))
+}
+
 impl QualityIntentIdentity {
     pub(super) fn from_control(
         request: &crate::playback_control::ControlRequestV1,
@@ -118,7 +124,7 @@ impl QualityControlResponse {
                 }
                 QualityControlOperation::CancelUnappended => matches!(
                     self.outcome.as_str(),
-                    "cancel_requested" | "observation_unknown" | "unsupported"
+                    "cancel_requested" | "cancelled" | "observation_unknown" | "unsupported"
                 ),
             }
             && if self.outcome == "unsupported" {
@@ -262,6 +268,47 @@ pub(crate) async fn quality_control_routed(
                 .identity
                 .as_ref()
                 .expect("validated cancellation identity");
+            let receipt_key = quality_cancellation_receipt_key(identity);
+            let existing = match state.store.quality_cancellation_receipt(&receipt_key).await {
+                Ok(receipt) => receipt,
+                Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            };
+            if let Some(receipt) = existing {
+                if receipt.state == "settled" {
+                    return answer(&request, "cancelled", true, Some(identity.clone()));
+                }
+            } else {
+                // Do not fill durable bounds for unknown or newer work.
+                if quality_preparation_identity(&route.playback_id).as_ref() != Some(identity) {
+                    return answer(
+                        &request,
+                        "observation_unknown",
+                        true,
+                        Some(identity.clone()),
+                    );
+                }
+                let now = unix_ms();
+                let receipt = plurx_core::store::QualityCancellationReceipt {
+                    receipt_key,
+                    generation: route.incarnation_id.clone(),
+                    session_id: route.session_id.clone(),
+                    owner_node_id: route.owner_node_id.clone(),
+                    owner_epoch: route.owner_epoch,
+                    client_instance_id: identity.client_instance_id.clone(),
+                    lifetime_id: identity.lifetime_id.clone(),
+                    recipe_revision: i64::try_from(identity.recipe_revision)
+                        .expect("validated recipe revision"),
+                    accepted_sequence: i64::try_from(identity.accepted_sequence)
+                        .expect("validated control sequence"),
+                    state: "requested".to_owned(),
+                    created_at_ms: now,
+                    updated_at_ms: now,
+                };
+                match state.store.request_quality_cancellation(&receipt).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) | Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                }
+            }
             let found = cancel_quality_preparation(&route.playback_id, identity);
             // A detached abort is not proof of completed cleanup. Absence may
             // also mean commit already owns the successor; never claim retention.

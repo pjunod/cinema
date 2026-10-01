@@ -1164,6 +1164,10 @@ pub struct DesiredOwnership {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionPreparation {
+    /// Independent cancellation is checked inside resource admission, so a
+    /// late durable cancellation cannot race a detached candidate into priming.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_cancellation_key: Option<String>,
     /// The successor being staged. Minted like any other incarnation.
     pub incarnation_id: String,
     pub session_id: String,

@@ -1183,6 +1183,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
+    // v88: independent quality cancellation, without ending the incumbent.
+    super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

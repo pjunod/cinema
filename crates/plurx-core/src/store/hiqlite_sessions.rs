@@ -286,6 +286,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSIONS_RETENTION_INDEX,
         super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
+        super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
         MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
         super::MEDIA_SESSION_PREPARATIONS_SCHEMA,
         super::MEDIA_SESSION_PRODUCER_RECOVERY_SCHEMA,
@@ -337,6 +338,33 @@ impl From<&mut Row<'_>> for RouteRow {
             updated_at_ms: row.get("updated_at_ms"),
             recovery_epoch: row.get("recovery_epoch"),
             drain_deadline_ms: row.get("drain_deadline_ms"),
+        })
+    }
+}
+
+struct PreparationCancellationBinding(String);
+impl From<&mut Row<'_>> for PreparationCancellationBinding {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("cancellation_key"))
+    }
+}
+
+struct QualityCancellationRow(crate::store::QualityCancellationReceipt);
+impl From<&mut Row<'_>> for QualityCancellationRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(crate::store::QualityCancellationReceipt {
+            receipt_key: row.get("receipt_key"),
+            generation: row.get("generation"),
+            session_id: row.get("session_id"),
+            owner_node_id: row.get("owner_node_id"),
+            owner_epoch: row.get("owner_epoch"),
+            client_instance_id: row.get("client_instance_id"),
+            lifetime_id: row.get("lifetime_id"),
+            recipe_revision: row.get("recipe_revision"),
+            accepted_sequence: row.get("accepted_sequence"),
+            state: row.get("state"),
+            created_at_ms: row.get("created_at_ms"),
+            updated_at_ms: row.get("updated_at_ms"),
         })
     }
 }
@@ -651,6 +679,9 @@ fn prepare_statements(
                     AND owner_epoch = $14 AND state = 'active')
                 AND ($15 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                   WHERE user_id = $5 AND playback_id = $6 AND revision != $15))
+                AND NOT EXISTS (SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = $16)
+                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE staged_incarnation_id = $8 AND cancellation_key != $16)
+                AND ($16 = '' OR NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE cancellation_key = $16 AND staged_incarnation_id != $8))
              ON CONFLICT(resource) DO UPDATE SET
                 expires_at_ms = excluded.expires_at_ms,
                 revision = job_leases.revision + 1,
@@ -674,7 +705,8 @@ fn prepare_statements(
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
                 preparation.expected_predecessor_owner_epoch,
-                expected_desired_revision
+                expected_desired_revision,
+                preparation.quality_cancellation_key.as_deref().unwrap_or("")
             ),
         ),
         (
@@ -719,6 +751,9 @@ fn prepare_statements(
                     AND owner_epoch = $19 AND state = 'active')
                 AND ($20 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                   WHERE user_id = $3 AND playback_id = $4 AND revision != $20))
+                AND NOT EXISTS (SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = $21)
+                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE staged_incarnation_id = $1 AND cancellation_key != $21)
+                AND ($21 = '' OR NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE cancellation_key = $21 AND staged_incarnation_id != $1))
              RETURNING incarnation_id, session_id, user_id, playback_id, owner_node_id",
             params!(
                 preparation.incarnation_id.as_str(),
@@ -740,7 +775,8 @@ fn prepare_statements(
                 removed_owner_key.as_str(),
                 preparation.expected_predecessor_owner_node_id.as_str(),
                 preparation.expected_predecessor_owner_epoch,
-                expected_desired_revision
+                expected_desired_revision,
+                preparation.quality_cancellation_key.as_deref().unwrap_or("")
             ),
         ),
         (
@@ -763,7 +799,10 @@ fn prepare_statements(
                   AND predecessor.owner_epoch = $11
                   AND predecessor.state = 'active')
                AND ($12 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))",
+                 WHERE user_id = $1 AND playback_id = $2 AND revision != $12))
+               AND NOT EXISTS (SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = $13)
+               AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE staged_incarnation_id = $3 AND cancellation_key != $13)
+                AND ($13 = '' OR NOT EXISTS (SELECT 1 FROM quality_preparation_owners WHERE cancellation_key = $13 AND staged_incarnation_id != $3))",
             params!(
                 preparation.user_id,
                 preparation.playback_id.as_str(),
@@ -776,8 +815,16 @@ fn prepare_statements(
                 MEDIA_SESSION_PUBLICATION_BLOCKED,
                 preparation.expected_predecessor_owner_node_id.as_str(),
                 preparation.expected_predecessor_owner_epoch,
-                expected_desired_revision
+                expected_desired_revision,
+                preparation.quality_cancellation_key.as_deref().unwrap_or("")
             ),
+        ),
+        (
+            "INSERT OR IGNORE INTO quality_preparation_owners(staged_incarnation_id, cancellation_key)
+             SELECT $1, $2 WHERE EXISTS (SELECT 1 FROM media_session_preparations
+                WHERE staged_incarnation_id = $1)
+                AND NOT EXISTS (SELECT 1 FROM quality_cancellation_receipts WHERE receipt_key = $2)",
+            params!(preparation.incarnation_id.as_str(), preparation.quality_cancellation_key.as_deref().unwrap_or("")),
         ),
     ]
 }
@@ -1041,7 +1088,8 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
 fn validate_preparation(
     preparation: &crate::domain::MediaSessionPreparation,
 ) -> Result<(), StoreError> {
-    let valid = valid_uuid(&preparation.incarnation_id)
+    let valid = preparation.quality_cancellation_key.as_ref().is_none_or(|key| valid_fingerprint(key))
+        && valid_uuid(&preparation.incarnation_id)
         && valid_uuid(&preparation.session_id)
         && valid_uuid(&preparation.expected_predecessor_incarnation_id)
         // A successor staged against itself is not a successor, and the
@@ -1853,12 +1901,31 @@ impl MediaSessionStore for HiqliteAuthStore {
         }) {
             return Ok(None);
         }
+        let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
+            "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1", params!(preparation.incarnation_id.as_str()))).await?;
+        if bindings.first().is_some_and(|binding| {
+            binding.0
+                != preparation
+                    .quality_cancellation_key
+                    .as_deref()
+                    .unwrap_or("")
+        }) {
+            return Ok(None);
+        }
+        if let Some(key) = preparation.quality_cancellation_key.as_ref() {
+            if self.quality_cancellation_receipt(key).await?.is_some() {
+                return Ok(None);
+            }
+        }
         // Replay by exact identity, before anything is attempted. The ledger's
         // primary key would otherwise turn an owner's retry into "you already
         // have one".
         if let Some(existing) =
             staged_row(self, preparation.user_id, &preparation.playback_id).await?
         {
+            if preparation.quality_cancellation_key.is_some() && bindings.is_empty() {
+                return Ok(None);
+            }
             if existing.staged_incarnation_id != preparation.incarnation_id
                 || existing.expected_predecessor_incarnation_id
                     != preparation.expected_predecessor_incarnation_id
@@ -2043,6 +2110,25 @@ impl MediaSessionStore for HiqliteAuthStore {
                     == preparation.expected_predecessor_incarnation_id
         });
         if exact_replay {
+            let bindings = timeout_store(self.client().query_consistent_map::<PreparationCancellationBinding, _>(
+                "SELECT cancellation_key FROM quality_preparation_owners WHERE staged_incarnation_id = $1",
+                params!(preparation.incarnation_id.as_str()))).await?;
+            if bindings
+                .first()
+                .map(|binding| binding.0.as_str())
+                .unwrap_or("")
+                != preparation
+                    .quality_cancellation_key
+                    .as_deref()
+                    .unwrap_or("")
+            {
+                return Ok(None);
+            }
+            if let Some(key) = preparation.quality_cancellation_key.as_ref() {
+                if self.quality_cancellation_receipt(key).await?.is_some() {
+                    return Ok(None);
+                }
+            }
             return Ok(
                 route_by(self, "incarnation_id", &preparation.incarnation_id)
                     .await?
@@ -2396,6 +2482,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                           AND client_instance_id = $12 AND sequence = $13
                           AND request_fingerprint = $14 AND response_json = $15
                           AND expires_at_ms = $16 AND updated_at_ms = $17))
+                    AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+                      JOIN quality_cancellation_receipts receipt ON receipt.receipt_key = owner.cancellation_key
+                      WHERE owner.staged_incarnation_id = $1)
                     AND ($18 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
                       WHERE user_id = $3 AND playback_id = $4 AND revision != $18))
                   RETURNING current_incarnation_id",
@@ -3331,6 +3420,90 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
     }
 
+    async fn request_quality_cancellation(
+        &self,
+        receipt: &crate::store::QualityCancellationReceipt,
+    ) -> Result<Option<crate::store::QualityCancellationReceipt>, StoreError> {
+        if !receipt.valid_request() {
+            return Err(StoreError::Task("invalid quality cancellation".into()));
+        }
+        timeout_store(self.client().execute(
+            crate::store::quality_cancellation::INSERT_CANCELLATION,
+            params!(
+                receipt.receipt_key.clone(),
+                receipt.generation.clone(),
+                receipt.session_id.clone(),
+                receipt.owner_node_id.clone(),
+                receipt.owner_epoch,
+                receipt.client_instance_id.clone(),
+                receipt.lifetime_id.clone(),
+                receipt.recipe_revision,
+                receipt.accepted_sequence,
+                receipt.created_at_ms
+            ),
+        ))
+        .await?;
+        Ok(self
+            .quality_cancellation_receipt(&receipt.receipt_key)
+            .await?
+            .filter(|stored| stored.same_request(receipt)))
+    }
+
+    async fn quality_cancellation_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> Result<Option<crate::store::QualityCancellationReceipt>, StoreError> {
+        if receipt_key.len() != 64 {
+            return Ok(None);
+        }
+        let sql = format!(
+            "SELECT {} FROM quality_cancellation_receipts WHERE receipt_key = $1",
+            crate::store::quality_cancellation::CANCELLATION_COLS
+        );
+        let rows = timeout_store(
+            self.client()
+                .query_consistent_map::<QualityCancellationRow, _>(sql, params!(receipt_key)),
+        )
+        .await?;
+        Ok(rows.into_iter().next().map(|row| row.0))
+    }
+
+    async fn settle_quality_cancellation(
+        &self,
+        receipt_key: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        timeout_store(self.client().execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = $4
+            WHERE receipt_key = $1 AND owner_node_id = $2 AND owner_epoch = $3 AND state = 'requested' AND created_at_ms <= $4
+                AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
+                    JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
+                    WHERE owner.cancellation_key = $1 AND child.state = 'active')",
+            params!(receipt_key, owner_node_id, owner_epoch, now_ms))).await?;
+        Ok(self
+            .quality_cancellation_receipt(receipt_key)
+            .await?
+            .is_some_and(|receipt| {
+                receipt.owner_node_id == owner_node_id
+                    && receipt.owner_epoch == owner_epoch
+                    && receipt.state == "settled"
+            }))
+    }
+
+    async fn quality_intent_cancelled(
+        &self,
+        generation: &str,
+        client_instance_id: &str,
+        lifetime_id: &str,
+        recipe_revision: i64,
+    ) -> Result<bool, StoreError> {
+        let rows = timeout_store(self.client().query_consistent_map::<QualityCancellationRow, _>(
+            format!("SELECT {} FROM quality_cancellation_receipts WHERE generation = $1 AND client_instance_id = $2 AND lifetime_id = $3 AND recipe_revision = $4 LIMIT 1", crate::store::quality_cancellation::CANCELLATION_COLS),
+            params!(generation, client_instance_id, lifetime_id, recipe_revision))).await?;
+        Ok(!rows.is_empty())
+    }
+
     async fn record_media_session_terminal_ack(
         &self,
         acknowledgement: &MediaSessionTerminalAck,
@@ -4131,6 +4304,12 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
                       WHERE state = 'ended' AND updated_at_ms < $4)
+                    OR EXISTS (SELECT 1 FROM quality_preparation_owners owner
+                      WHERE NOT EXISTS (SELECT 1 FROM media_sessions child
+                        WHERE child.incarnation_id = owner.staged_incarnation_id))
+                    OR EXISTS (SELECT 1 FROM quality_cancellation_receipts receipt
+                      WHERE receipt.updated_at_ms < $5 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
+                        WHERE parent.incarnation_id = receipt.generation AND parent.state = 'active'))
                     OR EXISTS (SELECT 1 FROM media_session_terminal_acks acknowledgement
                       WHERE acknowledgement.expires_at_ms <= $2
                          OR NOT EXISTS (SELECT 1 FROM media_sessions session
@@ -4140,7 +4319,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                       WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
                           WHERE lease.resource = 'session:' || session.incarnation_id))",
-                params!(retire_before, now_ms, failed_cutoff, retained_cutoff),
+                params!(retire_before, now_ms, failed_cutoff, retained_cutoff, now_ms.saturating_sub(60_000)),
             )
             .await?
             .into_iter()
@@ -4293,6 +4472,20 @@ impl MediaSessionStore for HiqliteAuthStore {
                               AND session.incarnation_id = acknowledgement.incarnation_id)
                     ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT $2)",
                 params!(now_ms, MAINTENANCE_BATCH),
+            ),
+            (
+                "DELETE FROM quality_preparation_owners WHERE staged_incarnation_id IN (
+                    SELECT owner.staged_incarnation_id FROM quality_preparation_owners owner
+                    WHERE NOT EXISTS (SELECT 1 FROM media_sessions session WHERE session.incarnation_id = owner.staged_incarnation_id)
+                    LIMIT $1)", params!(MAINTENANCE_BATCH),
+            ),
+            (
+                "DELETE FROM quality_cancellation_receipts WHERE receipt_key IN (
+                    SELECT receipt.receipt_key FROM quality_cancellation_receipts receipt
+                    WHERE receipt.updated_at_ms < $1 AND NOT EXISTS (SELECT 1 FROM media_sessions session
+                        WHERE session.incarnation_id = receipt.generation AND session.state = 'active')
+                    ORDER BY receipt.updated_at_ms, receipt.receipt_key LIMIT $2)",
+                params!(now_ms.saturating_sub(60_000), MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM media_sessions WHERE rowid IN (
@@ -4642,6 +4835,7 @@ mod tests {
 
     fn statement_test_preparation() -> crate::domain::MediaSessionPreparation {
         crate::domain::MediaSessionPreparation {
+            quality_cancellation_key: None,
             expected_desired_revision: None,
             incarnation_id: "00000000-0000-4000-8000-000000000002".to_owned(),
             session_id: "session".to_owned(),

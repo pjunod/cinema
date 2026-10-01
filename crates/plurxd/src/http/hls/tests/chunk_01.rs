@@ -1855,6 +1855,7 @@
         fixture
             .store
             .prepare_media_session(&plurx_core::domain::MediaSessionPreparation {
+                quality_cancellation_key: None,
                 expected_desired_revision: None,
                 incarnation_id: successor_incarnation.clone(),
                 session_id: successor_session.clone(),

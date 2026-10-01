@@ -2819,7 +2819,23 @@ pub(super) async fn control_local_with_settlement_capacity(
     // exchange: they must be the same string, or a client would be told
     // `staging` about a candidate for an ask it has already left.
     let desired_digest = request.selection.desired().digest();
-    let preparation_purpose = (!incumbent_waiting)
+    let quality_intent_cancelled = if let Some(intent) = request.intent.as_ref() {
+        state
+            .store
+            .quality_intent_cancelled(
+                &request.generation,
+                &request.client_instance_id,
+                &intent.lifetime_id,
+                i64::try_from(intent.recipe_revision).unwrap_or(i64::MAX),
+            )
+            .await
+            .unwrap_or(true)
+    } else {
+        false
+    };
+    // A cancelled intent is never a fresh preparation because the owner
+    // restarted or its reporter sent another ordinary exchange.
+    let preparation_purpose = (!incumbent_waiting && !quality_intent_cancelled)
         .then(|| {
             planned_relocation
                 .map(PreparationPurpose::PlannedRelocation)
@@ -2868,7 +2884,7 @@ pub(super) async fn control_local_with_settlement_capacity(
         // Claimed before the spawn, not inside it: a task that has not been
         // polled yet is still work this playback is doing, and an exchange
         // that raced in between would otherwise be told `none`.
-        let pending = PendingCandidateGuard::begin_control(&route.playback_id, &request);
+        let pending = PendingCandidateGuard::begin_control(state, route, &request);
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(

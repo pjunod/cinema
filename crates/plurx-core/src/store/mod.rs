@@ -28,6 +28,8 @@ mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod quality_cancellation;
+pub use quality_cancellation::QualityCancellationReceipt;
 mod renditionplan;
 mod sqlite;
 mod telemetry;
@@ -4959,6 +4961,37 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         user_id: i64,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Record independent target cancellation under the exact current owner.
+    /// At most 128 receipts belong to a generation. Replays preserve the first
+    /// timestamps and outcome; no parent session or cache pin is changed.
+    async fn request_quality_cancellation(
+        &self,
+        receipt: &QualityCancellationReceipt,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    async fn quality_cancellation_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> Result<Option<QualityCancellationReceipt>, StoreError>;
+
+    /// Mark cleanup proven for this exact receipt; cannot change its identity.
+    async fn settle_quality_cancellation(
+        &self,
+        receipt_key: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// A cancelled recipe intent may not be restaged by cadence or takeover.
+    async fn quality_intent_cancelled(
+        &self,
+        generation: &str,
+        client_instance_id: &str,
+        lifetime_id: &str,
+        recipe_revision: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Atomically store the first exact terminal-control acknowledgement and
     /// fence that exact owner route as ended. A conflicting identity/sequence

@@ -148,7 +148,9 @@ const RECEIPT_PRESSURE_SCHEMA_VERSION: i64 = 64;
 const RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
 const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 65;
 const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 66;
+const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3064,6 +3066,25 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    for result in self
+                        .client()
+                        .batch(super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA)
+                        .await?
+                    {
+                        result.map_err(database_error)?;
+                    }
+                    let attempt = self.client().txn(vec![("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(QUALITY_CANCELLATION_SCHEMA_VERSION, now, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE))]).await;
+                    self.settle_migration_attempt(
+                        QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     // Hiqlite rejects this mix of DDL and a source-reservation
@@ -3348,6 +3369,14 @@ impl HiqliteAuthStore {
                 "DELETE FROM media_session_terminal_acks".to_owned(),
                 params!(),
             ),
+            (
+                "DELETE FROM quality_cancellation_receipts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM quality_preparation_owners".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
@@ -3425,6 +3454,8 @@ impl HiqliteAuthStore {
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
             "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
             "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
+            "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, client_instance_id, lifetime_id, recipe_revision, accepted_sequence, state, created_at_ms, updated_at_ms FROM quality_cancellation_receipts ORDER BY receipt_key",
+            "SELECT staged_incarnation_id, cancellation_key FROM quality_preparation_owners ORDER BY staged_incarnation_id",
             "SELECT user_id, playback_id, staged_incarnation_id, expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms FROM media_session_preparations ORDER BY user_id, playback_id",
         ] {
             validate_sql(sql)?;
@@ -3511,6 +3542,12 @@ impl HiqliteAuthStore {
                 params!(),
             )
             .await?,
+            quality_preparation_owners: self.client().query_map(
+                "SELECT staged_incarnation_id, cancellation_key FROM quality_preparation_owners ORDER BY staged_incarnation_id", params!()).await?,
+            quality_cancellation_receipts: self.client().query_map(
+                "SELECT receipt_key, generation, session_id, owner_node_id, owner_epoch, client_instance_id,
+                    lifetime_id, recipe_revision, accepted_sequence, state, created_at_ms, updated_at_ms
+                 FROM quality_cancellation_receipts ORDER BY receipt_key", params!()).await?,
             media_session_terminal_acks: self.client().query_map(
                 "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
                         client_instance_id, sequence, request_fingerprint, response_json, \
@@ -5129,7 +5166,8 @@ fn schema_migration_action(
         | SUBTITLE_RECONCILE_SCHEMA_MIGRATION_SOURCE
         | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
         | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
-        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE => {
+        | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
+        | QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5177,6 +5215,8 @@ struct AuthStoreDump {
     library_channel_session_recipes: Vec<LibraryChannelSessionRecipeDumpRow>,
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
+    quality_preparation_owners: Vec<QualityPreparationOwnerDumpRow>,
+    quality_cancellation_receipts: Vec<QualityCancellationDumpRow>,
     media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
     media_session_preparations: Vec<MediaSessionPreparationDumpRow>,
 }
@@ -5604,6 +5644,24 @@ dump_row!(MediaSessionPreparationDumpRow {
     staged_incarnation_id: String,
     expected_predecessor_incarnation_id: String,
     deadline_ms: i64,
+    created_at_ms: i64,
+    updated_at_ms: i64,
+});
+dump_row!(QualityPreparationOwnerDumpRow {
+    staged_incarnation_id: String,
+    cancellation_key: String
+});
+dump_row!(QualityCancellationDumpRow {
+    receipt_key: String,
+    generation: String,
+    session_id: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    client_instance_id: String,
+    lifetime_id: String,
+    recipe_revision: i64,
+    accepted_sequence: i64,
+    state: String,
     created_at_ms: i64,
     updated_at_ms: i64,
 });

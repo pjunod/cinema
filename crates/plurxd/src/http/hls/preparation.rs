@@ -98,6 +98,8 @@ pub(super) struct PendingCandidateGuard {
     playback_id: String,
     claim: u64,
     quality_intent: Option<QualityIntentIdentity>,
+    registered: Arc<std::sync::atomic::AtomicBool>,
+    settlement: Option<(AppState, String, i64)>,
     cancelled: tokio_util::sync::CancellationToken,
 }
 
@@ -112,14 +114,21 @@ impl PendingCandidateGuard {
     }
 
     pub(super) fn begin_control(
-        playback_id: &str,
+        state: &AppState,
+        route: &MediaSessionRoute,
         request: &crate::playback_control::ControlRequestV1,
     ) -> Self {
-        Self::begin_owned(
-            playback_id,
+        let mut pending = Self::begin_owned(
+            &route.playback_id,
             &request.selection.desired().digest(),
             QualityIntentIdentity::from_control(request),
-        )
+        );
+        pending.settlement = Some((
+            state.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
+        ));
+        pending
     }
 
     fn begin_owned(
@@ -148,6 +157,8 @@ impl PendingCandidateGuard {
             playback_id: playback_id.to_owned(),
             claim,
             quality_intent,
+            registered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            settlement: None,
             cancelled,
         }
     }
@@ -172,6 +183,25 @@ impl PendingCandidateGuard {
 
 impl Drop for PendingCandidateGuard {
     fn drop(&mut self) {
+        if self.cancelled.is_cancelled()
+            && !self.registered.load(std::sync::atomic::Ordering::Acquire)
+        {
+            if let (Some(identity), Some((state, owner, epoch))) =
+                (self.quality_intent.clone(), self.settlement.clone())
+            {
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let key = quality_cancellation_receipt_key(&identity);
+                        // Planning exited before registration. Durable admission
+                        // also checks this receipt, so late Store work cannot prime.
+                        let _ = state
+                            .store
+                            .settle_quality_cancellation(&key, &owner, epoch, unix_ms())
+                            .await;
+                    });
+                }
+            }
+        }
         let mut pending = pending_preparation_candidates()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -384,7 +414,7 @@ pub(super) async fn settle_cancelled_preparation(
     active.cancelled.cancel();
     let deadline = tokio::time::Instant::now() + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     let mut delay = PREPARATION_SETTLEMENT_RETRY_MIN;
-    loop {
+    let durable_settled = loop {
         let now_ms = unix_ms();
         let settled = match active
             .executor
@@ -400,14 +430,14 @@ pub(super) async fn settle_cancelled_preparation(
             Err(_) => false,
         };
         if settled || tokio::time::Instant::now() >= deadline {
-            break;
+            break settled;
         }
         tokio::time::sleep(delay).await;
         delay = delay
             .saturating_mul(2)
             .min(PREPARATION_SETTLEMENT_RETRY_MAX);
-    }
-    retire_prepared_worker(
+    };
+    let retired = retire_prepared_worker(
         &active.state,
         &active.preparation.owner_node_id,
         &active.preparation.incarnation_id,
@@ -415,6 +445,21 @@ pub(super) async fn settle_cancelled_preparation(
         reason,
     )
     .await;
+    if durable_settled && retired {
+        if let Some(identity) = active.quality_intent.as_ref() {
+            let key = quality_cancellation_receipt_key(identity);
+            let _ = active
+                .state
+                .store
+                .settle_quality_cancellation(
+                    &key,
+                    &active.preparation.expected_predecessor_owner_node_id,
+                    active.preparation.expected_predecessor_owner_epoch,
+                    unix_ms(),
+                )
+                .await;
+        }
+    }
 }
 
 fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
@@ -1444,6 +1489,7 @@ pub(super) async fn process_preparation_candidate(
                 desired_digest: Some(selection.desired().digest()),
                 planning_cancellation: Some(pending.cancellation_token()),
                 quality_intent: pending.quality_intent.clone(),
+                planning_registration: Some(Arc::clone(&pending.registered)),
             },
             primes,
         )
@@ -1519,6 +1565,7 @@ pub(super) struct AcceptedAsk {
     /// Exact planning ownership, retained across registration so a later
     /// same-selection request cannot revive a cancelled earlier candidate.
     pub(super) planning_cancellation: Option<tokio_util::sync::CancellationToken>,
+    pub(super) planning_registration: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) quality_intent: Option<QualityIntentIdentity>,
 }
 
@@ -1580,8 +1627,28 @@ pub(super) async fn stage_prepared_successor_with_prime(
         film_time_ms: accepted_film_time_ms,
         desired_digest,
         planning_cancellation,
+        planning_registration,
         quality_intent,
     } = accepted;
+    if let Some(identity) = quality_intent.as_ref() {
+        let cancelled = state
+            .store
+            .quality_intent_cancelled(
+                &identity.generation,
+                &identity.client_instance_id,
+                &identity.lifetime_id,
+                i64::try_from(identity.recipe_revision).unwrap_or(i64::MAX),
+            )
+            .await
+            .unwrap_or(true);
+        if cancelled {
+            if let Some(token) = planning_cancellation.as_ref() {
+                token.cancel();
+            }
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+    }
     if let PreparationPurpose::PlannedRelocation(fence) = purpose {
         if !state.serving.planned_outage_is_current(fence).await {
             crate::playback_control::record_preparation_staged(false);
@@ -1804,6 +1871,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // then rather than against the one that started the work.
     .asking(desired_digest.clone());
     let preparation = plurx_core::domain::MediaSessionPreparation {
+        quality_cancellation_key: quality_intent
+            .as_ref()
+            .map(quality_cancellation_receipt_key),
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
         user_id: route.user_id,
@@ -1868,6 +1938,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
         // Publish cancellation ownership before the Store future is polled.
         // A wait or settings disable may then cancel an in-flight reservation;
         // the detached reservation owner reconciles a late commit exactly.
+        if let Some(registered) = planning_registration.as_ref() {
+            registered.store(true, std::sync::atomic::Ordering::Release);
+        }
         register_active_preparation(active.clone());
         // Between this task's last await and the line above there is no
         // suspension point, so a supersession landing in that window is
@@ -1992,27 +2065,34 @@ pub(super) async fn retire_prepared_worker(
     incarnation_id: &str,
     session_id: &str,
     reason: &'static str,
-) {
+) -> bool {
     if owner_node_id == state.node_id {
         state
             .transcode
             .begin_session_terminal(session_id, crate::vodserve::Terminal::Replaced, reason)
             .await;
         state.transcode.complete_session_release(session_id);
-    } else if let Err(error) = state
-        .media_sessions
-        .abort_remote(
-            owner_node_id,
-            &RemoteAbortRequest {
-                incarnation_id: incarnation_id.to_owned(),
-                session_id: session_id.to_owned(),
-                expected_owner_epoch: 1,
-                reason: None,
-            },
-        )
-        .await
-    {
-        tracing::warn!(target: "plurxd::http::hls", ?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+        true
+    } else {
+        match state
+            .media_sessions
+            .abort_remote(
+                owner_node_id,
+                &RemoteAbortRequest {
+                    incarnation_id: incarnation_id.to_owned(),
+                    session_id: session_id.to_owned(),
+                    expected_owner_epoch: 1,
+                    reason: None,
+                },
+            )
+            .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::http::hls", ?error, owner = %owner_node_id, %reason, "remote prepared worker cleanup did not settle");
+                false
+            }
+        }
     }
 }
 

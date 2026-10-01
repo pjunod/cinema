@@ -347,7 +347,7 @@ async function exchangeQualityControl(p,request){
       ||value.features.some(feature=>feature!=="quality_cancel_v1")
       ||(value.pending_identity!=null&&!validQualityControlIdentity(value.pending_identity,request))) return null;
     const outcomes=request.operation==="discover"?["supported","unsupported"]
-      :["cancel_requested","observation_unknown","unsupported"];
+      :["cancel_requested","cancelled","observation_unknown","unsupported"];
     if(!outcomes.includes(value.outcome)
       ||(value.outcome==="unsupported"?value.features.length!==0:value.features.length!==1)) return null;
     return value;
