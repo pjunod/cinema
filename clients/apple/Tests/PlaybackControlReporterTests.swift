@@ -1451,6 +1451,28 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal() {
+        let first = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 1_500)!
+        XCTAssertEqual(first.deadlineMs, 9_000)
+        XCTAssertEqual(first.optionalDeadlineMs, 7_000)
+        let coalesced = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 6_999)!
+        XCTAssertEqual(coalesced.optionalDeadlineMs, first.optionalDeadlineMs)
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 7_000))
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 999))
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: Int.max, originalDeadlineMs: Int.max, nowMs: Int.max))
+        let earlierExpiry = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 5_000, nowMs: 2_000)!
+        XCTAssertEqual(earlierExpiry.deadlineMs, 5_000)
+        XCTAssertEqual(earlierExpiry.optionalDeadlineMs, 3_000)
+        // Quiet/cliff windows are still meaningful for ordinary mid-play, but
+        // observing an expired original EOF cannot renew the cliff timestamp.
+        let item = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        window.bind(attachment: ObjectIdentifier(item), attempt: "viewer", nowMs: 0)
+        window.cliff(completedAtMs: 1_000, nowMs: 2_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 90_999))
+        window.cliff(completedAtMs: 1_000, nowMs: 91_000)
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 91_000))
+    }
     private func candidate(_ height: Int, route: String = "encode", peak: UInt64? = 3_000_000, grade: String = "sdr") -> QualityCandidate {
         QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
             route: route, width: height * 16 / 9, height: height, targetHeight: height,
