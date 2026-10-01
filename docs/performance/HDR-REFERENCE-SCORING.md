@@ -148,7 +148,12 @@ M1 and the overall codec/GPU plan stay open.
 The three focused synthetic methods in
 [`test_codec_hdr_score.py`](../../tests/operations/test_codec_hdr_score.py)
 each passed once during development. Their tracked local-pass records retain
-the original uncommitted test hashes and tool IDs. Because compaction did not
+uncommitted snapshot hashes and tool IDs. The earliest retained `88d450…`
+snapshot is **after** the temporary-path fixture fix; the first invocation's
+pre-fix whole-file hash is unavailable. It is not attributed as the exact
+first execution source. The first method's unchanged assertions are offered
+as individually reconstructed evidence, not whole-file equivalence.
+Because compaction did not
 retain the verbatim tool output, those records explicitly reconstruct
 individual results; the first invocation also contained a different method's
 fixture error. They require independent authenticated admissibility review,
