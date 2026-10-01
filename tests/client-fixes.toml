@@ -3446,3 +3446,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "internal fun autoActiveProductionPressure("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+# The new exact Android regression compiles this existing test source; this
+# bridge does not claim that any old PlaybackControlAskTest method executed.
+[[fixes]]
+id = "android.receipt-callback-test-transport-binding"
+commits = ["7c99a964"]
+source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlAskTest.kt"
+source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
