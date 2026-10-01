@@ -661,7 +661,9 @@ function completedQualityTransfer(networkDetails,url,loading,now,bytes){
     const started=Number(loading.start), ended=Number(loading.end);
     if(!Number.isSafeInteger(Number(bytes))||!(Number(bytes)>0)
       ||!Number.isFinite(started)||!Number.isFinite(ended)||!(ended>started)) return;
-    const entries=performance.getEntriesByName(name,"resource");
+    // The API's explicit resource entry-type filter narrows its broad DOM type.
+    const entries=/** @type {PerformanceResourceTiming[]} */
+      (performance.getEntriesByName(name,"resource"));
     // Never borrow the latest same-URL request. Coarse or ambiguous timer
     // joins cannot prove which completed response supplied this nonce.
     const matches=entries.filter(timing=>timing.encodedBodySize===Number(bytes)
