@@ -11,6 +11,13 @@ pub(super) struct HttpObservation {
     nonce: String,
 }
 
+#[cfg(test)]
+impl HttpObservation {
+    pub(super) fn network_fingerprint(&self) -> &str {
+        &self.network.network_fingerprint
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct AcceptedObservation {
     pub(super) gate: Arc<dyn PreparationGate>,
@@ -49,6 +56,7 @@ pub(super) async fn authenticate(
     let mut ingress_headers = headers.clone();
     ingress_headers.remove("forwarded");
     ingress_headers.remove("x-forwarded-for");
+    ingress_headers.remove("x-real-ip");
     let mut network = super::super::network::identity(&ingress_headers, remote)?;
     network.user_id = Some(user.id);
     network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
