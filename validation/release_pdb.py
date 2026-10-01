@@ -88,16 +88,17 @@ def _pdb_identity(pdb: Path) -> tuple[bytes, int]:
     sizes = struct.unpack_from(f"<{streams}I", directory, 4)
     position = 4 + streams * 4
     stream_one = None
-    for index, stream_size in enumerate(sizes[:2]):
+    for index, stream_size in enumerate(sizes):
         number_count = 0 if stream_size == 0xFFFFFFFF else math.ceil(stream_size / block_size)
         if position + number_count * 4 > len(directory):
             raise ValueError("truncated PDB stream block map")
+        if any(struct.unpack_from("<I", directory, position + block * 4)[0] >= blocks
+               for block in range(number_count)):
+            raise ValueError("PDB stream block exceeds file")
         if index == 1:
             if stream_size < 28 or number_count < 1:
                 raise ValueError("PDB has no identity stream")
             number = struct.unpack_from("<I", directory, position)[0]
-            if number >= blocks:
-                raise ValueError("PDB identity block exceeds file")
             stream_one = _read(pdb, number * block_size, 28)
         position += number_count * 4
     return stream_one[12:28], struct.unpack_from("<I", stream_one, 8)[0]

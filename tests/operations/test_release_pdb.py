@@ -38,6 +38,28 @@ def pair(directory: Path, *, guid: bytes = GUID, age: int = 1, name: bytes = b"p
 
 
 class PdbPairCase(unittest.TestCase):
+    def test_every_stream_block_map_is_bounded_before_identity_acceptance(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            cases = ((3, 0, 28, 512, 3, 999999),  # later stream outside file
+                     (3, 0, 28, 512, 3),          # later stream map truncated
+                     (2, 0, 513, 3, 999999),      # later identity block outside file
+                     (2, 0, 513, 3))             # later identity map truncated
+            for directory in cases:
+                pair(root)
+                path = root / "plurxd.pdb"; data = bytearray(path.read_bytes())
+                struct.pack_into("<I", data, 44, len(directory) * 4)
+                struct.pack_into(f"<{len(directory)}I", data, 1024, *directory)
+                path.write_bytes(data)
+                with self.subTest(directory=directory), self.assertRaisesRegex(ValueError, "block map|block exceeds"):
+                    verify_pdb_pair(root / "plurxd.exe", path)
+            # A genuine multi-block identity stream with a valid later map remains accepted.
+            pair(root); path = root / "plurxd.pdb"; data = bytearray(path.read_bytes())
+            struct.pack_into("<I", data, 44, 20)
+            struct.pack_into("<5I", data, 1024, 2, 0, 513, 3, 4)
+            path.write_bytes(data)
+            self.assertEqual(verify_pdb_pair(root / "plurxd.exe", path), "plurxd.pdb")
+
     def test_windows_archive_does_not_label_another_machine_as_x86_64(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); pair(root)

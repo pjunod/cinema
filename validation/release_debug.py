@@ -7,6 +7,7 @@ import struct
 
 
 MAX_METADATA = 32 * 1024 * 1024
+MAX_ROOT_METADATA = 64 * 1024
 MAX_UNITS = 65_536
 MAX_SLOTS = 262_144
 INDEX_SECTIONS = {
@@ -74,12 +75,15 @@ def _uleb(data: bytes, cursor: int) -> tuple[int, int]:
     raise ValueError("invalid packed-debug LEB128")
 
 
-def _root_attributes(abbrev: bytes, offset: int, wanted: int) -> list[tuple[int, int]]:
+def _root_attributes(abbrev: bytes, offset: int, wanted: int,
+                     expected_tag: int | None = None) -> list[tuple[int, int]]:
     while offset < len(abbrev):
         code, offset = _uleb(abbrev, offset)
         if not code:
             break
-        _tag, offset = _uleb(abbrev, offset)
+        tag, offset = _uleb(abbrev, offset)
+        if offset >= len(abbrev) or abbrev[offset] not in (0, 1):
+            raise ValueError("invalid packed-debug abbreviation children flag")
         offset += 1  # has-children byte
         attributes = []
         while True:
@@ -93,6 +97,8 @@ def _root_attributes(abbrev: bytes, offset: int, wanted: int) -> list[tuple[int,
             if form == 0x21:  # DW_FORM_implicit_const: operand is in abbreviation.
                 _, offset = _uleb(abbrev, offset)
         if code == wanted:
+            if expected_tag is not None and tag != expected_tag:
+                raise ValueError("DWP root is not a compilation unit")
             return attributes
     raise ValueError("packed-debug root abbreviation missing")
 
@@ -107,7 +113,7 @@ def _form(data: bytes, cursor: int, form: int, width: int, address: int) -> tupl
         if end > len(data):
             raise ValueError("truncated packed-debug attribute")
         return int.from_bytes(data[cursor:end], "little"), end
-    if form in (0x0D, 0x0F, 0x15, 0x1A, 0x1B, 0x22, 0x23):
+    if form in (0x0D, 0x0F, 0x15, 0x1A, 0x1B, 0x22, 0x23, 0x1F01, 0x1F02):
         return _uleb(data, cursor)
     if form in (0x19, 0x21):
         return 0, cursor
@@ -174,6 +180,42 @@ def _binary_ids(binary: Elf) -> set[int]:
     return ids
 
 
+def _contribution_id(data: bytes, abbrev: bytes, contribution_size: int) -> int:
+    """Inspect one bounded unit header/root, not its potentially large DIE tree."""
+    length, position = _form(data, 0, 6, 4, 8)
+    width = 4
+    if length == 0xFFFFFFFF:
+        length, position = _form(data, position, 7, 8, 8); width = 8
+    if not length or position + length != contribution_size:
+        raise ValueError("invalid DWP compilation-unit length")
+    version, position = _form(data, position, 5, width, 8)
+    identity = None
+    if version == 5:
+        kind, position = _form(data, position, 0x0B, width, 8)
+        address, position = _form(data, position, 0x0B, width, 8)
+        offset, position = _form(data, position, 6 if width == 4 else 7, width, address)
+        if kind != 5:
+            raise ValueError("DWP requires a split compilation unit")
+        identity, position = _form(data, position, 7, width, address)
+    elif version == 4:
+        offset, position = _form(data, position, 6 if width == 4 else 7, width, 8)
+        address, position = _form(data, position, 0x0B, width, 8)
+    else:
+        raise ValueError("DWP requires DWARF4 or DWARF5")
+    if address not in (1, 2, 4, 8):
+        raise ValueError("invalid DWP address size")
+    code, position = _uleb(data, position)
+    for attribute, form in _root_attributes(abbrev, offset, code, expected_tag=0x11):
+        value, position = _form(data, position, form, width, address)
+        if attribute == 0x2131:
+            if identity is not None and identity != value:
+                raise ValueError("DWP unit has conflicting identities")
+            identity = value
+    if not identity:
+        raise ValueError("DWP unit has no nonzero split-debug identity")
+    return identity
+
+
 def verify_packed_pair(binary_path: Path, debug_path: Path) -> int:
     """Require line/symbol sections and DWP coverage of every skeleton DWO ID."""
     binary, debug = Elf(binary_path), Elf(debug_path)
@@ -208,6 +250,18 @@ def verify_packed_pair(binary_path: Path, debug_path: Path) -> int:
         if section not in debug.sections or start + size > debug.sections[section][1]:
             raise ValueError("DWP contribution exceeds its debug section")
     required = _binary_ids(binary)
+    row_ids = {row: identity for identity, row in zip(identities, rows) if row}
+    info_column, abbrev_column = section_ids.index(1), section_ids.index(3)
+    for row in range(units):
+        contributions = []
+        for column, section in ((info_column, ".debug_info.dwo"),
+                                (abbrev_column, ".debug_abbrev.dwo")):
+            index = row * columns + column
+            contributions.append(debug.read(debug.sections[section][0] + offsets[index],
+                                            min(sizes[index], MAX_ROOT_METADATA)))
+        actual = _contribution_id(*contributions, sizes[row * columns + info_column])
+        if actual != row_ids[row + 1]:
+            raise ValueError("DWP index identity disagrees with its compilation unit")
     if not required <= present:
         raise ValueError("DWP does not cover executable split-debug identities")
     return len(required)
