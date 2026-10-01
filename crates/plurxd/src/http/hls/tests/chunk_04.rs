@@ -375,6 +375,8 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                candidate_id: None,
+                presentation_target: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id.to_owned(),
                 user_id: route.user_id,
@@ -447,6 +449,8 @@
             ..staged_candidate_request()
         };
         let recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: predecessor.user_id,
@@ -1627,6 +1631,7 @@
         request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
         request.observed_download_bps = Some(100_000_000);
         request.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            presentation_target: None,
             platform: crate::playback_control::ClientPlatform::Apple,
             max_height: 2160,
             codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1726,6 +1731,8 @@
 
     fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
         RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: route.incarnation_id.clone(),
             user_id: route.user_id,

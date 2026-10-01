@@ -734,6 +734,7 @@ pub(super) async fn plan_preparation_candidate(
             // still means "whatever is being delivered".
             crate::playback_control::QualitySelection::Auto {
                 height: Some(height),
+                ..
             } => {
                 resolve_height(
                     state,
@@ -744,7 +745,9 @@ pub(super) async fn plan_preparation_candidate(
                 )
                 .await
             }
-            crate::playback_control::QualitySelection::Auto { height: None } => delivered_height,
+            crate::playback_control::QualitySelection::Auto { height: None, .. } => {
+                delivered_height
+            }
             crate::playback_control::QualitySelection::Original => {
                 source.height.unwrap_or(delivered_height)
             }
@@ -902,7 +905,7 @@ pub(super) async fn plan_preparation_candidate(
     let decision = plurx_core::playback::decide_forced(source, &profile, force, &node);
     let copy = decision.method != PlaybackMethod::Transcode;
     let requested_height = match selection.quality {
-        crate::playback_control::QualitySelection::Auto { height } => height,
+        crate::playback_control::QualitySelection::Auto { height, .. } => height,
         crate::playback_control::QualitySelection::Original => source.height,
         crate::playback_control::QualitySelection::Manual { height } => Some(height),
     };
@@ -1486,6 +1489,8 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let staged_recipe = RemoteStartRequest {
+        candidate_id: None,
+        presentation_target: None,
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
         user_id: route.user_id,

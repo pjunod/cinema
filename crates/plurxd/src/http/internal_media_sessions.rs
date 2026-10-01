@@ -1150,7 +1150,10 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -1161,6 +1164,7 @@ mod tests {
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1382,6 +1386,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: crate::playback_control::EffectiveSelection {
+                candidate_id: None,
                 quality_auto: true,
                 height: 720,
                 audio_track: None,
