@@ -86,6 +86,18 @@ stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "v
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
 seekIntent = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
 seekIntentAfterControl = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+seekIntentAfterOptionalBoundary = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
+# A05: original captured optional owner, with exact session/item/candidate,
+# foreign resume-record identity and original target/deadline still separate.
+# No handwritten allowlist growth and no snapshot renewal after suspension.
+autoBoundaryOwnerCurrent = { function = "autoBoundaryIsCurrent", scopes = ["lifecycle", "open", "viewerAction"] }
+autoBoundarySeekCurrent = { function = "autoBoundaryIsCurrent", scopes = ["seek"] }
+autoBoundaryResumeCurrent = { function = "autoBoundaryResumeIsLive", scopes = ["lifecycle", "open", "viewerAction"] }
+autoBoundaryCommitViewerCurrent = { function = "commitPreparedSuccessor", scopes = ["viewerAction"] }
+autoBoundaryCommitOwnerCurrent = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "viewerAction"] }
+autoBoundaryCommitSeekCurrent = { function = "commitPreparedSuccessor", scopes = ["seek"] }
+autoResumeFallbackCurrent = { function = "setPlaybackRequested", scopes = ["lifecycle", "open", "viewerAction"] }
+autoResumeCompletedViewerCurrent = { function = "setPlaybackRequested", scopes = ["viewerAction"] }
 nativeSeekCompletion = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 nativeSeekAfterSelection = { function = "issueSeek", scopes = ["open", "viewerAction", "seek"] }
 recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open"] }

@@ -1451,6 +1451,50 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes() throws {
+        func attempt(lifecycle: Int = 1, open: Int = 2, viewer: Int = 3,
+                     seek: Int = 7, decision: Int = 4) -> Attempt {
+            Attempt(lifecycle: lifecycle, open: open, viewerAction: viewer,
+                initialDecision: decision, createRetry: 5, preparedAlignment: 6,
+                seek: seek, pgsSelection: 8, pgsItem: 9, item: nil)
+        }
+        let captured = attempt()
+        let expected: [(AttemptFence, Set<Attempt.Scope>)] = [
+            (.seekIntentAfterOptionalBoundary, [.viewerAction, .seek]),
+            (.autoBoundaryOwnerCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundarySeekCurrent, [.seek]),
+            (.autoBoundaryResumeCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundaryCommitViewerCurrent, [.viewerAction]),
+            (.autoBoundaryCommitOwnerCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundaryCommitSeekCurrent, [.seek]),
+            (.autoResumeFallbackCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoResumeCompletedViewerCurrent, [.viewerAction])
+        ]
+        for (fence, scopes) in expected {
+            XCTAssertEqual(fence.scopes, scopes, fence.rawValue)
+            XCTAssertTrue(captured.stillCurrent(attempt(), scopes: fence.scopes))
+            XCTAssertTrue(captured.stillCurrent(attempt(decision: 99), scopes: fence.scopes),
+                "unrelated initial decision must not widen a boundary fence")
+            for (scope, changed) in [
+                (Attempt.Scope.lifecycle, attempt(lifecycle: 99)),
+                (.open, attempt(open: 99)), (.viewerAction, attempt(viewer: 99)),
+                (.seek, attempt(seek: 99))
+            ] {
+                XCTAssertEqual(captured.stillCurrent(changed, scopes: fence.scopes), !scopes.contains(scope), fence.rawValue)
+            }
+        }
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"))
+        XCTAssertTrue(source.contains("AutoBoundaryResumeOwner(attempt: snapshotAttempt(),"))
+        XCTAssertTrue(source.contains("let resumeIntentAttempt = snapshotAttempt()"))
+        XCTAssertTrue(source.contains("attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitOwnerCurrent)"))
+        XCTAssertTrue(source.contains("AutoResumeIdentity(attempt) == owner.identity"))
+        XCTAssertFalse(source.contains("lifecycleGeneration == boundary.lifecycle"))
+        XCTAssertFalse(source.contains("owner.viewer == viewerActionEpoch"))
+    }
+
     func testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance() throws {
         // Check the actual controller callers, not just the budget helper:
         // buttons and relative remote commands share skip(seconds:), whereas

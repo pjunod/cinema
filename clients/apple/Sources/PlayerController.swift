@@ -2257,6 +2257,8 @@ final class PlayerController: ObservableObject {
     private var autoPreparedViewerEpoch: Int?
     /// A viewer boundary borrows its original transaction, never a new create.
     @MainActor private final class AutoBoundaryAttempt {
+        let attempt: Attempt
+        let resumeIdentity: AutoResumeIdentity?
         let generation: Int?
         let lifecycle: Int
         let attachment: Int
@@ -2272,8 +2274,10 @@ final class PlayerController: ObservableObject {
         var selectionOutcome: Bool?
         var selectionScope: UUID?
 
-        init(generation: Int?, lifecycle: Int, attachment: Int, viewer: Int, item: ObjectIdentifier,
+        init(attempt: Attempt, resumeIdentity: AutoResumeIdentity?, generation: Int?, lifecycle: Int, attachment: Int, viewer: Int, item: ObjectIdentifier,
              sessionId: String, targetMs: Int, enteredAtMs: Int, deadlineMs: Int, candidateId: String) {
+            self.attempt = attempt
+            self.resumeIdentity = resumeIdentity
             self.generation = generation
             self.lifecycle = lifecycle
             self.attachment = attachment
@@ -2511,8 +2515,31 @@ final class PlayerController: ObservableObject {
     private var resumePendingFailedItem: AVPlayerItem?
     private var pauseBeganAt: TimeInterval?
     private var explicitViewerPause: (item: ObjectIdentifier, session: String?, attachment: Int, lifecycle: Int)?
-    private var autoBoundaryResumeOwner: (viewer: Int, enteredAtMs: Int, item: ObjectIdentifier,
-                                          attachment: Int, lifecycle: Int)?
+    /// Foreign resume-record identity is not a global epoch scope. It binds
+    /// the actual record's creation, item and owner tuple; mutable observations
+    /// are deliberately excluded. Global epochs use the captured Attempt.
+    private struct AutoResumeIdentity: Equatable {
+        let lifecycle: Int
+        let attachment: Int
+        let viewer: Int
+        let item: ObjectIdentifier
+        let startedAt: TimeInterval
+
+        init(_ resume: PlaybackResumeAttempt) {
+            lifecycle = resume.lifecycleGeneration
+            attachment = resume.attachmentGeneration
+            viewer = resume.viewerActionEpoch
+            item = resume.itemIdentity
+            startedAt = resume.startedAt
+        }
+    }
+    private struct AutoBoundaryResumeOwner {
+        let attempt: Attempt
+        let identity: AutoResumeIdentity
+        let enteredAtMs: Int
+        var viewer: Int { attempt.viewerAction }
+    }
+    private var autoBoundaryResumeOwner: AutoBoundaryResumeOwner?
     /// The server retired this presentation while the viewer was paused.
     ///
     /// A rolling session ends 180 s after an accepted Hold
@@ -3755,8 +3782,9 @@ final class PlayerController: ObservableObject {
                     fastPath: established
                 )
                 attemptBoundaryResume = longViewerPause && autoOriginalBoundaryCandidate(now: enteredAtMs) != nil
-                if attemptBoundaryResume, let item = player.currentItem {
-                    autoBoundaryResumeOwner = (actionEpoch, enteredAtMs, ObjectIdentifier(item), openGeneration, lifecycleGeneration)
+                if attemptBoundaryResume, let resume = resumeAttempt {
+                    autoBoundaryResumeOwner = AutoBoundaryResumeOwner(attempt: snapshotAttempt(),
+                        identity: AutoResumeIdentity(resume), enteredAtMs: enteredAtMs)
                     isPlaying = false
                 } else {
                     Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: true)
@@ -3797,6 +3825,7 @@ final class PlayerController: ObservableObject {
             && resumeAttempt?.viewerActionEpoch == actionEpoch
             && resumeAttempt?.fastPathDeadline == nil
         let boundaryResume = attemptBoundaryResume
+        let resumeIntentAttempt = snapshotAttempt()
         resumeIntentTask = Task { [weak self] in
             guard let self,
                   self.lifecycleGeneration == lifecycle,
@@ -3821,17 +3850,19 @@ final class PlayerController: ObservableObject {
                 attempt.markPublicationCompleted()
                 self.resumeAttempt = attempt
             }
-            if boundaryResume, let attempt = self.resumeAttempt, attempt.viewerActionEpoch == actionEpoch {
+            if boundaryResume, let attempt = self.resumeAttempt,
+               let owner = self.autoBoundaryResumeOwner,
+               AutoResumeIdentity(attempt) == owner.identity {
                 let committed = await self.attemptAutoOriginalBoundary(targetMs: attempt.targetMs, generation: nil,
                     enteredAtMs: enteredAtMs,
                     originalDeadlineMs: enteredAtMs + max(0, Int((attempt.expiresAt - requestedAt) * 1_000)))
                 if self.autoBoundaryResumeOwner?.viewer == actionEpoch { self.autoBoundaryResumeOwner = nil }
                 if committed || self.preparedReplacement.phase == .switching {
-                    if self.viewerActionEpoch == actionEpoch { self.resumeIntentTask = nil }
+                    if self.attemptStillCurrent(resumeIntentAttempt, fence: .autoResumeCompletedViewerCurrent) { self.resumeIntentTask = nil }
                     return
                 }
-                guard !Task.isCancelled, self.viewerActionEpoch == actionEpoch,
-                      self.lifecycleGeneration == lifecycle, self.openGeneration == attachmentGeneration,
+                guard !Task.isCancelled,
+                      self.attemptStillCurrent(resumeIntentAttempt, fence: .autoResumeFallbackCurrent),
                       self.player.currentItem.map(ObjectIdentifier.init) == itemIdentity,
                       self.sessionId == currentSession, self.wantsPlayback else { return }
                 Self.applyPlaybackCommand(to: self.player, preferredRate: self.preferredRate, immediately: true)
@@ -4356,7 +4387,7 @@ final class PlayerController: ObservableObject {
                     enteredAtMs: enteredAtMs, originalDeadlineMs: enteredAtMs + 8_000)
                 if committed { return }
                 if preparedReplacement.phase == .switching { return }
-                guard !Task.isCancelled, attemptStillCurrent(seekAttempt, fence: .seekIntentAfterControl) else { return }
+                guard !Task.isCancelled, attemptStillCurrent(seekAttempt, fence: .seekIntentAfterOptionalBoundary) else { return }
             }
             if requestedSeekGeneration == generation {
                 #if os(iOS)
@@ -10528,22 +10559,24 @@ extension PlayerController {
 
     private func autoBoundaryIsCurrent(_ boundary: AutoBoundaryAttempt) -> Bool {
         guard autoBoundaryAttempt === boundary, boundary.committed == nil,
-              lifecycleGeneration == boundary.lifecycle, openGeneration == boundary.attachment,
-              viewerActionEpoch == boundary.viewer, sessionId == boundary.sessionId,
+              attemptStillCurrent(boundary.attempt, fence: .autoBoundaryOwnerCurrent),
+              sessionId == boundary.sessionId,
               player.currentItem.map(ObjectIdentifier.init) == boundary.item,
               wantsPlayback, started, selectedHeight == nil, !selectedQualityIsOriginal,
               autoDesiredCandidate?.id == boundary.candidateId else { return false }
         if let generation = boundary.generation {
-            return seekState.generation == generation && seekState.pendingMs == boundary.targetMs
+            return generation == boundary.attempt.seek &&
+                attemptStillCurrent(boundary.attempt, fence: .autoBoundarySeekCurrent) &&
+                seekState.pendingMs == boundary.targetMs
         }
-        return resumeAttempt?.viewerActionEpoch == boundary.viewer
+        return resumeAttempt.map(AutoResumeIdentity.init) == boundary.resumeIdentity && boundary.resumeIdentity != nil
     }
 
     private func autoBoundaryResumeIsLive() -> Bool {
-        guard let owner = autoBoundaryResumeOwner, owner.viewer == viewerActionEpoch,
-              owner.lifecycle == lifecycleGeneration, owner.attachment == openGeneration,
-              player.currentItem.map(ObjectIdentifier.init) == owner.item,
-              resumeAttempt?.viewerActionEpoch == owner.viewer else { return false }
+        guard let owner = autoBoundaryResumeOwner,
+              attemptStillCurrent(owner.attempt, fence: .autoBoundaryResumeCurrent),
+              player.currentItem.map(ObjectIdentifier.init) == owner.identity.item,
+              resumeAttempt.map(AutoResumeIdentity.init) == owner.identity else { return false }
         let now = PlaybackControlSession.monotonicMs()
         return now >= owner.enteredAtMs && (now < owner.enteredAtMs + 6_000 ||
             (autoBoundaryAttempt != nil && preparedReplacement.phase == .switching))
@@ -10621,7 +10654,8 @@ extension PlayerController {
               let item = player.currentItem, let sessionId,
               let target = presentationTarget else { return false }
         let previous = autoDesiredCandidate
-        let boundary = AutoBoundaryAttempt(generation: generation, lifecycle: lifecycleGeneration,
+        let boundary = AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity: resumeAttempt.map(AutoResumeIdentity.init),
+            generation: generation, lifecycle: lifecycleGeneration,
             attachment: openGeneration, viewer: viewerActionEpoch, item: ObjectIdentifier(item),
             sessionId: sessionId, targetMs: targetMs, enteredAtMs: enteredAtMs,
             deadlineMs: budget.deadlineMs, candidateId: chosen.id)
@@ -11276,7 +11310,8 @@ extension PlayerController: PreparedSuccessorHost {
         let boundary = autoBoundaryAttempt
         defer {
             if boundary?.committed == nil { boundary?.committed = false }
-            if let boundary, autoBoundaryAttempt === boundary, boundary.viewer != viewerActionEpoch {
+            if let boundary, autoBoundaryAttempt === boundary,
+               !attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitViewerCurrent) {
                 autoBoundaryAttempt = nil
             }
         }
@@ -11506,9 +11541,8 @@ extension PlayerController: PreparedSuccessorHost {
             autoExposed = false
         }
         if let boundary {
-            boundary.committed = boundary.viewer == viewerActionEpoch &&
-                boundary.lifecycle == lifecycleGeneration && boundary.attachment == openGeneration &&
-                (boundary.generation.map { $0 == seekState.generation } ?? true)
+            boundary.committed = attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitOwnerCurrent) &&
+                (boundary.generation == nil || attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitSeekCurrent))
             if boundary.committed == true, let generation = boundary.generation {
                 _ = seekState.markExecuted(generation: generation, targetMs: boundary.targetMs)
             }
