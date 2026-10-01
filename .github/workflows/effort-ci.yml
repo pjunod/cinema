@@ -49,8 +49,8 @@ jobs:
     name: effort policy and contract preflight
     needs: scope
     runs-on: [self-hosted, Linux, X64, lab, general]
-    # Match the main fast lane: full history plus all contract checks exceeded
-    # three minutes in effort run 3594. Keep every check; allow it to finish.
+    # Match the main lane: history and contract checks exceeded three minutes
+    # in effort runs 3594 and 3643. Keep every check; allow it to finish.
     timeout-minutes: 10
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

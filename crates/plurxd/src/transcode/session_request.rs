@@ -310,6 +310,30 @@ pub(super) async fn validate_copy_init_before_publication(
     producer_attempt: u64,
     deadline: Instant,
 ) -> Result<plurx_core::fmp4::HevcSampleEntryLayout, CopyInitValidationError> {
+    let started = Instant::now();
+    let result =
+        validate_copy_init_before_publication_inner(session, producer_attempt, deadline).await;
+    tracing::info!(
+        target: "plurxd::transcode",
+        file_id = session.file_id,
+        producer_attempt,
+        phase = "copy_init_validation",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        outcome = match &result {
+            Ok(_) => "validated",
+            Err(CopyInitValidationError::StateChanged) => "state_changed",
+            Err(CopyInitValidationError::Invalid(_)) => "invalid",
+        },
+        "playback startup phase completed"
+    );
+    result
+}
+
+async fn validate_copy_init_before_publication_inner(
+    session: &Session,
+    producer_attempt: u64,
+    deadline: Instant,
+) -> Result<plurx_core::fmp4::HevcSampleEntryLayout, CopyInitValidationError> {
     if !copy_init_attempt_is_current(session, producer_attempt) {
         return Err(CopyInitValidationError::StateChanged);
     }

@@ -443,6 +443,7 @@ impl TranscodeManager {
             self.require_cluster_serving_authority(admission)?;
         }
 
+        let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
         // prerequisite refusal may use the retained live engine rather than
         // turning background preparation into a catalogue-wide outage.
@@ -464,6 +465,7 @@ impl TranscodeManager {
             record_live_recovery(LiveRecoveryReason::RequestedLive);
             started
         } else {
+            let vod_lookup_at = Instant::now();
             let vod = self
                 .try_vod_session(
                     req,
@@ -475,6 +477,14 @@ impl TranscodeManager {
                     serving_admission,
                 )
                 .await;
+            tracing::info!(
+                target: "plurxd::transcode",
+                file_id = req.file_id,
+                phase = "vod_create",
+                elapsed_ms = vod_lookup_at.elapsed().as_millis() as u64,
+                outcome = if vod.is_ok() { "ready" } else { "refused" },
+                "playback startup phase completed"
+            );
             match vod {
                 Ok(info) => info,
                 Err(error) => {
@@ -527,6 +537,13 @@ impl TranscodeManager {
             live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
+        tracing::info!(
+            target: "plurxd::transcode",
+            session = %session_log_id(&info.session_id),
+            phase = "create",
+            elapsed_ms = startup_create_at.elapsed().as_millis() as u64,
+            "playback startup phase completed"
+        );
         Ok(SessionCreation {
             info,
             created: true,
@@ -1175,18 +1192,25 @@ impl TranscodeManager {
         &self,
         req: &SessionRequest,
     ) -> Result<Option<crate::vodserve::VodSettings>, String> {
-        let read = |key: &'static str| {
-            let store = Arc::clone(&self.store);
-            async move {
-                store
-                    .get_setting(key)
-                    .await
-                    .map_err(|error| start_infrastructure_error(format!("reading {key}: {error}")))
-            }
-        };
-        if read(plurx_core::store::keys::VOD_PRESENTATION)
-            .await?
-            .is_some_and(|value| value.trim() == "0")
+        // These values define one admission policy. Read them from one
+        // snapshot rather than paying six serial linearizable Store reads on
+        // every Play request (including a missing-index rolling fallback).
+        let settings = self
+            .store
+            .get_settings(&[
+                plurx_core::store::keys::VOD_PRESENTATION,
+                plurx_core::store::keys::VOD_WORKING_SET_BYTES,
+                plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS,
+                plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS,
+                plurx_core::store::keys::CACHE_MAX_GB,
+                plurx_core::store::keys::VOD_BLOCKED_GET_CAP,
+            ])
+            .await
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading VOD serving settings: {error}"))
+            })?;
+        let read = |key: &str| settings.get(key);
+        if read(plurx_core::store::keys::VOD_PRESENTATION).is_some_and(|value| value.trim() == "0")
         {
             return Ok(None);
         }
@@ -1207,7 +1231,7 @@ impl TranscodeManager {
         /// seek storm park work until the node runs out of sockets.
         const DEFAULT_BLOCKED_GET_CAP: usize = 64;
         const MAX_BLOCKED_GET_CAP: usize = 4_096;
-        let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES).await? {
+        let working_set_bytes = match read(plurx_core::store::keys::VOD_WORKING_SET_BYTES) {
             Some(raw) => match raw.trim().parse::<u64>() {
                 // The settings surface refuses a zero on the way in; one that
                 // arrived by another route is still not a budget this can run
@@ -1217,7 +1241,7 @@ impl TranscodeManager {
             },
             None => DEFAULT_WORKING_SET_BYTES,
         };
-        let server_cap = match read(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS).await? {
+        let server_cap = match read(plurx_core::store::keys::VOD_BLOCK_BUDGET_SECS) {
             Some(raw) => raw
                 .trim()
                 .parse::<f64>()
@@ -1232,22 +1256,21 @@ impl TranscodeManager {
             .filter(|s| s.is_finite() && *s > 0.0)
             .map(|s| s.min(server_cap))
             .unwrap_or(server_cap);
-        let materialize_secs =
-            match read(plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS).await? {
-                Some(raw) => raw
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|s| s.is_finite() && *s >= 10.0)
-                    .map(|s| s.min(MAX_MATERIALIZE_BUDGET_SECS))
-                    .unwrap_or(DEFAULT_MATERIALIZE_BUDGET_SECS),
-                None => DEFAULT_MATERIALIZE_BUDGET_SECS,
-            };
+        let materialize_secs = match read(plurx_core::store::keys::VOD_MATERIALIZE_BUDGET_SECS) {
+            Some(raw) => raw
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|s| s.is_finite() && *s >= 10.0)
+                .map(|s| s.min(MAX_MATERIALIZE_BUDGET_SECS))
+                .unwrap_or(DEFAULT_MATERIALIZE_BUDGET_SECS),
+            None => DEFAULT_MATERIALIZE_BUDGET_SECS,
+        };
         // Admitted renditions are the copy cache, so they answer to the same
         // budget the pre-transcode cache does. `0`/absent keeps admission
         // closed: renditions serve and evict under the working set, and
         // nothing is promised durability.
-        let completed_cache_bytes = match read(plurx_core::store::keys::CACHE_MAX_GB).await? {
+        let completed_cache_bytes = match read(plurx_core::store::keys::CACHE_MAX_GB) {
             Some(raw) => raw
                 .trim()
                 .parse::<u64>()
@@ -1260,7 +1283,7 @@ impl TranscodeManager {
         // trusted, because a zero would refuse every blocked GET — turning
         // every seek into an immediate 503 — and an unbounded value would let
         // one seek storm park work until the node ran out of sockets.
-        let blocked_get_cap = match read(plurx_core::store::keys::VOD_BLOCKED_GET_CAP).await? {
+        let blocked_get_cap = match read(plurx_core::store::keys::VOD_BLOCKED_GET_CAP) {
             Some(raw) => raw
                 .trim()
                 .parse::<usize>()

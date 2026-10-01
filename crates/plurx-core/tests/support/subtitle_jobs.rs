@@ -62,6 +62,7 @@ pub trait SubtitleFixture: Store {
     ) -> Result<JobToken, StoreError> {
         let page = self
             .list_jobs(JobQuery {
+                node_id: None,
                 state: None,
                 kind: Some(JobKind::SubtitleExtract),
                 after_id: None,
