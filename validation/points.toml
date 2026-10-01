@@ -601,6 +601,7 @@ paths = [
   "scripts/k06-owned-lab.py",
   "tests/operations/test_k06_owned_lab.py",
   "tests/operations/test_k06_owned_lab_review.py",
+  "tests/operations/test_k06_transport_diagnostics.py",
 ]
 checks = ["rust-gate", "rust-gate-ci", "operations-contract"]
 depends_on = ["cluster.membership"]
