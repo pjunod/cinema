@@ -242,6 +242,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
     run("saveAutoQuality", autoQuality)({ disabled: false }),
+    run("saveDisplayAwareAuto", ["pdisplayauto", "daqerr", "daqstate"])({ disabled: false }),
     run("saveLiveHlsRecovery", liveRecovery)({ disabled: false }),
     run("savePlaybackCompatibility", developer)({ disabled: false }),
     run("savePreparedQuality", prepared)({ disabled: false }),
@@ -264,6 +265,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
     assert.deepEqual(Object.keys(writes.saveAutoQuality.body), ["playback_auto_abr"]);
     assert.equal(writes.saveAutoQuality.path, "/settings");
+    assert.deepEqual(writes.saveDisplayAwareAuto.body, {playback_display_aware_auto:true});
+    assert.equal(writes.saveDisplayAwareAuto.path,"/settings");
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
     // operator made for something else.
@@ -326,6 +329,32 @@ test("PGS overlay saves either choice despite unmet readiness and reports a fail
   assert.equal(nodes.pgsoverlaycard.outerHTML, "saved:false", "failure cannot repaint a saved value");
   assert.equal(cached.length, 2, "failure cannot update the settings cache");
   assert.equal(notices.length, 2, "failure cannot report success");
+});
+
+test("display Auto saves either choice with pending readiness and retains newer edits", async () => {
+  const nodes={pdisplayauto:{checked:false},daqerr:{textContent:""},daqstate:{textContent:""}};
+  const card={dataset:{revision:"1"},isConnected:true};
+  const writes=[];let resolveWrite;
+  const server={};
+  const save=new Function("document","api","cacheSettings","toast","setCardSaved","SERVER",
+    `${shippedSource("saveDisplayAwareAuto")}\nreturn saveDisplayAwareAuto;`)(
+      {getElementById:id=>{assert.ok(id in nodes);return nodes[id];}},
+      async(path,request)=>{writes.push(request.body);return await new Promise(resolve=>{resolveWrite=resolve;});},
+      value=>value,()=>{},()=>{},server);
+  for(const enabled of [true,false]){
+    nodes.pdisplayauto.checked=enabled;
+    const pending=save({disabled:false,closest:()=>card});
+    resolveWrite({playback_display_aware_auto:enabled});await pending;
+    assert.deepEqual(writes.at(-1),{playback_display_aware_auto:enabled});
+    assert.equal(server.playback_display_aware_auto,enabled);
+    assert.equal(nodes.daqstate.textContent,enabled?"Enabled":"Disabled");
+  }
+  nodes.pdisplayauto.checked=true;
+  const pending=save({disabled:false,closest:()=>card});
+  card.dataset.revision="2";nodes.pdisplayauto.checked=false;
+  resolveWrite({playback_display_aware_auto:true});await pending;
+  assert.equal(server.playback_display_aware_auto,true,"accepted saved value updates shared state");
+  assert.equal(nodes.pdisplayauto.checked,false,"late response preserves newer unsaved draft");
 });
 
 test("quality switching renders the server's saved value", async () => {
@@ -469,7 +498,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
       shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
-      shippedSource("autoQualityCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
+      shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),

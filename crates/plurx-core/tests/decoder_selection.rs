@@ -2843,3 +2843,45 @@ fn requiring_what_just_failed_is_refused_by_the_record_not_by_the_conversion() {
         Err(DecodeRestrictionError::InvalidField("required_backend")),
     );
 }
+
+#[test]
+fn bound_probe_geometry_keeps_coded_dimensions_and_truthful_missing_facts() {
+    let upright = facts(
+        json!({"index":0,"codec_type":"video","width":1440,"height":1080,"sample_aspect_ratio":"4:3","avg_frame_rate":"30000/1001"}),
+    );
+    assert_eq!(upright.width(), Some(1440));
+    assert_eq!(upright.rotation_degrees(), Some(0));
+    assert_eq!(
+        upright
+            .displayed_aspect()
+            .expect("measured aspect")
+            .output_at_height(1080),
+        Some((1920, 1080))
+    );
+    let rotated = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"rotation":-90}]}),
+    );
+    assert_eq!(rotated.rotation_degrees(), Some(270));
+    assert_eq!(
+        rotated
+            .displayed_aspect()
+            .expect("measured aspect")
+            .output_at_height(1920),
+        Some((1080, 1920))
+    );
+    let missing = facts(json!({"index":0,"codec_type":"video","width":1920,"height":1080}));
+    assert!(missing.displayed_aspect().is_none());
+    // Actual selective-probe shape before geometry fields were requested.
+    let omitted_matrix = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"side_data_type":"Display Matrix"}]}),
+    );
+    assert!(omitted_matrix.rotation_degrees().is_none());
+    let malformed_matrix = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","side_data_list":[{"side_data_type":"Display Matrix","rotation":"invalid"}]}),
+    );
+    assert!(malformed_matrix.rotation_degrees().is_none());
+    let conflicting = facts(
+        json!({"index":0,"codec_type":"video","width":1920,"height":1080,"sample_aspect_ratio":"1:1","tags":{"rotate":"0"},"side_data_list":[{"rotation":90}]}),
+    );
+    assert!(conflicting.rotation_degrees().is_none());
+}

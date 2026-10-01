@@ -737,6 +737,8 @@ pub struct DecodeFacts {
     width: Option<u32>,
     height: Option<u32>,
     frame_rate: FrameRate,
+    sample_aspect_ratio: Option<Rational>,
+    rotation_degrees: Option<i32>,
     field_order: Option<String>,
     interlace_verdict: InterlaceVerdict,
     bit_depth: Option<u8>,
@@ -866,6 +868,14 @@ impl DecodeFacts {
         let width = positive_u32(selected, "width");
         let height = positive_u32(selected, "height");
         let frame_rate = parse_frame_rate(selected);
+        let sample_aspect_ratio = selected
+            .get("sample_aspect_ratio")
+            .and_then(Value::as_str)
+            .and_then(|value| {
+                let (numerator, denominator) = value.split_once(':')?;
+                Rational::new(numerator.parse().ok()?, denominator.parse().ok()?)
+            });
+        let rotation_degrees = parse_display_rotation(selected);
         let field_order = bounded_token(selected, "field_order")?;
         let bit_depth = parse_bit_depth(selected, pixel_format.as_deref());
         let color_range = bounded_token(selected, "color_range")?;
@@ -922,6 +932,8 @@ impl DecodeFacts {
             width,
             height,
             frame_rate,
+            sample_aspect_ratio,
+            rotation_degrees,
             field_order,
             interlace_verdict: InterlaceVerdict::NotChecked,
             bit_depth,
@@ -970,6 +982,27 @@ impl DecodeFacts {
 
     pub fn height(&self) -> Option<u32> {
         self.height
+    }
+
+    /// Measured sample aspect; missing/invalid probe metadata remains unknown.
+    pub fn sample_aspect_ratio(&self) -> Option<Rational> {
+        self.sample_aspect_ratio
+    }
+
+    /// A successfully selected FFprobe stream without rotation metadata is upright.
+    /// Malformed or conflicting metadata remains unknown rather than guessed.
+    pub fn rotation_degrees(&self) -> Option<i32> {
+        self.rotation_degrees
+    }
+
+    pub fn displayed_aspect(&self) -> Option<crate::playback::geometry::DisplayAspect> {
+        let sar = self.sample_aspect_ratio?;
+        crate::playback::geometry::DisplayAspect::from_source(
+            self.width?,
+            self.height?,
+            Some((sar.numerator(), sar.denominator())),
+            self.rotation_degrees,
+        )
     }
 
     pub fn frame_rate(&self) -> FrameRate {
@@ -1199,6 +1232,35 @@ fn positive_u32(stream: &Value, key: &str) -> Option<u32> {
         // representation and therefore remains unknown rather than becoming
         // a falsely claimed two-pixel output.
         .filter(|value| *value >= 2)
+}
+
+fn parse_display_rotation(stream: &Value) -> Option<i32> {
+    let mut rotation = None;
+    if let Some(side_data) = stream.get("side_data_list") {
+        for item in side_data.as_array()? {
+            if item.get("side_data_type").and_then(Value::as_str) == Some("Display Matrix")
+                && item.get("rotation").is_none()
+            {
+                return None;
+            }
+            if let Some(value) = item.get("rotation") {
+                let measured = i32::try_from(value.as_i64()?).ok()?.rem_euclid(360);
+                if rotation.is_some_and(|previous| previous != measured) {
+                    return None;
+                }
+                rotation = Some(measured);
+            }
+        }
+    }
+    if let Some(value) = stream.get("tags").and_then(|tags| tags.get("rotate")) {
+        let measured = value.as_str()?.parse::<i32>().ok()?.rem_euclid(360);
+        if rotation.is_some_and(|previous| previous != measured) {
+            return None;
+        }
+        rotation = Some(measured);
+    }
+    let rotation = rotation.unwrap_or(0);
+    matches!(rotation, 0 | 90 | 180 | 270).then_some(rotation)
 }
 
 fn parse_rational(value: Option<&str>) -> Option<Rational> {

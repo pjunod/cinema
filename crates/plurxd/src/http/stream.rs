@@ -4244,6 +4244,7 @@ mod tests {
                 hdr: true,
                 dolby_vision: true,
                 max_nits: None,
+                presentation_target: None,
             }),
             ..Default::default()
         }

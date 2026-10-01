@@ -1787,6 +1787,7 @@ pub mod keys {
     /// Opt-in web Auto controller. Missing and every value other than `"1"`
     /// are off, leaving the server's initial Auto choice in place.
     pub const PLAYBACK_AUTO_ABR: &str = "playback.auto_abr";
+    pub const PLAYBACK_DISPLAY_AWARE_AUTO: &str = "playback.display_aware_auto";
     /// Opt-in Android TV refresh-rate matching. Missing and every value other
     /// than `"1"` are off; readiness observations are advisory only.
     pub const PLAYBACK_DISPLAY_MODE_MATCH: &str = "playback.display_mode_match";

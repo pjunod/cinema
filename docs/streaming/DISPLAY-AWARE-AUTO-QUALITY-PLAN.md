@@ -81,8 +81,8 @@ and [A-04's design](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) into that same
 execution ledger. Claim/update the existing A-05 board row for runtime work;
 do not create a second controller project with its own fixtures or ownership.
 At M0, amend A-05 to name this effort and the mapping in §7 before editing its
-runtime surfaces. This planning reconciliation has not claimed the board or
-started implementation. The labels A (starting selection) and B (runtime)
+runtime surfaces. The planning reconciliation did not claim the board or start implementation;
+§9 records subsequent source implementation. The labels A (starting selection) and B (runtime)
 below are workstreams, not separately shippable feature deliverables.
 
 The strictly additive parser-compatibility prerequisite in §4.1 is a necessary
@@ -1043,3 +1043,53 @@ JIT/pacing provenance, foreground impact or physical cliff result is claimed;
 older OS and nullable/missing metrics must remain honestly unknown. The full
 source/client adapter and shaped-device experiments remain implementation and
 evidence work, not a reason to raise the deployment minimum.
+
+
+### 9.3 M1-A source progress — 2026-09-30
+
+B-R1 is committed as `62fcdaa12aa2cffa478dff4aff3b148a069a4885` and reviewed
+in [PR657](http://192.168.4.7:3000/noirr/plurx/pulls/657). The tracked hook and
+exact-commit check passed. The artifact attachment API rejected this Forgejo
+URL; the PR exists. No skipped workflow is treated as qualification. The
+combined effort and M1 task retain this reviewed dependency pending ordinary
+prerequisite landing; no deployment is claimed.
+
+The first M1 source slice adds exact two-axis fit using upright SAR/rotation
+aspect and integer cross-products at the agreed `11/10` scale. It checks actual
+even output dimensions; width 2112 admits 1920×1080 while width 2113 refuses it.
+Tablet, portrait, scope, SAR, rotation and missing/invalid geometry fixtures
+pass. Source coded dimensions remain separate from displayed aspect.
+
+The existing bound `DecodeFacts` FFprobe reader retains measured SAR and
+rotation with its existing source identity/lifecycle. A successful stream probe
+without a display matrix or rotate tag is upright; malformed/conflicting
+rotation or missing SAR stays unknown. Existing artifact FactsDigest remains
+unchanged; the normalized candidate recipe in M2 must include the actual SAR,
+rotation and transformation version rather than changing legacy cache identity.
+Both existing production selective probes now request SAR, rotate tags and
+display-matrix rotation. A matrix identified without its rotation remains
+unknown; a regression pins the actual incomplete selective-probe shape.
+No second probe, catalog migration or unbound fact cache was introduced.
+
+Create capabilities now carry optional render target and nullable per-entry
+coded-width/rational-frame-rate limits. Duplicate codec/profile entries remain
+separate. Known violations refuse admission; incomplete legacy constraints are
+unknown, including zero actual dimensions. Admission of original copy uses
+coded dimensions, while normalized encodes use their resulting output geometry.
+The new replicated `playback.display_aware_auto` choice defaults off when absent,
+is returned by settings/server info, and saves independently of advisory
+readiness. Its Developer card identifies combined source/device qualification
+and its graduation destination. Both choices and a late-save/newer-draft race
+are verified by the existing Settings suite.
+
+Current focused evidence: exact fit2 passed; per-profile admission1 passed;
+bound-probe geometry1 passed; Settings35/35 passed; pinned plurxd all-target
+check passed. Workspace all-target Clippy passed; the final zero-axis admission rerun passed.
+The existing decoder-selection/recipe-identity suite passed all 59 cases,
+including source-binding and artifact-identity regressions. Docs index4 passed. This
+is source implementation evidence only: worker grade, actual display, physical
+recovery, normalized production filters and retained/remote candidate transport
+remain later integration/qualification obligations, not passes from pure math.
+The final adversarial review found and rechecked the incomplete-matrix P2
+correction; its final verdict found no actionable blockers. Corrected focused
+probe test and pinned all-target check passed; final Clippy/hook pending.
