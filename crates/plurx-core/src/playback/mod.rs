@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::MediaFile;
 
 pub mod audio;
+pub mod candidate;
 pub mod caps;
 pub mod desired;
 pub mod intent;

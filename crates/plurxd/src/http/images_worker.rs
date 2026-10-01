@@ -722,6 +722,7 @@ async fn pass(
         if !published {
             let settlement = if cancel.is_cancelled() {
                 JobSettlement::Yield {
+                    error_code: Some("worker_interrupted".into()),
                     not_before_ms: now_ms().saturating_add(5000),
                     checkpoint: None,
                 }

@@ -775,7 +775,8 @@
             )
             .await
             .expect("legacy producer after neutral observation")
-            .expect("legacy FFmpeg completed inside its retained budget");
+            ;
+        let ProductionProgress::Ready(produced) = produced else { panic!("legacy FFmpeg completed inside its retained budget"); };
         assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
     }
 
@@ -867,7 +868,8 @@
             )
             .await
             .expect("legacy producer after final observation timeout")
-            .expect("legacy FFmpeg completed after the probe released its source offset lane");
+            ;
+        let ProductionProgress::Ready(produced) = produced else { panic!("legacy FFmpeg completed after the probe released its source offset lane"); };
         assert!(produced.segments > 0, "the legacy FFmpeg produced no media");
     }
 
@@ -2123,6 +2125,8 @@
             },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -2190,6 +2194,8 @@
             },
             start_seconds: 0.0,
             audio_index: None,
+            audio_claim: None,
+            audio_delivery: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -3165,6 +3171,8 @@
             kind: SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,

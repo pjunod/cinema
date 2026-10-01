@@ -808,6 +808,9 @@ pub struct TranscodeOptions {
     /// Audio: output channel count (2 = stereo downmix) and bitrate.
     pub audio_channels: u32,
     pub audio_bitrate_kbps: u32,
+    /// Server-resolved route delivery. Absent retains the legacy scalar
+    /// builder during the add-before-remove migration of those fields.
+    pub audio: Option<crate::playback::audio::AudioDelivery>,
     /// 0-based index among the file's audio streams (default track otherwise).
     pub audio_index: Option<i64>,
     /// Start offset in seconds (resume / session start).
@@ -989,6 +992,7 @@ impl Default for TranscodeOptions {
             effective_rate_control: EffectiveRateControl::Vbr,
             audio_channels: 2,
             audio_bitrate_kbps: AUDIO_BITRATE_KBPS_DEFAULT,
+            audio: None,
             audio_index: None,
             start_seconds: 0.0,
             start_number: 0,
@@ -999,6 +1003,35 @@ impl Default for TranscodeOptions {
             force_idr: false,
             software_threads: None,
         }
+    }
+}
+
+impl TranscodeOptions {
+    pub fn audio_budget_kbps(&self) -> u32 {
+        self.audio
+            .as_ref()
+            .map_or(self.audio_bitrate_kbps, |audio| audio.budget_kbps())
+    }
+
+    /// Keep the transitional scalar readers in step with the one typed
+    /// decision; no second caller chooses channels or bitrate independently.
+    pub fn set_audio_delivery(&mut self, audio: crate::playback::audio::AudioDelivery) {
+        match audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                channels,
+                bitrate_kbps,
+                ..
+            } => {
+                self.audio_channels = u32::from(channels);
+                self.audio_bitrate_kbps = bitrate_kbps;
+            }
+            crate::playback::audio::AudioAction::Copy { channels, .. } => {
+                self.audio_channels = u32::from(channels);
+                self.audio_bitrate_kbps = audio.budget_kbps();
+            }
+            crate::playback::audio::AudioAction::None => {}
+        }
+        self.audio = Some(audio);
     }
 }
 
@@ -1489,6 +1522,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
         effective_rate_control: media.effective_rate_control,
         audio_channels: media.audio_channels,
         audio_bitrate_kbps: media.audio_bitrate_kbps,
+        audio: media.audio.clone(),
         audio_index: media.audio_index,
         start_seconds: execution.start_seconds,
         start_number: execution.start_number,
@@ -1801,14 +1835,18 @@ fn hls_args_inner(
         args.push("-af".into());
         args.push(af);
     }
-    args.push("-c:a".into());
-    args.push("aac".into());
-    args.push("-ac".into());
-    args.push(opts.audio_channels.to_string());
-    args.push("-b:a".into());
-    args.push(format!("{}k", opts.audio_bitrate_kbps));
-    args.push("-ar".into());
-    args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
+    if let Some(audio) = &opts.audio {
+        push_audio_delivery_args(&mut args, audio, false);
+    } else {
+        args.push("-c:a".into());
+        args.push("aac".into());
+        args.push("-ac".into());
+        args.push(opts.audio_channels.to_string());
+        args.push("-b:a".into());
+        args.push(format!("{}k", opts.audio_bitrate_kbps));
+        args.push("-ar".into());
+        args.push(crate::playback::audio::AUDIO_SAMPLE_RATE.to_string());
+    }
 
     // Start the MPEG-TS timeline at zero.
     //
@@ -2149,6 +2187,46 @@ fn copy_audio_channels(source: &MediaFile, audio_index: Option<i64>) -> Option<i
     .and_then(|stream| stream.channels)
 }
 
+/// One typed delivery builds the same audio tokens on encoded and copy-video
+/// paths. The historical copy-video AAC conversion omits `-ac` and places
+/// its explicit 5.1 layout after the bitrate; retain that exact shape.
+pub fn push_audio_delivery_args(
+    args: &mut Vec<String>,
+    audio: &crate::playback::audio::AudioDelivery,
+    legacy_copy_conversion: bool,
+) {
+    use crate::playback::audio::AudioAction;
+    match &audio.action {
+        AudioAction::None => args.push("-an".into()),
+        AudioAction::Copy { .. } => args.extend(["-c:a".into(), "copy".into()]),
+        AudioAction::Encode {
+            codec,
+            channels,
+            layout,
+            bitrate_kbps,
+            sample_rate,
+        } => {
+            args.extend(["-c:a".into(), codec.clone()]);
+            if !legacy_copy_conversion {
+                args.extend(["-ac".into(), channels.to_string()]);
+                if let Some(layout) = layout {
+                    args.extend(["-channel_layout:a".into(), layout.clone()]);
+                }
+            }
+            args.extend(["-b:a".into(), format!("{bitrate_kbps}k")]);
+            if legacy_copy_conversion {
+                if let Some(layout) = layout {
+                    args.extend(["-channel_layout:a".into(), layout.clone()]);
+                }
+            }
+            args.extend(["-ar".into(), sample_rate.to_string()]);
+            // RequiresLayoutMeasurement is not a pan expression. The
+            // incumbent default downmix remains unchanged until the named
+            // content and phase qualifications authorize a concrete recipe.
+        }
+    }
+}
+
 fn copy_input_args(
     source: &MediaFile,
     start_seconds: f64,
@@ -2156,7 +2234,9 @@ fn copy_input_args(
     transcode_audio: bool,
     pacing: Pacing,
     video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
 ) -> Vec<String> {
+    let transcode_audio = audio.map_or(transcode_audio, |audio| audio.transcodes());
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
 
@@ -2225,7 +2305,34 @@ fn copy_input_args(
 
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
 
-    if transcode_audio {
+    if let Some(audio) = audio {
+        if has_offset && transcode_audio {
+            if let Some(af) = audio_offset_filter(source.audio_offset_ms) {
+                args.extend(["-af".into(), af]);
+            }
+        }
+        // Preserve the incumbent copy conversion's exact spelling when its
+        // byte semantics match. Explanatory reason text must never select
+        // argv, because it is deliberately excluded from recipe identity.
+        let legacy_conversion = match &audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                codec,
+                channels,
+                layout,
+                bitrate_kbps,
+                sample_rate,
+            } => {
+                codec == "aac"
+                    && copy_audio_channels(source, audio_index) == Some(i64::from(*channels))
+                    && *bitrate_kbps == if *channels == 6 { 320 } else { 256 }
+                    && layout.as_deref() == if *channels == 6 { Some("5.1") } else { None }
+                    && *sample_rate == 48_000
+                    && audio.downmix.is_none()
+            }
+            _ => false,
+        };
+        push_audio_delivery_args(&mut args, audio, legacy_conversion);
+    } else if transcode_audio {
         // The correction rides the encode as a filter — same input, no
         // second read.
         if has_offset {
@@ -2376,6 +2483,27 @@ pub fn copy_pipe_args_with_dolby_vision(
     pacing: Pacing,
     video: CopyVideoOptions,
 ) -> Vec<String> {
+    copy_pipe_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        video,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn copy_pipe_args_with_audio_delivery(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    video: CopyVideoOptions,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -2383,6 +2511,7 @@ pub fn copy_pipe_args_with_dolby_vision(
         transcode_audio,
         pacing,
         video,
+        audio,
     );
     args.extend(
         [
@@ -2477,6 +2606,33 @@ pub fn hls_copy_args_with_sequence(
     init_filename: &str,
     out_dir: &str,
 ) -> Vec<String> {
+    hls_copy_args_with_audio_delivery(
+        source,
+        start_seconds,
+        audio_index,
+        transcode_audio,
+        pacing,
+        dolby_vision,
+        start_number,
+        init_filename,
+        out_dir,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hls_copy_args_with_audio_delivery(
+    source: &MediaFile,
+    start_seconds: f64,
+    audio_index: Option<i64>,
+    transcode_audio: bool,
+    pacing: Pacing,
+    dolby_vision: DolbyVisionCopyOptions,
+    start_number: i64,
+    init_filename: &str,
+    out_dir: &str,
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+) -> Vec<String> {
     let mut args = copy_input_args(
         source,
         start_seconds,
@@ -2484,6 +2640,7 @@ pub fn hls_copy_args_with_sequence(
         transcode_audio,
         pacing,
         dolby_vision,
+        audio,
     );
 
     // fMP4 HLS. Segments split at existing keyframes (copy can't force them), so
@@ -3827,6 +3984,79 @@ mod tests {
         .join(" ");
         assert!(stereo.contains("-c:a aac -b:a 256k"));
         assert!(!stereo.contains("-channel_layout:a"));
+    }
+
+    #[test]
+    fn typed_audio_argv_preserves_legacy_six_and_propagates_explicit_surround() {
+        use crate::playback::{
+            audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute},
+            default_profile,
+        };
+        let mut media = file(None);
+        media.audio_streams = vec![crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            index: 1,
+            ..Default::default()
+        }];
+        let mut audio = resolve_audio(
+            media.audio_streams.first(),
+            default_profile(),
+            AudioRoute::Progressive,
+            0,
+        );
+        let video = CopyVideoOptions::new(false, false);
+        assert_eq!(
+            copy_pipe_args_with_audio_delivery(
+                &media,
+                0.0,
+                Some(1),
+                true,
+                Pacing::unpaced(),
+                video,
+                Some(&audio)
+            ),
+            copy_pipe_args_with_dolby_vision(&media, 0.0, Some(1), true, Pacing::unpaced(), video)
+        );
+        audio.reason = "a refreshed explanation".into();
+        assert_eq!(
+            copy_pipe_args_with_audio_delivery(
+                &media,
+                0.0,
+                Some(1),
+                true,
+                Pacing::unpaced(),
+                video,
+                Some(&audio)
+            ),
+            copy_pipe_args_with_dolby_vision(&media, 0.0, Some(1), true, Pacing::unpaced(), video)
+        );
+        let explicit = AudioDelivery {
+            action: AudioAction::Encode {
+                codec: "eac3".into(),
+                channels: 6,
+                layout: Some("5.1".into()),
+                bitrate_kbps: 640,
+                sample_rate: 48_000,
+            },
+            downmix: None,
+            reason: "explicit route".into(),
+        };
+        let mut options = TranscodeOptions::default();
+        options.set_audio_delivery(explicit);
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/typed",
+        )
+        .join(" ");
+        assert!(
+            args.contains("-c:a eac3 -ac 6 -channel_layout:a 5.1 -b:a 640k -ar 48000"),
+            "{args}"
+        );
+        assert!(!args.contains("pan=") && !args.contains("alimiter="));
     }
 
     /// The `hvc1` tag promises no in-band parameter sets, and a

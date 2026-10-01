@@ -198,6 +198,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [TONE-MAP-CHAIN-CORRECTIONS.md](streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Implementation plan from the 2026-09-20 architecture review: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, and dither, with an image-comparison protocol. | open |
 | [INTERLACE-IN-THE-MEDIA-CONTRACT.md](streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Implementation plan from the 2026-09-20 architecture review: field order carried into the media contract, deinterlace before scale with a deliberate frame/field policy, the Live TV field-rate bitrate fix, and the reproduced fixture as acceptance. | open |
 | [AUDIO-RESOLVED-INDEPENDENTLY.md](streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Implementation plan from the 2026-09-20 architecture review: audio negotiated separately from video so a resolution change or burn no longer downmixes compatible multichannel audio, carried through recipe identity, manifests and handoffs. | open |
+| [AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md](streaming/AUDIO-DOWNMIX-SYNTHETIC-QUALIFICATION.md) | Shipped Jellyfin 8.1.3 per-side synthetic downmix measurements, clipping and AAC limiter margin; no real-content, listening, device or output enablement claim. | open |
 | [VOD-BFRAMES-TIMELINE-DESIGN.md](streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Design decision from the 2026-09-20 architecture review: keep no-reorder deployed; if evidence ever supports B-frames, only signed version-1 offsets with the exact executable presentation-grid contract and per-family/client qualification are admissible. | open |
 | [DECODE-FACTS-GATE-AND-FALLBACK.md](streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | Implementation plan from the 2026-09-20 architecture review: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, and classifying fallback reasons. | open |
 | [TRANSCODE-DECOMPOSITION-PLAN.md](streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | Implementation plan from the 2026-09-20 architecture review: the behaviour-preserving extraction of `transcode.rs`, `hls.rs` and `vodserve.rs` along ownership boundaries, the test-seam census, and the separate registry-unification evaluation. | open |
@@ -292,6 +293,11 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md](streaming/APPLE-PACING-HOLD-FREEZE-ROOT-CAUSE.md) | Why Apple and web HLS froze on a pacing hold, and the repair contract. | built |
 | [STUTTER-4K.md](streaming/STUTTER-4K.md) | 4K copy-path stutter: what it is, what it isn't, what to try next. | open |
 | [SEGMENTER-PLAN.md](streaming/SEGMENTER-PLAN.md) | GOP-aware segmenting — zero boundary drops on the copy path. | built |
+| [DISPLAY-AWARE-AUTO-QUALITY-PLAN.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-PLAN.md) | How Auto should preserve smooth original playback, choose display-appropriate intermediate transcodes, and recover quality safely across Android, Apple and web. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-REVIEW.md) | Adversarial findings on the automatic-quality plan, their disposition, and remaining qualification risks. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-HANDOFF.md) | The independent Opus review request and the evidence it must challenge before implementation. | open |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.md) | Lifecycle wrapper for the independent Opus review; links to its byte-identical source artifact and reconciliation. | done |
+| [DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt](streaming/DISPLAY-AWARE-AUTO-QUALITY-OPUS-REVIEW.txt) | Supplied independent Opus review, preserved byte-for-byte: four P1 and ten P2 findings and source evidence. | done |
 | [ADAPTIVE-QUALITY.md](streaming/ADAPTIVE-QUALITY.md) | The design for bandwidth-aware streaming. | live |
 
 ---
@@ -307,6 +313,8 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [RAFT-FAULT-TESTING-IMPLEMENTATION.md](cluster/RAFT-FAULT-TESTING-IMPLEMENTATION.md) | The bounded proposal and build contract for three repeatable Raft fault scenarios, generated WAL regressions, and replay evidence, preserving the current CI/CD process and adding no product gates. | open |
+| [RAFT-FAULT-TESTING-REVIEW.md](cluster/RAFT-FAULT-TESTING-REVIEW.md) | Independent adversarial findings on the fault-testing proposal and the author's amendments for protocol timing, partition evidence, complete data comparison, and child cleanup. | done |
 | [STATUS-HISTORY.md](cluster/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
 | [CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md) | Activity tabs, exact worker/job visibility, and reviewed throughput improvements with playback and storage constraints. | open |
 | [CLOCK-SKEW-GUARD-DESIGN.md](cluster/CLOCK-SKEW-GUARD-DESIGN.md) | Accepted K-06 design and original review/gate receipt; runtime remains open through separately owned measurement and enforcement handoffs. | open |

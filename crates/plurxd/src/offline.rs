@@ -786,11 +786,31 @@ impl OfflineManager {
             .await;
             return;
         };
+        let audio_delivery = match package.audio_recipe.as_deref() {
+            None => None,
+            Some(snapshot) => {
+                match plurx_core::playback::audio::AudioDelivery::parse_encoded_snapshot(snapshot) {
+                    Some(audio) => Some(audio),
+                    None => {
+                        self.fail(
+                            &package,
+                            "validating",
+                            "invalid_audio_recipe",
+                            "The download's audio identity is invalid.",
+                            work_started,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+        };
         let spec = OfflineSpec {
             target_height: package.target_height,
             audio_index: package.audio_index,
             subtitle,
             effective_rate_control,
+            audio_delivery,
         };
         // Best-effort progress hint: fenced completion remains authoritative
         // and subsequent progress writes retry the current state.
@@ -823,7 +843,7 @@ impl OfflineManager {
                 self.publish_ready(&package, &file, produced, work_started)
                     .await
             }
-            Ok(OfflineProduceOutcome::Yielded)
+            Ok(OfflineProduceOutcome::Yielded(_))
             | Ok(OfflineProduceOutcome::ClaimedElsewhere)
             | Ok(OfflineProduceOutcome::StoreUnavailable)
             | Ok(OfflineProduceOutcome::PolicyChanged)
@@ -1208,6 +1228,7 @@ mod tests {
         subtitle_index: Option<i64>,
     ) -> OfflinePackage {
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: id.into(),
             request_id: format!("request-{id}"),
             user_id: fixture.user_id,
@@ -1280,6 +1301,7 @@ mod tests {
 
     fn package(mode: &str, index: Option<i64>) -> OfflinePackage {
         OfflinePackage {
+            audio_recipe: None,
             id: "pkg".into(),
             request_id: "request".into(),
             user_id: 1,
@@ -1473,6 +1495,7 @@ mod tests {
         // A second package, already past its deadline, so the ungated sweep
         // has something to prove it still runs. Expiry deletes the row.
         let lapsed = NewOfflinePackage {
+            audio_recipe: None,
             id: "lapsed".into(),
             request_id: "request-lapsed".into(),
             user_id: fixture.user_id,
@@ -1623,6 +1646,7 @@ mod tests {
             .await
             .expect("delete original package");
         let replacement = NewOfflinePackage {
+            audio_recipe: None,
             id: package.id.clone(),
             request_id: package.request_id.clone(),
             user_id: package.user_id,
@@ -1683,7 +1707,7 @@ mod tests {
         let fixture = seeded_recovery_fixture().await;
         fixture.manager.transcode.test_script_offline_production([
             OfflineProduceOutcome::HealthRefused,
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
         ]);
         let package = claimed_package(&fixture, "manager-recovery", "none", None).await;
@@ -1909,6 +1933,7 @@ mod tests {
     /// without starting an encoder.
     async fn queue_stale_package(fixture: &Fixture, id: &str) {
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: id.into(),
             request_id: format!("request-{id}"),
             user_id: fixture.user_id,
@@ -2044,6 +2069,7 @@ mod tests {
     /// touches it and only the expiry sweep can remove it.
     async fn put_expiring_package(fixture: &Fixture, id: &str, expires_at: i64) {
         let package = NewOfflinePackage {
+            audio_recipe: None,
             id: id.into(),
             request_id: format!("request-{id}"),
             user_id: fixture.user_id,

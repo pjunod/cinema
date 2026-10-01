@@ -452,6 +452,11 @@ impl VodServe {
             file: file.clone(),
             audio_index: req.audio_index,
             aac,
+            audio_delivery: prepared
+                .encoding
+                .as_ref()
+                .and_then(|encoding| encoding.options.audio.clone())
+                .or_else(|| req.audio_delivery.clone()),
             video,
             source_object_version,
             cluster_cache_key,

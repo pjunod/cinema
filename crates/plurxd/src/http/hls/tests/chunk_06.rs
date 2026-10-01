@@ -307,7 +307,7 @@
     async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
         use plurx_core::playback::DesiredQuality;
         let state = resolver_state();
-        let mut broken = envelope(1, DesiredQuality::Auto { height: None });
+        let mut broken = envelope(1, DesiredQuality::Auto { height: None, candidate_id: None });
         broken.recipe_revision = 0;
 
         let answer = create_with(
@@ -2582,6 +2582,9 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    candidate_id: None,
+                    presentation_target: None,
+                    decoder_caps: None,
                     protocol_version: crate::media_pool::PROTOCOL_VERSION,
                     incarnation_id: route.incarnation_id.clone(),
                     user_id: route.user_id,
@@ -2598,6 +2601,8 @@
                 delivered,
                 delivered_bps: Some(10_000_000),
                 capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    presentation_target: None,
+                    decoder_caps: None,
                     platform: crate::playback_control::ClientPlatform::Apple,
                     max_height: 2160,
                     codecs: vec![crate::playback_control::CodecPolicy::H264],

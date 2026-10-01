@@ -1077,7 +1077,10 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         # the predicate is false while one is waiting, so it would yield on
         # every check and the package would never become ready.
         self.assertIn("let owes_idle_courtesy = offline_package_id.is_none();", daemon)
-        self.assertIn(
+        self.assertIn("else if owes_idle_courtesy {", daemon)
+        self.assertIn("self.pretranscode_publication_yield_reason()", daemon)
+        self.assertIn("if self.admissions.background_must_yield()", daemon)
+        self.assertNotIn(
             "|| (owes_idle_courtesy && !self.pretranscode_worker_idle())", daemon
         )
 

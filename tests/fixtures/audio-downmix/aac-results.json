@@ -1,0 +1,344 @@
+{
+  "5.1": {
+    "fc": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.24449948652778,
+          "sample_peak_dbfs": -9.372095180718883,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.244394433003997,
+          "sample_peak_dbfs": -9.376238721890628,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ]
+    },
+    "all": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.4332837081198617,
+          "sample_peak_dbfs": 4.9041061585871475,
+          "samples_at_or_above_full_scale": 1707,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.433283708394086,
+          "sample_peak_dbfs": 4.904077899310397,
+          "samples_at_or_above_full_scale": 1708,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.435440612286958,
+          "sample_peak_dbfs": 4.784089252094427,
+          "samples_at_or_above_full_scale": 1693,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.4354406117712166,
+          "sample_peak_dbfs": 4.784085073616728,
+          "samples_at_or_above_full_scale": 1694,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -4.015649709341964,
+          "sample_peak_dbfs": -0.4961062941294087,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -4.015649709152067,
+          "sample_peak_dbfs": -0.5132084191801127,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        }
+      ]
+    }
+  },
+  "5.1-side": {
+    "fc": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.24449948652778,
+          "sample_peak_dbfs": -9.372095180718883,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.244394433003997,
+          "sample_peak_dbfs": -9.376238721890628,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ]
+    },
+    "all": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.4332837081198617,
+          "sample_peak_dbfs": 4.9041061585871475,
+          "samples_at_or_above_full_scale": 1707,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.433283708394086,
+          "sample_peak_dbfs": 4.904077899310397,
+          "samples_at_or_above_full_scale": 1708,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.435440612286958,
+          "sample_peak_dbfs": 4.784089252094427,
+          "samples_at_or_above_full_scale": 1693,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.4354406117712166,
+          "sample_peak_dbfs": 4.784085073616728,
+          "samples_at_or_above_full_scale": 1694,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -4.015649709341964,
+          "sample_peak_dbfs": -0.4961062941294087,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -4.015649709152067,
+          "sample_peak_dbfs": -0.5132084191801127,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        }
+      ]
+    }
+  },
+  "7.1": {
+    "fc": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.24449948652778,
+          "sample_peak_dbfs": -9.372095180718883,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.244394433003997,
+          "sample_peak_dbfs": -9.376238721890628,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -23.247189422589223,
+          "sample_peak_dbfs": -9.214342096086854,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -23.247187399081383,
+          "sample_peak_dbfs": -9.436329222107876,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -23.9,
+          "samples": 576512
+        }
+      ]
+    },
+    "all": {
+      "default": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.391154745513074,
+          "sample_peak_dbfs": 7.097426684029168,
+          "samples_at_or_above_full_scale": 2077,
+          "integrated_lufs": -3.4,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.3911547444254886,
+          "sample_peak_dbfs": 7.097426684029168,
+          "samples_at_or_above_full_scale": 2077,
+          "integrated_lufs": -3.4,
+          "samples": 576512
+        }
+      ],
+      "pan": [
+        {
+          "channel": 0,
+          "rms_dbfs": -3.4092781904432123,
+          "sample_peak_dbfs": 6.456198230318365,
+          "samples_at_or_above_full_scale": 1778,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -3.409278194689294,
+          "sample_peak_dbfs": 6.456198230318365,
+          "samples_at_or_above_full_scale": 1778,
+          "integrated_lufs": -3.5,
+          "samples": 576512
+        }
+      ],
+      "limited": [
+        {
+          "channel": 0,
+          "rms_dbfs": -4.016328250121339,
+          "sample_peak_dbfs": -0.4715100146203506,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        },
+        {
+          "channel": 1,
+          "rms_dbfs": -4.016328251097207,
+          "sample_peak_dbfs": -0.47416580513405293,
+          "samples_at_or_above_full_scale": 0,
+          "integrated_lufs": -4.0,
+          "samples": 576512
+        }
+      ]
+    }
+  }
+}
