@@ -1447,11 +1447,100 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
    frames, 420 MiB binary). The executing session's recommendation is D now
    and C when line numbers are worth the artefact plumbing; §5.7's PR 2 is
    C. **Paul's call.**
+   **Answered 2026-09-30:** Paul selected C. The dated implementation below
+   supersedes the recommendation to ship D; the historical measurements stay
+   measurements of their named source, not of the new release tree.
 
 ---
 
 ## Execution log
 
+**Profile C continuation, 2026-09-30:** The separately owned
+`codex/p02-packed-debug-artifacts` branch starts from effort
+`8a7dbf5337584b2bb0556d0b617fef48122def2e`. Before edits it fetched newest
+main `f16be4f22296f98a6bce9f2a38b76b2411759e53` and audited Cargo, Docker,
+release/export/manifest tools, Windows packaging and their focused tests.
+Main has no newer hunks in those build files. Open PR629
+(`826d3d643cf4eca6ffa38941da25884d9118af53`) owns the intervening CI image
+stage and runtime-stage extraction; this task leaves that extraction hunk
+unchanged and adds only paired-debug handling. PR403's optical helper and
+runtime additions are preserved: when its third binary integrates, its
+binary-set contract must also retain that binary's platform debug artifact.
+The workboard is not permission to restore older build behavior.
+
+After main-sync landed, the unpublished source was ported onto actual effort
+`df1e443dab63653131e2851192529eef1457242b`. Fresh main was
+`1da6326d239eb0b809c8a569f36127d58a8efef9`; its removal of the duplicate
+`coverage` job from `ci.yml` is retained explicitly. The effort's newer
+ten-minute preflight and manual-only image publication policy remain intact:
+those unrelated main/effort differences are not reverted by artifact work.
+This current-tree composition is qualified separately from the earlier
+tiny-fixture and old-base receipts above.
+
+The release profile is `debug = "line-tables-only"`, `strip = "none"`,
+`split-debuginfo = "packed"`. Thin LTO, default codegen units, unwind and
+overflow policy are unchanged; these are the
+[Cargo profile settings](https://doc.rust-lang.org/cargo/reference/profiles.html).
+For the GNU amd64/arm64 container paths,
+Docker copies each `.dwp` out of its cached target and beside its executable
+in `/usr/local/bin`; the binary-only exporter and verified-runtime rewrite
+retain the same pair. Package-smoke artifacts retain `.dwp` files, and the
+immutable release image carries them beyond the workflow receipt's retention
+period. Historical tags without a paired-debug copy keep schema1 and do not
+invent a `.dwp` requirement.
+
+Profile-C manifests use schema2. Their exact entry set includes each `.dwp`
+and SHA-256 sidecar, binds its bytes to its executable digest and the source
+tree/commit/build-ref, and checks actual compiler identity against the tagged
+`rust-toolchain.toml`. Packaging rejects tracked source changes before naming
+that tree; untracked generated export/packaging files remain allowed. The
+bounded ELF/DWARF verifier requires symbol and
+line sections, a valid DWP compilation-unit index and coverage of every
+executable skeleton DWO identity. Missing, symlinked, torn, wrong-machine or
+mismatched debug files fail rather than producing a flags-only receipt.
+Metadata reads are capped at 32 MiB; DWP contribution ranges are checked
+against their actual section sizes, without reading the whole debug payload.
+
+Windows emits a PDB, not a `.dwp`. Its existing zip now verifies the PE
+CodeView GUID/age against the MSF7 PDB identity stream and requires the
+existing Windows x86_64 release machine before retaining both
+`plurxd.exe` and the verified PDB under its CodeView basename (including a
+hashed build basename when present). There is no macOS daemon release archive in
+this workflow; macOS packed debug is a dSYM and is not represented as a DWP.
+The Windows format/zip regression uses an owned synthetic PE/PDB pair, not a
+claim that a Windows release was rebuilt or executed here.
+Archive creation uses Python's standard `zipfile` writer, already required
+by PE/PDB verification, rather than assuming the preflight host has Info-ZIP.
+The regression puts a failing external `zip` on PATH and verifies the actual
+archive's executable/PDB bytes and missing-PDB refusal; no dependency skip
+or mocked archive substitutes for those checks.
+
+The GNU proof was a separate committed, std-only Rust fixture
+`4d52c6d4ca59e18acd086adc4f7532620d213f36`, archive SHA-256
+`b51f0ebdbb4672cc1ce33c354142182c7a1e8390943c92151e3d1b133abc8a0b`,
+on the existing audited Rust image
+`sha256:897e260d0a1a5a5146433bdb73f62bd84f5f47e846d3485e5f70f63912b5917d`.
+It verified Rust1.97.1 before its 2.50-second build, then the new verifier
+matched all six actual DWO identities. Its panic retained named `/source/src/main.rs`
+file/line frames. Removing the DWP did not remove every frame's line table:
+some reside in the executable; that observation is not weakened into a false
+negative assertion. The shipping contract nevertheless retains and verifies
+the complete pair. The first attempt failed before compilation because the
+local Docker log driver required `compress=false` with `max-file=1`; that
+failure and the separately named corrected attempt remain distinct receipts.
+Both exact owned containers and scratch directories were removed; production
+remained healthy, restart count0, readiness200. CPU2, RAM2 GiB without swap,
+PID128, read-only root, no capabilities, no-new-privileges, no network,
+64 MiB scratch and a fixed120-second controller budget were retained; load
+was telemetry for this functional fixture, not performance qualification.
+
+Focused format/packaging evidence is named by
+`tests/operations/test_release_debug.py` and
+`tests/operations/test_release_pdb.py`, with the existing publication and
+license-notice contracts retained. This is not full-release qualification,
+M4's measured service-limit/playback/GPU matrix, M3's live workload comparison,
+or M8's actual fuzz campaigns. No production service directive, runner
+configuration, deployment, playback or process-supervision contract changes.
 | Date | Model | Session | Milestone | PR | Evidence |
 |---|---|---|---|---|---|
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |

@@ -34,8 +34,10 @@ RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/
         | grep -q 'cluster-read-cost-validation' \
     && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
+    && cp target-plurxd/release/plurxd.dwp /plurxd.dwp \
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
-    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
+    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
+    && cp target-cluster-check/release/plurx-cluster-check.dwp /plurx-cluster-check.dwp
 
 # Pinned by digest for the same reason, and with more at stake: this layer
 # is the shipped image's entire userland, and `bookworm-slim` moves under
@@ -221,10 +223,12 @@ LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
 COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
 COPY licenses/ /usr/share/doc/plurx/licenses/
 COPY --from=build /plurxd /usr/local/bin/plurxd
+COPY --from=build /plurxd.dwp /usr/local/bin/plurxd.dwp
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image
 # that produced the on-disk state without installing Rust on the host.
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
+COPY --from=build /plurx-cluster-check.dwp /usr/local/bin/plurx-cluster-check.dwp
 
 # Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
 # either var to point elsewhere. It's a superset of system ffmpeg, so this is
