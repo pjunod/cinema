@@ -1399,6 +1399,68 @@ are `test_manual_fuzz_only_keeps_all_five_campaigns_and_skips_runtime_sweeps`
 and `test_fuzz_summary_records_growth_and_refuses_an_unexecuted_clean_receipt`
 in `tests.operations.test_evidence_workflows`; neither runs a fuzzer.
 
+**Post-merge receipt, 2026-10-01 — scoped M8 campaign acceptance satisfied.**
+The first actual manual fuzz-only run is
+[API run 3727 / UI run 3706](http://192.168.4.7:3000/noirr/plurx/actions/runs/3706)
+on effort `d3dfbe2aeaea39f773a20cc08327bddaa74d7ea6`, with
+`fuzz_only=true` and `seed_pgs_crash=false`. All five jobs completed cleanly
+using `nightly-2026-08-01`. Deep, pacing and mutation suites were skipped,
+not passed. Each configured budget was 900 seconds; libFuzzer reported
+901 seconds including final stopping. No campaign was repeated for this
+evidence-only update. These results supersede the pending runner receipt
+above, without relabeling the older local review-round measurements.
+
+| Target / job ID | Executions | Corpus files before → after | Final corpus | Outcome |
+|---|---:|---:|---:|---|
+| `inspect_sup` / 39480 | 3,695,229 | 2 → 204 | 836 KiB | budget spent, no finding |
+| `epub_facts` / 39481 | 281,032 | 17 → 924 | 63,084 KiB | budget spent, no finding |
+| `fmp4_reader` / 39482 | 6,267,134 | 13 → 366 | 2,476 KiB | budget spent, no finding |
+| `nfo_parse` / 39483 | 44,062,346 | 20 → 2,084 | 8,488 KiB | budget spent, no finding |
+| `rpu_rewrite` / 39484 | 36,752,979 | 16 → 802 | 3,276 KiB | budget spent, no finding |
+
+**How to read it:** file growth is each completed campaign summary's actual
+before/after count, not libFuzzer's intermediate added-unit count. A spent
+budget with no finding is bounded parser evidence, not proof of no bugs.
+The PGS job separately executed its explicit seed-opt-in control once:
+`tests::only_the_explicit_seed_enables_the_crash_proof` passed; this is not
+a repeated task-PR fast lane.
+
+Raw logs and downloaded artifact ZIPs are retained privately. Each actual
+upload ZIP hash matches the downloaded bytes; each ZIP contains one target
+log, not a full corpus export. No corpus-content identity is inferred from
+the file counts. Immutable receipt identities:
+
+| Job | Raw log SHA-256 | Artifact ID | Downloaded ZIP SHA-256 |
+|---|---|---:|---|
+| 39480 | `4983ca31ce39e80bd0180407a54a7b5f25281c674e5f554b8c549467d59edfb3` | 1497 | `68550afd1dcc7241f677242aa2555eab093321b419bcd20e6f2e2dfca9bc3793` |
+| 39481 | `e315bf8426549795fe9956a78df7adb611928b06b3a6ed71be1dfd819e536884` | 1499 | `145c9c5c03607b553425d4451d70c57d726fa56a2efa6c6e6a3fed55b1d1c945` |
+| 39482 | `3c5069e6c5e1deea6de4fadbee8c3a6df8da4e9ef73fc37340c0b1782b4977ba` | 1500 | `6187b0a8c9ee40de1aae0f11322f3e5fb620dc1ded611a825077f86574bf1aaf` |
+| 39483 | `875d35efb3057603ae52e34dc52aad5e5fbb7ab97e259a6b862185484b929876` | 1498 | `17f1d925a87bbf2157ebc24ba1b7dfedbb847f8ec71424e3873b9d0bbfab8598` |
+| 39484 | `39dc8e855af37aa057a89cc25699f3ce0edcfd5da4a308002a2d89f58b435f43` | 1501 | `cda9b85bc165b760bbcc674be31f1e30bd5ae984fe87b47a50eb4647998f2021` |
+
+**Separately scoped M6 file/line backtrace, 2026-10-01.** One deliberate
+`plurxd diagnostic-panic` invocation on the frozen `4f243a01` artifact
+resolved native file/line frames, with the paired DWP present. Exact source
+is `4f243a01c04868f6a4d9a56fdb96f9aeb95ee4d8`, tree
+`2814294643036f95bcf8cd51e8bc6c4e736b46bf`, image manifest
+`sha256:3b7ea70808a7b212e800768b11ab90cdda35e8093177c0009c36c1b302ac4b18`.
+This is not an assertion about the later `d3dfbe2a` release binary.
+The full stack resolved `diagnostic_panic` at
+`/src/crates/plurxd/src/main.rs:503:5`, dispatch at `545:37` and main at
+`494:7`; the panic banner alone was not the proof. Expected and actual
+exit were 101, OOM false, start `2026-10-01T10:28:22.712655274Z`, finish
+`2026-10-01T10:28:22.840966759Z`. The owned read-only, network-none container
+had no host mounts, 1 CPU / 256 MiB / 64 PIDs / 30-second deadline;
+no daemon or cluster started and zero unit methods ran. Its exact owned
+container was removed after retaining the raw 9,949-byte log, SHA-256
+`9a0a5961e930b61a7492c79bdeed7a7b3db6311d3402aefc0cde49b58546fcb7`.
+
+**Still open:** whole P02 and current-main qualification; full-image
+reproducibility/size comparison; measured systemd/Compose peak-load and
+playback/GPU matrices; realtime priority cadence/readback; and the
+overflow/full-suite/workload acceptance. No deployment, service directives,
+runner policy, profile settings or production load changed in this update.
+
 ---
 
 ## 6. Verification and rollout
@@ -1543,6 +1605,7 @@ or M8's actual fuzz campaigns. No production service directive, runner
 configuration, deployment, playback or process-supervision contract changes.
 | Date | Model | Session | Milestone | PR | Evidence |
 |---|---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M8 actual post-merge campaigns; M6 frozen-artifact backtrace | Evidence-only continuation; draft PR pending | All five bounded run3727 campaigns on exact effort `d3dfbe2a` completed; counts/log/ZIP identities in §5.8. Separate frozen `4f243a01` artifact resolved native file/line stack with expected exit101 and owned cleanup. Neither result closes whole P02 or current-main qualification. No fuzz or unit campaign repeated by this docs author. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 
 Executing sessions append one row per milestone PR (see the

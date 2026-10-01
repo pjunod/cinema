@@ -469,6 +469,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [HDR-REFERENCE-SCORING.md](performance/HDR-REFERENCE-SCORING.md) | Independent bounded PQ code-domain metrics/census and explicitly graded BT.709 reference provenance for SDR VMAF; diagnostic evidence does not close genuine corpus, GPU or physical acceptance. | open |
 | [PERF-PLAN.md](performance/PERF-PLAN.md) | Round one: where the seconds go, and the plan to get them back. | built |
 | [PERF-PLAN-REVIEW.md](performance/PERF-PLAN-REVIEW.md) | What to correct before implementing it. | done |
 | [PERF-REVIEW-RESPONSE.md](performance/PERF-REVIEW-RESPONSE.md) | What the review got right, what already shipped, what changed. | done |
