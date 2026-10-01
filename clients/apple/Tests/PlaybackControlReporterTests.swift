@@ -1530,6 +1530,49 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertFalse(autoOriginalTransferMarginProven([sample("a"), sample("b")], sessionId: "another", nowMs: 2_000))
     }
 
+    func testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence() {
+        var status = PlaybackSessionStatus(id: "incumbent")
+        status.producerState = "held"
+        status.activeEncodeCandidateId = "candidate"
+        status.activeEncodeMilliRealtime = 2_000
+        status.activeEncodeAgeMs = 1_000
+        status.activeEncodeActiveMs = 2_000
+        status.activeEncodeSegments = 2
+        func pressure(_ snapshot: PlaybackSessionStatus?, session: String? = "incumbent", at: Int = 2_000) -> Bool {
+            autoActiveProductionPressure(status: snapshot, observedAtMs: 1_000, nowMs: at,
+                sessionId: session, candidateId: "candidate", runwaySeconds: 3)
+        }
+        XCTAssertFalse(pressure(status), "paced wall delivery with actual 2x work is not pressure")
+        status.activeEncodeMilliRealtime = 800
+        XCTAssertTrue(pressure(status), "fresh saturation still counts while producer currently held")
+        XCTAssertFalse(pressure(status, at: 16_001))
+        XCTAssertFalse(pressure(status, session: "replacement"))
+        XCTAssertFalse(pressure(nil))
+        status.activeEncodeActiveMs = nil
+        XCTAssertFalse(pressure(status), "unknown active time is not saturation proof")
+        let item = NSObject(), successor = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        window.bind(attachment: ObjectIdentifier(item), attempt: "attempt1")
+        window.stalled(at: 1_000)
+        window.cliff(completedAtMs: 2_000, nowMs: 3_000)
+        window.cliff(completedAtMs: 2_000, nowMs: 10_000)
+        XCTAssertEqual(window.lastCliffMs, 2_000, "same completion never renews cliff")
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 60_999))
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 91_999))
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 92_000))
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 999))
+        window.bind(attachment: ObjectIdentifier(successor), attempt: "attempt1")
+        XCTAssertNil(window.lastStallMs)
+        XCTAssertNil(window.lastCliffMs)
+        window.stalled(at: 93_000)
+        window.bind(attachment: ObjectIdentifier(successor), attempt: "attempt2")
+        XCTAssertNil(window.lastStallMs)
+        window.cliff(completedAtMs: 1, nowMs: 93_000)
+        XCTAssertNil(window.lastCliffMs)
+        window.bind(attachment: nil, attempt: "attempt2")
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 200_000))
+    }
+
     func testStagedProductionProofRequiresExactCandidateAndCombinedAge() {
         var status = PlaybackSessionStatus(id: "staged")
         status.activeEncodeCandidateId = "candidate"

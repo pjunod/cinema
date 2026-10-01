@@ -3,6 +3,51 @@ import Combine
 import Foundation
 import MediaPlayer
 
+/// Observational upgrade windows for one installed item and playback attempt.
+/// Re-reading a completed cliff sample never renews its original timestamp.
+struct AutoUpgradeEvidenceWindow {
+    private var attachment: ObjectIdentifier?
+    private var attempt: String?
+    private(set) var lastStallMs: Int?
+    private(set) var lastCliffMs: Int?
+
+    mutating func bind(attachment: ObjectIdentifier?, attempt: String) {
+        guard self.attachment != attachment || self.attempt != attempt else { return }
+        self = AutoUpgradeEvidenceWindow()
+        self.attachment = attachment
+        self.attempt = attempt
+    }
+
+    mutating func stalled(at nowMs: Int) {
+        guard attachment != nil, nowMs >= 0 else { return }
+        lastStallMs = max(lastStallMs ?? nowMs, nowMs)
+    }
+
+    mutating func cliff(completedAtMs: Int, nowMs: Int) {
+        guard attachment != nil, completedAtMs >= 0, nowMs >= completedAtMs,
+              nowMs - completedAtMs <= 15_000 else { return }
+        lastCliffMs = max(lastCliffMs ?? completedAtMs, completedAtMs)
+    }
+
+    func allowsUpgrade(nowMs: Int) -> Bool {
+        guard attachment != nil else { return false }
+        return (lastStallMs.map { nowMs >= $0 && nowMs - $0 >= 60_000 } ?? true)
+            && (lastCliffMs.map { nowMs >= $0 && nowMs - $0 >= 90_000 } ?? true)
+    }
+}
+
+func autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: Int?, nowMs: Int,
+                                  sessionId: String?, candidateId: String, runwaySeconds: Double?) -> Bool {
+    guard let status, let observedAtMs, nowMs >= observedAtMs,
+          let age = status.activeEncodeAgeMs, age >= 0,
+          nowMs - observedAtMs <= 15_000, age <= 15_000 - (nowMs - observedAtMs) else { return false }
+    return sessionId != nil && status.id == sessionId && status.activeEncodeCandidateId == candidateId &&
+        status.activeEncodeSegments.map { $0 >= 2 } == true &&
+        status.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
+        status.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true &&
+        runwaySeconds.map { $0 >= 0 && $0 < 10 } == true
+}
+
 func autoCompletedTransferBps(_ sample: PlayerController.AutoCompletedTransfer, nowMs: Int, maximumAgeMs: Int = 10_000) -> Double? {
     guard sample.networkLoad, !sample.fromLocalCache, sample.producerPaced == false,
           sample.ageMs(nowMs: nowMs) <= maximumAgeMs, sample.bodyBytes > 0,
@@ -2078,6 +2123,7 @@ final class PlayerController: ObservableObject {
     private var autoRouteProtocol: String?
     private var autoNextTickMs = 0
     private var autoUpgradeSinceMs: Int?
+    private var autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Int?
     private var autoSwitchTimes: [Int] = []
     private var autoBlockedUntil: [String: Int] = [:]
@@ -6050,6 +6096,9 @@ final class PlayerController: ObservableObject {
                     // can no longer freeze forever with no error.
                     establishedPlayback: self.attachmentRecovery.establishedPlayback
                 ) else { continue }
+                self.autoUpgradeEvidence.bind(attachment: self.player.currentItem.map(ObjectIdentifier.init),
+                                              attempt: self.playbackAttemptId)
+                self.autoUpgradeEvidence.stalled(at: PlaybackControlSession.monotonicMs())
                 switch stallEvent.action {
                 case .none:
                     continue
@@ -10185,10 +10234,7 @@ extension PlayerController {
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
         else { return }
         let now = PlaybackControlSession.monotonicMs()
-        if sessionStatusAgeMs.map({ $0 <= 15_000 }) == true, sessionStatus?.producerState == "held" {
-            autoUpgradeSinceMs = nil
-            return
-        }
+        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId)
         let link: Double? = {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
@@ -10201,13 +10247,13 @@ extension PlayerController {
         }()
         let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
         let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
+        if severe, let transfer = latestAutoCompletedTransfer {
+            autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
+        }
         let mild = autoMildSamples >= 2 && link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } == true
-        let producer = sessionStatusAgeMs.map { $0 <= 15_000 } == true &&
-            sessionStatus?.producerState == "running" && sessionStatus?.activeEncodeCandidateId == current.id &&
-            sessionStatus?.activeEncodeAgeMs.map { $0 >= 0 && $0 + (sessionStatusAgeMs ?? 15_001) <= 15_000 } == true &&
-            sessionStatus?.activeEncodeSegments.map { $0 >= 2 } == true &&
-            sessionStatus?.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
-            sessionStatus?.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true
+        let producer = autoActiveProductionPressure(status: sessionStatus,
+            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
         if !producer && (severe || mild) { reportCandidateLinkSample(negative: true) }
         guard severe || producer || mild else { return }
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
@@ -10294,6 +10340,7 @@ extension PlayerController {
 
     private func tickDisplayAwareAuto() {
         let now = PlaybackControlSession.monotonicMs()
+        autoUpgradeEvidence.bind(attachment: player.currentItem.map(ObjectIdentifier.init), attempt: playbackAttemptId)
         guard now >= autoNextTickMs else { return }
         autoNextTickMs = now + 5_000
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
@@ -10307,10 +10354,6 @@ extension PlayerController {
               case let candidates = measuredCostCatalog(offered),
               let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
         else { autoUpgradeSinceMs = nil; return }
-        if sessionStatusAgeMs.map({ $0 <= 15_000 }) == true, sessionStatus?.producerState == "held" {
-            autoUpgradeSinceMs = nil
-            return
-        }
         let link: Double? = {
             guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
                   !transfer.fromLocalCache, transfer.producerPaced == false,
@@ -10332,6 +10375,9 @@ extension PlayerController {
         }
         let downsideCost = autoDownsideCostBps(current, sample: latestAutoCompletedTransfer, sessionId: sessionId, nowMs: now)
         let severe = link.map { bps in downsideCost.map { bps < $0 * 0.7 } ?? false } ?? false
+        if severe, let transfer = latestAutoCompletedTransfer {
+            autoUpgradeEvidence.cliff(completedAtMs: transfer.completedAtMs, nowMs: now)
+        }
         let currentArea = Int64(current.width) * Int64(current.height)
         let mild = link.map { bps in downsideCost.map { bps < $0 * (current.peakBps == nil ? 1.0 : 1.3) } ?? false } ?? false
         if !mild { autoMildSamples = 0; autoMildTransferCompletedMs = nil }
@@ -10339,13 +10385,9 @@ extension PlayerController {
             autoMildSamples = min(2, autoMildSamples + 1)
             autoMildTransferCompletedMs = latestAutoCompletedTransfer?.completedAtMs
         }
-        let producerPressure = sessionStatusAgeMs.map { $0 <= 15_000 } == true &&
-            sessionStatus?.producerState == "running" && sessionStatus?.activeEncodeCandidateId == current.id &&
-            sessionStatus?.activeEncodeAgeMs.map { $0 >= 0 && $0 + (sessionStatusAgeMs ?? 15_001) <= 15_000 } == true &&
-            sessionStatus?.activeEncodeSegments.map { $0 >= 2 } == true &&
-            sessionStatus?.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
-            sessionStatus?.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true &&
-            (bufferedRunwaySeconds() ?? 0) < 10
+        let producerPressure = autoActiveProductionPressure(status: sessionStatus,
+            observedAtMs: sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+            sessionId: sessionId, candidateId: current.id, runwaySeconds: bufferedRunwaySeconds())
         let pressure = ((severe || autoMildSamples >= 2) &&
             (current.peakBps != nil || (bufferedRunwaySeconds() ?? 0) < 10)) || producerPressure
         let aspect = Double(current.width) / Double(current.height)
@@ -10357,6 +10399,7 @@ extension PlayerController {
                 linkCeiling: severe || autoMildSamples >= 2 ? link : nil)
             autoUpgradeSinceMs = nil
         } else {
+            guard autoUpgradeEvidence.allowsUpgrade(nowMs: now) else { autoUpgradeSinceMs = nil; return }
             let fitting = eligible.filter { candidate in
                 link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? false } == true
             }

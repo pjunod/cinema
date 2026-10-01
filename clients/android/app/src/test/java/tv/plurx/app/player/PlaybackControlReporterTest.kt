@@ -1800,6 +1800,41 @@ class DisplayAwareAutoEvidenceTest {
         assertFalse(autoOriginalTransferMarginProven(listOf(sample("a"), sample("b")), "another", 2_000L))
     }
 
+    @Test fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence() {
+        val status = tv.plurx.app.data.PlaybackSessionStatus(id = "incumbent", producer_state = "held",
+            active_encode_candidate_id = "candidate", active_encode_milli_realtime = 2_000,
+            active_encode_age_ms = 1_000L, active_encode_active_ms = 2_000L, active_encode_segments = 2)
+        fun pressure(snapshot: tv.plurx.app.data.PlaybackSessionStatus?, session: String? = "incumbent", at: Long = 2_000L) =
+            autoActiveProductionPressure(snapshot, 1_000L, at, session, "candidate", 3_000L)
+        assertFalse(pressure(status), "paced wall delivery with actual 2x work is not pressure")
+        assertTrue(pressure(status.copy(active_encode_milli_realtime = 800)), "fresh saturation still counts while currently held")
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800), at = 16_001L))
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800), session = "replacement"))
+        assertFalse(pressure(null))
+        assertFalse(pressure(status.copy(active_encode_milli_realtime = 800, active_encode_active_ms = null)))
+        val item = Any(); val successor = Any()
+        val window = AutoUpgradeEvidenceWindow()
+        window.bind(item, 1)
+        window.stalled(1_000L)
+        window.cliff(2_000L, 3_000L)
+        window.cliff(2_000L, 10_000L)
+        assertEquals(2_000L, window.lastCliffMs)
+        assertFalse(window.allowsUpgrade(60_999L))
+        assertFalse(window.allowsUpgrade(91_999L))
+        assertTrue(window.allowsUpgrade(92_000L))
+        assertFalse(window.allowsUpgrade(999L))
+        window.bind(successor, 1)
+        assertNull(window.lastStallMs)
+        assertNull(window.lastCliffMs)
+        window.stalled(93_000L)
+        window.bind(successor, 2)
+        assertNull(window.lastStallMs)
+        window.cliff(1, 93_000L)
+        assertNull(window.lastCliffMs)
+        window.bind(null, 2)
+        assertFalse(window.allowsUpgrade(200_000L))
+    }
+
     @Test fun stagedProductionProofRequiresExactCandidateAndCombinedAge() {
         val status = tv.plurx.app.data.PlaybackSessionStatus(id = "staged", active_encode_candidate_id = "candidate",
             active_encode_milli_realtime = 1_150, active_encode_age_ms = 1_000L,

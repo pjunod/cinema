@@ -1420,3 +1420,20 @@ are unchanged. Real actor/intake regressions and source compilation establish
 these bounded contracts, not physical 14-versus-20, decoder, typed-recovery or
 complete A-05 acceptance. Formal review and the current effort gate remain
 separate from author development evidence.
+
+### 9.12 Native pacing and upgrade observation windows (2026-10-01)
+
+The next bounded A-05 source task uses the existing native film-clock stall
+observations and completed-transfer timestamps. Upgrade history belongs to the
+installed attachment/attempt: a new item or attempt cannot inherit it, and a
+re-read cliff sample cannot renew its original completion time. Native upgrades
+require 60 seconds without a stall and 90 seconds since a proved bandwidth
+cliff, in addition to the existing headroom/dwell/owner conditions.
+
+Routine producer `held` state is not a stall verdict. Fresh exact-session and
+candidate active-production evidence can still attribute saturation while a
+producer is held; measured active 2x work behind paced 1x delivery is not
+pressure. Missing active timing is Unknown. Successor production, Link cost,
+decoder and continuity qualification remain independent. This source task
+does not close unknown-cost original trials, natural-boundary integration,
+typed recovery disposition or physical A-05 acceptance.
