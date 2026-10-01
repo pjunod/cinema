@@ -796,6 +796,7 @@ use crate::queue_fixture::QueueFixture;
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
+                retained_logical: None,
                 measured_candidate: None,
                 file: media_file_at(PathBuf::from("unused.mkv"), ms),
                 audio_index: None,
