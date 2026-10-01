@@ -138,7 +138,8 @@ FIXTURES = {
                 "geq=lum='64+64*X/W*(0.75+0.25*sin(T))':cb=512:cr=512"),
         extra=["-pix_fmt", "yuv420p10le", "-color_primaries", "bt709",
                "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv",
-               "-x265-params", "log-level=none:pools=1:frame-threads=1"],
+               "-x265-params", "log-level=none:pools=1:frame-threads=1:"
+               "colorprim=bt709:transfer=bt709:colormatrix=bt709:range=limited"],
         bitexact=True, why="10-bit near-black ramps without an 8-bit intermediate",
     ),
     "burn-pgs": dict(
