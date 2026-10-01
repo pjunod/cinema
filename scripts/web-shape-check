@@ -248,7 +248,7 @@ function domShape(shell, contract) {
     assert.match(button, /aria-haspopup="menu"/);
     assert.match(button, /aria-expanded="false"/);
   }
-  const ids = {skip_back: "pbback", play_pause: "pbplay", skip_forward: "pbforward", audio: "pbaudio", subtitles: "pbsubs", quality: "pbquality", settings: "pbsettings", info: "statsbtn", pip: "pbpip", title_info: "pbinfo", fullscreen: "pbfs", larger: "pblarger", close: "pbclose", airplay: "apbtn", spacer: null};
+  const ids = {skip_back_30: "pbback30", skip_back: "pbback", play_pause: "pbplay", skip_forward: "pbforward", skip_forward_30: "pbforward30", audio: "pbaudio", subtitles: "pbsubs", quality: "pbquality", settings: "pbsettings", info: "statsbtn", pip: "pbpip", title_info: "pbinfo", fullscreen: "pbfs", larger: "pblarger", close: "pbclose", airplay: "apbtn", spacer: null};
   const rowFor = id => { const row = contract.controls.rows.find(r => r.id === id); assert.ok(row, `missing row ${id}`); return row; };
   const moved = Object.entries(rowFor("transport").surface_placement || {}).filter(([, where]) => where.desktop).map(([item, where]) => ({item, ...where.desktop}));
   const barAt = player.indexOf('id="pbar"');

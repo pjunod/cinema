@@ -296,7 +296,7 @@ that failed.
 | `hold` | notice | banner, timed (30 s), server sentence | nobody | timer · presenting evidence |
 | `degraded` | notice | banner, timed (5 s) | nobody | timer |
 | `refused` | notice | banner, **untimed**, with actions: a viewer-requested change failed and the previous stream continues | nobody | intent superseded (a later change succeeds or the viewer asks again) · presenting evidence ≥ 10 s *of continuous playback* on `attached` |
-| `exhausted` | prompt | full-screen: "Playback is stalled." + Keep waiting / Try again / Close (plus Force transcode where the owner offers it) | **the owner, before raising** | user action only |
+| `exhausted` | prompt | full-screen: "Playback is stalled." + owner-provided actions; web offers Try again / Close (plus Force transcode) | **the owner, before raising** | user action only |
 | `stopped` | terminal | full-screen: title + sentence + Try again / Close (+ Sign in for 401/403) | **the owner, before raising** | user action only |
 
 <!-- contract:surface-classes:begin -->
@@ -353,13 +353,12 @@ terminal (`2174`); on the web `showStallRecoveryFailure` and the
 with rungs left (`retryAfterReadinessTimeout`, the Android target-deadline
 `recover`) raises `recovering`, not `exhausted`.
 
-**Keep waiting** is an action the *owner* implements, and the fixture only
-names it: web re-arms `armStall` and clears `recoveringStall`; Apple runs
-`retryAfterPlaybackFailure` (which resets `recoveryReopenBudget` and only
-that, `2447-2453`); Android resets `stallReopenBudget` and
-`sessionlessStallRecoveryUsed` and sets `playWhenReady = true`. Each is one
-more bounded attempt; a prompt that comes back is the ladder spent again, and
-that is the honest answer.
+**Keep waiting** requires an executable bounded owner transition. Apple
+retries through `retryAfterPlaybackFailure`; Android resets its bounded reopen
+allowance and resumes. The stopped or terminal exhausted web attempt offers
+Try again, Force transcode where applicable, and Close. Hiding its prompt
+and arming a detector that immediately exits is not recovery. Try again
+opens through the existing transport owner at the saved position.
 
 **Actions are a property of the fault, not the class.** The vocabulary is
 `keep_waiting · retry · close · force_transcode · sign_in`; the owner sets
@@ -401,7 +400,7 @@ disambiguate are *context* (start · attached playback · pending change) and
 | # | Raw event (context) | Class | Notes |
 |---|---|---|---|
 | 1 | Any refusal or error while the owner reports **exhausted** and has stopped the player | `stopped` | title from context; sentence = armed `terminal` verdict message if one exists **and the failure is not transport-class** (the existing exception, `PlayerController.swift:5327` at `a124876`, `Controller.kt:657`), else the client sentence |
-| 2 | Owner budget spent, picture frozen, owner stopped the player | `exhausted` | Keep waiting / Try again / Close; Force transcode on the web's diagnosed-stall path |
+| 2 | Owner budget spent, picture frozen, owner stopped the player | `exhausted` | Try again / Close; Force transcode on the web's diagnosed-stall path |
 | 3 | 401 / 403 on any playback request | `stopped` | `sign_in` action; keeps the status-based auth match the app has (`AppModel.swift:288`) |
 | 4 | 409 `vod_source_rescan_required`, 422 `vod_source_unsupported` / unsupported tracks, 501 `vod_transcode_unavailable` / `vod_subtitle_burn_unavailable` (start) | `stopped` | server sentence; no retry |
 | 5 | 503 `vod_disabled` (start) | `stopped` | server sentence; no retry — service is off, not building |

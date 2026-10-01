@@ -2,7 +2,7 @@
 // ---- detail helpers -------------------------------------------------------
 function fmtChannels(n){ return n===8?"7.1":n===7?"6.1":n===6?"5.1":n===2?"2.0":n===1?"Mono":(n?n+"ch":""); }
 function fmtMbps(bps){ return bps? (bps>=1000000? (bps/1000000).toFixed(bps>=10000000?0:1)+" Mb/s" : Math.round(bps/1000)+" kb/s") : ""; }
-function fmtBytes(n){ if(!n) return ""; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1000&&i<u.length-1){ n/=1000; i++; } return (i?n.toFixed(n>=10?0:1):Math.round(n))+" "+u[i]; }
+function fmtBytes(n){ if(n==null||!Number.isFinite(n)||n<0) return ""; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1000&&i<u.length-1){ n/=1000; i++; } return (i?n.toFixed(n>=10?0:1):Math.round(n))+" "+u[i]; }
 function audioLabel(a){ return [a.codec&&a.codec.toUpperCase(), fmtChannels(a.channels), a.language].filter(Boolean).join(" · "); }
 // Apache-2.0 Google Material icon paths. Inline SVG keeps the self-hosted web
 // client usable without a font or CDN connection.

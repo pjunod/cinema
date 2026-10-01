@@ -1669,15 +1669,12 @@ async fn control_inner_observed(
     }
     if route.state != "active" {
         crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
-        return control_error(
-            StatusCode::GONE,
-            "session_ended",
-            "this media session has ended or been superseded",
-            Some(route.incarnation_id),
-            Some(owner_epoch),
-            None,
-            None,
-        );
+        return (StatusCode::GONE, [(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+            "code": "session_ended", "message": "this media session has ended or been superseded",
+            "generation": route.incarnation_id, "control_epoch": owner_epoch,
+            "terminal_reason": crate::vodserve::Terminal::from_durable_reason(route.terminal_reason.as_deref())
+                .map(|cause| cause.durable_reason()),
+        }))).into_response();
     }
     if let Some(refusal) = control_owner_refusal(&route, Some(owner_epoch)) {
         return refusal;
@@ -2016,6 +2013,7 @@ pub(crate) fn control_error(
         status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(crate::playback_control::ControlErrorBody {
+            terminal_reason: None,
             code: code.to_owned(),
             message: message.into(),
             generation,
@@ -2526,6 +2524,14 @@ async fn control_local_with_observation(
                 None,
             );
         }
+        Some(Err(crate::playback_control::ControlStateError::RollingEnded(cause))) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return (StatusCode::GONE, [(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+                "code": "session_ended", "message": "the rolling media session ended before control could renew it",
+                "generation": route.incarnation_id, "control_epoch": owner_epoch,
+                "terminal_reason": cause.terminal_reason().durable_reason(),
+            }))).into_response();
+        }
         Some(Err(crate::playback_control::ControlStateError::SessionEnded)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
             return control_error(
@@ -2540,15 +2546,11 @@ async fn control_local_with_observation(
         }
         Some(Err(crate::playback_control::ControlStateError::PauseExpired)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
-            return control_error(
-                StatusCode::GONE,
-                "pause_grace_expired",
-                "the paused rolling presentation reached its finite grace; resume may open one replacement at the saved position",
-                Some(route.incarnation_id.clone()),
-                Some(owner_epoch),
-                None,
-                None,
-            );
+            return (StatusCode::GONE, [(header::CACHE_CONTROL, "no-store")], Json(serde_json::json!({
+                "code": "pause_grace_expired", "message": "the paused rolling presentation reached its finite grace; resume may open one replacement at the saved position",
+                "generation": route.incarnation_id, "control_epoch": owner_epoch,
+                "terminal_reason": crate::vodserve::Terminal::PauseExpired.durable_reason(),
+            }))).into_response();
         }
         Some(Err(crate::playback_control::ControlStateError::OwnerTransition)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);

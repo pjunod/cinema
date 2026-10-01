@@ -3036,7 +3036,6 @@
           "attached": "g1",
           "player_stopped": true,
           "actions": [
-            "keep_waiting",
             "retry",
             "force_transcode",
             "close"
@@ -3054,7 +3053,6 @@
           "surface": "blocking",
           "class": "exhausted",
           "actions": [
-            "keep_waiting",
             "retry",
             "force_transcode",
             "close"
