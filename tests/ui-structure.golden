@@ -2104,10 +2104,10 @@ catalog|player@1280x860|dom|aside#watch-title-panel.watch-title[aria-label=*] > 
 catalog|player@1280x860|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|player@1280x860|dom|aside.px-side > div.px-foot|1
 catalog|player@1280x860|dom|aside.px-side > div.px-head|1
-catalog|player@1280x860|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@1280x860|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@1280x860|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@1280x860|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+catalog|player@1280x860|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@1280x860|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@1280x860|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@1280x860|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 catalog|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 catalog|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 catalog|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -2153,10 +2153,10 @@ catalog|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slide
 catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 catalog|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pblarger.picon[aria-label=* text]|1
 catalog|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
@@ -2227,6 +2227,7 @@ catalog|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true typ
 catalog|player@1280x860|dom|dl.watch-ledger > dd[text]|2
 catalog|player@1280x860|dom|dl.watch-ledger > dd|8
 catalog|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+catalog|player@1280x860|dom|g > path|5
 catalog|player@1280x860|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@1280x860|dom|nav.px-nav > a|3
 catalog|player@1280x860|dom|nav.px-nav[aria-label=*] > a|6
@@ -2242,6 +2243,8 @@ catalog|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
+catalog|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+catalog|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > path|14
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|10
@@ -2273,10 +2276,10 @@ catalog|player@390x780|dom|aside#watch-title-panel.watch-title[aria-label=*] > d
 catalog|player@390x780|dom|aside.px-side > div#pxnav.px-scroll|1
 catalog|player@390x780|dom|aside.px-side > div.px-foot|1
 catalog|player@390x780|dom|aside.px-side > div.px-head|1
-catalog|player@390x780|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@390x780|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@390x780|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-catalog|player@390x780|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+catalog|player@390x780|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@390x780|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@390x780|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+catalog|player@390x780|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 catalog|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 catalog|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 catalog|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -2322,10 +2325,10 @@ catalog|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider
 catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 catalog|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-catalog|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+catalog|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 catalog|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
@@ -2395,6 +2398,7 @@ catalog|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type
 catalog|player@390x780|dom|dl.watch-ledger > dd[text]|2
 catalog|player@390x780|dom|dl.watch-ledger > dd|8
 catalog|player@390x780|dom|dl.watch-ledger > dt[text]|10
+catalog|player@390x780|dom|g > path|5
 catalog|player@390x780|dom|main#main > section#watch-browser.watch-browser[aria-label=*]|1
 catalog|player@390x780|dom|nav.px-nav > a|3
 catalog|player@390x780|dom|nav.px-nav[aria-label=*] > a|6
@@ -2410,6 +2414,8 @@ catalog|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > s
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 catalog|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
+catalog|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+catalog|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > path|14
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > rect|10
@@ -5009,10 +5015,10 @@ classic|player@1280x860|dom|^ > div#app|1
 classic|player@1280x860|dom|^ > div#modal.modal.open.watch-host[role=region aria-label=*]|1
 classic|player@1280x860|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-ledger.watch-ledger-host|1
 classic|player@1280x860|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-title|1
-classic|player@1280x860|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@1280x860|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@1280x860|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@1280x860|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+classic|player@1280x860|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@1280x860|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@1280x860|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@1280x860|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -5059,10 +5065,10 @@ classic|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slide
 classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 classic|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-classic|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+classic|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pblarger.picon[aria-label=* text]|1
 classic|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
@@ -5113,6 +5119,7 @@ classic|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true typ
 classic|player@1280x860|dom|dl.watch-ledger > dd[text]|2
 classic|player@1280x860|dom|dl.watch-ledger > dd|8
 classic|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+classic|player@1280x860|dom|g > path|5
 classic|player@1280x860|dom|header.top > a.logo[text]|1
 classic|player@1280x860|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
 classic|player@1280x860|dom|header.top > div.topctl|1
@@ -5132,6 +5139,8 @@ classic|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
+classic|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+classic|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 classic|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 classic|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
 classic|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
@@ -5153,10 +5162,10 @@ classic|player@390x780|dom|^ > div#app|1
 classic|player@390x780|dom|^ > div#modal.modal.open.watch-host[role=region aria-label=*]|1
 classic|player@390x780|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-ledger.watch-ledger-host|1
 classic|player@390x780|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-title|1
-classic|player@390x780|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@390x780|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@390x780|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-classic|player@390x780|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+classic|player@390x780|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@390x780|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@390x780|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+classic|player@390x780|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 classic|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 classic|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -5203,10 +5212,10 @@ classic|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider
 classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 classic|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-classic|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+classic|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 classic|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
@@ -5256,6 +5265,7 @@ classic|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type
 classic|player@390x780|dom|dl.watch-ledger > dd[text]|2
 classic|player@390x780|dom|dl.watch-ledger > dd|8
 classic|player@390x780|dom|dl.watch-ledger > dt[text]|10
+classic|player@390x780|dom|g > path|5
 classic|player@390x780|dom|header.top > a.logo[text]|1
 classic|player@390x780|dom|header.top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
 classic|player@390x780|dom|header.top > div.topctl|1
@@ -5275,6 +5285,8 @@ classic|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > s
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 classic|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
+classic|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+classic|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 classic|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 classic|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
 classic|player@390x780|focus|002|button#pbquality.picon "Playback quality"
@@ -7774,10 +7786,10 @@ theater|player@1280x860|dom|^ > div#app|1
 theater|player@1280x860|dom|^ > div#modal.modal.open.watch-host[role=region aria-label=*]|1
 theater|player@1280x860|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-ledger.watch-ledger-host|1
 theater|player@1280x860|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-title|1
-theater|player@1280x860|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@1280x860|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@1280x860|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@1280x860|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+theater|player@1280x860|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@1280x860|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@1280x860|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@1280x860|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|player@1280x860|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|player@1280x860|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -7821,10 +7833,10 @@ theater|player@1280x860|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slide
 theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 theater|player@1280x860|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-theater|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+theater|player@1280x860|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pblarger.picon[aria-label=* text]|1
 theater|player@1280x860|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
@@ -7878,6 +7890,7 @@ theater|player@1280x860|dom|div.watch-trks > button.on.trk[aria-pressed=true typ
 theater|player@1280x860|dom|dl.watch-ledger > dd[text]|2
 theater|player@1280x860|dom|dl.watch-ledger > dd|8
 theater|player@1280x860|dom|dl.watch-ledger > dt[text]|10
+theater|player@1280x860|dom|g > path|5
 theater|player@1280x860|dom|header.th-top > a.logo[text]|1
 theater|player@1280x860|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
 theater|player@1280x860|dom|header.th-top > div.th-ctl|1
@@ -7897,6 +7910,8 @@ theater|player@1280x860|dom|section#watch-browser.watch-browser[aria-label=*] > 
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
+theater|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+theater|player@1280x860|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 theater|player@1280x860|focus|000|button#pbforward.picon "Forward 10 seconds"
 theater|player@1280x860|focus|001|button#pbforward30.picon "Forward 30 seconds"
 theater|player@1280x860|focus|002|button#pbquality.picon "Playback quality"
@@ -7918,10 +7933,10 @@ theater|player@390x780|dom|^ > div#app|1
 theater|player@390x780|dom|^ > div#modal.modal.open.watch-host[role=region aria-label=*]|1
 theater|player@390x780|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-ledger.watch-ledger-host|1
 theater|player@390x780|dom|aside#watch-title-panel.watch-title[aria-label=*] > div#watch-title|1
-theater|player@390x780|dom|button#pbback.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@390x780|dom|button#pbback30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@390x780|dom|button#pbforward.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
-theater|player@390x780|dom|button#pbforward30.picon[aria-label=* text] > span.pseek-seconds[aria-hidden=true text]|1
+theater|player@390x780|dom|button#pbback.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@390x780|dom|button#pbback30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@390x780|dom|button#pbforward.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
+theater|player@390x780|dom|button#pbforward30.picon[aria-label=*] > svg.pseek-arrows[aria-hidden=true]|1
 theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.lookword[text]|1
 theater|player@390x780|dom|button.ghost.lookbtn.sm[aria-haspopup=menu aria-label=*] > span.tsw|1
 theater|player@390x780|dom|button.ghost.profile.sm > span.caret[text]|1
@@ -7965,10 +7980,10 @@ theater|player@390x780|dom|div#ptimeline.ptimeline > div#pseek.pseek[role=slider
 theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptcur.ptime[aria-hidden=true text]|1
 theater|player@390x780|dom|div#ptimeline.ptimeline > span#ptdur.ptime[aria-hidden=true text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbaudio.paud.picon[aria-expanded=false aria-haspopup=menu aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=* text]|1
-theater|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=* text]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbback.picon[aria-label=*]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbback30.picon[aria-label=*]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbforward.picon[aria-label=*]|1
+theater|player@390x780|dom|div#ptransport.ptransport > button#pbforward30.picon[aria-label=*]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbfs.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbpip.picon[aria-label=* text]|1
 theater|player@390x780|dom|div#ptransport.ptransport > button#pbplay.picon[aria-label=* text]|1
@@ -8021,6 +8036,7 @@ theater|player@390x780|dom|div.watch-trks > button.on.trk[aria-pressed=true type
 theater|player@390x780|dom|dl.watch-ledger > dd[text]|2
 theater|player@390x780|dom|dl.watch-ledger > dd|8
 theater|player@390x780|dom|dl.watch-ledger > dt[text]|10
+theater|player@390x780|dom|g > path|5
 theater|player@390x780|dom|header.th-top > a.logo[text]|1
 theater|player@390x780|dom|header.th-top > button#dvr-global.dvr-global.unavailable[aria-label=*]|1
 theater|player@390x780|dom|header.th-top > div.th-ctl|1
@@ -8040,6 +8056,8 @@ theater|player@390x780|dom|section#watch-browser.watch-browser[aria-label=*] > s
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|2
 theater|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
+theater|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > g|2
+theater|player@390x780|dom|svg.pseek-arrows[aria-hidden=true] > path|5
 theater|player@390x780|focus|000|button#pbforward.picon "Forward 10 seconds"
 theater|player@390x780|focus|001|button#pbforward30.picon "Forward 30 seconds"
 theater|player@390x780|focus|002|button#pbquality.picon "Playback quality"

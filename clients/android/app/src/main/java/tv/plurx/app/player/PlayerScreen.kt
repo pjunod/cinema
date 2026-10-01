@@ -46,14 +46,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.ClosedCaption
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Forward10
-import androidx.compose.material.icons.filled.Forward30
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.PictureInPictureAlt
-import androidx.compose.material.icons.filled.Replay10
-import androidx.compose.material.icons.filled.Replay30
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -84,6 +80,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -2010,6 +2007,25 @@ internal fun playerContextLine(releaseDate: String?, runtimeLabel: String?): Str
     ).takeIf { it.isNotEmpty() }?.joinToString("   ·   ")
 
 @Composable
+private fun SeekArrows(count: Int, backward: Boolean, label: String) {
+    Canvas(Modifier.size(34.dp).semantics { contentDescription = label }) {
+        val scale = size.width / 32f
+        val top = (size.height - 24f * scale) / 2f
+        fun x(value: Float): Float = (if (backward) 32f - value else value) * scale
+        repeat(count) { index ->
+            val start = (if (count == 2) 7f else 2f) + index * 10f
+            val arrow = Path().apply {
+                moveTo(x(start), top + 5f * scale)
+                lineTo(x(start + 8f), top + 12f * scale)
+                lineTo(x(start), top + 19f * scale)
+                close()
+            }
+            drawPath(arrow, Color.White)
+        }
+    }
+}
+
+@Composable
 private fun TransportButtons(
     isPlaying: Boolean,
     timelineAbove: Boolean,
@@ -2032,19 +2048,17 @@ private fun TransportButtons(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         TvIconButton(onClick = onSeekBack30, modifier = modifier(PlayerControlId.SkipBack30, 48.dp)) {
-            Icon(
-                Icons.Filled.Replay30,
-                contentDescription = "Back 30 seconds",
-                tint = Color.White,
-                modifier = Modifier.size(34.dp),
+            SeekArrows(
+                count = 3,
+                backward = true,
+                label = "Back 30 seconds",
             )
         }
         TvIconButton(onClick = onSeekBack, modifier = modifier(PlayerControlId.SkipBack, 48.dp)) {
-            Icon(
-                Icons.Filled.Replay10,
-                contentDescription = "Back 10 seconds",
-                tint = Color.White,
-                modifier = Modifier.size(34.dp),
+            SeekArrows(
+                count = 2,
+                backward = true,
+                label = "Back 10 seconds",
             )
         }
         TvIconButton(
@@ -2059,19 +2073,17 @@ private fun TransportButtons(
             )
         }
         TvIconButton(onClick = onSeekForward, modifier = modifier(PlayerControlId.SkipForward, 48.dp)) {
-            Icon(
-                Icons.Filled.Forward10,
-                contentDescription = "Forward 10 seconds",
-                tint = Color.White,
-                modifier = Modifier.size(34.dp),
+            SeekArrows(
+                count = 2,
+                backward = false,
+                label = "Forward 10 seconds",
             )
         }
         TvIconButton(onClick = onSeekForward30, modifier = modifier(PlayerControlId.SkipForward30, 48.dp)) {
-            Icon(
-                Icons.Filled.Forward30,
-                contentDescription = "Forward 30 seconds",
-                tint = Color.White,
-                modifier = Modifier.size(34.dp),
+            SeekArrows(
+                count = 3,
+                backward = false,
+                label = "Forward 30 seconds",
             )
         }
     }
