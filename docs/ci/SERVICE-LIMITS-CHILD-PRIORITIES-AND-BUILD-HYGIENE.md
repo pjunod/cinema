@@ -1213,7 +1213,9 @@ invent a `.dwp` requirement.
 Profile-C manifests use schema2. Their exact entry set includes each `.dwp`
 and SHA-256 sidecar, binds its bytes to its executable digest and the source
 tree/commit/build-ref, and checks actual compiler identity against the tagged
-`rust-toolchain.toml`. The bounded ELF/DWARF verifier requires symbol and
+`rust-toolchain.toml`. Packaging rejects tracked source changes before naming
+that tree; untracked generated export/packaging files remain allowed. The
+bounded ELF/DWARF verifier requires symbol and
 line sections, a valid DWP compilation-unit index and coverage of every
 executable skeleton DWO identity. Missing, symlinked, torn, wrong-machine or
 mismatched debug files fail rather than producing a flags-only receipt.
@@ -1221,7 +1223,8 @@ Metadata reads are capped at 32 MiB; DWP contribution ranges are checked
 against their actual section sizes, without reading the whole debug payload.
 
 Windows emits a PDB, not a `.dwp`. Its existing zip now verifies the PE
-CodeView GUID/age against the MSF7 PDB identity stream before retaining both
+CodeView GUID/age against the MSF7 PDB identity stream and requires the
+existing Windows x86_64 release machine before retaining both
 `plurxd.exe` and the verified PDB under its CodeView basename (including a
 hashed build basename when present). There is no macOS daemon release archive in
 this workflow; macOS packed debug is a dSYM and is not represented as a DWP.

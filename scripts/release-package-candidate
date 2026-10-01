@@ -28,6 +28,8 @@ done
 actual_commit=$(git -C "$source_root" rev-parse HEAD^{commit})
 [ "$actual_commit" = "$expected_commit" ] \
   || die "source commit $actual_commit does not match $expected_commit"
+git -C "$source_root" diff --quiet HEAD -- \
+  || die "tagged source has tracked changes; artifact identity would name the wrong tree"
 git_tree=$(git -C "$source_root" rev-parse HEAD^{tree})
 rustc_version=$(tr '\n' ' ' < "$export_root/rustc-version" | sed 's/[[:space:]]*$//')
 [ -n "$rustc_version" ] || die "binary export has no Rust toolchain identity"

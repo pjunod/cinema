@@ -38,6 +38,14 @@ def pair(directory: Path, *, guid: bytes = GUID, age: int = 1, name: bytes = b"p
 
 
 class PdbPairCase(unittest.TestCase):
+    def test_windows_archive_does_not_label_another_machine_as_x86_64(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); pair(root)
+            path = root / "plurxd.exe"; data = bytearray(path.read_bytes())
+            struct.pack_into("<H", data, 68, 0xAA64); path.write_bytes(data)
+            with self.assertRaisesRegex(ValueError, "machine"):
+                verify_pdb_pair(path, root / "plurxd.pdb")
+
     def test_codeview_basename_is_retained_even_when_the_build_output_was_renamed(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); pair(root, name=b"plurxd-012345abcdef.pdb")

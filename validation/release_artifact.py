@@ -259,9 +259,10 @@ def verify(
             path = directory / debug_name
             if not isinstance(record, dict) or set(record) != {"sha256", "binary_sha256", "dwo_units"}:
                 raise ValueError("invalid packed debug artifact record")
+            units = verify_packed_pair(directory / name, path)
             if record["binary_sha256"] != binaries[name]["sha256"] or record["sha256"] != _digest(path):
                 raise ValueError("packed debug digest/binary pairing mismatch")
-            if record["dwo_units"] != verify_packed_pair(directory / name, path):
+            if type(record["dwo_units"]) is not int or record["dwo_units"] != units:
                 raise ValueError("packed debug compilation-unit mismatch")
             if (directory / f"{debug_name}.sha256").read_text(encoding="utf-8") != f"{record['sha256']}  {debug_name}\n":
                 raise ValueError("packed debug sidecar mismatch")
