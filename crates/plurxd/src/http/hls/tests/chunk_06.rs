@@ -2560,6 +2560,7 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()

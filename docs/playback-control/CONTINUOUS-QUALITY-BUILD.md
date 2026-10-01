@@ -1401,3 +1401,26 @@ code being merged. Record individual results and rerun failures individually.
 A repair invalidates prior passing evidence only for tests affected by that
 repair; it does not trigger an unconditional full-lane rerun. No unit tests
 run during implementation.
+
+### 10.16 Versioned worker media roles
+
+A continuous family worker request now carries a strict version-1 media role
+and a UUID family generation through the existing stored/peer request. Ordinary
+requests omit it, preserving their legacy JSON and idempotency identity. A role,
+version or family change changes the request fingerprint. Older strict workers
+refuse the new field; they cannot recreate a video-only recipe as muxed media.
+Unknown role fields, unsupported versions, live presentation, source copy,
+burned subtitles, HDR-output requests and legacy candidate contexts are refused.
+Following library channels cannot accidentally become continuous VOD families.
+
+The existing descriptor-bound VOD preparation now resolves the continuous
+video role with normalized High level 5.0 video and no audio. The shared-audio
+role freezes its AAC recipe and uses CPU-only resource accounting and its own
+48 kHz plan. Soundtrack preparation does not require a GPU or video tone-map
+proof merely because the source carries HDR. Both roles retain the existing
+source attestation and executable/engine capture before naming a rendition.
+
+Authored regressions cover strict wire parsing, distinct request identities,
+unsupported-role refusal and real-source video/audio recipe preparation. Rust
+1.97.1 workspace/all-target compilation passed; tests remain deferred. This makes worker creation role-aware; the family actor still
+needs pairing, parent ownership, delivery routing and consumer-pin integration.

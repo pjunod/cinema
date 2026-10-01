@@ -1217,7 +1217,8 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.candidate_id.is_none() || request.decoder_caps.is_some())
+    (request.request.continuous_media.is_none() || request.library_channel.is_none())
+        && (request.candidate_id.is_none() || request.decoder_caps.is_some())
         // An explicit snapshot is a current capability constraint, including
         // on ordinary negotiated routes. Empty/all-unavailable is decoder
         // loss, not permission to fall back to legacy unconstrained dispatch.
@@ -1257,7 +1258,11 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.file_id > 0
+    request
+        .continuous_media
+        .as_ref()
+        .is_none_or(|media| media.valid_for(request))
+        && request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -5477,6 +5482,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         user_id: route.user_id,
         typeless_playlist: true,
         request: SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
@@ -5916,6 +5922,7 @@ mod tests {
             typeless_playlist: true,
             library_channel: None,
             request: SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 control_sequence: None,
                 file_id: 11,
@@ -6905,6 +6912,7 @@ mod tests {
         let mut vod = base.clone();
         vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
             request: SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
@@ -7050,6 +7058,7 @@ mod tests {
 
         let vod = RemoteStartRequest {
             request: SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()

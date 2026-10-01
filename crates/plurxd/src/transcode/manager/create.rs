@@ -670,6 +670,16 @@ impl TranscodeManager {
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
     ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| !media.valid_for(req))
+        {
+            return Err(vod_refusal_error(
+                "vod_continuous_recipe_invalid",
+                "the continuous media role is incompatible with this request",
+            ));
+        }
         if matches!(req.kind, SessionKind::Copy { .. }) {
             match req.subtitle_burn {
                 None => return Ok(None),
@@ -840,9 +850,18 @@ impl TranscodeManager {
                 "the source probe has no usable video cadence; rescan the file",
             )
         })?;
-        let (mut encoder, mut grade) = self
-            .encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
-            .await?;
+        let shared_audio_role = req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio);
+        let (mut encoder, mut grade) = if shared_audio_role {
+            // This process maps no video. It needs neither a GPU permit nor a
+            // video tone-map proof merely because its source contains HDR.
+            (Encoder::Software, OutputGrade::Sdr)
+        } else {
+            self.encoder_and_grade_for(file, req.hdr10, target_height, subtitle_burn.is_some())
+                .await?
+        };
         // After the encoder and grade, deliberately. `encoder_and_grade_for`
         // can refuse this source outright (an unknown Dolby Vision profile, an
         // unproven Profile 5 renderer), and a refusal must not first start a
@@ -915,6 +934,18 @@ impl TranscodeManager {
                 options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             }
         }
+        if let Some(media) = req.continuous_media.as_ref() {
+            options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            if media.role == ContinuousMediaRole::SharedAudio {
+                options.pipeline = Pipeline::Cpu;
+                options.tone_map = ToneMap::None;
+            }
+            if media.role == ContinuousMediaRole::Video {
+                options.video_sample_envelope =
+                    plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
+                options.normalized_geometry = true;
+            }
+        }
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -974,6 +1005,22 @@ impl TranscodeManager {
                 ));
             }
         }
+        let shared_audio = if req
+            .continuous_media
+            .as_ref()
+            .is_some_and(|media| media.role == ContinuousMediaRole::SharedAudio)
+        {
+            Some(
+                plurx_core::transcode::VodSharedAudioRecipe::from_plan(&plan).ok_or_else(|| {
+                    vod_refusal_error(
+                        "vod_continuous_audio_invalid",
+                        "the resolved source has no bounded shared AAC recipe",
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -1006,7 +1053,7 @@ impl TranscodeManager {
             ));
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
-            shared_audio: None,
+            shared_audio,
             source_object_version,
             plan,
             resources,

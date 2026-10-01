@@ -339,6 +339,7 @@
     ) -> plurx_core::domain::MediaSessionPreparation {
         let staged_session_id = uuid::Uuid::new_v4().to_string();
         let staged_request = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: route.playback_id.clone(),
@@ -451,6 +452,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let request = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: predecessor.playback_id.clone(),
@@ -739,6 +741,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
@@ -814,6 +817,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
@@ -1057,6 +1061,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -1252,6 +1257,7 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
@@ -1433,6 +1439,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -1526,6 +1533,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -1934,6 +1942,7 @@
 
     fn staged_candidate_request() -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 11,

@@ -41,6 +41,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
@@ -52,6 +53,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
     let missing = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
@@ -221,6 +223,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: None,
             previous_session_id: None,
@@ -357,6 +360,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: None,
         previous_session_id: None,
@@ -449,6 +453,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
@@ -489,6 +494,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let plain = manager
         .prepare_vod_encoding(
             &SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
@@ -522,6 +528,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
@@ -625,6 +632,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
@@ -708,6 +716,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     )
     .with_dovi_reshape(true);
     let req = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
@@ -799,6 +808,7 @@ async fn encoding_shipped_shape() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
+        continuous_media: None,
         candidate_context: None,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
@@ -821,4 +831,57 @@ async fn encoding_shipped_shape() {
     assert!(encoding.admissions.software_in_use() > 0, "the permit holds software capacity");
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
+}
+
+#[tokio::test]
+async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("continuous worker fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source).await.expect("source probe");
+    let metadata = std::fs::metadata(&source).expect("metadata");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, source.to_str().expect("fixture path"), probe.clone()).await;
+    store.upsert_file(
+        store.get_file(file_id).await.expect("read file").expect("seeded file").item_id,
+        source.to_str().expect("fixture path"),
+        metadata.len() as i64,
+        metadata.modified().expect("fixture mtime").duration_since(std::time::UNIX_EPOCH).expect("unix mtime").as_secs() as i64,
+        &probe,
+    ).await.expect("attested file");
+    let file = store.get_file(file_id).await.expect("read file").expect("seeded file");
+    let manager = TranscodeManager::new(store, base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu);
+    let mut request = SessionRequest {
+        continuous_media: Some(Box::new(ContinuousMediaRequest {
+            version: 1,
+            family_generation: uuid::Uuid::new_v4().to_string(),
+            role: ContinuousMediaRole::Video,
+        })),
+        candidate_context: None,
+        request_id: Some(uuid::Uuid::new_v4().to_string()),
+        previous_session_id: None,
+        reopen_reason: None,
+        presentation: Presentation::Vod,
+        automatic: false,
+        kind: SessionKind::Transcode { height: 240 },
+        ..reopen_request(file_id, "continuous-worker", "unused", "unused")
+    };
+    let video = manager.prepare_vod_encoding(&request, &file).await.expect("video planning").expect("video recipe");
+    assert!(!video.plan.options().input_has_audio);
+    assert!(video.shared_audio.is_none());
+    assert_eq!(video.plan.options().video_sample_envelope, plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50);
+    let video_args = video.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
+    assert!(video_args.iter().any(|arg| arg == "-an"));
+    assert!(!video_args.iter().any(|arg| arg == "aac"));
+    request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::SharedAudio;
+    let audio = manager.prepare_vod_encoding(&request, &file).await.expect("audio planning").expect("audio recipe");
+    assert!(audio.shared_audio.is_some());
+    assert!(!audio.resources().hardware_slot);
+    assert_eq!(audio.resources().cpu_threads, 3);
+    assert_eq!(audio.media_plan(file.duration_ms.expect("fixture duration")).timescale, 48_000);
+    let audio_args = audio.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
+    assert!(audio_args.iter().any(|arg| arg == "-vn"));
+    assert!(audio_args.iter().any(|arg| arg == "aac"));
+    request.continuous_media.as_mut().expect("continuous role").version = 2;
+    assert!(manager.prepare_vod_encoding(&request, &file).await.is_err());
 }

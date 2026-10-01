@@ -1065,6 +1065,7 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id,

@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -38,6 +39,7 @@
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             audio_offset_ms: 250,
             ..request.clone()
@@ -56,6 +58,7 @@
             "one request id reused by two users must not collide"
         );
         let other_player = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             playback_id: "pb-2".into(),
             ..request.clone()
@@ -112,6 +115,7 @@
         // The same key asking for something else is a mistake worth naming,
         // not a quiet second stream.
         let different = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             start_seconds: 600.0,
             ..request.clone()
@@ -124,6 +128,7 @@
 
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some("req-2".into()),
             start_seconds: 600.0,
@@ -163,6 +168,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -238,6 +244,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 999_999, // nothing has this id, so the create fails
@@ -259,6 +266,7 @@
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
         let retry = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             file_id,
             ..request.clone()
@@ -292,6 +300,7 @@
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -332,6 +341,7 @@
         // body is still Auto, so its initial pre-claim numeric answer is not
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen
@@ -446,6 +456,7 @@
         .await;
 
         let lower = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen_request(
@@ -784,6 +795,7 @@
         drop(claim);
 
         let foreign = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some("renamed-foreign".into()),
             ..request
@@ -1197,6 +1209,7 @@
         .await;
 
         let request = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             audio_index: Some(2),
             subtitle_burn: Some(5),
@@ -1215,6 +1228,7 @@
         drop(stall_claim);
 
         let track_change = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some("user-track-change".into()),
             previous_session_id: None,
@@ -1438,6 +1452,7 @@
         drop(claim);
 
         let device_b = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some("device-b-reopen".into()),
             previous_session_id: Some("device-b-session".into()),
@@ -1458,6 +1473,7 @@
         drop(device_b_claim);
 
         let foreign_user = SessionRequest {
+            continuous_media: None,
             candidate_context: None,
             request_id: Some("foreign-user-reopen".into()),
             ..request
@@ -2633,4 +2649,58 @@ scope = "test"
             .await
             .expect("resolve plan");
         (plan, mgr, work, cache)
+    }
+
+    #[test]
+    fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
+        let mut request = SessionRequest {
+            continuous_media: None,
+            candidate_context: None,
+            file_id: 1,
+            playback_id: "continuous-role".into(),
+            request_id: None,
+            control_sequence: None,
+            automatic: false,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Transcode { height: 360 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: Presentation::Vod,
+            transport: None,
+            block_budget_secs: None,
+        };
+        let legacy = serde_json::to_value(&request).expect("legacy request");
+        assert!(legacy.get("continuous_media").is_none());
+        let legacy_identity = request.intent_fingerprint("viewer");
+        request.continuous_media = Some(Box::new(ContinuousMediaRequest {
+            version: 1,
+            family_generation: uuid::Uuid::new_v4().to_string(),
+            role: ContinuousMediaRole::Video,
+        }));
+        assert!(request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        let video_identity = request.intent_fingerprint("viewer");
+        assert_ne!(video_identity, legacy_identity);
+        let mut wire = serde_json::to_value(&request).expect("continuous request");
+        wire["continuous_media"]["ignored_role"] = true.into();
+        assert!(serde_json::from_value::<SessionRequest>(wire).is_err());
+        request.automatic = true;
+        let fixed_rung_identity = request.intent_fingerprint("viewer");
+        request.kind = SessionKind::Transcode { height: 720 };
+        assert_ne!(request.intent_fingerprint("viewer"), fixed_rung_identity);
+        request.kind = SessionKind::Transcode { height: 360 };
+        request.continuous_media.as_mut().expect("continuous media role").role = ContinuousMediaRole::SharedAudio;
+        assert_ne!(request.intent_fingerprint("viewer"), video_identity);
+        request.continuous_media.as_mut().expect("continuous media role").version = 2;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.continuous_media.as_mut().expect("continuous media role").version = 1;
+        request.hdr10 = true;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.hdr10 = false;
+        request.presentation = Presentation::Live;
+        assert!(!request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
     }

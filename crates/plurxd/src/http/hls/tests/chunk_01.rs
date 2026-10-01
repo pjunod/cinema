@@ -923,6 +923,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 control_sequence: None,
                 file_id: 1,
@@ -2088,6 +2089,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                continuous_media: None,
                 candidate_context: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
@@ -2352,6 +2354,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    continuous_media: None,
                     candidate_context: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),

@@ -487,9 +487,41 @@ pub struct CandidateExecutionContext {
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
 }
 
+/// Versioned worker media role for one continuous family generation.
+/// Legacy request JSON omits this field; older strict workers refuse it rather
+/// than silently materializing a muxed rendition under a video-only identity.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousMediaRequest {
+    pub version: u32,
+    pub family_generation: String,
+    pub role: ContinuousMediaRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuousMediaRole {
+    Video,
+    SharedAudio,
+}
+
+impl ContinuousMediaRequest {
+    pub fn valid_for(&self, request: &SessionRequest) -> bool {
+        self.version == 1
+            && uuid::Uuid::parse_str(&self.family_generation).is_ok()
+            && request.presentation == Presentation::Vod
+            && matches!(request.kind, SessionKind::Transcode { .. })
+            && !request.hdr10
+            && request.subtitle_burn.is_none()
+            && request.candidate_context.is_none()
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuous_media: Option<Box<ContinuousMediaRequest>>,
     #[serde(skip)]
     pub candidate_context: Option<CandidateExecutionContext>,
     pub file_id: i64,
@@ -824,7 +856,11 @@ impl SessionRequest {
     /// the same `request_id` must still recover the first persisted answer.
     fn intent_fingerprint_with_user_scope(&self, user_name: Option<&str>) -> String {
         let kind = match self.kind {
-            SessionKind::Transcode { height: _ } if self.automatic => "ta".to_owned(),
+            SessionKind::Transcode { height: _ }
+                if self.automatic && self.continuous_media.is_none() =>
+            {
+                "ta".to_owned()
+            }
             SessionKind::Transcode { height } => format!("t{height}"),
             SessionKind::Copy {
                 aac,
@@ -867,6 +903,18 @@ impl SessionRequest {
                 "{kind}+candidate:{}:{}",
                 context.candidate_id.to_hex(),
                 hex::encode(context.recipe_digest)
+            )
+        } else {
+            kind
+        };
+        let kind = if let Some(media) = self.continuous_media.as_ref() {
+            let role = match media.role {
+                ContinuousMediaRole::Video => "video",
+                ContinuousMediaRole::SharedAudio => "shared_audio",
+            };
+            format!(
+                "{kind}+continuous:{}:{}:{role}",
+                media.version, media.family_generation
             )
         } else {
             kind
