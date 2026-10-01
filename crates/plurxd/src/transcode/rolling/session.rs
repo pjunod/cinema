@@ -929,6 +929,7 @@ impl Session {
         let (publish, expired, insufficient, retention_first_segment, budget) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
+            clock.first_staged_at.get_or_insert_with(Instant::now);
             if held_for_scratch {
                 // Restart the hard deadline on every held cycle, so it runs
                 // its full length again from the moment the hold clears and
@@ -1154,6 +1155,21 @@ impl Session {
             || clock.budget_anchor_sequence != budget.demand_sequence
         {
             return Ok(());
+        }
+        if clock.served.is_none() {
+            tracing::info!(
+                target: "plurxd::transcode",
+                session = %session_log_id(session_id),
+                producer_attempt,
+                phase = "writer_inventory_to_first_snapshot",
+                elapsed_ms = clock.first_staged_at.map(|at| available_at.saturating_duration_since(at).as_millis() as u64),
+                produced_end_ms = end_ms,
+                served_end_ms,
+                requested_position_ms = (self.start_seconds * 1_000.0).round() as i64,
+                media_origin_ms,
+                end_list,
+                "playback startup phase completed"
+            );
         }
         let revision = clock
             .served

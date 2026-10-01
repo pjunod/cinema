@@ -76,6 +76,7 @@ async fn background_jobs_dedupe_and_request_identity_are_distinct() {
     ));
     let page = store
         .list_jobs(JobQuery {
+            node_id: None,
             state: None,
             kind: None,
             after_id: None,
@@ -352,6 +353,7 @@ async fn background_jobs_expired_cancellation_is_reaped_and_empty_queue_needs_no
     assert!(store.maintain_jobs(31_001).await.expect("reap"));
     let page = store
         .list_jobs(JobQuery {
+            node_id: None,
             state: None,
             kind: None,
             after_id: None,
@@ -396,6 +398,7 @@ async fn background_jobs_receipts_survive_seven_days_and_domain_identity_outlive
             .expect("retire details");
         let page = store
             .list_jobs(JobQuery {
+                node_id: None,
                 state: None,
                 kind: None,
                 after_id: None,
@@ -1197,6 +1200,59 @@ async fn background_jobs_settled_history_yields_to_new_work_at_the_bound() {
         .expect("read")
         .is_some());
     assert!(!store.maintain_jobs(30_000).await.expect("idle"));
+}
+
+#[tokio::test]
+async fn background_job_node_filter_precedes_pagination_and_excludes_unassigned_work() {
+    let store = SqliteStore::open_in_memory().expect("store");
+    let mut ids = Vec::new();
+    for n in 1..=4 {
+        let mut request = enqueue(1_000);
+        request.id = format!("00000000-0000-4000-8000-{n:012}");
+        request.dedupe_key = format!("fragment:{n}");
+        // One background reader plus viewer demand can occupy the two slots.
+        if n == 3 {
+            request.request.consumer_kind = "playback_fragment".into();
+            request.request.deadline_ms = Some(60_000);
+        }
+        if n == 4 {
+            request.payload = JobPayload::ArtifactHydrate {
+                artifact_key: "fragment:test".into(),
+                target_node_id: "node-b".into(),
+            };
+        }
+        ids.push(request.id.clone());
+        store.enqueue_job(request).await.expect("enqueue");
+    }
+    // The first unassigned row must not consume a filtered page. Both live
+    // assignments and explicit destinations belong to the selected node.
+    claimed(&store, claim(&ids[1], 0, 1_000)).await;
+    claimed(&store, claim(&ids[2], 0, 1_000)).await;
+    let mut query = JobQuery {
+        node_id: Some("node-a".into()),
+        state: None,
+        kind: None,
+        after_id: None,
+        limit: 1,
+    };
+    let first = store.list_jobs(query.clone()).await.expect("first");
+    assert_eq!(first.jobs[0].id, ids[1]);
+    query.after_id = first.next_after_id;
+    let second = store.list_jobs(query).await.expect("second");
+    assert_eq!(second.jobs[0].id, ids[2]);
+    assert!(second.next_after_id.is_none());
+    let targeted = store
+        .list_jobs(JobQuery {
+            node_id: Some("node-b".into()),
+            state: None,
+            kind: None,
+            after_id: None,
+            limit: 25,
+        })
+        .await
+        .expect("destination");
+    assert_eq!(targeted.jobs.len(), 1);
+    assert_eq!(targeted.jobs[0].id, ids[3]);
 }
 
 #[tokio::test]

@@ -824,6 +824,8 @@ paths = [
   "scripts/playback-lab",
   "scripts/audio-downmix-qualification/**",
   "tests/fixtures/audio-downmix/**",
+  "scripts/playback-startup-lab",
+  "scripts/playback-startup-trace",
   "scripts/web-hls-startup-browser-check",
   "scripts/subtitle-readiness-browser-check",
   "scripts/player-input-fence",

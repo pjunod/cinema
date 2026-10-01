@@ -12,6 +12,7 @@ impl TranscodeManager {
         publication: MediaResponsePublication,
         deadline: Instant,
     ) -> Result<MediaResponseAuthorization, MediaResponsePublicationRejection> {
+        let response_admission_at = Instant::now();
         if tokio::time::Instant::now().into_std() >= deadline {
             return Err(MediaResponsePublicationRejection::StateChanged);
         }
@@ -369,6 +370,16 @@ impl TranscodeManager {
                 || session.control.is_retired()
             {
                 return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            if actor_authorization.first_producer_media_publication {
+                tracing::info!(
+                    target: "plurxd::transcode",
+                    session = %session_log_id(session_id),
+                    producer_attempt,
+                    phase = "first_response_admission",
+                    elapsed_ms = response_admission_at.elapsed().as_millis() as u64,
+                    "playback startup phase completed"
+                );
             }
             return Ok(MediaResponseAuthorization {
                 session_id: session_id.to_owned(),
