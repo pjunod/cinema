@@ -1067,6 +1067,9 @@ assert.equal(context.ACT_TIMER, null);
 
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
+        # Only the shipped media installer owns these two cache-clean points.
+        # The CI tooling stage cleans its independently installed build tools.
+        dockerfile = dockerfile.split("FROM runtime-assets AS ci", 1)[0]
         distro_install = dockerfile.index("intel-media-va-driver-non-free")
         first_clean = dockerfile.index("apt-get clean", distro_install)
         jellyfin_verify = dockerfile.index("sha256sum -c -", first_clean)
@@ -1503,7 +1506,14 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertNotIn("uses: ./.github/actions/ffmpeg", fast_rust)
         self.assertIn("uses: ./.github/actions/ffmpeg", unit_rust)
-        self.assertIn('major: "6"', unit_rust)
+        self.assertIn('major: "8"', unit_rust)
+        self.assertIn("binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", unit_rust)
+        # The shipped-runtime qualification uses FFmpeg 8; the independent
+        # main fast lane still retains FFmpeg 6 burst-honoring coverage.
+        self.assertIn(
+            'major: "6"',
+            workflow_job_blocks(".github/workflows/main-fast-lane.yml")["rust_compile"],
+        )
         # Membership alone would stay green with the step moved below the gate
         # it provisions, which is exactly the failure this contract records.
         self.assertLess(
@@ -1515,7 +1525,7 @@ assert.equal(context.ACT_TIMER, null);
             "\n  android_jvm:", 1
         )[0]
         android_device = workflow.split("\n  android_device:", 1)[1].split(
-            "\n  coverage:", 1
+            "\n  package_smoke:", 1
         )[0]
         self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
         self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
@@ -1639,22 +1649,10 @@ assert.equal(context.ACT_TIMER, null);
             effort_apple,
         )
 
-        coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
-        self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
-        self.assertIn("--failure-mode all", coverage)
-        # Instrumenting the cluster harness made the diagnostic badge depend on
-        # replicated-store deadlines and turned one slow worker into a red CI
-        # badge. Keep coverage on the same runner-neutral lane as `check`.
-        self.assertIn(
-            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
-            coverage,
-        )
-        self.assertIn("scripts/publish-badge", coverage)
-        self.assertIn("--branch badges", coverage)
-        self.assertIn('--message "${msg}%"', coverage)
+        # The coverage workflow owns measurement and publication independently
+        # of the manually dispatched full-CI sweep.
+        self.assertNotIn("coverage", workflow_job_blocks(".github/workflows/ci.yml"))
 
-        # The README shows badges from the ready-PR gate and the last manual
-        # coverage measurement, rather than the retired full-CI snapshots.
         readme = read("README.md")
         for badge in (
             "../badges-pr-ci/ci.svg",
@@ -1668,7 +1666,8 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("../badges-ci/ci.svg", readme)
         self.assertNotIn("../badges-lint/lint.svg", readme)
-        self.assertIn("last manual full-CI measurement", readme)
+        self.assertIn("Coverage refreshes automatically on pushes to `main`", readme)
+        self.assertIn("measurement date (UTC)", readme)
         self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
@@ -1789,6 +1788,72 @@ assert.equal(context.ACT_TIMER, null);
             self.assertTrue(selected[surface], surface)
         self.assertFalse(selected["docs_only"])
 
+    def test_coverage_refreshes_on_main_without_full_ci(self):
+        workflow = read(".github/workflows/coverage.yml")
+        trigger = workflow.split("\non:\n", 1)[1].split("\nenv:", 1)[0]
+        self.assertIn("  push:\n    branches: [main]", trigger)
+        self.assertIn("  workflow_dispatch:", trigger)
+        self.assertNotIn("pull_request", trigger)
+        self.assertNotIn("paths", trigger)
+        self.assertIn("group: coverage-main", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        jobs = workflow_job_blocks(".github/workflows/coverage.yml")
+        self.assertEqual(set(jobs), {"coverage"})
+        coverage = jobs["coverage"]
+        self.assertEqual(workflow_job_needs(coverage), ())
+        self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
+        self.assertIn("ref: main", coverage)
+        self.assertIn("persist-credentials: false", coverage)
+        self.assertIn("components: llvm-tools-preview", coverage)
+        self.assertIn("lane: coverage", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertIn(
+            "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
+            coverage,
+        )
+        self.assertIn("--failure-mode all", coverage)
+        steps = workflow_step_blocks(coverage)
+        publish = steps["Publish the unit coverage badge"]
+        self.assertNotIn("continue-on-error", publish)
+        self.assertNotIn("if: always()", publish)
+        self.assertIn("scripts/publish-badge", publish)
+        self.assertIn("--branch badges", publish)
+        self.assertIn("--alias codex/badges", publish)
+        self.assertIn("date -u +%F", publish)
+        self.assertIn('--message "${msg}% · ${measured_on} UTC"', publish)
+        self.assertLess(
+            coverage.index("Measure line coverage"),
+            coverage.index("Publish the unit coverage badge"),
+        )
+        self.assertIn("Enforce persistent Cargo bounds", steps)
+        for path in (ROOT / ".github/workflows").glob("*.yml"):
+            if path.name != "coverage.yml":
+                self.assertNotIn("--filename coverage", path.read_text())
+
+    def test_coverage_uses_general_runner_with_pinned_ffmpeg_container(self):
+        coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
+        self.assertIn(
+            "runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]\n",
+            coverage,
+        )
+        self.assertIn("container: ubuntu:24.04", coverage)
+        steps = workflow_step_blocks(coverage)
+        install = steps["Install coverage prerequisites"]
+        for package in ("git", "jq", "nodejs", "python3", "build-essential", "clang"):
+            self.assertRegex(install, rf"\b{package}\b")
+        self.assertLess(
+            coverage.index("Install coverage prerequisites"),
+            coverage.index("actions/checkout@"),
+        )
+        self.assertIn('major: "6"', coverage)
+        self.assertLess(
+            coverage.index("./.github/actions/ffmpeg"),
+            coverage.index("Measure line coverage"),
+        )
+        cleanup = steps["Restore persistent runner workspace ownership"]
+        self.assertIn("if: always()", cleanup)
+        self.assertIn('chown -R "$owner" "$GITHUB_WORKSPACE"', cleanup)
+
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")
@@ -1797,6 +1862,7 @@ assert.equal(context.ACT_TIMER, null);
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
         fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
         self.assertIn("timeout-minutes: 10", fast_jobs["preflight"])
+        self.assertIn("timeout-minutes: 10", effort_jobs["preflight"])
         fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
@@ -2729,7 +2795,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("clients/android/**/*.gradle*", workflow)
         self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
         android_device = workflow.split("  android_device:", 1)[1].split(
-            "\n  coverage:", 1
+            "\n  package_smoke:", 1
         )[0]
         self.assertEqual(
             android_device.count(
@@ -3396,6 +3462,7 @@ assert.equal(context.ACT_TIMER, null);
         for path in (
             ".github/workflows/ci.yml",
             ".github/workflows/cluster-store-backstop.yml",
+            ".github/workflows/coverage.yml",
             ".github/workflows/effort-ci.yml",
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
@@ -3418,12 +3485,19 @@ assert.equal(context.ACT_TIMER, null);
                 ):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
                     "cluster_daemon",
-                    "coverage",
                 }:
-                    expected = high_cpu_ffmpeg6
-                elif path == ".github/workflows/ci.yml" and name == "web_layout":
-                    expected = ffmpeg6
+                    # The pinned private CI image supplies shipped FFmpeg 8;
+                    # host trust labels remain unchanged, without a FFmpeg-6
+                    # installation requirement on these image-owned jobs.
+                    expected = high_cpu
+                elif path == ".github/workflows/ci.yml" and name in {
+                    "web_layout", "vod_web"
+                }:
+                    expected = general
+                elif path == ".github/workflows/coverage.yml" and name == "coverage":
+                    expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
@@ -3455,8 +3529,6 @@ assert.equal(context.ACT_TIMER, null);
                     "cluster_transport_recovery",
                 }:
                     expected = ci_topology
-                elif path == ".github/workflows/ci.yml" and name == "check":
-                    expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "cluster_wal":
                     expected = high_cpu
                 elif (
@@ -3716,6 +3788,73 @@ assert.equal(context.ACT_TIMER, null);
             "the ffmpeg majors CI covers changed; update docs/VALIDATION.md's "
             "'Which ffmpeg the profiles assume' in the same commit",
         )
+
+    def test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage(self):
+        dockerfile = read("Dockerfile")
+        self.assertIn("FROM runtime-assets AS ci", dockerfile)
+        ci_stage = dockerfile.split("FROM runtime-assets AS ci", 1)[1].split(
+            "FROM runtime-assets AS runtime", 1
+        )[0]
+        self.assertIn("COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/", ci_stage)
+        self.assertIn("COPY licenses/ /usr/share/doc/plurx/licenses/", ci_stage)
+        self.assertIn("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers", dockerfile)
+        self.assertLess(
+            dockerfile.index("PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers"),
+            dockerfile.index("python3 -m playwright install --with-deps chromium"),
+        )
+        self.assertIn("PLURX_FFMPEG=/usr/lib/jellyfin-ffmpeg/ffmpeg", dockerfile)
+        self.assertIn("/usr/local/bin/ffmpeg", dockerfile)
+
+        jobs = workflow_job_blocks(".github/workflows/ci.yml")
+        image = None
+        self.assertNotIn("coverage", jobs)
+        for name in ("check", "cluster_daemon", "web_layout", "vod_web"):
+            with self.subTest(job=name):
+                block = jobs[name]
+                self.assertNotIn("ffmpeg-6", block)
+                self.assertIn('major: "8"', block)
+                self.assertIn(
+                    "binary: /usr/lib/jellyfin-ffmpeg/ffmpeg", block
+                )
+                steps = workflow_step_blocks(block)
+                capture = steps["Capture mounted runner workspace owner"]
+                restore = steps["Restore persistent runner workspace ownership"]
+                self.assertIn('dirname -- "$GITHUB_WORKSPACE"', capture)
+                self.assertIn('echo "HOST_WORKSPACE_OWNER=$owner"', capture)
+                self.assertIn('"${owner%%:*}" = 0', capture)
+                self.assertIn('"${owner##*:}" = 0', capture)
+                self.assertIn('chown -R "$HOST_WORKSPACE_OWNER"', restore)
+                self.assertNotIn('stat -c', restore)
+                self.assertIn("    container:\n", block)
+                match = re.search(r"(?m)^      image: (.+)$", block)
+                self.assertIsNotNone(match)
+                pinned = match.group(1)
+                self.assertRegex(
+                    pinned,
+                    r"^192\.168\.4\.7:3000/noirr/plurx-ci@sha256:[0-9a-f]{64}$",
+                )
+                if image is None:
+                    image = pinned
+                self.assertEqual(image, pinned)
+                self.assertIn("      credentials:\n        username: noirr\n", block)
+                self.assertIn(
+                    "        password: ${{ secrets.CI_REGISTRY_PULL_TOKEN }}", block
+                )
+                self.assertNotIn("secrets.LOCAL_REGISTRY_TOKEN", block.split("    steps:", 1)[0])
+
+        fast = workflow_job_blocks(".github/workflows/main-fast-lane.yml")[
+            "rust_compile"
+        ]
+        self.assertIn("container: ubuntu:24.04", fast)
+        self.assertIn('major: "6"', fast)
+        self.assertIn("make unit", fast)
+        coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
+        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertNotIn("plurx-ci@sha256:", coverage)
+        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
+        action = read(".github/actions/ffmpeg/action.yml")
+        self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 
     def test_ci_flake_ledger_records_real_job_outcomes_and_durations(self):
         script = ROOT / "scripts/ci-flake-report"

@@ -93,7 +93,7 @@ impl TranscodeManager {
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
-            background_heavy: Arc::new(tokio::sync::Semaphore::new(1)),
+            background_heavy: Arc::new(tokio::sync::Semaphore::new(BACKGROUND_HEAVY_LIMIT)),
             offline_waiting: AtomicBool::new(false),
             dv_strippable: false,
             dv_convertible: false,
@@ -960,6 +960,10 @@ impl TranscodeManager {
     /// tick while another heavy worker or a viewer has the box.
     pub(crate) fn fragment_worker_may_start(&self) -> bool {
         self.pretranscode_worker_idle() && self.background_heavy.available_permits() > 0
+    }
+
+    pub(crate) fn background_worker_in_use(&self) -> bool {
+        self.background_heavy.available_permits() == 0
     }
 
     pub fn pretranscode_worker_idle(&self) -> bool {

@@ -1,0 +1,17 @@
+{
+  "probe_command": [
+    "/usr/bin/ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+    "-o", "ConnectTimeout=6", "-o", "ServerAliveInterval=3",
+    "-o", "ServerAliveCountMax=1", "pjunod@192.168.5.115",
+    "/usr/local/bin/plurx-apple-primary-health"
+  ],
+  "probe_timeout_seconds": 12,
+  "interval_seconds": 20,
+  "failure_checks": 3,
+  "recovery_checks": 2,
+  "runner_command": [
+    "/opt/homebrew/bin/forgejo-runner", "daemon", "--config",
+    "/opt/homebrew/etc/forgejo-runner/config.yaml"
+  ],
+  "runner_directory": "/opt/homebrew/var/lib/forgejo-runner"
+}
