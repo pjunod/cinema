@@ -450,6 +450,7 @@ use crate::queue_fixture::QueueFixture;
             automatic: false,
             previous_session_id: None,
             reopen_reason: None,
+            decode_blocked_heights: Vec::new(),
             kind: SessionKind::Copy {
                 aac: true,
                 preserve_dolby_vision: false,

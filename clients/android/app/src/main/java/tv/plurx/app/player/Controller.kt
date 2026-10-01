@@ -218,6 +218,15 @@ class Controller internal constructor(
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private var autoBandwidth = builtPlayer.autoBandwidth
+    private val autoState get() = playbackIntent.autoQuality
+    private val autoDefaults by lazy {
+        autoQualityDefaults(context.assets.open("auto-quality-policy.json").bufferedReader().use { it.readText() })
+    }
+    private var autoResolvedHeight: Int? = null
+    private var adaptiveReopenCause: tv.plurx.app.data.ReopenReason? = null
+    private val autoQualityJob: Job
+    private var autoClaimOwner = Any()
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
 
     var audioOffsetMs: Long = initialAudioOffsetMs.coerceIn(-15_000, 15_000)
@@ -828,6 +837,14 @@ class Controller internal constructor(
             // still own success/failure; failover must not steal the request.
             if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
             val mediaCompatibilityFailure = isCompatibilityPlaybackError(error.errorCode)
+            if (httpResponseCode(error) in setOf(401, 403, 410)) {
+                autoState.refusalKind = "authority-refused"
+                autoState.refusalAtMs = monotonicNowMs()
+            }
+            if (error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED) {
+                autoState.decodeAtMs = monotonicNowMs()
+                if (autoControllerTick(decodingFailure = true)) return
+            }
             // Paused on a rolling session: this is the pause grace retiring the
             // presentation (§9.5), not a failure anyone is watching. Walking the
             // node list or raising "Playback stopped" here is what the latch
@@ -1080,6 +1097,7 @@ class Controller internal constructor(
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            if (!playWhenReady) autoState.suspendMeasurements(monotonicNowMs())
             if (!playbackControlBootstrapFence.isActive()) return
             if (pendingLifecyclePauseCallback && !playWhenReady) {
                 pendingLifecyclePauseCallback = false
@@ -1227,6 +1245,12 @@ class Controller internal constructor(
                 sampleTargetPresentationDeadline()
                 sampleSurface(realPosition(), monotonicNowMs())
                 delay(targetPresentationDeadline.nextSampleDelayMs(monotonicNowMs()))
+            }
+        }
+        autoQualityJob = scope.launch {
+            while (isActive) {
+                delay(autoDefaults.sampleMs.toLong())
+                autoControllerTick()
             }
         }
         stallWatchdogJob = scope.launch {
@@ -1472,6 +1496,7 @@ class Controller internal constructor(
      */
     fun prepareReplacement(
         quality: PlaybackQuality,
+        automatic: Boolean = false,
         onPrepared: (Long, PlaybackQuality) -> Unit,
     ) {
         if (!playbackControlBootstrapFence.isActive()) return
@@ -1482,7 +1507,7 @@ class Controller internal constructor(
         // A rung is not a destination. Recording this as a pending seek pinned
         // the fallback's reopen to the playhead at the tap, which after a
         // seconds-long wait is seconds of playback thrown away.
-        val pending = playbackIntent.beginQualityChange(quality, tappedAtMs)
+        val pending = playbackIntent.beginQualityChange(quality, tappedAtMs, automatic)
         val publicationEpoch = mediaMutationEpoch
         scope.launch {
             val current = publishQualityChange(pending, publicationEpoch)
@@ -1672,6 +1697,8 @@ class Controller internal constructor(
     }
 
     fun release() {
+        autoQualityJob.cancel()
+        autoState.release(autoClaimOwner)
         if (!playbackControlBootstrapFence.isActive()) return
         playbackTelemetry.cancelPending()
         playbackControlBootstrapFence.release()
@@ -1989,6 +2016,8 @@ class Controller internal constructor(
                     // Save this session's resolved height so the stall-reopen budget
                     // can compare each stall response against the predecessor rung.
                     stallReopenBudget.seed(hls.height)
+                    autoResolvedHeight = hls.height
+                    autoState.release(autoClaimOwner)
                     encoder = hls.encoder
                     sessionIsVod = hls.vod
                     adoptSessionDelivery(hls)
@@ -2066,6 +2095,8 @@ class Controller internal constructor(
             if (!event.controlMayDefer || !openStallTracker.defer(monotonicNowMs())) {
                 false
             } else {
+                autoState.holdUntilMs = monotonicNowMs() + 20_000L
+                autoState.release(autoClaimOwner)
                 surfaceOwner.controlHold(
                     mediaMutationEpoch,
                     if (verdict.type == "hold") {
@@ -2088,6 +2119,9 @@ class Controller internal constructor(
      * repeated repairs that do not improve presentation.
      */
     private suspend fun onStall(event: OpenPlaybackStallTracker.Event) {
+        val autoNow = monotonicNowMs()
+        autoState.lastStallAtMs = autoNow.toDouble()
+        autoState.supplyStalls.addLast(autoNow)
         if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
         val positionMs = event.positionMs
         // The ask goes before the budget is consulted, and before anything
@@ -2097,6 +2131,9 @@ class Controller internal constructor(
         // floor one too high and rejects the very exchange that carried this
         // stall's evidence.
         val session = sessionId
+        val adaptiveCause = adaptiveReopenCause
+        val adaptiveOwner = autoClaimOwner
+        adaptiveReopenCause = null
         // Capture media AND transport ownership before the ask. Pause must
         // reject this evidence even after Resume, but must not revoke an
         // already admitted replacement carrying the viewer's recipe.
@@ -2226,7 +2263,13 @@ class Controller internal constructor(
                         audioOffsetMs = recipe.recipe.audioOffsetMs,
                         quality = recipe.recipe.quality,
                         sourceHeight = plan.sourceHeight,
-                    ),
+                        previousSessionId = session.takeIf { adaptiveCause != null },
+                        reopenReason = adaptiveCause,
+                    ).let { body ->
+                        if (adaptiveCause != null) body.copy(
+                            height = autoState.requestedHeight, quality_auto = true, copy = false,
+                        ) else body
+                    },
                     caps = decisionCaps,
                     requestHDR10 = sessionHDR10Request(
                         decisionMode = plan.mode,
@@ -2244,6 +2287,9 @@ class Controller internal constructor(
                     throw cancelled
                 } catch (error: Exception) {
                     if (stallGuard.isCurrent(requestVersion)) {
+                        if (adaptiveCause != null) {
+                            autoState.requestedHeight?.let { autoState.blockedHeights.add(it.toDouble()) }
+                        }
                         playbackTelemetry.report(
                             event = "playback_error",
                             level = "error",
@@ -2276,6 +2322,8 @@ class Controller internal constructor(
                     return@launch
                 }
                 sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
+                    autoResolvedHeight = hls.height
+                    autoState.release(autoClaimOwner)
                     // Update the same-rung budget: the budget counts consecutive
                     // reopen responses that do NOT resolve a strictly lower rung than
                     // the predecessor (same rung, absent/zero height, or a higher
@@ -2306,8 +2354,103 @@ class Controller internal constructor(
                 }
             } finally {
                 stallGuard.finishRequest(requestVersion)
+                if (adaptiveCause != null) autoState.release(adaptiveOwner)
             }
         }
+    }
+
+    /** A separate five-second reader; the status/recovery clocks remain owners. */
+    private fun autoControllerTick(decodingFailure: Boolean = false): Boolean {
+        val now = monotonicNowMs()
+        if (!autoState.eligible(
+                setting = Session.playbackAutoAbr,
+                quality = playbackIntent.desiredQuality,
+                presenting = playbackIntent.playbackRequested && presentationForeground && !lifecyclePaused &&
+                    player.playWhenReady && player.playbackState != Player.STATE_ENDED,
+                attached = establishedPlayback && sessionId != null && activeQuality == PlaybackQuality.Auto && !plan.isAudioOnly,
+                replacing = controlObservationIsClosed || !playbackControlBootstrapFence.isActive() ||
+                    playbackIntent.pendingSeek != null || directedChange != null ||
+                    stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe())),
+                nowMs = now, sampleMs = autoDefaults.sampleMs.toLong(),
+            )
+        ) return false
+        // Until the server supplies per-rung grade proof, refuse HDR/unknown
+        // changes. Do not label this conservative bound physical HDR acceptance.
+        if (!adaptiveGradeAllowsChange(deliveredRange)) return false
+        if (recipeOwnership.attachedTransport != PlaybackMediaTransport.HlsTranscode) return false
+        val height = autoResolvedHeight ?: player.videoSize.height.takeIf { it > 0 } ?: return false
+        if (plan.ladder.none { it.height == height }) return false
+        val runway = if (player.bufferedPosition == C.TIME_UNSET || player.currentPosition == C.TIME_UNSET) null
+            else (player.bufferedPosition - player.currentPosition).coerceAtLeast(0).div(1000.0)
+        if (player.isPlaying) autoState.holdUntilMs = null
+        while (autoState.supplyStalls.firstOrNull()?.let { now - it > autoDefaults.stallWindowMs } == true) {
+            autoState.supplyStalls.removeFirst()
+        }
+        val statusAge = sessionStatusAgeMs
+        val speed = sessionStatus?.recent_speed?.takeIf { statusAge != null && statusAge <= autoDefaults.causeMaxAgeMs }
+        val sample = AutoQualityPolicy.Sample(
+            currentHeight = height.toDouble(), estimateKbps = autoBandwidth.estimateKbps.takeIf {
+                autoBandwidth.recentAtMs?.let { at -> at >= autoState.measurementFloorMs &&
+                    now - at in 0..autoDefaults.recentSampleMaxAgeMs.toLong() } == true
+            },
+            recentEstimateKbps = autoBandwidth.recentKbps.takeIf {
+                autoBandwidth.recentAtMs?.let { it >= autoState.measurementFloorMs } == true
+            }, recentEstimateAtMs = autoBandwidth.recentAtMs?.toDouble(),
+            runwaySeconds = runway, previousRunwaySeconds = autoState.previousRunwaySeconds,
+            recentSpeed = speed, activeSupplyStall = !player.isPlaying && runway != null && runway <= autoDefaults.nearEmptyRunwaySeconds,
+            supplyStalls = autoState.supplyStalls.size.toDouble(),
+            decodeStalls = if (autoState.decodeAtMs?.let { now - it <= autoDefaults.causeMaxAgeMs } == true) 1.0 else 0.0,
+            decodeStepConsumed = autoState.decodeStepConsumed, lastStallAtMs = autoState.lastStallAtMs,
+            lastSwitchAtMs = autoState.lastSwitchAtMs, lastCliffAtMs = autoState.lastCliffAtMs,
+            nowMs = now.toDouble(), mildSamples = autoState.mildSamples, upgradeSinceMs = autoState.upgradeSinceMs,
+            playerHeight = null, blockedHeights = autoState.blockedHeights,
+            causeEvidence = nativeAutoCause(autoState, now, autoDefaults.causeMaxAgeMs.toLong(), statusAge,
+                sessionStatus?.producer_state, speed),
+        )
+        val decision = AutoQualityPolicy.decideRung(
+            plan.ladder.map { AutoQualityPolicy.Rung(it.height.toDouble(), it.total_kbps.toDouble(), it.peak_kbps.toDouble()) },
+            sample, autoDefaults,
+        )
+        autoState.previousRunwaySeconds = runway
+        autoState.mildSamples = decision.mildSamples
+        autoState.upgradeSinceMs = decision.upgradeSinceMs
+        val target = decision.height?.toInt()?.takeIf { it != height } ?: return false
+        val cause = adaptiveReopenReason(decision) ?: return false
+        val actionOwner = Any()
+        if (!autoState.claim(actionOwner)) return false
+        autoClaimOwner = actionOwner
+        decision.blockedHeights?.let { autoState.blockedHeights.addAll(it) }
+        if (cause == tv.plurx.app.data.ReopenReason.Decode) autoState.decodeStepConsumed = true
+        if (decision.emergency) autoState.lastCliffAtMs = now.toDouble()
+        autoState.lastSwitchAtMs = now.toDouble()
+        autoState.requestedHeight = target
+        raiseRecoveryStep(null, "Auto quality is changing to ${target}p.")
+        playbackTelemetry.report(event = "auto_decision", level = "info", message = decision.reason ?: "Auto",
+            detail = "cause=${cause.name.lowercase()} from=$height to=$target runway=$runway")
+        if (!decodingFailure && player.isPlaying && runway != null && runway > autoDefaults.nearEmptyRunwaySeconds) {
+            // Publish Auto's requested height before the next exchange without
+            // converting the viewer's Auto instruction into a manual choice.
+            prepareReplacement(PlaybackQuality.Auto, automatic = true) { position, quality -> replan(position, "auto-adapt", quality) }
+        } else {
+            adaptiveReopenCause = cause
+            val observedEpoch = mediaMutationEpoch
+            val observedPlayer = player
+            val observedSession = sessionId
+            scope.launch {
+                try {
+                    if (mediaMutationEpoch != observedEpoch || player !== observedPlayer || sessionId != observedSession ||
+                        playbackIntent.desiredQuality != PlaybackQuality.Auto || lifecyclePaused || !presentationForeground ||
+                        playbackIntent.pendingSeek != null) return@launch
+                    onStall(OpenPlaybackStallTracker.Event(0, realPosition(), false, establishedPlayback))
+                } finally {
+                    adaptiveReopenCause = null
+                    // An admitted reopen owns the claim through its inner
+                    // create/attach coroutine, not just this launch's return.
+                    if (sessionId == observedSession) autoState.release(actionOwner)
+                }
+            }
+        }
+        return true
     }
 
     internal fun sessionBody(
@@ -2324,7 +2467,11 @@ class Controller internal constructor(
             aac = plan.aac,
             preserveDolbyVision = plan.preserveDolbyVision,
             sourceHeight = plan.sourceHeight,
-        ),
+        ).let { body ->
+            if (recipe.quality == PlaybackQuality.Auto && autoState.requestedHeight != null)
+                body.copy(height = autoState.requestedHeight, quality_auto = true, copy = false)
+            else body
+        },
         caps = decisionCaps,
         requestHDR10 = sessionHDR10Request(
             decisionMode = plan.mode,
@@ -2506,7 +2653,8 @@ class Controller internal constructor(
                     }
                 }
                 delay(statusPollIntervalMs(
-                    statusPollingVisible() || preparedPlayer != null || preparedPredecessor != null,
+                    statusPollingVisible() || preparedPlayer != null || preparedPredecessor != null ||
+                        (Session.playbackAutoAbr && playbackIntent.desiredQuality == PlaybackQuality.Auto),
                 ))
             }
         }
@@ -2851,11 +2999,11 @@ class Controller internal constructor(
         }
         return ClientSelection(
             quality = when (val requested = playbackIntent.desiredQuality) {
-                PlaybackQuality.Auto -> QualitySelection.Auto
+                PlaybackQuality.Auto -> QualitySelection.Auto(autoState.requestedHeight)
                 PlaybackQuality.Original -> QualitySelection.Original
                 else -> requested.rungHeight
                     ?.let(QualitySelection::Manual)
-                    ?: QualitySelection.Auto
+                    ?: QualitySelection.Auto()
             },
             audioTrack = selectedAudio?.toInt(),
             subtitle = SubtitleSelection(
@@ -2901,6 +3049,7 @@ class Controller internal constructor(
     fun setPresentationForeground(foreground: Boolean, inPictureInPicture: Boolean = false) {
         if (!playbackControlBootstrapFence.isActive()) return
         val visible = foreground || inPictureInPicture
+        if (presentationForeground != visible) autoState.suspendMeasurements(monotonicNowMs())
         if (presentationForeground != visible) stallGuard.invalidateObservation()
         presentationForeground = visible
         val lifecycle = lifecyclePlaybackTransition(
@@ -3478,6 +3627,7 @@ class Controller internal constructor(
      */
     private var rendezvousJob: Job? = null
     private var preparedOrigin: ProgressiveMediaOrigin? = null
+    private var preparedAutoBandwidth: AutoBandwidth? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
 
@@ -3496,6 +3646,8 @@ class Controller internal constructor(
         val modeOverride: String?,
         val requiresHlsOverride: Boolean?,
         val progressiveMediaOrigin: ProgressiveMediaOrigin,
+        val autoBandwidth: AutoBandwidth,
+        val autoResolvedHeight: Int?,
         val baseMs: Long,
         val sessionId: String?,
         val activeMediaPath: String?,
@@ -3620,6 +3772,7 @@ class Controller internal constructor(
         rendezvous = null
         rendezvousSeekObserved = false
         preparedOrigin = built.progressiveMediaOrigin
+        preparedAutoBandwidth = built.autoBandwidth
         val successorListener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 // Posted, not called. Abandoning releases this very player, and
@@ -3865,6 +4018,8 @@ class Controller internal constructor(
             modeOverride = attachedModeOverride,
             requiresHlsOverride = attachedRequiresHlsOverride,
             progressiveMediaOrigin = progressiveMediaOrigin,
+            autoBandwidth = autoBandwidth,
+            autoResolvedHeight = autoResolvedHeight,
             baseMs = baseMs,
             sessionId = sessionId,
             activeMediaPath = activeMediaPath,
@@ -3883,11 +4038,13 @@ class Controller internal constructor(
         successor.playbackParameters = previousPlaybackParameters
         successor.playWhenReady = previousPlayWhenReady
         preparedOrigin?.let { progressiveMediaOrigin = it }
+        preparedAutoBandwidth?.let { autoBandwidth = it }
 
         preparedListener?.let { successor.removeListener(it) }
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
+        preparedAutoBandwidth = null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -3923,7 +4080,10 @@ class Controller internal constructor(
             sessionId = successorSession
             startStatusPolling(successorSession)
         }
-        action.effectiveSelection?.let { stallReopenBudget.seed(it.height.toInt()) }
+        action.effectiveSelection?.let {
+            autoResolvedHeight = it.height.toInt()
+            stallReopenBudget.seed(it.height.toInt())
+        }
         // The badges and the info panel describe the stream on the screen, and
         // both halves of the grade move together or neither does.
         adoptedGrade(
@@ -3980,6 +4140,7 @@ class Controller internal constructor(
     private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
+        autoState.release(autoClaimOwner)
         preparedSwitch.noteFirstFrame(monotonicNowMs())
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
@@ -4014,6 +4175,8 @@ class Controller internal constructor(
         externalListeners.forEach { predecessor.player.addListener(it) }
 
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
+        autoBandwidth = predecessor.autoBandwidth
+        autoResolvedHeight = predecessor.autoResolvedHeight
         attachedModeOverride = predecessor.modeOverride
         attachedRequiresHlsOverride = predecessor.requiresHlsOverride
         predecessor.recipe?.let { recipe ->
@@ -4116,6 +4279,7 @@ class Controller internal constructor(
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
+        preparedAutoBandwidth = null
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -4264,6 +4428,7 @@ internal fun isTelevision(context: Context): Boolean =
 
 /** Minimal view of [Plan] so the controller doesn't depend on the screen file. */
 interface PlanLike {
+    val ladder: List<tv.plurx.app.data.Rung> get() = emptyList()
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
@@ -4311,6 +4476,7 @@ interface PlanLike {
 class BuiltPlayer internal constructor(
     val player: ExoPlayer,
     internal val progressiveMediaOrigin: ProgressiveMediaOrigin,
+    internal val autoBandwidth: AutoBandwidth,
 )
 
 @UnstableApi
@@ -4353,12 +4519,14 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
 @UnstableApi
 private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole): BuiltPlayer {
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
+    val autoBandwidth = AutoBandwidth(context)
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
         transferListener = progressiveMediaOrigin,
+        autoBandwidth = autoBandwidth,
     )
-    return BuiltPlayer(player, progressiveMediaOrigin)
+    return BuiltPlayer(player, progressiveMediaOrigin, autoBandwidth)
 }
 
 /**

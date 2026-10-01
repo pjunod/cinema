@@ -1073,6 +1073,7 @@
             automatic: true,
             previous_session_id: Some(previous_session_id.into()),
             reopen_reason: Some(ReopenReason::Stall),
+            decode_blocked_heights: Vec::new(),
             // The handler's first Auto answer is intentionally not authority
             // for a stall reopen; claim normalization replaces this from the
             // named predecessor's already-resolved height.

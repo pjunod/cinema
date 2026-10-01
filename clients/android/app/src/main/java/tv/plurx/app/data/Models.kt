@@ -18,6 +18,7 @@ data class Server(
     val version: String? = null,
     val instance_id: String? = null,
     val display_mode_match: Boolean = false,
+    val playback_auto_abr: Boolean = false,
 )
 
 @Serializable
@@ -766,6 +767,11 @@ data class PlaybackSessionStatus(
 @Serializable
 enum class ReopenReason {
     @kotlinx.serialization.SerialName("stall") Stall,
+    @kotlinx.serialization.SerialName("link") Link,
+    @kotlinx.serialization.SerialName("encode") Encode,
+    @kotlinx.serialization.SerialName("decode") Decode,
+    @kotlinx.serialization.SerialName("hold") Hold,
+    @kotlinx.serialization.SerialName("authority") Authority,
 }
 
 /**

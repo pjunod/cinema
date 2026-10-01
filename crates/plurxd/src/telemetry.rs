@@ -1936,6 +1936,30 @@ pub fn emit(store: Arc<dyn Store>, event: PlaybackEvent) {
     emit_with_network(store, event, None, None);
 }
 
+/// Called only after public create validates the authoritative predecessor.
+pub(crate) fn adaptive_reopen_event(
+    request: &crate::transcode::SessionRequest,
+    route: &plurx_core::domain::MediaSessionRoute,
+    now_ms: i64,
+) -> Option<PlaybackEvent> {
+    let cause = request.reopen_reason?;
+    if cause == crate::transcode::ReopenReason::Stall {
+        return None;
+    }
+    let height = serde_json::from_str::<serde_json::Value>(&route.response_json)
+        .ok()?
+        .get("height")?
+        .as_i64()?;
+    Some(PlaybackEvent {
+        at_unix_ms: now_ms,
+        user_id: Some(route.user_id),
+        event: "stall".into(),
+        height: Some(height),
+        detail: Some(format!("{}:adaptive_reopen", cause.as_str())),
+        ..PlaybackEvent::default()
+    })
+}
+
 /// Persist the N0 event and, independently when opted in, fold its bounded
 /// network measurement into the matching prior. Keeping the two switches
 /// independent means an operator may retain only the aggregate prior without
@@ -1993,13 +2017,21 @@ pub(crate) fn emit_with_network(
     }
 }
 
-fn prior_observation(
+pub(crate) fn prior_observation(
     event: &PlaybackEvent,
     network: Option<&NetworkIdentity>,
 ) -> Option<NetworkPriorObservation> {
     let network = network?;
     let credential_generation = network.credential_generation.as_ref()?;
     let user_id = network.user_id?;
+    let detail = event.detail.as_deref().unwrap_or_default();
+    // A decode failure, deliberate hold or lost authority says nothing about
+    // this credential's network. Even accompanying throughput must not turn
+    // those observations into a shared quality ceiling.
+    let cause = detail.split_once(':').map(|(cause, _)| cause);
+    if matches!(cause, Some("decode" | "hold" | "authority" | "unknown")) {
+        return None;
+    }
     let client_kbps = event
         .bandwidth_kbps
         .filter(|value| *value > 0)
@@ -2013,9 +2045,9 @@ fn prior_observation(
         (Some(value), None) | (None, Some(value)) => Some(value),
         (None, None) => None,
     };
-    let detail = event.detail.as_deref().unwrap_or_default();
     let starved = event.event == "stall"
-        && (detail.contains("supply")
+        && (matches!(cause, Some("link" | "encode"))
+            || detail.contains("supply")
             || detail.contains("network")
             || detail.contains("blocked")
             || detail.contains("kind=buffering")
@@ -3172,13 +3204,36 @@ mod tests {
 
         let mut decode = event;
         decode.detail = Some("decode:late_frames".to_owned());
-        let observation = prior_observation(&decode, Some(&network)).expect("throughput remains");
-        assert_eq!(observation.starved_rung_height, None);
+        assert!(prior_observation(&decode, Some(&network)).is_none());
 
         decode.height = None;
-        let observation = prior_observation(&decode, Some(&network))
-            .expect("a throughput sample does not require a rung");
-        assert_eq!(observation.throughput_kbps, Some(5_000));
+        assert!(prior_observation(&decode, Some(&network)).is_none());
+    }
+
+    #[test]
+    fn typed_auto_causes_do_not_turn_decode_hold_or_authority_into_network_pressure() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        for cause in ["link", "encode", "decode", "hold", "authority", "unknown"] {
+            let event = PlaybackEvent {
+                event: "stall".into(),
+                height: Some(720),
+                bandwidth_kbps: Some(100),
+                runway_ds: Some(0),
+                detail: Some(format!("{cause}:buffering")),
+                ..PlaybackEvent::default()
+            };
+            let observation = prior_observation(&event, Some(&network));
+            if matches!(cause, "link" | "encode") {
+                assert_eq!(observation.expect(cause).starved_rung_height, Some(720));
+            } else {
+                assert!(observation.is_none(), "{cause} is not network evidence");
+            }
+        }
     }
 
     /// How the writer called its Store, recorded call by call.

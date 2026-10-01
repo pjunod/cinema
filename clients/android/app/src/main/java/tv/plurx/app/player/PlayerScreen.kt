@@ -191,7 +191,7 @@ private data class Plan(
     val source: MediaFileDto?,
     override val audio: List<AudioTrack>,
     override val subtitles: List<SubTrack>,
-    val ladder: List<Rung>,
+    override val ladder: List<Rung>,
     val declaredOffsetMs: Long?,
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,

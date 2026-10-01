@@ -36,6 +36,25 @@ val generateReaderAssets = tasks.register<GenerateReaderAssets>("generateReaderA
     outputDirectory.set(layout.buildDirectory.dir("generated/reader-assets"))
 }
 
+abstract class GenerateAutoQualityAssets @Inject constructor(
+    private val fileSystem: FileSystemOperations,
+) : DefaultTask() {
+    @get:InputDirectory abstract val sourceDirectory: DirectoryProperty
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+    @TaskAction fun generate() {
+        fileSystem.sync {
+            from(sourceDirectory)
+            include("auto-quality-policy.json")
+            into(outputDirectory)
+        }
+    }
+}
+
+val generateAutoQualityAssets = tasks.register<GenerateAutoQualityAssets>("generateAutoQualityAssets") {
+    sourceDirectory.set(layout.projectDirectory.dir("../../../tests/playback"))
+    outputDirectory.set(layout.buildDirectory.dir("generated/auto-quality-assets"))
+}
+
 /**
  * True when this invocation asked for release or signed profile capture.
  *
@@ -108,7 +127,7 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 140
+        versionCode = 142
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -183,6 +202,10 @@ android {
 
 androidComponents {
     onVariants(selector().all()) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(
+            generateAutoQualityAssets,
+            GenerateAutoQualityAssets::outputDirectory,
+        )
         variant.sources.assets?.addGeneratedSourceDirectory(
             generateReaderAssets,
             GenerateReaderAssets::outputDirectory,

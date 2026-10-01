@@ -29,6 +29,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         dataSource: DataSource.Factory,
         audioLanguage: String? = null,
         transferListener: TransferListener? = null,
+        autoBandwidth: AutoBandwidth? = null,
     ): ExoPlayer {
         require(role != PlayerRole.Offline || dataSource is CacheDataSource.Factory) {
             "Offline playback requires a cache-only data source"
@@ -62,6 +63,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         }
         val renderers = DefaultRenderersFactory(context).setEnableDecoderFallback(true)
         val player = ExoPlayer.Builder(context)
+            .apply { autoBandwidth?.let { setBandwidthMeter(it.meter) } }
             .setLoadControl(playbackLoadControl(context, live = role == PlayerRole.LiveTv))
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)

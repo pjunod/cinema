@@ -1926,6 +1926,7 @@
         let candidate = crate::transcode::SessionRequest {
             previous_session_id: Some(uuid::Uuid::new_v4().to_string()),
             reopen_reason: Some(crate::transcode::ReopenReason::Stall),
+            decode_blocked_heights: Vec::new(),
             ..staged_candidate_request()
         };
         stage_prepared_successor(
