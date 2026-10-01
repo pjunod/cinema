@@ -1917,7 +1917,7 @@
         .expect("the offline pass answers")
         .expect("offline pass");
         assert!(
-            matches!(produced, OfflineProduceOutcome::Yielded),
+            matches!(produced, OfflineProduceOutcome::Yielded(_)),
             "an unscripted production reaches the real producer and yields at its deadline"
         );
         assert!(
@@ -2175,4 +2175,114 @@
     #[tokio::test]
     async fn encoded_producer_retains_audio_despite_refreshed_source_and_unchanged_claim() {
         retained_audio_consumer_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn queued_transcode_publishes_while_holding_its_own_admission() {
+        super::require_ffmpeg();
+        use plurx_core::cluster::coordination::UnclusteredJobAuthority;
+        use plurx_core::domain::{NewPretranscodeJob, PretranscodeRequirements};
+        use plurx_core::store::background_jobs::{ClaimJob, ClaimOutcome, JobKind, JobState};
+        use plurx_core::store::background_jobs_pretranscode::{enqueue_request, projection};
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let path = media.path().join("Queued.mkv");
+        write_real_video(&path, 6);
+        std::fs::File::open(&path).expect("source").set_times(
+            std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + Duration::from_secs(1))
+        ).expect("fixture source generation");
+        let id = seed_real_file(&store, &path).await;
+        let file = store.get_file(id).await.expect("get").expect("file");
+        let (mgr, _work, cache) = cached_manager(&store);
+        let policy = mgr.try_pretranscode_policy_snapshot().await.expect("policy");
+        let now = unix_ms();
+        let request = enqueue_request(&NewPretranscodeJob {
+            id: uuid::Uuid::new_v4().to_string(), dedupe_key: "publication-own-admission".into(),
+            file_id: id, source_size: file.size, source_mtime: file.mtime,
+            target_height: 240, policy_generation: policy.generation,
+            requirements_json: serde_json::to_string(&PretranscodeRequirements {
+                version: 1, decoder: file.video_codec.clone().expect("codec"),
+                acceptable_encoder_families: vec!["software".into()],
+                output_contract: "hls-mpegts-v1".into(), tone_map: false,
+                output_grade: "sdr".into(), scratch_bytes: 1,
+            }).expect("requirements"),
+            reason: "recent".into(), priority: 1, not_before_ms: now, created_at_ms: now,
+        }).expect("request");
+        store.enqueue_job(request.clone()).await.expect("enqueue");
+        let admission = mgr.admit_pretranscode(&file, 240).await.expect("admission").expect("idle");
+        assert!(!mgr.pretranscode_worker_idle(), "the job owns the slot until settlement");
+        let claimed = match store.claim_job(ClaimJob {
+            job_id: request.id.clone(), expected_revision: 0, node_id: NODE.into(),
+            boot_id: uuid::Uuid::new_v4().to_string(), claim_id: uuid::Uuid::new_v4().to_string(),
+            kind: JobKind::TranscodePrepare, payload_version: 1, now_ms: now, dispatched_at_ms: now,
+        }).await.expect("claim") { ClaimOutcome::Claimed {job} => *job, other => panic!("{other:?}") };
+        let job = projection(&claimed).expect("projection");
+        let active = crate::background_jobs::ActiveBackgroundJob::start(
+            Arc::clone(&store), Arc::new(UnclusteredJobAuthority), claimed.token.expect("token"),
+            tokio::time::Instant::now() + Duration::from_secs(30), JobKind::TranscodePrepare,
+        ).expect("active job");
+        let fence = PretranscodeFence::new(job, active.fence(), admission);
+        let source = pretranscode_source_snapshot(&file, &[media.path().to_path_buf()]).await.expect("source");
+        let outcome = mgr.produce_pretranscode_job(&file, 240, Instant::now() + Duration::from_secs(120),
+            &active.fence().loss_token(), source, fence).await.expect("produce");
+        let PretranscodeProduceOutcome::Ready(produced) = outcome else { panic!("{outcome:?}") };
+        let row = store.background_job(&request.id).await.expect("read").expect("job");
+        assert_eq!(row.state, JobState::Succeeded);
+        assert_eq!(row.yield_count, 0);
+        assert_eq!(row.failed_attempts, 0);
+        let location = store.cache_hit(&produced.recipe, NODE).await.expect("cache lookup").expect("published");
+        assert!(location.manifest_digest.is_some());
+        assert!(cache.path().join(location.relative_dir).join(plurx_core::transcode::manifest::MANIFEST_FILE).exists());
+        active.finish().await;
+        assert!(mgr.pretranscode_worker_idle());
+    }
+
+    #[tokio::test]
+    async fn admitted_publication_still_yields_to_viewers_and_downloads() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: true, cpu_threads: 2, decoder_threads: None,
+        };
+        let permit = mgr.admissions.try_admit_bundle(2, 8, &estimate, crate::admission::Priority::Background).expect("permit");
+        assert!(!mgr.pretranscode_publication_yield_reason().is_some());
+        let viewer = mgr.admissions.wait_for_slot();
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        drop(viewer);
+        mgr.offline_waiting.store(true, std::sync::atomic::Ordering::Release);
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        mgr.offline_waiting.store(false, std::sync::atomic::Ordering::Release);
+        assert!(!mgr.pretranscode_publication_yield_reason().is_some());
+        drop(permit);
+        let live = mgr.admissions.try_admit_bundle(2, 8, &estimate, crate::admission::Priority::Live).expect("live permit");
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        drop(live);
+        let handoff = mgr.admissions.reserve_for_handoff(&estimate, Duration::from_secs(30));
+        assert!(mgr.pretranscode_publication_yield_reason().is_some());
+        mgr.admissions.release_reservation(handoff);
+        assert!(mgr.pretranscode_publication_yield_reason().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn producer_interruptions_distinguish_foreground_download_and_deadline() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let (mgr, _work, _cache) = cached_manager(&store);
+        for expected in ["foreground_demand", "offline_waiting", "ownership_lost", "production_deadline"] {
+            let cancelled = tokio_util::sync::CancellationToken::new();
+            let viewer = (expected == "foreground_demand").then(|| mgr.admissions.wait_for_slot());
+            mgr.offline_waiting.store(expected == "offline_waiting", std::sync::atomic::Ordering::Release);
+            if expected == "ownership_lost" { cancelled.cancel(); }
+            let deadline = if expected == "production_deadline" { Instant::now() } else { Instant::now() + Duration::from_secs(30) };
+            let mut child = tokio::process::Command::new("sh").args(["-c", "exec sleep 30"]).kill_on_drop(true).spawn().expect("child");
+            let ended = mgr.run_part(&mut child, deadline, true, Some(&cancelled)).await;
+            let observed = match ended { PartEnd::Preempted(reason) => reason, PartEnd::Deadline => "production_deadline", other => panic!("{other:?}") };
+            assert_eq!(observed, expected);
+            assert!(child.try_wait().expect("reaped").is_some());
+            drop(viewer);
+        }
     }

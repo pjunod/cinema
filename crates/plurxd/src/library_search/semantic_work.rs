@@ -190,6 +190,7 @@ pub(super) async fn run(
                 || !ENABLED.load(Ordering::Acquire)
             {
                 JobSettlement::Yield {
+                    error_code: Some("worker_interrupted".into()),
                     not_before_ms: now_ms().saturating_add(5000),
                     checkpoint: None,
                 }

@@ -1283,6 +1283,7 @@ async fn background_offline_join_preserves_recipe_authority_and_independent_inte
             .settle_job(SettleJob {
                 token,
                 settlement: JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: Some(
                         serde_json::json!({"effective_recipe_hash": "c".repeat(64), "part": 2})
                     ),
@@ -1917,6 +1918,7 @@ async fn background_storage_aliases_share_capacity_and_contention_is_atomic() {
                 token: job.token.expect("token"),
                 now_ms: 1_002,
                 settlement: JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: None,
                     not_before_ms: 5_000,
                 },
@@ -4616,7 +4618,8 @@ async fn probe_batches_respect_scan_parent_and_shared_domain_reservations() {
         }
         let parent = store.background_job(&claims[0].job_id).await.expect("parent").expect("parent");
         store.settle_job(SettleJob { token: parent.token.expect("token"), now_ms: 1_001,
-            settlement: JobSettlement::Yield { checkpoint: None, not_before_ms: 60_000 },
+            settlement: JobSettlement::Yield { error_code: None,
+                checkpoint: None, not_before_ms: 60_000 },
         }).await.expect("scan yielded after inline probing");
         // Physical reservations deliberately survive settlement to lease expiry.
         for (index, expected) in [(1, true), (2, false)] {

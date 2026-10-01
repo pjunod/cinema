@@ -238,6 +238,7 @@ async fn execute(
     let mut published = false;
     let settlement = if cancel.is_cancelled() || shutdown.is_cancelled() {
         Some(JobSettlement::Yield {
+            error_code: Some("worker_interrupted".into()),
             not_before_ms: now_ms().saturating_add(5000),
             checkpoint: None,
         })
