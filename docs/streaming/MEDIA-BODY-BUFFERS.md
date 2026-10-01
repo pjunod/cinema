@@ -4,7 +4,7 @@
 Decision 1 taken on Paul's behalf and his to overturn: the shared read is
 128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
 HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
-M2 implementation pending; proof-preserving contract reconciled 2026-09-30 ·
+M2 implementation built 2026-09-30; controlled acceptance pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -20,8 +20,14 @@ hyper before they are counted or the object is marked complete; it does not
 prove socket delivery or client receipt. M1 changes the storage read and
 measures. M2 later groups resident data so consecutive body polls can keep
 4 KiB frames ready without a producer wakeup between them; it must keep every
-behaviour §2.2 lists. It remains
-pending until M1 has the deployment and measurement evidence in §5.2.
+behaviour §2.2 lists.
+
+**Sequencing amendment, 2026-09-30:** Paul authorized completing M2 without
+an idle seven-day eligibility wait. Organic media1 week comparisons remain
+supplementary monitoring, not a prerequisite to implementation. Controlled
+acceptance, every functional boundary, the 4 KiB proof, 128 KiB storage read,
+1 MiB resident-payload ceiling and the existing rollback thresholds remain.
+Earlier execution receipts below retain their original requirements verbatim.
 
 The original instruction here was: "if M1 seems to need a change in `hls.rs`
 beyond the constructor argument, stop and flag it." It did, and this is the
@@ -233,10 +239,22 @@ number.
 
 ### 3.2 M2 — coalesce writes, retain per-piece acceptance
 
-Later milestone, still subject to §5.2's media1 week and lab4 acceptance.
+Later milestone, subject to §5.2's controlled acceptance. The dated sequencing
+amendment above makes the media1 week supplementary monitoring.
 The 2026-09-30 contract replaces the original one-large-chunk/one-batch-ack
 recipe, which contradicted Decision 5. It does not select an implemented
 data structure or claim an unmeasured throughput or socket-write reduction.
+
+**Implementation choice, 2026-09-30:** one resident storage backing supplies
+up to 32 consecutive proof frames. Gathering stops at one 128 KiB backing,
+including a short read; that is a smaller cap within the 1 MiB maximum,
+not a fill target. This keeps each `reader.next()` elapsed sample separate
+from downstream delay, without speculative storage reads. The owner waits
+for that payload's accepted prefix before gathering another. One bounded
+prefix vector records frame lengths and actual acceptance times; one `Notify`
+coalesces producer wakeups. The public body slices resident data on each poll,
+rechecks lifetime, no-progress and terminal fences, then records only the
+frame it yields. Read provenance is noted after the first accepted frame.
 
 - **Separate storage, payload and proof.** Storage reads remain 128 KiB;
   every public body frame is at most the literal
@@ -266,7 +284,12 @@ data structure or claim an unmeasured throughput or socket-write reduction.
   acceptances before exiting and discard the unaccepted tail. Reading or
   queueing data never credits it. Receiver drop remains `response_dropped`,
   not a manufactured transport error; real failures retain terminal error
-  propagation. No frame escapes after its deadline/terminal fence wins.
+  propagation. A consumer-observed deadline retains its classified failure
+  even if hyper consumes the error and drops the body before the pump wakes;
+  reconcile its accepted prefix before emitting that failure once. VOD
+  failures retain one warning with sanitized session, delivered/expected
+  bytes and bounded cause/error kind, not a warning for every frame.
+  No frame escapes after its deadline/terminal fence wins.
 - **Preserve independent deadlines and ownership.** The spawned pump still
   owns the file, tracker, authorization and completion permit. Its absolute
   300 s lifetime and 30 s no-progress deadlines advance even when the body
@@ -617,11 +640,11 @@ accepts, and Paul can overturn it.
 
 ### 5.2 M2 — proof-preserving write coalescing
 
-Same plan PR, after the M1 candidate has been exercised on media1 for a week
-with no `segment_delivery` regressions in the telemetry (§6). Code: §3.2.
-The six future assertions below describe required boundaries, not tests
-implemented by the September 30 documentation reconciliation. They use
-`driven_local_body` plus a pump built from a `Cursor` reader, so they can
+Code: §3.2. The 2026-09-30 sequencing amendment permits implementation now;
+the organic media1 week remains supplementary telemetry (§6), not an
+eligibility gate. The six assertions below describe required boundaries.
+The implementation tests use
+`resident_local_body` plus `pump_local_media` built from a `Cursor` reader, so they can
 run in `make unit` without files. Keep §5.1's existing small-object proof
 tests and fixtures unchanged; passing larger fixtures is not acceptance.
 
@@ -649,7 +672,9 @@ lab4 with HLS p99 not worse than M1's.
   proof-granularity tests tabled in §5.1, and, since Decision 1,
   `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` and
   `accepted_http_connections_have_nagle_disabled`. Run the six M2 tests by name when
-  that milestone becomes eligible.
+  implementing that milestone. **2026-09-30 effort amendment:** run these
+  six and the retained M1 proof regressions as focused development evidence;
+  defer the full Rust suites to the final effort promotion qualification.
 - Lane: `make unit` before promoting the one plan PR. The implementation
   session did not run it while P-01 was repairing that lane; this is pending
   evidence, not an implied pass.
@@ -661,6 +686,8 @@ lab4 with HLS p99 not worse than M1's.
   days before and after the deploy timestamp; also `journalctl -u plurxd |
   grep -c 'stalled on storage'` for both windows. Report both tables." A
   rise in `transport_stall` or in the stall warning is the rollback signal.
+  **2026-09-30 amendment:** this organic seven-day comparison supplements
+  controlled acceptance and monitoring; it does not delay M2 implementation.
 - Packet rate, for Decision 6. `TCP_NODELAY` sends each 4 KiB HLS write as
   its own packets. On a real 1500-MTU client link that can be up to about
   6% more packets and ACKs (§5.1.2, the packet cost). GPT prompt: "On
@@ -762,6 +789,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/s02_batching_sol61 | M2 sole-review remediation | [#647](http://192.168.4.7:3000/noirr/plurx/pulls/647), review [19/comment 6624](http://192.168.4.7:3000/noirr/plurx/pulls/647#issuecomment-6624) | Independent review requested three P2 corrections. Consumer-first 30 s and actual 300 s deadlines now retain one classified failure across body error/drop before the manually parked pump resumes; exact accepted prefixes and no completion are asserted. The production VOD callback again logs one sanitized session, delivered/expected-byte, cause/error-kind warning; its actual short-source response regression asserts exact credited bytes and one warning. Removing timeout retention fails the first regression with no failure event; suppressing the warning fails the second with no warning. Historical measurements remain unchanged. Controlled actual-daemon §5.1 latency/RSS/thread/throughput comparison remains blocking before merge; no unit or body-only microbenchmark substitutes for it. Same-node incumbent/candidate, generated fixtures, warmed actual HLS objects, rotated trials and isolated fresh processes per RSS group follow the retained harness in the linked M1 measurement. No second formal review, production deployment or performance acceptance is claimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/s02_batching_sol61 | M2 runtime batching and sequencing amendment | `codex/s02-resident-body-batching` into `effort/architecture-review-2026-09-20` | Authorized coordinating session removed the idle seven-day eligibility wait; original receipts stay verbatim. Both local HLS paths use one resident 128 KiB backing and yield independently fenced 4 KiB frames without a producer wakeup between resident frames. A bounded accepted-prefix vector records lengths and actual acceptance times; the owner reconciles it once before drop/failure/completion, preserves each storage sample and transfers exact authorized EOF to the existing bounded detached completion. Six `http::hls::response::batching_tests` regressions pass, including 3 MiB exact EOF, 2.5 MiB short EOF, 100 KiB consecutive ready polls, partial retained frame/drop, 30 s no-progress and actual 300 s absolute lifetime. Retained small-object/accounting and authorized VOD finalizer regressions pass unchanged in their fixtures. Pinned Rust 1.97.1 local compiler, isolated target, focused evidence; full Rust suites remain for effort promotion. **Still owed:** single adversarial review, current-head effort gate, lab4 controlled rerun with HLS p99 not worse than M1, final promotion qualification and supplementary §6 telemetry/packet monitoring. No deployment, client receipt, socket-write reduction or throughput gain is claimed. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k08_upstream_receipt_sol61 | M2 contract reconciliation only | [draft #645](http://192.168.4.7:3000/noirr/plurx/pulls/645), `codex/s02-proof-preserving-batching` | Authorized by Paul's coordinating session. Direct source audit at effort `f319fa779` and original review [3667](http://192.168.4.7:3000/noirr/plurx/pulls/410#issuecomment-3667)/accepted disposition [3715](http://192.168.4.7:3000/noirr/plurx/pulls/410#issuecomment-3715) confirmed that whole-batch acknowledgement would contradict Decision 5. §3.2 now groups bounded resident data but yields and records each at-most-4 KiB acceptance separately; §5.2 retains six future boundaries without claiming implemented tests. Partial/Pending socket writes are distinct from body acceptance; exact EOF retains detached authorized completion and storage-rate provenance stays per read. Existing authors, Decisions 1/5/6 and historical measurements below are retained. This docs-only continuation implements no pump/body/transport code and claims no wire delivery, write-count/throughput gain, fleet evidence or M2 completion. **Still owed:** mandatory regression-free media1 week, M2 implementation and tests, lab4 rerun, Decisions 1/6 confirmation and §6 post-deploy telemetry/packet-rate evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | `ed98c6ab` / [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Shared 256 KiB capacity at all six file-backed readers; rate-normalized the slow-read signal. Pinned 1.97.1 check and six focused regressions passed. Needs: lab4 before/after throughput, peak RSS/thread count, HLS p50/p95/p99, and the repaired fast-lane `make unit` evidence. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | pending in [#410](http://192.168.4.7:3000/noirr/plurx/pulls/410) | Needs: M1 candidate deployed on media1 for one week with no `segment_delivery` regression, then the §5.1 lab4 protocol re-run. No acknowledgement-batching code has been written. |

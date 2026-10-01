@@ -755,6 +755,39 @@
         );
     }
 
+    #[tokio::test]
+    async fn a_short_vod_body_logs_its_sanitized_failure_and_accepted_prefix() {
+        use tracing_subscriber::prelude::*;
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(16));
+        let _guard = crate::test_tracing_default(tracing_subscriber::registry()
+            .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs))));
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let session_id = "vod-private-session-never-log-verbatim";
+        let owner = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let path = dir.path().join("short.m4s");
+        tokio::fs::write(&path, vec![7_u8; 8192]).await.expect("VOD object");
+        let delivery = std::sync::Arc::new(crate::meter::Meter::new());
+        let response = vod_segment_response(&fixture.state, session_id, "seg00005.m4s",
+            &RelayHeaders::default(),
+            vod_ready_metered(&path, 16384, std::sync::Arc::clone(&delivery)).await, owner)
+            .await.expect("VOD response");
+        assert!(axum::body::to_bytes(response.into_body(), 16385).await.is_err());
+        let entries: Vec<_> = logs.tail("warn", 16).into_iter()
+            .filter(|entry| entry.message.contains("VOD response failed before its advertised length"))
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let warning = &entries[0];
+        assert_eq!(warning.target, "plurxd::http::hls");
+        assert!(warning.message.contains("delivered_bytes=8192"), "{}", warning.message);
+        assert!(warning.message.contains("expected_bytes=16384"), "{}", warning.message);
+        assert!(warning.message.contains("storage_error"));
+        assert!(warning.message.contains("UnexpectedEof"));
+        assert!(warning.message.contains(&crate::transcode::session_log_id(session_id)));
+        assert!(!warning.message.contains(session_id));
+        assert_eq!(delivery.total_bytes(), 8192);
+    }
+
     /// Decision 1 of docs/streaming/MEDIA-BODY-BUFFERS.md, taken on the §5.1.1
     /// measurement: the shared media read is 128 KiB, and the delivery-proof
     /// unit stays 4 KiB beside it rather than following it.

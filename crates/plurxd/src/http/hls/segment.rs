@@ -731,8 +731,7 @@ async fn vod_segment_response_before(
         MEDIA_BODY_READ_BUFFER,
     );
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
-    let (sender, receiver) =
-        tokio::sync::mpsc::channel::<DrivenLocalChunk>(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
+    let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
     let terminal = StreamedBodyTerminal::new();
     let pump_terminal = terminal.clone();
     let pump_session = session.to_owned();
@@ -743,159 +742,46 @@ async fn vod_segment_response_before(
         complete_object,
         completion_permit,
     );
-    tokio::spawn(async move {
-        let mut reader = reader;
-        let mut completion = Some(completion);
-        let mut delivered = 0_u64;
-        let fail = |kind, message: String| pump_terminal.fail(kind, message);
-        loop {
-            let progress_deadline =
-                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
-            let next = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    fail(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime".to_owned(),
-                    );
+    let mut delivered = 0_u64;
+    tokio::spawn(pump_local_media(
+        reader,
+        sender,
+        pump_terminal,
+        body_deadline,
+        len,
+        move |event| {
+            match event {
+                LocalDeliveryEvent::Accepted(bytes) => {
+                    delivered += bytes;
+                    delivery.note(bytes);
+                }
+                LocalDeliveryEvent::Failed(error, cause) => {
                     tracing::warn!(
                         target: "plurxd::http::hls",
                         session = %crate::transcode::session_log_id(&pump_session),
                         delivered_bytes = delivered,
                         expected_bytes = len,
-                        "VOD response exceeded its maximum admitted body lifetime"
+                        cause,
+                        error_kind = ?error.kind(),
+                        "VOD response failed before its advertised length"
                     );
-                    return;
                 }
-                () = sender.closed() => return,
-                _ = tokio::time::sleep_until(progress_deadline) => {
-                    fail(
-                        std::io::ErrorKind::TimedOut,
-                        "media response made no progress before its body deadline".to_owned(),
-                    );
-                    tracing::warn!(
-                        target: "plurxd::http::hls",
-                        session = %crate::transcode::session_log_id(&pump_session),
-                        delivered_bytes = delivered,
-                        expected_bytes = len,
-                        "VOD response made no storage progress before its body deadline"
-                    );
-                    return;
-                }
-                next = reader.next() => next,
-            };
-            let bytes = match next {
-                Some(Ok(bytes)) => bytes,
-                Some(Err(error)) => {
-                    fail(error.kind(), error.to_string());
-                    return;
-                }
-                None if delivered == len => return,
-                None => {
-                    fail(
-                        std::io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "VOD response reached EOF after {delivered} of {len} advertised bytes"
-                        ),
-                    );
-                    tracing::warn!(
-                        target: "plurxd::http::hls",
-                        session = %crate::transcode::session_log_id(&pump_session),
-                        delivered_bytes = delivered,
-                        expected_bytes = len,
-                        "VOD response reached EOF before its advertised length"
-                    );
-                    return;
-                }
-            };
-            // One storage read is handed downstream in acknowledgement-sized
-            // pieces. `Bytes::split_to` is a refcount bump on the buffer this
-            // read already filled, not a copy, so the proof granularity below
-            // stays at MEDIA_BODY_ACK_GRANULARITY however large
-            // MEDIA_BODY_READ_BUFFER is. Without this split the read size
-            // *is* the ack unit, and any object at or below it would be
-            // counted and completed by a single body poll.
-            let mut bytes = bytes;
-            while !bytes.is_empty() {
-                let piece = bytes.split_to(bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
-                let bytes_len = piece.len() as u64;
-                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-                let send = sender.send(DrivenLocalChunk {
-                    bytes: piece,
-                    accepted: accepted_tx,
-                });
-                tokio::pin!(send);
-                let sent = tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(body_deadline) => {
-                        fail(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime".to_owned(),
-                        );
-                        false
-                    }
-                    result = &mut send => result.is_ok(),
-                };
-                if !sent {
-                    return;
-                }
-                let downstream_deadline = (tokio::time::Instant::now()
-                    + MEDIA_BODY_NO_PROGRESS_TIMEOUT)
-                    .min(body_deadline);
-                let accepted = tokio::select! {
-                    biased;
-                    Ok(()) = accepted_rx => true,
-                    _ = tokio::time::sleep_until(body_deadline) => {
-                        fail(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime".to_owned(),
-                        );
-                        false
-                    }
-                    _ = tokio::time::sleep_until(downstream_deadline) => {
-                        fail(
-                            std::io::ErrorKind::TimedOut,
-                            "media response made no downstream progress before its body deadline".to_owned(),
-                        );
-                        false
-                    }
-                    () = sender.closed() => false,
-                };
-                if !accepted {
-                    return;
-                }
-                // Counted here — where the bytes actually left. `accepted` is the
-                // downstream acknowledgement, so nothing is credited to this
-                // viewer's rate until the chunk has been taken. A meter advanced
-                // at read time instead would measure the disk.
-                //
-                // The buffered init object is deliberately *not* counted. It is
-                // handed to the response whole, so crediting it would date bytes
-                // at handoff rather than at delivery and inflate the first window
-                // of a session that has delivered nothing yet. One small object
-                // missing from the total is the honest trade; an unmeasured
-                // session correctly reports no rate at all rather than a fast
-                // one, even though that advisory value no longer gates handoff.
-                delivery.note(bytes_len);
-                delivered = delivered.saturating_add(bytes_len);
-                if delivered == len {
-                    if let Some((manager, session, authorization, complete_object, permit)) =
-                        completion.take()
-                    {
-                        settle_streamed_response_completion(
-                            manager,
-                            session,
-                            authorization,
-                            complete_object,
-                            permit,
-                        );
-                    }
-                    return;
-                }
+                LocalDeliveryEvent::StorageRead(..) | LocalDeliveryEvent::Finished => {}
             }
-        }
-    });
-    let body = driven_local_body(receiver, terminal, body_deadline);
+            true
+        },
+        move || {
+            let (manager, session, authorization, complete_object, permit) = completion;
+            settle_streamed_response_completion(
+                manager,
+                session,
+                authorization,
+                complete_object,
+                permit,
+            );
+        },
+    ));
+    let body = resident_local_body(receiver, terminal, body_deadline);
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let headers_mut = response.headers_mut();
@@ -1370,8 +1256,7 @@ pub(super) async fn segment_local_before(
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
     let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
-    let (sender, receiver) =
-        tokio::sync::mpsc::channel::<DrivenLocalChunk>(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
+    let (sender, receiver) = tokio::sync::mpsc::channel(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
     let terminal = StreamedBodyTerminal::new();
     let pump_terminal = terminal.clone();
     let pump_session = session.to_owned();
@@ -1385,151 +1270,40 @@ pub(super) async fn segment_local_before(
     // This producer is the sole owner of the file, delivery tracker, and EOF
     // authorization after headers are exposed. Both deadlines keep advancing
     // even if downstream stops polling; receiver Drop ends it immediately.
-    tokio::spawn(async move {
-        let mut reader = reader;
-        let mut delivery = delivery;
-        let mut completion = Some(completion);
-        let mut delivered = 0_u64;
-        let fail = |kind, message: String| pump_terminal.fail(kind, message);
-        loop {
-            let started = Instant::now();
-            let progress_deadline =
-                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
-            let next = tokio::select! {
-                biased;
-                _ = tokio::time::sleep_until(body_deadline) => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response exceeded its maximum admitted body lifetime",
-                    );
-                    delivery.fail_transport(&error, "body_lifetime_exceeded");
-                    fail(error.kind(), error.to_string());
-                    return;
+    tokio::spawn(pump_local_media(
+        reader,
+        sender,
+        pump_terminal,
+        body_deadline,
+        opened_len,
+        move |event| {
+            match event {
+                LocalDeliveryEvent::Accepted(bytes) => delivery.note_delivered(bytes),
+                LocalDeliveryEvent::StorageRead(bytes, elapsed) => {
+                    delivery.note_storage_read(bytes, elapsed)
                 }
-                () = sender.closed() => return,
-                _ = tokio::time::sleep_until(progress_deadline) => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "media response made no storage progress before its body deadline",
-                    );
-                    delivery.fail(&error);
-                    fail(error.kind(), error.to_string());
-                    return;
+                LocalDeliveryEvent::Failed(error, "body_lifetime_exceeded") => {
+                    delivery.fail_transport(&error, "body_lifetime_exceeded")
                 }
-                next = reader.next() => next,
-            };
-            let (bytes, read_elapsed) = match next {
-                Some(Ok(bytes)) => (bytes, started.elapsed()),
-                Some(Err(error)) => {
-                    delivery.fail(&error);
-                    fail(error.kind(), error.to_string());
-                    return;
+                LocalDeliveryEvent::Failed(error, "downstream_no_progress") => {
+                    delivery.fail_transport(&error, "downstream_no_progress")
                 }
-                None if delivered == opened_len => return,
-                None => {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        format!(
-                            "media response reached EOF after {delivered} of {opened_len} advertised bytes"
-                        ),
-                    );
-                    delivery.fail(&error);
-                    fail(error.kind(), error.to_string());
-                    return;
-                }
-            };
-            // See the VOD pump: the storage read size above and the delivery
-            // proof granularity below are separate decisions. Splitting here
-            // keeps the ack -- and therefore the byte count, the slow-read
-            // report and the completion that renews the lease and moves the
-            // fetched-segment frontier -- at MEDIA_BODY_ACK_GRANULARITY.
-            let read_len = bytes.len() as u64;
-            let mut storage_read_noted = false;
-            let mut bytes = bytes;
-            while !bytes.is_empty() {
-                let piece = bytes.split_to(bytes.len().min(MEDIA_BODY_ACK_GRANULARITY));
-                let bytes_len = piece.len() as u64;
-                let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
-                let send = sender.send(DrivenLocalChunk {
-                    bytes: piece,
-                    accepted: accepted_tx,
-                });
-                tokio::pin!(send);
-                let sent = tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(body_deadline) => {
-                        let error = std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime",
-                        );
-                        delivery.fail_transport(&error, "body_lifetime_exceeded");
-                        fail(error.kind(), error.to_string());
-                        false
-                    }
-                    result = &mut send => result.is_ok(),
-                };
-                if !sent {
-                    return;
-                }
-                let downstream_deadline = (tokio::time::Instant::now()
-                    + MEDIA_BODY_NO_PROGRESS_TIMEOUT)
-                    .min(body_deadline);
-                let accepted = tokio::select! {
-                    biased;
-                    Ok(()) = accepted_rx => true,
-                    _ = tokio::time::sleep_until(body_deadline) => {
-                        let error = std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response exceeded its maximum admitted body lifetime",
-                        );
-                        delivery.fail_transport(&error, "body_lifetime_exceeded");
-                        fail(error.kind(), error.to_string());
-                        false
-                    }
-                    _ = tokio::time::sleep_until(downstream_deadline) => {
-                        let error = std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "media response made no downstream progress before its body deadline",
-                        );
-                        delivery.fail_transport(&error, "downstream_no_progress");
-                        fail(error.kind(), error.to_string());
-                        false
-                    }
-                    () = sender.closed() => false,
-                };
-                if !accepted {
-                    return;
-                }
-                delivery.note_delivered(bytes_len);
-                if !storage_read_noted {
-                    // The stall signal is a property of the storage read, not of
-                    // the acknowledgement unit, so it is evaluated once per read
-                    // against the bytes storage actually produced in that time --
-                    // but only after the body has taken the first piece of it, so
-                    // a chunk the consumer never accepted still reports nothing.
-                    storage_read_noted = true;
-                    delivery.note_storage_read(read_len, read_elapsed);
-                }
-                delivered = delivered.saturating_add(bytes_len);
-                if delivered == opened_len {
-                    if delivery.finish() {
-                        if let Some((manager, session, authorization, complete_object, permit)) =
-                            completion.take()
-                        {
-                            settle_streamed_response_completion(
-                                manager,
-                                session,
-                                authorization,
-                                complete_object,
-                                permit,
-                            );
-                        }
-                    }
-                    return;
-                }
+                LocalDeliveryEvent::Failed(error, _) => delivery.fail(&error),
+                LocalDeliveryEvent::Finished => return delivery.finish(),
             }
-        }
-    });
+            true
+        },
+        move || {
+            let (manager, session, authorization, complete_object, permit) = completion;
+            settle_streamed_response_completion(
+                manager,
+                session,
+                authorization,
+                complete_object,
+                permit,
+            );
+        },
+    ));
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
@@ -1549,7 +1323,7 @@ pub(super) async fn segment_local_before(
         // Streamed rather than buffered: a 4K copy segment is ~35 MB, and
         // reading it into memory before the first byte goes out is an
         // allocation and a copy per request for data on its way to a socket.
-        .body(driven_local_body(receiver, terminal, body_deadline))
+        .body(resident_local_body(receiver, terminal, body_deadline))
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
