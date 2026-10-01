@@ -68,3 +68,27 @@ The builder starts CQ0 in the independent clone identified in the build.
 Before shared production edits it must record upstream landing/release,
 reconcile the implementation delta, and obtain the required adversarial
 integration review. Existing-session scope is not reassigned by this review.
+
+## 4. CQ0 implementation delta — investigative approval only
+
+The builder's `cq0_adversarial_review` agent reviewed the new isolated lab,
+its six final Chrome receipts and the focused checks on 2026-09-30. Verdict:
+**approve the isolated investigative prototype; revise the evidence record
+before claiming CQ0 complete.** All nine receipt checks passed. No shared
+production work or media/native acceptance was approved.
+
+The build's §10.1 now records every qualification requested by the review:
+
+| Finding | Recorded disposition |
+|---|---|
+| SourceBuffer range growth cannot exclude overlapping replacement samples | The measured frontier and range extension are retained; exact sample bounds, general overwrite exclusion and complete interval provenance remain unproved. |
+| Separately decoding aligned segments is not alternating-resolution join verification | Encoded joins, burned frame identities and midpoint joins remain unqualified. |
+| Git HEAD did not include uncommitted prototype source | Source content hashes and the staged candidate tree are retained; the normal commit is blocked by missing catalog registration. HEAD in the receipt is explicitly a planning anchor. |
+| Final cases exercise `loadLevel`, not the failed `nextLoadLevel` trial | Prior receipts remain historical diagnostics without complete source identity; the limitation is also supported by the read-only vendored setter behavior. |
+| Safari WebDriver failed before playback | Native selection, autonomous pressure/reselection and real Safari media remain not measured. |
+
+The same record explicitly keeps audible/browser-output continuity and
+external display capture not measured. CQ0 is a runnable partial milestone;
+its missing physical/API and media evidence is not converted into a pass.
+The upstream ownership/integration delta review required by §1.2 is still
+outstanding and cannot be replaced by this isolated prototype review.

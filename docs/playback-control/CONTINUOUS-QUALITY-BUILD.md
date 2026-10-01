@@ -856,7 +856,7 @@ historical measured outcomes as current evidence.
 | Milestone | Commit/tree | Focused command / device run | Result |
 |---|---|---|---|
 | Upstream ownership | `424f7d162` + dirty work in the named session | Read-only scope inspection, 2026-09-30 | Active dependency; no shared production edits authorized yet |
-| CQ0 | — | — | Not run |
+| CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
 | CQ2a | — | — | Not run |
 | CQ1 | — | — | Not run |
 | CQ2 | — | — | Not run |
@@ -866,6 +866,139 @@ historical measured outcomes as current evidence.
 | CQ6 | — | — | Not run |
 | CQ7 | — | — | Not run |
 | CQ8 | — | — | Not run |
+
+### 10.1 CQ0 isolated experiment — mechanics evidence, capture incomplete
+
+The new [probe](../../scripts/continuous-quality-lab.mjs) and its
+[receipt checks](../../tests/playback/continuous-quality/receipt.test.mjs)
+write only this independent clone's `target/continuous-quality/`. They
+serve the vendored hls.js **1.6.16** read-only, with one HTML media element,
+one Hls attachment, two H.264 SDR fMP4 video rungs and one separately encoded
+shared AAC audio playlist. The generated fixture has moving patterns and a
+numbered frame lane, 24000/1001 fps, closed 48-frame GOPs, B-frames and a
+short final segment. These fixed synthetic settings are investigative;
+production must reuse the repository's actual segment planner.
+
+```bash
+node scripts/continuous-quality-lab.mjs fixture
+node scripts/continuous-quality-lab.mjs verify-media
+node scripts/continuous-quality-lab.mjs run chrome \
+  baseline switch cancel-before-append cancel-after-append denied long-buffer
+CQ_RECEIPTS=target/continuous-quality \
+  node --test tests/playback/continuous-quality/receipt.test.mjs
+node scripts/continuous-quality-lab.mjs run safari native-autonomous
+# Manual local reproduction, including a native Safari attempt:
+node scripts/continuous-quality-lab.mjs serve
+# Open the printed localhost URL with ?native=1, then click Start fixture.
+```
+
+The final numbered fixture SHA-256 is
+`44ac3add25f0322c7f5f5f5f5a207d862c369a323e01159562f35c1baec86231`;
+FFmpeg is 9.0.1 on this host. Each browser receipt pins its user agent,
+fixture hash, Git planning anchor and probe source hash. The planning anchor
+excludes the then-uncommitted prototype; `source-evidence.json` separately
+pins the runner, page, probe, checks and read-only hls.js by content hash
+and identifies the staged candidate tree. The normal commit supplies source identity after the catalog registration. Raw JSON, request
+logs, append range changes, canvas diagnostics and browser screenshots
+remain under the private generated target directory; no fleet credentials
+or media source paths are needed. These are **not** promotion receipts.
+
+**Observed constraints:**
+
+- In 1.6.16, `nextLoadLevel` alone does not override a locked manual level.
+  The initial experiment requested 1080p but kept loading 720p. Those trials
+  are retained in `target/continuous-quality/initial-nextLoadLevel/`, but
+  lack a complete source identity and are historical diagnostics only. The
+  final runnable cases exercise `loadLevel`; the setter distinction is also
+  visible in the read-only vendored code. No reproducible failed-setter
+  regression or acceptance result is claimed from those initial trials.
+  `loadLevel` sets the manual choice for future loads, keeps
+  `autoLevelEnabled=false`, and does not invoke the immediate-switch buffer
+  flush. Production adoption remains behind the integration delta review.
+- Append provenance must use the actual video SourceBuffer, independently
+  of the media element's audio/video intersection and playlist timestamps.
+  B-frame rebasing makes the first buffered video time 0.083416 s in this
+  fixture. Playlist fragment start 10.010000 s corresponds to actual
+  SourceBuffer start 10.093416 s. The probe records before/after ranges from
+  real append completion before hls.js completion listeners settle. The
+  interval start is a **contiguous range-growth inference** from the old
+  buffered end, not a decoded first-sample bound: overlapping replacement
+  bytes could extend the same range. Only the first target segment is
+  recorded as target provenance. General sample-level overwrite exclusion
+  and per-interval pinning remain unproved, pending production integration.
+- Cancellation before append is exercised while loading is stopped. After
+  target append, the probe requests 720p again without removing media;
+  already committed 1080p frames still present before the later 720p choice.
+  Its result stays `observation_pending`, never false `retained_current`.
+  This is local engine evidence; it does not implement or prove the CQ2a
+  negotiated cancellation/acknowledgement-loss ownership protocol.
+- With 30 seconds of forward buffering, a request at about 3.00 s first
+  presents at 34.117416 s: 31.107 seconds after the tap in the final series. A post-append
+  deadline based on tap time would falsely report retention. Existing media
+  remains buffered and no quality-driven removal is observed.
+- The local denied-selection case requests no target media and leaves the
+  incumbent moving. It exercises client refusal mechanics only; resource
+  admission, producer leases, JIT readiness and denied production work are
+  **not measured**. The fixture is fully materialized before playback.
+- All 48 independently decoded video segments align across the two rungs,
+  including the short tail. Every decoded frame follows the rational grid;
+  encoded shared AAC packet timestamps have zero gaps. This proves fixture
+  timing, not sample-level audio output at the browser or device. The
+  verifier decodes each segment separately; alternating-resolution encoded
+  joins, burned frame-number recognition, DTS/sample-entry compatibility
+  and cold midpoint joins are not qualified by these checks.
+- The no-switch baseline and switch cases both report an initial
+  `bufferSeekOverHole` to 0.133416 s; the fixture's startup A/V origin needs
+  separate treatment before production-media qualification. It is retained
+  as an observed startup limitation, not hidden as a switch success.
+
+The six final Chrome attempts contain one no-switch baseline, two ordinary
+safe refusals, two ordinary presented switches (one then returns to 720p),
+and one long-buffer presented switch. Nine focused receipt checks pass with
+no skipped cases when `CQ_RECEIPTS` is set. Stable callback-gap p95 is
+50.1 ms; switch-window maximum is 50.1 ms for the regular/long-buffer cases
+and 66.7 ms for post-append supersession. These are callback diagnostics,
+not display-gap qualification. The prototype never starts live producers;
+no claim is made about maximum live encoders or server cleanup.
+
+**Native Safari failed experiment:** actual `/usr/bin/safaridriver` starts,
+but `POST /session` times out after 15 seconds on this host. The blocked
+receipt records that operation; no preference or automation authorization
+was changed. Native HLS media, autonomous rung reselection and runtime
+exact-quality selection are **not measured**. The native page intentionally
+exposes no invented exact-height API; its candidate limitation requires a
+real runtime/native adapter experiment before CQ7 design is accepted.
+Playwright WebKit would not fill this row.
+
+**How to read the results:** moving canvas pixels, callback PTS and rendition
+size diagnose decoder progress; browser screenshots are point samples, not
+external display capture. Browser output audio and display capture are
+**not measured**. These muted synthetic runs do not qualify unmuted audio,
+fullscreen, subtitles, pause/seek collisions, other rates, backgrounding,
+real high-bitrate titles or low-end devices. Nonzero source origin, VFR,
+HDR/HEVC, device selection and production JIT/admission remain unqualified.
+CQ0 is runnable and retainable, with those evidence rows incomplete; it is
+not a second acceptance oracle. Port the measurements into the existing
+playback lab after §1.2 is satisfied.
+
+A narrow read-only check on 2026-09-30 found the named upstream chat still
+`active`, with its current turn `inProgress` and shared production edits in
+progress. Its surfaces are not released. CQ2a/CQ1 and every shared
+production edit remain blocked until upstream landing, authoritative-main
+integration, ownership reconciliation and adversarial integration review.
+No message was sent to the upstream chat and no scope transfer was inferred.
+
+**Workflow supersession, 2026-09-30:** Paul directed normal commits in the
+independent clone, batched into one larger PR, with adversarial review only
+when ready for main, followed by the fast lane. Per-task PRs, intermediate
+focused-unit runs and the pre-integration adversarial review are superseded
+for this session. Existing experiments and review remain historical evidence;
+no new unit suites run during building. Compiler feedback and the normal
+tracked commit hook remain in use. The non-overlap instruction and upstream
+landing/release requirement remain intact. Routine decisions proceed with a
+note rather than a new permission checkpoint; the new lab's single catalog
+path is registered under `playback.pipeline` to satisfy the normal hook.
+The [status page](CONTINUOUS-QUALITY-STATUS.html) carries current progress.
 
 Each platform series records total attempts, presented switches, safe
 refusals, recovery-owned outcomes, visible failures, capture coverage,
