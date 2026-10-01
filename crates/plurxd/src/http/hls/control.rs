@@ -2192,13 +2192,17 @@ pub(super) async fn control_local_with_settlement_capacity(
     // Structural validation above also runs on relaying ingress; semantic
     // refusal belongs here, after routing, before any owner mutation.
     if request.demand != crate::playback_control::PlaybackDemand::End
-        && matches!(
-            request.selection.quality,
-            crate::playback_control::QualitySelection::Auto {
-                candidate_id: Some(_),
-                ..
-            }
-        )
+        && (request
+            .capabilities
+            .as_ref()
+            .is_some_and(|caps| caps.decoder_caps.is_some())
+            || matches!(
+                request.selection.quality,
+                crate::playback_control::QualitySelection::Auto {
+                    candidate_id: Some(_),
+                    ..
+                }
+            ))
     {
         return control_error(
             StatusCode::BAD_REQUEST,
@@ -2207,7 +2211,17 @@ pub(super) async fn control_local_with_settlement_capacity(
             Some(route.incarnation_id.clone()),
             Some(owner_epoch),
             None,
-            Some("selection.quality.candidate_id_unsupported"),
+            Some(
+                if request
+                    .capabilities
+                    .as_ref()
+                    .is_some_and(|caps| caps.decoder_caps.is_some())
+                {
+                    "capabilities.decoder_caps_unsupported"
+                } else {
+                    "selection.quality.candidate_id_unsupported"
+                },
+            ),
         );
     }
     let can_settle_preparation = request

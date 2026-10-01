@@ -1165,6 +1165,7 @@ mod tests {
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],

@@ -1491,6 +1491,7 @@ pub(super) async fn stage_prepared_successor_with_prime(
     let staged_recipe = RemoteStartRequest {
         candidate_id: None,
         presentation_target: None,
+        decoder_caps: None,
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: staged_incarnation_id.clone(),
         user_id: route.user_id,

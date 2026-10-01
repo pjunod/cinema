@@ -585,12 +585,113 @@ pub(crate) enum DynamicRangePolicy {
     Sdr,
 }
 
+/// Full runtime decoder snapshot. Absence is unknown; an empty video list is
+/// an explicit loss of every decoder. Entries remain profile-specific.
+/// Codec tokens include decode-only codecs such as VP9. Unknown canonical
+/// tokens are retained for forwarding, never treated as a capability grant.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "DecoderCapsSnapshotWire")]
+pub(crate) struct DecoderCapsSnapshot {
+    pub revision: u64,
+    pub video: Vec<RuntimeVideoConstraint>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DecoderCapsSnapshotWire {
+    revision: u64,
+    video: Vec<RuntimeVideoConstraint>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeVideoConstraint {
+    pub codec: String,
+    pub profiles: Vec<String>,
+    pub available: bool,
+    pub dynamic_ranges: Vec<DynamicRangePolicy>,
+    pub dv_profiles: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_rate: Option<RuntimeFrameRate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bitrate_bps: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeFrameRate {
+    pub numerator: u32,
+    pub denominator: u32,
+}
+
+impl TryFrom<DecoderCapsSnapshotWire> for DecoderCapsSnapshot {
+    type Error = &'static str;
+
+    fn try_from(wire: DecoderCapsSnapshotWire) -> Result<Self, Self::Error> {
+        if !(1..=9_007_199_254_740_991).contains(&wire.revision) || wire.video.len() > 16 {
+            return Err("invalid decoder snapshot revision or entry count");
+        }
+        for entry in &wire.video {
+            if entry.codec.is_empty()
+                || entry.codec.len() > 32
+                || entry.codec == "auto"
+                || !entry.codec.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || entry.profiles.len() > 8
+                || entry.profiles.iter().any(|profile| {
+                    profile.is_empty()
+                        || profile.len() > 32
+                        || !profile.bytes().all(|byte| {
+                            byte.is_ascii_lowercase()
+                                || byte.is_ascii_digit()
+                                || matches!(byte, b'_' | b'-')
+                        })
+                })
+                || entry.dynamic_ranges.len() > 4
+                || entry.dynamic_ranges.contains(&DynamicRangePolicy::Auto)
+                || entry.dv_profiles.len() > 8
+                || entry
+                    .dv_profiles
+                    .iter()
+                    .any(|profile| !(1..=10).contains(profile))
+                || [entry.max_width, entry.max_height]
+                    .into_iter()
+                    .flatten()
+                    .any(|axis| !(1..=16_384).contains(&axis))
+                || entry
+                    .max_bitrate_bps
+                    .is_some_and(|rate| !(1..=1_000_000_000_000).contains(&rate))
+                || entry.max_frame_rate.is_some_and(|rate| {
+                    !(1..=1_000_000).contains(&rate.numerator)
+                        || !(1..=1_000_000).contains(&rate.denominator)
+                        || u64::from(rate.numerator) > 1_000 * u64::from(rate.denominator)
+                })
+            {
+                return Err("invalid runtime decoder constraint");
+            }
+        }
+        Ok(Self {
+            revision: wire.revision,
+            video: wire.video,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DynamicCapabilities {
     /// Tolerated and preserved by the parser floor; no policy consumes it yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_caps: Option<DecoderCapsSnapshot>,
     pub platform: ClientPlatform,
     pub max_height: i64,
     pub codecs: Vec<CodecPolicy>,
@@ -3131,6 +3232,7 @@ impl PlaybackDemandSnapshot {
             },
             capabilities: Some(DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform,
                 max_height: 2160,
                 codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
@@ -15368,6 +15470,53 @@ mod tests {
     }
 
     #[test]
+    fn decoder_snapshot_parser_preserves_loss_and_refuses_unbounded_claims() {
+        let empty = serde_json::json!({"revision": 1, "video": []});
+        let parsed: DecoderCapsSnapshot =
+            serde_json::from_value(empty.clone()).expect("valid decoder snapshot fixture");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("valid decoder snapshot fixture"),
+            empty
+        );
+        for revision in [0, 9_007_199_254_740_992u64] {
+            assert!(serde_json::from_value::<DecoderCapsSnapshot>(
+                serde_json::json!({"revision": revision, "video": []})
+            )
+            .is_err());
+        }
+        let valid = serde_json::json!({"revision": 2, "video": [{
+            "codec": "vp9", "profiles": ["main10"], "available": false,
+            "dynamic_ranges": [], "dv_profiles": []
+        }]});
+        let parsed: DecoderCapsSnapshot =
+            serde_json::from_value(valid.clone()).expect("valid decoder snapshot fixture");
+        assert_eq!(
+            serde_json::to_value(parsed).expect("valid decoder snapshot fixture"),
+            valid
+        );
+        for (field, value) in [
+            ("codec", serde_json::json!("auto")),
+            ("profiles", serde_json::json!(["Main10"])),
+            ("max_width", serde_json::json!(0)),
+            (
+                "max_frame_rate",
+                serde_json::json!({"numerator": 30, "denominator": 0}),
+            ),
+            ("unrecognized", serde_json::json!(true)),
+        ] {
+            let mut bad = valid.clone();
+            bad["video"][0][field] = value;
+            assert!(
+                serde_json::from_value::<DecoderCapsSnapshot>(bad).is_err(),
+                "{field}"
+            );
+        }
+        let mut bad = valid.clone();
+        bad["video"] = serde_json::json!(vec![valid["video"][0].clone(); 17]);
+        assert!(serde_json::from_value::<DecoderCapsSnapshot>(bad).is_err());
+    }
+
+    #[test]
     fn auto_candidate_parser_floor_retains_nested_route_for_owner_dispatch() {
         let mut wire =
             serde_json::to_value(relay_request()).expect("valid parser-floor test fixture");
@@ -15375,6 +15524,12 @@ mod tests {
         wire["control"]["selection"]["quality"]["candidate_id"] = id.into();
         wire["control"]["capabilities"]["presentation_target"] = serde_json::json!({
             "width_px": 2400, "height_px": 1600, "revision": 3
+        });
+        wire["control"]["capabilities"]["decoder_caps"] = serde_json::json!({
+            "revision": 4,
+            "video": [{"codec": "h264", "profiles": ["high"], "available": false,
+                "dynamic_ranges": ["sdr"], "dv_profiles": [], "max_width": 1920,
+                "max_height": 1080, "max_frame_rate": {"numerator": 30000, "denominator": 1001}}]
         });
         let parsed: ControlRelayRequest =
             serde_json::from_value(wire.clone()).expect("valid parser-floor test fixture");
@@ -15432,6 +15587,9 @@ mod tests {
         assert!(legacy["control"]["capabilities"]
             .get("presentation_target")
             .is_none());
+        assert!(legacy["control"]["capabilities"]
+            .get("decoder_caps")
+            .is_none());
     }
 
     #[test]
@@ -15483,6 +15641,7 @@ mod tests {
             },
             capabilities: Some(DynamicCapabilities {
                 presentation_target: None,
+                decoder_caps: None,
                 platform: ClientPlatform::Web,
                 max_height: 2160,
                 codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
@@ -24399,6 +24558,7 @@ mod tests {
     fn can_prepare(dual_player_preparation: bool) -> DynamicCapabilities {
         DynamicCapabilities {
             presentation_target: None,
+            decoder_caps: None,
             platform: ClientPlatform::Apple,
             max_height: 2160,
             codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],

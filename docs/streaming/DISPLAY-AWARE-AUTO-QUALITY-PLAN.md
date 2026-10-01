@@ -1098,3 +1098,43 @@ parser3, actual owner/refusal1, durable replay/remote-path1 and actual response
 relay1 passed; validation253 (one skip) and affected operations85 passed.
 No old-base result qualifies it. The sole reviewed conflict was rechecked with
 no blockers; final normal hook/commit checks remain recorded separately.
+
+### 9.2.3 Required receive-only runtime decoder snapshot (in progress)
+
+The parser floor also carries optional `decoder_caps` in control capabilities
+and remote worker context. Omission retains the legacy/unknown baseline; presence
+is a full snapshot, never a patch. An empty `video` array explicitly states no
+available decoder. Each entry retains its canonical codec token (including
+VP9/decode-only and future unknown tokens), profile tokens, availability, grade
+and DV profile claims, and optional width/height, rational frame-rate and bitrate
+limits. Unknown codec/profile tokens provide no admission proof. Multiple
+entries remain separate; no global minimum collapses their profile constraints.
+
+Structural bounds are 16 video entries, eight profiles per entry, 32-byte
+lowercase ASCII/digit/underscore/hyphen tokens, four grades, eight DV profiles
+1–10, positive axes through 16384, positive rational components through 1000000
+with ratio at most 1000 fps, and bitrate at most 1000000000000 bit/s. Snapshot
+and presentation revisions are positive JSON-safe integers through
+9007199254740991 so native/JavaScript round trips cannot silently round them.
+
+Revision ordering belongs to the scoped client lifetime at the B-R2 owner:
+lower revisions cannot replace newer state, an equal revision with differing
+contents is a conflict, and an in-flight successor must be checked against the
+latest accepted target/decoder state before commit. This subsection records the
+consumption contract; B-R2 enforcement is still pending implementation.
+
+B-R1 preserves the snapshot through structural ingress and relay, then refuses
+unsupported nonterminal local dispatch even when `candidate_id` is absent.
+Terminal cleanup and retained-response replay retain their earlier ordering.
+Remote execution/takeover refuses any snapshot it cannot enforce. Target geometry
+alone remains advisory. No client emits these fields yet; the conformance audit
+allows exactly the two optional, omitted legacy extensions and fails when a
+native client gains either field, requiring restoration of complete parity.
+Focused evidence: strict conformance 15/15; complete static validation 253
+(one existing skip); docs index 4/4; nested relay/worker parser fixtures 3/3;
+actual owner refusal preserving the active session/drain 1/1; snapshot-bearing
+public ingress and retained terminal replay 1/1; candidate/revision tests with
+`hiqlite-store` 4/4. The final all-target compiler check and workspace Clippy passed on pinned
+Rust 1.97.1. Independent schema/relay review found no actionable blockers;
+the normal commit hook remains pending. These are source checks, not a parser-floor deployment
+receipt or feature qualification.
