@@ -1,6 +1,6 @@
 # Owned clock lab — prepare, observe and retire one identified artifact
 
-**Status:** prepared for review; no lab build, launch or observation executed
+**Status:** open — prepared for review; no lab build, launch or observation executed
 · **Written:** 2026-10-01 · **Source preparation:** actual effort `e0f91c741`.
 
 Companion to [the measurement plan](CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
