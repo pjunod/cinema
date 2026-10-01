@@ -1912,6 +1912,10 @@ pub struct NetworkPrior {
     /// within the verdict's lifetime. Always written together with
     /// [`NetworkPrior::starved_at_ms`].
     pub worst_rung_height: Option<i64>,
+    /// Separately attributed completed-transfer Link verdict. Legacy inferred
+    /// supply negatives never populate or refresh this pair.
+    pub link_worst_rung_height: Option<i64>,
+    pub link_starved_at_ms: Option<i64>,
     /// When the most recent starvation was observed. The verdict ages out
     /// from this stamp, not from `updated_at_ms`, which every healthy
     /// observation refreshes.
@@ -1934,6 +1938,16 @@ pub struct NetworkPrior {
 pub const NETWORK_PRIOR_STARVED_TTL_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl NetworkPrior {
+    /// A measured Link verdict for a new-policy consumer. Existing consumers
+    /// continue to use [`Self::active_starved_rung`].
+    pub fn active_link_starved_rung(&self, now_ms: i64) -> Option<i64> {
+        let height = self.link_worst_rung_height.filter(|height| *height > 0)?;
+        let age = now_ms.checked_sub(self.link_starved_at_ms?)?;
+        (0..=NETWORK_PRIOR_STARVED_TTL_MS)
+            .contains(&age)
+            .then_some(height)
+    }
+
     /// The starvation verdict if it is still recent enough to believe.
     ///
     /// A verdict with no stamp is treated as expired: the two are written
@@ -2042,6 +2056,68 @@ pub struct NetworkPriorObservation {
     pub throughput_kbps: Option<u32>,
     pub starved_rung_height: Option<i64>,
     pub observed_at_ms: i64,
+    /// Validated completed-body evidence, available only to an attributed
+    /// Link producer. The legacy client telemetry converter has no such facts.
+    pub measured_link: Option<MeasuredLinkObservation>,
+}
+
+/// Closed cause vocabulary for network-prior attribution, separate from the
+/// legacy telemetry strings. Only Link can establish measured negative proof.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetworkPriorCause {
+    Link,
+    Encode,
+    Decode,
+    Hold,
+    Authority,
+}
+
+/// Evidence about one completed network body, not a smoothed bandwidth meter
+/// or time spent waiting for a producer. Construction fails closed when any
+/// provenance is unknown. Completion and receipt use the same server clock.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeasuredLinkObservation {
+    completed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompletedNetworkTransfer {
+    pub body_bytes: u64,
+    pub body_duration_ms: u64,
+    pub completed_at_ms: i64,
+    pub network_load: Option<bool>,
+    pub from_local_cache: Option<bool>,
+    pub producer_paced: Option<bool>,
+}
+
+impl MeasuredLinkObservation {
+    pub fn from_completed_transfer(
+        cause: NetworkPriorCause,
+        transfer: CompletedNetworkTransfer,
+        observed_at_ms: i64,
+    ) -> Option<Self> {
+        let evidence = Self {
+            completed_at_ms: transfer.completed_at_ms,
+        };
+        (cause == NetworkPriorCause::Link
+            && transfer.body_bytes > 0
+            && transfer.body_duration_ms > 0
+            && transfer.network_load == Some(true)
+            && transfer.from_local_cache == Some(false)
+            && transfer.producer_paced == Some(false)
+            && evidence.fresh_at(observed_at_ms))
+        .then_some(evidence)
+    }
+
+    pub(crate) fn fresh_at(&self, observed_at_ms: i64) -> bool {
+        observed_at_ms
+            .checked_sub(self.completed_at_ms)
+            .is_some_and(|age| (0..=15_000).contains(&age))
+    }
+
+    pub(crate) fn completed_at_ms(&self) -> i64 {
+        self.completed_at_ms
+    }
 }
 
 /// The set of fields that must be supplied to build a

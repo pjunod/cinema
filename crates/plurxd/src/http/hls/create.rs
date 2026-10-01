@@ -144,6 +144,18 @@ pub struct CreateSession {
 }
 
 impl CreateSession {
+    pub(super) fn candidate_auto_policy(&self) -> bool {
+        use plurx_core::playback::DesiredQuality;
+        if self.height == Some(1440) {
+            return false;
+        }
+        match self.intent.as_ref().map(|intent| intent.selection.quality) {
+            Some(DesiredQuality::Auto { .. }) => true,
+            Some(_) => false,
+            None => self.quality_auto == Some(true) && self.copy != Some(true),
+        }
+    }
+
     /// `height` is initially resolved by the caller — Auto answered, explicit
     /// rungs snapped, the source-height promise honored. A bound stall reopen
     /// is the one later normalization: `claim_request` replaces this value
@@ -1025,6 +1037,8 @@ pub(crate) async fn resolve_height(
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
     pub request: crate::transcode::SessionRequest,
+    /// Actual Auto policy after geometry/copy normalization, not wire intent.
+    pub candidate_auto_policy: bool,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
     pub height: i64,
@@ -1152,6 +1166,18 @@ pub(crate) async fn resolve_plan(
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
+            if requested.is_none() && body.candidate_auto_policy() {
+                // The fallback belongs to the actual negotiated catalog, not
+                // to legacy starvation heights or an unattributed rate EWMA.
+                height = resolve_height(
+                    state,
+                    Some(source),
+                    super::super::stream::prior_for_candidate_policy(network_prior, true),
+                    hdr10_requested,
+                    body.height,
+                )
+                .await;
+            }
             body.audio = state
                 .transcode
                 .candidate_audio_index(source, body.audio)
@@ -1257,6 +1283,7 @@ pub(crate) async fn resolve_plan(
         .transpose()
         .map_err(|error| ApiError::BadRequest(error.to_owned()))?
         .flatten();
+    let candidate_auto_policy = body.candidate_auto_policy();
     let mut request = body.into_request(file_id, height);
     request.audio_claim = audio_claim;
     request.candidate_context = candidate_context;
@@ -1334,6 +1361,7 @@ pub(crate) async fn resolve_plan(
     }
     Ok(ResolvedPlan {
         request,
+        candidate_auto_policy,
         height,
         intent_fingerprint: fingerprint,
         plan_notes,
@@ -1630,6 +1658,7 @@ async fn create_with_purpose(
         req,
     )
     .await?;
+    let candidate_auto_policy = resolved.candidate_auto_policy;
     let request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
@@ -2454,7 +2483,11 @@ async fn create_with_purpose(
             ladder_ceiling,
             info.audio_delivery.as_ref(),
         ),
-        prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
+        prior_kbps: super::super::stream::prior_for_candidate_policy(
+            network_prior.as_ref(),
+            candidate_auto_policy && request.candidate_context.is_some(),
+        )
+        .and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
         delivered_dolby_vision_profile: session_delivered_dolby_vision_profile(
             source.as_ref(),

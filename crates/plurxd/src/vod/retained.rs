@@ -63,6 +63,7 @@ impl VodServe {
             || !candidate.decoder_compatible
             || candidate.id != context.candidate_id
             || candidate.recipe_digest != context.recipe_digest
+            || candidate.normalized_geometry != context.normalized_geometry
             || candidate.grade != context.grade
             || request.presentation != crate::transcode::Presentation::Vod
             || context
@@ -82,6 +83,9 @@ impl VodServe {
             let artifact = &entry.artifact;
             let binding = artifact.candidate.as_ref()?;
             (binding.candidate_id == candidate.id
+                && binding.kind == request.kind
+                && binding.normalized_geometry == context.normalized_geometry
+                && binding.profile == context.profile
                 && binding.recipe_digest == candidate.recipe_digest
                 && binding.route == candidate.route
                 && binding.grade == candidate.grade
@@ -90,10 +94,15 @@ impl VodServe {
                 && binding.audio_offset_ms == request.audio_offset_ms
                 && binding.subtitle_burn == request.subtitle_burn
                 && artifact.source_version == source.object_version()
-                && request
+                && artifact
                     .audio_delivery
                     .as_ref()
-                    .is_none_or(|audio| artifact.audio_delivery.as_ref() == Some(audio)))
+                    .zip(request.audio_delivery.as_ref())
+                    .is_some_and(|(actual, requested)| {
+                        actual.valid_snapshot()
+                            && requested.valid_snapshot()
+                            && actual.byte_identity() == requested.byte_identity()
+                    }))
             .then(|| Arc::clone(artifact))
         })?;
         let binding = artifact.candidate.clone()?;
@@ -827,6 +836,225 @@ async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn measured_candidate_cost_requires_complete_actual_audio_route_source_and_digest() {
+        use crate::vodgen::Sink;
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let temp = crate::test_tempdir().expect("cost fixture");
+        let serve = crate::vodserve::tests::bare_serve(temp.path());
+        let mut rendition = crate::vodserve::tests::synthetic_rendition(temp.path()).await;
+        let path = temp.path().join("source.bin");
+        tokio::fs::write(&path, b"cost source")
+            .await
+            .expect("source");
+        let file = crate::vodserve::tests::media_file_at(path, 10_000);
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await
+            .expect("source fence");
+        let digest = [42; 32];
+        let candidate_id = CandidateId::for_recipe_digest(digest);
+        let audio = plurx_core::playback::audio::AudioDelivery {
+            action: plurx_core::playback::audio::AudioAction::None,
+            downmix: None,
+            reason: "actual fixture producer has no audio".to_owned(),
+        };
+        let kind = SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        let owned = Arc::get_mut(&mut rendition).expect("unshared");
+        owned.source = Some(source);
+        owned.recipe.file = file.clone();
+        owned.recipe.audio_delivery = Some(audio.clone());
+        // This unit supplies the private dispatch-attested binding. Production
+        // can mint it only after the actual recipe equality check.
+        owned.recipe.measured_candidate = Some(RetainedCandidateBinding {
+            kind,
+            normalized_geometry: true,
+            profile: None,
+            candidate_id,
+            recipe_digest: digest,
+            file_id: file.id,
+            audio_index: None,
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            route: CandidateRoute::Remux,
+        });
+        let init = b"actual fixture init";
+        let init_digest = hex::encode(Sha256::digest(init));
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity {
+                muxer_init: init_digest.clone(),
+                served_init: init_digest,
+                promotion: Default::default(),
+            }),
+            from_disk: false,
+        };
+        tokio::fs::write(rendition.dir.path().join(INIT_NAME), init)
+            .await
+            .expect("init");
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let candidate = QualityCandidate {
+            id: candidate_id,
+            recipe_digest: digest,
+            route: CandidateRoute::Remux,
+            normalized_geometry: true,
+            width: 1280,
+            height: 720,
+            target_height: 720,
+            average_bps: Some(u64::MAX),
+            peak_bps: Some(u64::MAX),
+            grade: plurx_core::transcode::OutputGrade::Sdr,
+            decoder_compatible: true,
+            complete_cache: true,
+            sustainable: true,
+        };
+        let request = SessionRequest {
+            candidate_context: Some(crate::transcode::CandidateExecutionContext {
+                retained_output: None,
+                owner_node_id: None,
+                candidate_id,
+                recipe_digest: digest,
+                normalized_geometry: true,
+                grade: candidate.grade,
+                profile: None,
+            }),
+            file_id: file.id,
+            playback_id: "cost-fixture".to_owned(),
+            request_id: None,
+            control_sequence: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind,
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: Some(audio),
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        let source = rendition.source.as_ref().expect("source");
+        assert!(
+            serve
+                .measured_candidate_cost(&candidate, &request, source)
+                .is_none(),
+            "complete_cache and planned numbers are not measurement"
+        );
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+        };
+        for entry in 0..rendition.plan.len() {
+            sink.materialize(entry as u32, vec![7; 1000 + entry])
+                .await
+                .expect("actual sink publication");
+        }
+        sink.completed_output().await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let proof = loop {
+            if let Some(proof) = serve.measured_candidate_cost(&candidate, &request, source) {
+                break proof;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "completed retained proof never issued"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        };
+        assert!(proof.average_bps() > 0 && proof.average_bps() < u64::MAX);
+        assert!(proof.rfc_peak_bps() > 0 && proof.rfc_peak_bps() < u64::MAX);
+        let descriptor = proof.public_descriptor();
+        assert_eq!(descriptor.recipe_digest, digest);
+        assert_eq!(descriptor.qualification, "complete_full_mux_rfc8216_v1");
+        assert_eq!(descriptor.artifact_id, proof.artifact_facts().artifact_id);
+        assert!(serve
+            .shared
+            .retained_artifacts
+            .acquire_expected(&proof.artifact_facts(), &rendition)
+            .is_some());
+        let mut altered = request.clone();
+        altered.audio_delivery = None;
+        assert!(serve
+            .measured_candidate_cost(&candidate, &altered, source)
+            .is_none());
+        altered = request.clone();
+        altered.audio_index = Some(7);
+        assert!(serve
+            .measured_candidate_cost(&candidate, &altered, source)
+            .is_none());
+        altered = request.clone();
+        altered.kind = SessionKind::Copy {
+            aac: true,
+            preserve_dolby_vision: false,
+            convert_dolby_vision: false,
+        };
+        assert!(serve
+            .measured_candidate_cost(&candidate, &altered, source)
+            .is_none());
+        altered = request.clone();
+        altered
+            .candidate_context
+            .as_mut()
+            .expect("context")
+            .owner_node_id = Some("other-node".to_owned());
+        assert!(serve
+            .measured_candidate_cost(&candidate, &altered, source)
+            .is_none());
+        let mut other_candidate = candidate.clone();
+        other_candidate.route = CandidateRoute::Encode;
+        assert!(serve
+            .measured_candidate_cost(&other_candidate, &request, source)
+            .is_none());
+        other_candidate = candidate.clone();
+        other_candidate.recipe_digest[31] ^= 1;
+        assert!(serve
+            .measured_candidate_cost(&other_candidate, &request, source)
+            .is_none());
+        let private = temp.path().join(".retained").join(&descriptor.artifact_id);
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        assert!(
+            private.exists(),
+            "held opaque proof pins the exact artifact"
+        );
+        drop(proof);
+        // Registry publication precedes reservation release by a few
+        // instructions. Wait for that actual assembly boundary, not a timer.
+        for _ in 0..100 {
+            if !serve
+                .shared
+                .retained_artifacts
+                .state
+                .lock()
+                .expect("registry")
+                .assembling
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        serve.shared.retained_artifacts.collect(temp.path()).await;
+        let state = serve
+            .shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("registry");
+        assert!(
+            state.entries.values().all(|entry| entry
+                .idle_since
+                .is_some_and(|since| since.elapsed() < Duration::from_secs(1))),
+            "idle grace starts after final proof release"
+        );
+    }
 
     #[tokio::test]
     async fn namespace_lease_unknown_orphans_and_preclone_reservations_fail_closed() {

@@ -2143,6 +2143,19 @@ pub async fn decision_post(
     decision(auth, state, path, Query(q), headers, remote).await
 }
 
+/// Legacy priors have neither completed-body nor candidate-recipe provenance.
+/// Only legacy policy may read them; catalog negotiation itself is not proof.
+pub(super) fn prior_for_candidate_policy(
+    prior: Option<&plurx_core::domain::NetworkPrior>,
+    candidate_policy: bool,
+) -> Option<&plurx_core::domain::NetworkPrior> {
+    if candidate_policy {
+        None
+    } else {
+        prior
+    }
+}
+
 pub async fn decision(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -2474,9 +2487,13 @@ pub async fn decision(
     } else {
         None
     };
+    // A negotiated catalog cannot reinterpret coarse legacy supply history
+    // as completed-transfer evidence for its candidate recipes.
+    let candidate_prior =
+        prior_for_candidate_policy(network_prior.as_ref(), quality_candidates.is_some());
     let fallback_height = state
         .transcode
-        .auto_height_for_request(Some(&file), network_prior.as_ref(), q.hdr10t == Some(1))
+        .auto_height_for_request(Some(&file), candidate_prior, q.hdr10t == Some(1))
         .await;
     let display_aspect = state.transcode.quality_display_aspect(&file).await;
     let quality_candidate_id = quality_candidates.as_ref().and_then(|catalog| {
@@ -2545,7 +2562,7 @@ pub async fn decision(
         audio_offset_ms: file.audio_offset_ms,
         declared_offset_ms: declared_av_offset(&state, id).await,
         ladder: crate::transcode::ladder(file.height),
-        prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
+        prior_kbps: candidate_prior.and_then(|prior| prior.sustained_kbps),
         prefer_segmented,
     }))
 }
@@ -3850,6 +3867,28 @@ fn progressive_audio_args(transcode_audio: bool) -> &'static [&'static str] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a05_candidate_catalog_never_promotes_legacy_prior_provenance() {
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(i64::MAX),
+            sample_count: 99,
+            updated_at_ms: i64::MAX,
+            link_worst_rung_height: Some(2160),
+            link_starved_at_ms: Some(i64::MAX),
+        };
+        assert!(prior_for_candidate_policy(Some(&prior), true).is_none());
+        let legacy = prior_for_candidate_policy(Some(&prior), false)
+            .expect("legacy consumers retain their unchanged prior");
+        assert!(std::ptr::eq(legacy, &prior));
+        assert_eq!(legacy.sustained_kbps, Some(1));
+        assert!(prior_for_candidate_policy(None, false).is_none());
+    }
 
     #[test]
     fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
