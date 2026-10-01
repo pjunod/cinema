@@ -678,6 +678,7 @@ class Controller internal constructor(
     private var autoNextTickMs = 0L
     private val autoLinkClaims = LinkedHashMap<String, Triple<Long, Boolean, String>>()
     private var autoUpgradeSinceMs: Long? = null
+    private val autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Long? = null
     private val autoSwitchTimes = mutableListOf<Long>()
     private val autoBlockedUntil = mutableMapOf<String, Long>()
@@ -1292,6 +1293,8 @@ class Controller internal constructor(
                 // timer, just the reading the stall tracker already took.
                 sampleSurface(mediaPositionMs, observedAtMs)
                 if (openStall != null) {
+                    autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
+                    autoUpgradeEvidence.stalled(observedAtMs)
                     if (openStall.controlMayDefer) {
                         playbackStallCount += 1
                     }
@@ -1393,6 +1396,7 @@ class Controller internal constructor(
         reason: String,
         observedAtMs: Long = monotonicNowMs(),
     ): PlaybackAttempt {
+        autoUpgradeEvidence.reset()
         establishedPlayback = false
         openStallTracker.reset()
         return playbackTelemetry.begin(reason, observedAtMs, playbackIntent.pendingSeek?.sequence)
@@ -3041,13 +3045,12 @@ class Controller internal constructor(
             transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
         val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
+        if (severe && transfer != null) autoUpgradeEvidence.cliff(transfer.completedAtMs, now)
         val mild = autoMildSamples >= 2 && link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
-        val producer = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
-            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
-            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
-            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
-            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
-            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true
+        val producer = autoActiveProductionPressure(sessionStatus,
+            sessionStatusAgeMs?.let { now - it }, now, sessionId, current.id,
+            player.bufferedPosition - player.currentPosition)
         if (!producer && (severe || mild)) reportCandidateLinkSample(negative = true)
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
@@ -3076,6 +3079,7 @@ class Controller internal constructor(
 
     private fun tickDisplayAwareAuto() {
         val now = monotonicNowMs()
+        autoUpgradeEvidence.bind(autoTransfersByPlayer[player], mediaMutationEpoch)
         if (now < autoNextTickMs) return
         autoNextTickMs = now + 5_000L
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
@@ -3090,10 +3094,6 @@ class Controller internal constructor(
         val target = autoPresentationTarget ?: return
         val policyCatalog = measuredCostCatalog()
         val current = policyCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
-        if (sessionStatusAgeMs?.let { it <= 15_000L } == true && sessionStatus?.producer_state == "held") {
-            autoUpgradeSinceMs = null
-            return
-        }
         reportCandidateLinkSample(negative = false)
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
@@ -3113,19 +3113,16 @@ class Controller internal constructor(
             it.decoder_compatible && (it.route != "encode" || it.grade == current.grade) && (autoBlockedUntil[it.id] ?: 0L) <= now }
         val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
         val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        if (severe && transfer != null) autoUpgradeEvidence.cliff(transfer.completedAtMs, now)
         val mild = link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
         if (!mild) { autoMildSamples = 0; autoMildTransferCompletedMs = null }
         else if (autoMildTransferCompletedMs != transfer?.completedAtMs) {
             autoMildSamples = (autoMildSamples + 1).coerceAtMost(2)
             autoMildTransferCompletedMs = transfer?.completedAtMs
         }
-        val producerPressure = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
-            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
-            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
-            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
-            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
-            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true &&
-            player.bufferedPosition - player.currentPosition < 10_000L
+        val producerPressure = autoActiveProductionPressure(sessionStatus,
+            sessionStatusAgeMs?.let { now - it }, now, sessionId, current.id,
+            player.bufferedPosition - player.currentPosition)
         val pressure = ((severe || autoMildSamples >= 2) &&
             (current.peak_bps != null || player.bufferedPosition - player.currentPosition < 10_000L)) || producerPressure
         val aspect = current.width.toDouble() / current.height
@@ -3136,6 +3133,7 @@ class Controller internal constructor(
             autoRecoveryCandidate(eligible, current, autoDecoderRejected,
                 link.takeIf { severe || autoMildSamples >= 2 })
         } else {
+            if (!autoUpgradeEvidence.allowsUpgrade(now)) { autoUpgradeSinceMs = null; return }
             val fitting = eligible.filter { candidate -> link?.let { bps -> candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } == true } == true }
             val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
             if (pick == null || !(pick.width.toLong() * pick.height > area ||
@@ -4791,6 +4789,46 @@ internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long
     if (!sample.networkLoad || sample.fromLocalCache != false || sample.producerPaced != false ||
         sample.ageMs(nowMs) > maximumAgeMs || sample.bodyBytes <= 0 || duration <= 0) return null
     return (sample.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
+}
+
+/** Private observational windows; attachment changes cannot inherit old proof. */
+internal class AutoUpgradeEvidenceWindow {
+    private var attachment: Any? = null
+    private var epoch: Long? = null
+    var lastStallMs: Long? = null
+        private set
+    var lastCliffMs: Long? = null
+        private set
+    fun reset() { attachment = null; epoch = null; lastStallMs = null; lastCliffMs = null }
+    fun bind(attachment: Any?, epoch: Long) {
+        if (this.attachment === attachment && this.epoch == epoch) return
+        reset()
+        this.attachment = attachment
+        this.epoch = epoch
+    }
+    fun stalled(nowMs: Long) {
+        if (attachment != null && nowMs >= 0) lastStallMs = maxOf(lastStallMs ?: nowMs, nowMs)
+    }
+    fun cliff(completedAtMs: Long, nowMs: Long) {
+        if (attachment != null && completedAtMs >= 0 && nowMs >= completedAtMs && nowMs - completedAtMs <= 15_000L)
+            lastCliffMs = maxOf(lastCliffMs ?: completedAtMs, completedAtMs)
+    }
+    fun allowsUpgrade(nowMs: Long): Boolean = attachment != null &&
+        (lastStallMs?.let { nowMs >= it && nowMs - it >= 60_000L } ?: true) &&
+        (lastCliffMs?.let { nowMs >= it && nowMs - it >= 90_000L } ?: true)
+}
+
+internal fun autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: Long?, nowMs: Long,
+                                          sessionId: String?, candidateId: String, runwayMs: Long?): Boolean {
+    if (status == null || observedAtMs == null || nowMs < observedAtMs) return false
+    val age = status.active_encode_age_ms ?: return false
+    val elapsed = nowMs - observedAtMs
+    return elapsed <= 15_000L && age >= 0 && age <= 15_000L - elapsed &&
+        sessionId != null && status.id == sessionId && status.active_encode_candidate_id == candidateId &&
+        status.active_encode_segments?.let { it >= 2 } == true &&
+        status.active_encode_active_ms?.let { it >= 2_000L } == true &&
+        status.active_encode_milli_realtime?.let { it in 1..999 } == true &&
+        runwayMs?.let { it in 0..9_999L } == true
 }
 
 internal fun autoOriginalTransferMarginProven(samples: List<AutoCompletedTransfer>, sessionId: String, nowMs: Long): Boolean {
