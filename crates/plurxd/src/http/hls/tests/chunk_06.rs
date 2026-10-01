@@ -442,7 +442,7 @@
         };
         assert!(!body.candidate_auto_policy(), "the original wire copy was not candidate Auto");
         let resolved = resolve_plan(PlanInputs {
-            state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None,
+            state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None,
         }, None, body).await.expect("geometry-promoted plan");
         assert!(matches!(resolved.request.kind, crate::transcode::SessionKind::Transcode { .. }));
         assert!(resolved.candidate_auto_policy, "response policy must follow actual normalized Auto");
@@ -463,6 +463,8 @@
                 file_id: source.id,
                 source: Some(source),
                 network_prior: None,
+                network_identity: None,
+                incumbent_receipt: None,
             },
             None,
             body,
@@ -566,6 +568,8 @@
                     file_id: source.id,
                     source: Some(&source),
                     network_prior: Some(&prior),
+                    network_identity: None,
+                    incumbent_receipt: None,
                 },
                 None,
                 body,
@@ -608,6 +612,8 @@
             file_id: source.id,
             source: Some(&source),
             network_prior: None,
+            network_identity: None,
+            incumbent_receipt: None,
         };
         let plain = resolve_plan(inputs(), None, body())
             .await
@@ -672,6 +678,8 @@
                 file_id: source.id,
                 source: Some(&source),
                 network_prior: None,
+                network_identity: None,
+                incumbent_receipt: None,
             },
             Some(review),
             CreateSession {

@@ -37,6 +37,26 @@ internal data class PlaybackClientLog(
     val height: Int? = null,
     val encoder: String? = null,
     @SerialName("session_id") val sessionId: String? = null,
+    @SerialName("link_sample") val linkSample: CandidateLinkSample? = null,
+)
+
+@Serializable
+internal data class CandidateLinkSample(
+    val receipt: String,
+    @SerialName("object_name") val objectName: String,
+    val etag: String,
+    @SerialName("body_bytes") val bodyBytes: Long,
+    @SerialName("body_duration_ms") val bodyDurationMs: Long,
+    @SerialName("age_ms") val ageMs: Long,
+    @SerialName("network_load") val networkLoad: Boolean,
+    @SerialName("from_cache") val fromCache: Boolean,
+    @SerialName("producer_paced") val producerPaced: Boolean,
+    val cause: String,
+    val negative: Boolean,
+    @SerialName("media_duration_ms") val mediaDurationMs: Long?,
+    val presenting: Boolean,
+    val stalled: Boolean,
+    @SerialName("runway_ms") val runwayMs: Long,
 )
 
 internal class MarkerOfferLedger {

@@ -4121,6 +4121,21 @@ impl PlaybackTelemetryStore for HiqliteAuthStore {
 
 #[async_trait]
 impl NetworkPriorStore for HiqliteAuthStore {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.telemetry
+            .observe_candidate_link(value.clone(), now_ms)
+            .await
+    }
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError> {
+        self.telemetry.candidate_link_prior(binding.clone()).await
+    }
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,

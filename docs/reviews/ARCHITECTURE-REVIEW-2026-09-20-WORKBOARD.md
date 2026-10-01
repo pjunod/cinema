@@ -114,6 +114,14 @@ rate hints only from actual negotiated candidate Auto policy. It preserves
 legacy/manual routes and does not claim the remaining attributable producer
 or candidate-aware negative selection; see the combined plan §9.9.
 
+The next grouped ordinary Decision/Create producer-reader milestone composes
+actual landed S-10 measured-output APIs, binds completed VOD body receipts to
+the exact incumbent attachment and authenticated namespace, and consumes only
+qualified full-output cost for positive margin. Rolling duration, prepared
+control authentication/accepted-actor/staged registration, typed recovery and
+physical acceptance remain explicitly open; see combined plan §9.10. Missing
+observational proof remains Unknown, never an ordinary-playback enable gate.
+
 ## How to claim, work and finish a plan
 
 **P-02 post-merge evidence continuation, 2026-10-01 (gpt-6.1-sol,

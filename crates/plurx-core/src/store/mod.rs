@@ -24,6 +24,7 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+mod candidate_link;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -4245,6 +4246,15 @@ pub trait PlaybackTelemetryStore: Send + Sync + 'static {
 /// prior describes the network observed by one server node.
 #[async_trait]
 pub trait NetworkPriorStore: Send + Sync + 'static {
+    async fn observe_candidate_link(
+        &self,
+        value: &crate::domain::CandidateLinkObservation,
+        now_ms: i64,
+    ) -> Result<(), StoreError>;
+    async fn candidate_link_prior(
+        &self,
+        binding: &crate::domain::CandidateLinkBinding,
+    ) -> Result<Option<crate::domain::CandidateLinkPrior>, StoreError>;
     async fn observe_network_prior(
         &self,
         observation: &NetworkPriorObservation,
