@@ -897,6 +897,9 @@ use marker_dispatch::*;
 #[path = "vod/generation.rs"]
 mod generation;
 use generation::*;
+#[path = "vod/output_measurement.rs"]
+mod output_measurement;
+use output_measurement::PublishedOutputMeasurement;
 // split: end vod-generation
 
 // split: begin vod-plan

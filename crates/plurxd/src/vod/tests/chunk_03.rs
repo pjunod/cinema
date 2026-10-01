@@ -3174,6 +3174,54 @@
         assert!(ready.len > 0);
     }
 
+    #[tokio::test]
+    async fn full_output_sink_observes_only_committed_current_epoch_bytes_and_complete_tail() {
+        use crate::vodgen::Sink;
+        let temp = crate::test_tempdir().expect("measurement fixture");
+        let serve = bare_serve(temp.path());
+        let mut rendition = synthetic_rendition(temp.path()).await;
+        let path = temp.path().join("source.bin");
+        tokio::fs::write(&path, b"held source version").await.expect("source fixture");
+        let file = media_file_at(path, 10_000);
+        let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+            .await.expect("held source fence");
+        let owned = Arc::get_mut(&mut rendition).expect("unshared fixture");
+        owned.source = Some(source);
+        *owned.identity.get_mut() = IdentityState {
+            identity: Some(InitIdentity {
+                muxer_init: "fixture-muxer".to_owned(),
+                served_init: "fixture-served".to_owned(),
+                promotion: Default::default(),
+            }),
+            from_disk: false,
+        };
+        let sink = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 0,
+        };
+        let stale = RenditionSink {
+            shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition),
+            epoch: 1,
+        };
+        assert_eq!(stale.materialize(0, vec![7; 999]).await
+            .expect_err("stale write").kind(), io::ErrorKind::NotFound);
+        for entry in 0..rendition.plan.len() {
+            sink.materialize(entry as u32, vec![7; 1000 + entry]).await
+                .expect("successful actual directory commit");
+        }
+        assert!(rendition.output_measurement.lock().expect("observer")
+            .complete_rates().is_none(), "entries alone are not a completed trailer");
+        sink.completed_output().await;
+        let rates = rendition.output_measurement.lock().expect("observer")
+            .complete_rates().expect("complete full-output observation");
+        assert_eq!(rates.wire_bytes, (0..rendition.plan.len()).map(|i| 1000 + i as u64).sum::<u64>());
+        sink.materialize(0, vec![7; 1000]).await.expect("legacy repeat remains playable");
+        assert!(rendition.output_measurement.lock().expect("observer")
+            .complete_rates().is_none(), "duplicate publication loses measurement authority");
+    }
+
     /// Fix 4: a stale generation's queued materialize — landing after the
     /// driver restarted the producer — is refused under the manifest lock and
     /// touches neither the manifest nor the counters.

@@ -33,6 +33,7 @@ pub(super) struct Rendition {
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
     pub(super) manifest: Mutex<Manifest>,
+    pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
