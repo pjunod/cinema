@@ -165,9 +165,14 @@ the age of its status sample, and its stall-scoped verdict — the
 The adapter is §8.3's table, the tick location and guards named there, and
 nothing else. It sends the typed cause from M1.
 
-**Current implementation candidate (2026-10-01):**
-`codex/a05-android-adaptive-controller` carries the Android adapter and the
-first M1 sender together. It reads the existing `playback_auto_abr` answer
+**Historical candidate — superseded on 2026-10-01:**
+The description in the next three paragraphs records PR #670 at `8947db6`;
+that implementation was removed, not shipped. It is not the reduced PR's
+current behavior. The newer combined route-v1 design in PR #669 owns the
+native controller; retaining this height-only adapter would duplicate it.
+
+That candidate carried the Android adapter and the first M1 sender together.
+It read the existing `playback_auto_abr` answer
 from native ServerInfo, packages the shared policy artifact for defaults,
 owns a Media3 bandwidth meter per pipeline, and runs a separate five-second
 tick. Auto's requested height remains Auto in create and prepared-selection
@@ -190,9 +195,15 @@ NetworkPrior. Hold/authority retain the rung and contribute no network pressure.
 The original public intent fingerprint remains the replay identity; only a
 private normalized recipe with nonempty evidence receives additive attribution.
 
-This candidate has no device deployment, D3 baseline or shaped-network trace.
-The trace/build/merge requirements below remain binding; implementation and
-focused local proofs are not physical acceptance or a milestone closure.
+That historical candidate had no device deployment, D3 baseline or shaped-network
+trace. Its local proofs do not establish physical acceptance or milestone closure.
+
+**Reduced PR #670 scope (2026-10-01):** only the typed cause enum and Link-only
+NetworkPrior filtering remain. Encode pressure does not update network prior.
+There is no new Android adapter, sender, numeric decode-block field or height
+clamp in this PR. Authenticated candidate-identity evidence is a separate
+continuation, not a prerequisite for merging these narrow changes. The original
+M3 trace acceptance below and the overall A05 physical acceptance remain open.
 
 **Acceptance:** the platform's shaped-network trace shows stalled seconds down
 and unexpected SDR transitions at zero against its own D3 baseline. Not a
