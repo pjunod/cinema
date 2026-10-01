@@ -554,6 +554,38 @@ its rejected, accepted and three ambiguous outcomes pin effect order,
 identity and error text. Indeterminate rollback and premature finalization
 negative controls both failed this actual consumer, then were restored.
 
+**M7 join continuation (2026-10-01, gpt-6.1-sol,
+agent:/root/p02_663_resume_sol61).** The removal implementation landed through
+[#666](http://192.168.4.7:3000/noirr/plurx/pulls/666). Its prerequisite evidence
+above remains the prerequisite for this continuation, not a new qualification
+claim. Based on effort `903201a24`, the manager consumes attempt-local join
+effects in `redeem_for_role` and `finalize_for_role`:
+
+- An unused credential must still be live; a reservation survives its TTL
+  only for its exact node. The existing staged-identity read precedes repair
+  of the HTTP-origin claim and hostname. A collision refuses; a missing
+  learner row refuses; only the historical voter crash shape resumes node
+  publication under its exact reservation.
+- Finalization validates token role and node/Raft identity before effects.
+  An already-redeemed token is idempotent without further I/O. Otherwise the
+  actual committed membership must prove the admitted role before the exact
+  token/node CAS. Metrics and CAS failures propagate; a lost CAS remains
+  `ReusedToken`. Neither an intermediate learner nor a failed observation
+  can consume a voter credential.
+
+The manager still owns the existing authoritative reads, HTTP claim repair
+and Raft transaction. SQL, protocol-range CAS, schema, rejection text and
+await order are unchanged. The fixture projection and its unchecked
+promotion split are not made authoritative; explicit learner promotion and
+Hiqlite proposal transport are unchanged. No feature switch, production
+cluster action or release qualification is added. The new reservation and
+role-step cases live under `lifecycle::join_transition_tests`; the actual
+finalization consumer's effect/error case is
+`cluster::membership::tests::join_finalization_consumer_preserves_failure_and_effect_order`.
+Focused pass receipts, exact current compiler evidence, independent review
+and the effort gate belong to the task PR; this paragraph does not claim
+those pending checks have passed.
+
 ### 3.9 Test-seam migration
 
 **Census script** (checked into `validation/cfg_test_census.py` by §5.1;
