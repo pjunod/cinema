@@ -36,6 +36,8 @@ Apple Home clipping: [Featured movie content bounds](apple-builds/570-home-hero-
 
 Apple playback controls: [10 and 30 second seeking](apple-builds/689-playback-seek-controls.md).
 
+Apple seek icons: [Directional arrows for seek distances](apple-builds/694-seek-arrow-icons.md).
+
 ## Find it fast
 
 | You want to know… | Read |
