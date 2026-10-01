@@ -474,9 +474,24 @@ pub struct SessionRecoveryIdentity {
 /// What a client asked for, normalised. Two requests with the same
 /// fingerprint would produce byte-identical output, which is what makes a
 /// repeated create safe to answer with the session that already exists.
+/// Reconstructed from the retained worker envelope and validated recipe.
+/// Never emitted inside the strict legacy request envelope.
+#[derive(Debug, Clone)]
+pub struct CandidateExecutionContext {
+    /// Dispatch location for the exact process-bound recipe, never client wire.
+    pub owner_node_id: Option<String>,
+    pub candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub recipe_digest: [u8; 32],
+    pub normalized_geometry: bool,
+    pub grade: plurx_core::transcode::OutputGrade,
+    pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
+    #[serde(skip)]
+    pub candidate_context: Option<CandidateExecutionContext>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -782,6 +797,19 @@ pub(super) struct SessionOwner<'a> {
     pub(super) automatic: bool,
 }
 
+impl SessionKind {
+    pub(crate) fn copy_contract(self) -> Option<(bool, bool, bool)> {
+        match self {
+            Self::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+            Self::Transcode { .. } => None,
+        }
+    }
+}
+
 impl SessionRequest {
     /// The client's request intent before server-owned Auto normalization.
     /// This is the only idempotency identity: it is what `claim_request`
@@ -831,6 +859,15 @@ impl SessionRequest {
         // fingerprint it always had.
         let kind = if self.presentation == Presentation::Vod {
             format!("{kind}+vod")
+        } else {
+            kind
+        };
+        let kind = if let Some(context) = self.candidate_context.as_ref() {
+            format!(
+                "{kind}+candidate:{}:{}",
+                context.candidate_id.to_hex(),
+                hex::encode(context.recipe_digest)
+            )
         } else {
             kind
         };

@@ -16,6 +16,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id,
             playback_id: "pb-1".into(),
@@ -37,6 +38,7 @@
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
+            candidate_context: None,
             audio_offset_ms: 250,
             ..request.clone()
         };
@@ -54,6 +56,7 @@
             "one request id reused by two users must not collide"
         );
         let other_player = SessionRequest {
+            candidate_context: None,
             playback_id: "pb-2".into(),
             ..request.clone()
         };
@@ -109,6 +112,7 @@
         // The same key asking for something else is a mistake worth naming,
         // not a quiet second stream.
         let different = SessionRequest {
+            candidate_context: None,
             start_seconds: 600.0,
             ..request.clone()
         };
@@ -120,6 +124,7 @@
 
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
+            candidate_context: None,
             request_id: Some("req-2".into()),
             start_seconds: 600.0,
             ..request.clone()
@@ -158,6 +163,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id,
             playback_id: "pb-race".into(),
@@ -232,6 +238,7 @@
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 999_999, // nothing has this id, so the create fails
             playback_id: "pb-fail".into(),
@@ -252,6 +259,7 @@
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
         let retry = SessionRequest {
+            candidate_context: None,
             file_id,
             ..request.clone()
         };
@@ -284,6 +292,7 @@
             Pipeline::Cpu,
         );
         let original = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id,
             playback_id: "native-replay".into(),
@@ -323,6 +332,7 @@
         // body is still Auto, so its initial pre-claim numeric answer is not
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
+            candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen
         };
@@ -436,6 +446,7 @@
         .await;
 
         let lower = SessionRequest {
+            candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen_request(
                 51,
@@ -773,6 +784,7 @@
         drop(claim);
 
         let foreign = SessionRequest {
+            candidate_context: None,
             request_id: Some("renamed-foreign".into()),
             ..request
         };
@@ -1185,6 +1197,7 @@
         .await;
 
         let request = SessionRequest {
+            candidate_context: None,
             audio_index: Some(2),
             subtitle_burn: Some(5),
             ..reopen_request(52, "track-player", "stall-track", "track-stall")
@@ -1202,6 +1215,7 @@
         drop(stall_claim);
 
         let track_change = SessionRequest {
+            candidate_context: None,
             request_id: Some("user-track-change".into()),
             previous_session_id: None,
             reopen_reason: None,
@@ -1424,6 +1438,7 @@
         drop(claim);
 
         let device_b = SessionRequest {
+            candidate_context: None,
             request_id: Some("device-b-reopen".into()),
             previous_session_id: Some("device-b-session".into()),
             ..request.clone()
@@ -1443,6 +1458,7 @@
         drop(device_b_claim);
 
         let foreign_user = SessionRequest {
+            candidate_context: None,
             request_id: Some("foreign-user-reopen".into()),
             ..request
         };

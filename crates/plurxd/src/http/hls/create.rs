@@ -178,6 +178,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            candidate_context: None,
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,
@@ -1074,7 +1075,7 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
-    body: CreateSession,
+    mut body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         state,
@@ -1087,7 +1088,148 @@ pub(crate) async fn resolve_plan(
         .as_ref()
         .map(|review| review.hdr10)
         .unwrap_or(body.hdr10 == Some(true));
-    let height = resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let mut height =
+        resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
+    let mut candidate_context = None;
+    let mut candidate_copy = false;
+    if body.copy == Some(true) {
+        if let (Some(source), Some(caps)) = (
+            source,
+            body.caps.as_ref().filter(|caps| {
+                caps.video
+                    .iter()
+                    .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
+            }),
+        ) {
+            if let Some(facts) = state.transcode.quality_source_facts(source).await {
+                if let (Some(width), Some(height)) = (facts.width(), facts.height()) {
+                    let rate = facts
+                        .frame_rate()
+                        .value()
+                        .map(|rate| (rate.numerator(), rate.denominator()));
+                    let fits = caps
+                        .video
+                        .iter()
+                        .filter(|entry| source.video_codec.as_deref() == Some(entry.codec.as_str()))
+                        .any(|entry| {
+                            entry.geometry_admission(width, height, rate) != Some(false)
+                                && (entry.max_frame_rate.is_none() || rate.is_some())
+                        });
+                    if !fits {
+                        if body.quality_auto == Some(true) {
+                            body.copy = Some(false);
+                        } else {
+                            return Err(ApiError::Conflict(
+                                "original_decoder_geometry_or_cadence_unavailable".to_owned(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
+        let enabled = state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+            .await?
+            .is_some_and(|value| value.trim() == "1");
+        let requested = body
+            .intent
+            .as_ref()
+            .and_then(|intent| match intent.selection.quality {
+                plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
+                _ => None,
+            });
+        if requested.is_some() && !enabled {
+            return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
+        }
+        if enabled
+            && (requested.is_some()
+                || body.height == Some(1440)
+                || (body.quality_auto == Some(true) && body.copy != Some(true)))
+        {
+            body.audio = state
+                .transcode
+                .candidate_audio_index(source, body.audio)
+                .await;
+            let worker_catalog = state
+                .media_pool
+                .quality_candidates(
+                    state,
+                    crate::media_pool::QualityCatalogRequest {
+                        copy_contract: None,
+                        file_id: source.id,
+                        source_size: source.size,
+                        source_mtime: source.mtime,
+                        caps: caps.clone(),
+                        audio_index: body.audio,
+                        audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
+                        subtitle_burn: body.subtitle_burn,
+                        presentation: crate::transcode::Presentation::Vod,
+                    },
+                )
+                .await;
+            let catalog: Vec<_> = worker_catalog
+                .iter()
+                .map(|entry| entry.candidate.clone())
+                .collect();
+            let picked = if requested.is_none() && body.height != Some(1440) {
+                state
+                    .transcode
+                    .quality_display_aspect(source)
+                    .await
+                    .and_then(|aspect| {
+                        plurx_core::playback::candidate::select_quality_candidate(
+                            &catalog,
+                            aspect,
+                            caps.display
+                                .as_ref()
+                                .and_then(|display| display.presentation_target),
+                            None,
+                        )
+                    })
+                    .or_else(|| {
+                        catalog.iter().find(|candidate| {
+                            candidate.target_height == height as u32
+                                && candidate.decoder_compatible
+                                && candidate.route
+                                    == plurx_core::playback::candidate::CandidateRoute::Encode
+                        })
+                    })
+            } else {
+                catalog.iter().find(|candidate| {
+                    requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)
+                        && candidate.decoder_compatible
+                })
+            };
+            let candidate = picked.ok_or_else(|| {
+                ApiError::Conflict("candidate_recipe_changed_or_decoder_unavailable".to_owned())
+            })?;
+            candidate_copy =
+                candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
+            height = i64::from(candidate.target_height);
+            let mut context = crate::transcode::TranscodeManager::candidate_context(candidate);
+            context.owner_node_id = worker_catalog
+                .iter()
+                .find(|entry| entry.candidate.id == candidate.id)
+                .map(|entry| entry.node_id.clone());
+            candidate_context = Some(context);
+        }
+    } else if body.intent.as_ref().is_some_and(|intent| {
+        matches!(
+            intent.selection.quality,
+            plurx_core::playback::DesiredQuality::Auto {
+                candidate_id: Some(_),
+                ..
+            }
+        )
+    }) {
+        return Err(ApiError::BadRequest(
+            "candidate_requires_current_capabilities".to_owned(),
+        ));
+    }
     let native_subtitles = body.native_subtitles == Some(true);
     let native_subtitle = body.subtitle.filter(|s| *s >= 0);
     if native_subtitles {
@@ -1103,6 +1245,7 @@ pub(crate) async fn resolve_plan(
         }
     }
     let mut request = body.into_request(file_id, height);
+    request.candidate_context = candidate_context;
     if request
         .request_id
         .as_ref()
@@ -1126,6 +1269,23 @@ pub(crate) async fn resolve_plan(
         Some(review) => apply_plan_review(&mut request, review),
         None => Vec::new(),
     };
+    if let Some(context) = request.candidate_context.as_ref() {
+        if !candidate_copy {
+            request.hdr10 = context.grade == plurx_core::transcode::OutputGrade::Hdr10;
+        }
+        request.kind = if candidate_copy {
+            match request.kind {
+                crate::transcode::SessionKind::Copy { .. } => request.kind,
+                _ => {
+                    return Err(ApiError::Conflict(
+                        "candidate_copy_no_longer_compatible".to_owned(),
+                    ))
+                }
+            }
+        } else {
+            crate::transcode::SessionKind::Transcode { height }
+        };
+    }
     Ok(ResolvedPlan {
         request,
         height,
@@ -1265,17 +1425,6 @@ async fn create_with_purpose(
     // must still activate, or the first play of every title would be refused.
     // A parser-floor create must not reinterpret a future route as ordinary
     // Auto or persist acceptance of a candidate it cannot dispatch.
-    if req.intent.as_ref().is_some_and(|intent| {
-        matches!(
-            intent.selection.quality,
-            plurx_core::playback::DesiredQuality::Auto {
-                candidate_id: Some(_),
-                ..
-            }
-        )
-    }) {
-        return Err(ApiError::BadRequest("candidate_unsupported".to_owned()));
-    }
     let mut recorded_ask_revision: Option<i64> = None;
     if let Some(intent) = req.intent.as_ref() {
         intent
@@ -1352,6 +1501,20 @@ async fn create_with_purpose(
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
     // exactly the population these lines exist to count down to zero.
+    let candidate_decoder_caps = req.caps.as_ref().and_then(|caps| {
+        crate::playback_control::DecoderCapsSnapshot::from_device_caps(
+            caps,
+            caps.display
+                .as_ref()
+                .and_then(|display| display.presentation_target)
+                .map_or(1, |target| target.revision),
+        )
+    });
+    let candidate_target = req.caps.as_ref().and_then(|caps| {
+        caps.display
+            .as_ref()
+            .and_then(|display| display.presentation_target)
+    });
     let client_build = client_build_label(req.caps.as_ref(), &headers);
     // E4: the client's echo stops being an instruction the moment it sends
     // the capabilities the plan was derived from. Everything below reads the
@@ -1642,12 +1805,74 @@ async fn create_with_purpose(
         true,
     );
 
+    let quality_enabled = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
+    let mut quality_owners = std::collections::HashSet::new();
+    if quality_enabled && candidate_decoder_caps.is_some() {
+        quality_owners.insert(state.node_id.clone());
+        if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
+            quality_owners.extend(
+                state
+                    .media_pool
+                    .quality_candidates(
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: request.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.clone(),
+                            audio_index: request.audio_index,
+                            audio_offset_ms: request.audio_offset_ms,
+                            subtitle_burn: request.subtitle_burn,
+                            presentation: request.presentation,
+                        },
+                    )
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.node_id),
+            );
+        }
+        if let Some(owner) = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.owner_node_id.as_ref())
+        {
+            quality_owners.insert(owner.clone());
+        }
+    }
+    let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
+        state
+            .store
+            .media_session_route(previous)
+            .await?
+            .map(|route| route.owner_node_id)
+    } else {
+        None
+    };
+    // The mandatory receive-only decoder snapshot proves the actual worker
+    // supports the new owner semantics; parser-only workers refuse dispatch.
+    // A retained legacy predecessor may stay on its old owner without claiming
+    // the new protocol or requiring fields that owner cannot execute.
+    let quality_negotiated = !quality_owners.is_empty()
+        && (request.candidate_context.is_some()
+            || predecessor_owner
+                .as_ref()
+                .is_none_or(|owner| quality_owners.contains(owner)));
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
-        candidate_id: None,
-        presentation_target: None,
-        decoder_caps: None,
+        candidate_id: request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        presentation_target: quality_negotiated.then_some(candidate_target).flatten(),
+        decoder_caps: quality_negotiated
+            .then_some(candidate_decoder_caps.clone())
+            .flatten(),
         protocol_version: crate::media_pool::PROTOCOL_VERSION,
         incarnation_id: incarnation_id.clone(),
         user_id: user.id,
@@ -1792,7 +2017,11 @@ async fn create_with_purpose(
     } else {
         None
     };
-    let mut owner_candidates = if let Some(owner) = pinned_owner {
+    let candidate_owner = request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.owner_node_id.clone());
+    let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
         vec![owner]
     } else if !state.media_pool.remote_placement_ready(&state).await {
         vec![state.node_id.clone()]
@@ -1821,6 +2050,9 @@ async fn create_with_purpose(
             Err(_) => Vec::new(),
         }
     };
+    if quality_negotiated {
+        owner_candidates.retain(|owner| quality_owners.contains(owner));
+    }
     // Cold snapshots and one-node recovery retain the established local
     // behavior. A non-empty ranked list is authoritative: an ineligible local
     // offer must not bypass an eligible peer or capacity refusal.
@@ -2104,7 +2336,47 @@ async fn create_with_purpose(
     } else {
         info.playlist_url
     };
+    let display_aware_enabled = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     let response = StartResponse {
+        display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
+        quality_candidate_id: request
+            .candidate_context
+            .as_ref()
+            .map(|context| context.candidate_id),
+        quality_candidates: if let (true, Some(source), Some(caps)) = (
+            display_aware_enabled && quality_negotiated,
+            source.as_ref(),
+            candidate_decoder_caps.as_ref(),
+        ) {
+            Some(
+                state
+                    .media_pool
+                    .quality_candidates(
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: request.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.device_caps(),
+                            audio_index: request.audio_index,
+                            audio_offset_ms: request.audio_offset_ms,
+                            subtitle_burn: request.subtitle_burn,
+                            presentation: request.presentation,
+                        },
+                    )
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect(),
+            )
+        } else {
+            None
+        },
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,

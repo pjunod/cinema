@@ -346,6 +346,16 @@ impl<T> VodPublication<T> {
 /// numbers would make the player diagnose the wrong system.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VodSessionInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_encode_milli_realtime: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_encode_age_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_encode_active_ms: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_encode_segments: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_encode_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     pub id: String,
     pub file_id: i64,
     pub target_height: i64,

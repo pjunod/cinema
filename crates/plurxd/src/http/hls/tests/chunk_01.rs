@@ -923,6 +923,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                candidate_context: None,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -942,6 +943,9 @@
             },
         };
         let start = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -1795,6 +1799,9 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2080,6 +2087,7 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
+                candidate_context: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2099,6 +2107,9 @@
             },
         };
         let start = StartResponse {
+            display_aware_auto_protocol: Some("route-v1".to_owned()),
+            quality_candidate_id: None,
+            quality_candidates: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(60_000),
@@ -2340,6 +2351,7 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
+                    candidate_context: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
@@ -2359,6 +2371,9 @@
                 },
             };
             let start = StartResponse {
+                display_aware_auto_protocol: Some("route-v1".to_owned()),
+                quality_candidate_id: None,
+                quality_candidates: None,
                 session_id: session_id.clone(),
                 playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                 duration_ms: Some(60_000),

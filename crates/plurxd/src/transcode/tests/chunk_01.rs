@@ -480,6 +480,7 @@
         session.frozen_presentation = Some(FrozenHlsPresentation::new(
             execution_file_for_retry(),
             HlsContext {
+                bandwidth: None,
                 file_id: 91,
                 start_seconds: 6275.560,
                 media_origin_seconds: 6275.560,
@@ -1962,6 +1963,7 @@
             Pipeline::Cpu,
         ));
         let req = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "cap-probe".to_owned(),
@@ -2029,6 +2031,7 @@
             Arc::clone(&store), dir.path().to_owned(), EncoderCaps::default(), Pipeline::Cpu,
         );
         let mut req = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "snapshot-probe".to_owned(),
@@ -2186,6 +2189,7 @@
     fn frozen_hls_presentation_fingerprint_covers_master_affecting_facts() {
         let file = profile5_file();
         let context = HlsContext {
+            bandwidth: None,
             file_id: file.id,
             start_seconds: 12.5,
             media_origin_seconds: 12.5,
@@ -2220,6 +2224,7 @@
     fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
         let file = profile5_file();
         let context = HlsContext {
+            bandwidth: None,
             file_id: file.id,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2249,6 +2254,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -2271,6 +2277,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -2293,6 +2300,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -2308,12 +2316,99 @@
     }
 
     #[test]
+    fn normalized_rolling_and_vod_presentations_share_the_resolved_square_pixel_raster() {
+        use plurx_core::transcode::*;
+        let mut file = profile5_file();
+        file.width = Some(1440);
+        file.height = Some(1080);
+        file.video_codec = Some("h264".to_owned());
+        file.hdr = None;
+        file.hdr_format = None;
+        file.dolby_vision = Default::default();
+        let facts = DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                "width":1440,"height":1080,"sample_aspect_ratio":"4:3","pix_fmt":"yuv420p",
+                "avg_frame_rate":"30/1","r_frame_rate":"30/1","color_transfer":"bt709"
+            }]}),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("fixture identity"),
+        )
+        .expect("bound fixture facts");
+        let caps = DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "fixture".to_owned(),
+                Some("e".repeat(64)),
+            )
+            .expect("fixture build"),
+            vec![],
+            vec![SoftwareDecoder {
+                codec: "h264".to_owned(),
+                implementation: Some("h264".to_owned()),
+            }],
+        )
+        .expect("fixture inventory");
+        let options = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
+            target_height: 1080,
+            ..Default::default()
+        };
+        let request = TranscodeRequest::new(
+            Encoder::Software,
+            TranscodeMediaOptions::from_options(&file, &options),
+        )
+        .with_normalized_geometry();
+        let plan = resolve_transcode(
+            &request,
+            &facts,
+            &caps,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("normalized fixture plan");
+        let context = HlsContext {
+            bandwidth: None,
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: Some(30.0),
+        };
+        let rolling = FrozenHlsPresentation::from_contract(
+            file.clone(),
+            context,
+            &SessionKind::Transcode { height: 1080 },
+            Some(plan.output_contract()),
+        );
+        let vod = encoded_vod_presentation_file(
+            file,
+            1080,
+            OutputGrade::Sdr,
+            Some(plan.output_contract()),
+        );
+        assert_eq!(
+            (rolling.file.width, rolling.file.height),
+            (Some(1920), Some(1080))
+        );
+        assert_eq!(
+            (vod.width, vod.height),
+            (rolling.file.width, rolling.file.height)
+        );
+        assert!(
+            rolling.sealed_stable_master_contract.is_none(),
+            "new rolling presentation remains attempt-bound, not a proved codec init"
+        );
+    }
+
+    #[test]
     fn encoded_vod_presentation_never_mixes_source_width_with_requested_height() {
         let mut file = profile5_file();
         file.width = Some(640);
         file.height = Some(360);
 
-        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr, None);
 
         assert_eq!(presented.width, Some(640));
         assert_eq!(presented.height, Some(360));
@@ -2325,7 +2420,7 @@
         file.width = None;
         file.height = None;
 
-        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr, None);
 
         assert_eq!(presented.width, None);
         assert_eq!(presented.height, None);
@@ -2337,6 +2432,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -3008,6 +3104,7 @@
     #[test]
     fn the_grade_is_part_of_a_request_identity() {
         let request = SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 5,
             playback_id: "player".into(),
@@ -3026,6 +3123,7 @@
             transport: None,
         };
         let hdr10 = SessionRequest {
+            candidate_context: None,
             hdr10: true,
             ..request.clone()
         };

@@ -14,6 +14,7 @@
     #[test]
     fn a_converting_copy_fingerprints_apart_from_the_copy_it_replaces() {
         let copy = |convert: bool| SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id: 1,
             playback_id: "p".to_owned(),

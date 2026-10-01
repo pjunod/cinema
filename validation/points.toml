@@ -1072,6 +1072,7 @@ paths = [
   "scripts/ci-cargo-cache-prepare",
   "scripts/ci-cargo-cache-refresh",
   "scripts/image-base-drift",
+  "scripts/build-static-ffprobe",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",

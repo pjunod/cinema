@@ -26,6 +26,8 @@ use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, 
 
 #[derive(Serialize)]
 pub struct ServerInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_aware_auto_protocol: Option<String>,
     pub name: String,
     /// Bare semver — clients compare this.
     pub version: &'static str,
@@ -48,6 +50,7 @@ pub struct ServerInfo {
     /// server's initial playback decision. Public because every signed-in web
     /// viewer needs the same node-wide playback policy.
     pub playback_auto_abr: bool,
+    pub playback_display_aware_auto: bool,
     /// Whether Android television clients may request a same-resolution mode
     /// matching the delivery cadence.
     pub display_mode_match: bool,
@@ -73,12 +76,18 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .get_setting(keys::PLAYBACK_AUTO_ABR)
         .await?
         .is_some_and(|value| value.trim() == "1");
+    let playback_display_aware_auto = state
+        .store
+        .get_setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        .await?
+        .is_some_and(|value| value.trim() == "1");
     let display_mode_match = state
         .store
         .get_setting(keys::PLAYBACK_DISPLAY_MODE_MATCH)
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
+        display_aware_auto_protocol: Some("route-v1".to_owned()),
         name,
         version: crate::version::SEMVER,
         build: crate::version::BUILD,
@@ -90,6 +99,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         setup_required,
         android_app,
         playback_auto_abr,
+        playback_display_aware_auto,
         display_mode_match,
     }))
 }
@@ -1838,6 +1848,7 @@ pub struct SettingsDto {
     /// Let the web client's Auto controller change rungs after playback starts.
     /// Explicit opt-in; missing is false.
     pub playback_auto_abr: bool,
+    pub playback_display_aware_auto: bool,
     /// Android television same-resolution refresh matching. The Developer
     /// readiness rows explain current observations but never gate this switch.
     pub playback_display_mode_match: bool,
@@ -2018,6 +2029,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         setting(keys::PLAYBACK_NETWORK_PRIORS).is_some_and(|value| value.trim() == "1");
     let playback_auto_abr =
         setting(keys::PLAYBACK_AUTO_ABR).is_some_and(|value| value.trim() == "1");
+    let playback_display_aware_auto =
+        setting(keys::PLAYBACK_DISPLAY_AWARE_AUTO).is_some_and(|value| value.trim() == "1");
     let playback_display_mode_match =
         setting(keys::PLAYBACK_DISPLAY_MODE_MATCH).is_some_and(|value| value.trim() == "1");
     // One parser owns the stored string. Three copies of this negated match
@@ -2243,6 +2256,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         telemetry_retain_days,
         playback_network_priors,
         playback_auto_abr,
+        playback_display_aware_auto,
         playback_display_mode_match,
         transcode_max_hw_sessions,
         transcode_software_pool_threads,
@@ -2517,6 +2531,7 @@ pub struct UpdateSettings {
     pub telemetry_retain_days: Option<i64>,
     pub playback_network_priors: Option<bool>,
     pub playback_auto_abr: Option<bool>,
+    pub playback_display_aware_auto: Option<bool>,
     pub playback_display_mode_match: Option<bool>,
     /// Encoder capacity. Bounded rather than free-form, because both numbers
     /// buy hardware that does not exist if they are wrong: a hardware cap
@@ -2656,6 +2671,7 @@ impl UpdateSettings {
             || self.telemetry_retain_days.is_some()
             || self.playback_network_priors.is_some()
             || self.playback_auto_abr.is_some()
+            || self.playback_display_aware_auto.is_some()
             || self.playback_display_mode_match.is_some()
             || self.transcode_max_hw_sessions.is_some()
             || self.transcode_software_pool_threads.is_some()
@@ -3690,6 +3706,15 @@ pub async fn update_settings(
     }
     if req.telemetry_retain_days.is_some() || req.playback_network_priors.is_some() {
         crate::telemetry::invalidate_settings(&state.store);
+    }
+    if let Some(enabled) = req.playback_display_aware_auto {
+        state
+            .store
+            .put_setting(
+                keys::PLAYBACK_DISPLAY_AWARE_AUTO,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
     }
     if let Some(enabled) = req.playback_auto_abr {
         state
