@@ -230,6 +230,9 @@ impl VodServe {
                         })
                 });
                 if exact_terminal {
+                    if let Some(session) = sessions.get(&candidate.session_id) {
+                        session.invalidate_observational_attachment();
+                    }
                     sessions.remove(&candidate.session_id)
                 } else {
                     None
@@ -271,6 +274,9 @@ impl VodServe {
                             > SESSION_IDLE_TTL
                 });
                 if still_expired {
+                    if let Some(session) = sessions.get(&id) {
+                        session.invalidate_observational_attachment();
+                    }
                     sessions.remove(&id).and_then(|session| session.rendition)
                 } else {
                     None

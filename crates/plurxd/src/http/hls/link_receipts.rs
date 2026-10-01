@@ -39,6 +39,9 @@ pub(crate) struct LiveLinkProof {
     transfer: plurx_core::playback::candidate::NetworkTransferEvidence,
 }
 impl LiveLinkProof {
+    pub(super) fn incumbent_session(&self) -> &str {
+        &self.binding.session
+    }
     pub(crate) fn transfer(
         &self,
     ) -> Option<plurx_core::playback::candidate::NetworkTransferEvidence> {
@@ -133,11 +136,16 @@ impl Receipt {
 }
 #[derive(Default)]
 struct Rows {
+    staged: HashMap<String, super::prepared_link::StagedProof>,
     sessions: HashMap<String, SessionRow>,
     receipts: HashMap<String, Receipt>,
 }
 #[derive(Default)]
-pub(crate) struct LinkReceipts(Mutex<Rows>, #[cfg(test)] crate::seam_hooks::PauseSlot);
+pub(crate) struct LinkReceipts(
+    Mutex<Rows>,
+    #[cfg(test)] crate::seam_hooks::PauseSlot,
+    #[cfg(test)] crate::seam_hooks::PauseSlot,
+);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -223,6 +231,9 @@ impl LinkReceipts {
                 let rows = self.0.lock().ok()?;
                 let now = Instant::now();
                 let row = rows.receipts.get(nonce)?;
+                if rows.staged.contains_key(&row.binding.session) {
+                    return None;
+                }
                 let (eof, _) = row.completion?;
                 if Some(row.binding.source.user_id) != network.user_id
                     || !network
@@ -338,6 +349,10 @@ impl LinkReceipts {
             .map(|(_, value)| value)
     }
     fn prune(rows: &mut Rows, now: Instant) {
+        rows.staged.retain(|_, proof| {
+            !proof.cancelled.is_cancelled()
+                && proof.deadline_unix_ms > crate::media_sessions::unix_ms()
+        });
         rows.receipts
             .retain(|_, row| now.saturating_duration_since(row.born) <= NONCE_TTL);
         rows.sessions
@@ -359,6 +374,60 @@ impl LinkReceipts {
                 touched: now,
             },
         );
+    }
+    pub(super) fn register_staged(
+        &self,
+        binding: SessionBinding,
+        proof: super::prepared_link::StagedProof,
+    ) {
+        let Ok(mut rows) = self.0.lock() else {
+            return;
+        };
+        Self::prune(&mut rows, Instant::now());
+        if proof.cancelled.is_cancelled()
+            || !proof.stage.still_live()
+            || proof.deadline_unix_ms <= crate::media_sessions::unix_ms()
+            || rows.sessions.len() >= SESSIONS && !rows.sessions.contains_key(&binding.session)
+        {
+            return;
+        }
+        rows.staged.insert(binding.session.clone(), proof);
+        rows.sessions.insert(
+            binding.session.clone(),
+            SessionRow {
+                binding,
+                touched: Instant::now(),
+            },
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn replace_staged_gate_for_test(
+        &self,
+        session: &str,
+        gate: Arc<dyn crate::playback_control::PreparationGate>,
+    ) {
+        self.0
+            .lock()
+            .expect("registry lock")
+            .staged
+            .get_mut(session)
+            .expect("registered stage")
+            .gate = gate;
+    }
+    #[cfg(test)]
+    pub(super) fn pause_final_stage_route_for_test(&self) -> Arc<crate::seam_hooks::AsyncPause> {
+        self.2.arm("staged final route result")
+    }
+    #[cfg(test)]
+    pub(super) fn raw_claimed_for_test(&self, nonce: &str) -> bool {
+        self.0
+            .lock()
+            .expect("registry lock")
+            .receipts
+            .get(nonce)
+            .expect("minted nonce")
+            .raw
+            .is_some()
     }
     /// Pending headers alone are not proof; only successful exact completion arms it.
     pub(super) fn mint(
@@ -384,6 +453,14 @@ impl LinkReceipts {
         let now = Instant::now();
         Self::prune(&mut rows, now);
         if rows.receipts.len() >= NONCES {
+            return None;
+        }
+        if rows.staged.get(session).is_some_and(|proof| {
+            proof.cancelled.is_cancelled()
+                || !proof.fence.still_live()
+                || !proof.stage.still_live()
+                || proof.deadline_unix_ms <= crate::media_sessions::unix_ms()
+        }) {
             return None;
         }
         let source = rows.sessions.get_mut(session)?;
@@ -441,10 +518,15 @@ impl LinkReceipts {
         {
             return None;
         }
-        let captured = {
+        let (captured, staged) = {
             let rows = self.0.lock().ok()?;
-            rows.receipts.get(&sample.receipt)?.binding.clone()
+            let binding = rows.receipts.get(&sample.receipt)?.binding.clone();
+            let staged = rows.staged.get(&binding.session).cloned();
+            (binding, staged)
         };
+        if staged.is_some() && sample.negative {
+            return None;
+        }
         if session != Some(captured.session.as_str())
             || network.user_id != Some(captured.source.user_id)
             || network.credential_generation.as_ref()?.as_str()
@@ -461,7 +543,7 @@ impl LinkReceipts {
         .await
         .ok()?
         .ok()??;
-        if !Self::same_route(&captured, &route, &state.node_id) {
+        if !Self::route_for_observation(&captured, &route, &state.node_id, staged.as_ref()) {
             return None;
         }
         let file = tokio::time::timeout(
@@ -486,16 +568,50 @@ impl LinkReceipts {
         }
         #[cfg(test)]
         self.1.hold().await;
+        if let Some(proof) = staged.as_ref() {
+            let budget = Duration::from_millis(
+                u64::try_from(
+                    proof
+                        .deadline_unix_ms
+                        .saturating_sub(crate::media_sessions::unix_ms()),
+                )
+                .unwrap_or(0)
+                .min(100),
+            );
+            let current = tokio::time::timeout(budget, async {
+                proof.gate.observation_is_current(proof.fence.clone()).await
+                    && proof
+                        .gate
+                        .staged_observation_is_current(
+                            proof.fence.clone(),
+                            proof.incarnation.clone(),
+                            proof.deadline_unix_ms,
+                        )
+                        .await
+                        .is_some_and(|stage| stage.still_live())
+            })
+            .await
+            .unwrap_or(false);
+            if !current {
+                return None;
+            }
+        }
         // Source lookup can suspend while the exact serving attachment is
         // retired or replaced. Claim only after its current authority fence.
-        let route = tokio::time::timeout(
-            Duration::from_secs(1),
-            state.store.media_session_route(&captured.session),
-        )
+        let route = tokio::time::timeout(Duration::from_secs(1), async {
+            let route = state.store.media_session_route(&captured.session).await;
+            #[cfg(test)]
+            if staged.is_some() {
+                self.2.hold().await;
+            }
+            route
+        })
         .await
         .ok()?
         .ok()??;
-        if !Self::same_route(&captured, &route, &state.node_id) {
+        if !fence.unchanged()
+            || !Self::route_for_observation(&captured, &route, &state.node_id, staged.as_ref())
+        {
             return None;
         }
         let mut rows = self.0.lock().ok()?;
@@ -515,6 +631,31 @@ impl LinkReceipts {
             && route.owner_node_id == node
             && route.state == "active"
             && route.publication_ready_at_ms == 0
+            && route.lease_expires_at_ms > crate::media_sessions::unix_ms()
+    }
+    fn route_for_observation(
+        binding: &SessionBinding,
+        route: &MediaSessionRoute,
+        node: &str,
+        staged: Option<&super::prepared_link::StagedProof>,
+    ) -> bool {
+        let Some(proof) = staged else {
+            return Self::same_route(binding, route, node);
+        };
+        !proof.cancelled.is_cancelled()
+            && proof.fence.still_live()
+            && proof.stage.still_live()
+            && proof.deadline_unix_ms > crate::media_sessions::unix_ms()
+            && route.session_id == binding.session
+            && route.incarnation_id == binding.incarnation
+            && route.owner_epoch == binding.owner_epoch
+            && route.owner_epoch == proof.owner_epoch
+            && route.incarnation_id == proof.incarnation
+            && route.user_id == binding.source.user_id
+            && route.owner_node_id == node
+            && route.state == "active"
+            && route.publication_ready_at_ms
+                == plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
             && route.lease_expires_at_ms > crate::media_sessions::unix_ms()
     }
 }

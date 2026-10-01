@@ -1036,6 +1036,7 @@ pub(crate) async fn resolve_height(
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
+    pub(crate) selected_candidate: Option<plurx_core::playback::candidate::QualityCandidate>,
     pub request: crate::transcode::SessionRequest,
     /// Actual Auto policy after geometry/copy normalization, not wire intent.
     pub candidate_auto_policy: bool,
@@ -1445,6 +1446,7 @@ pub(crate) async fn resolve_plan(
         None
     };
     Ok(ResolvedPlan {
+        selected_candidate,
         request,
         candidate_auto_policy,
         candidate_route,

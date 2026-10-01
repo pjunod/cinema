@@ -1254,7 +1254,10 @@ pattern = "publication_ready_at_ms"
 # A05 #683: +3 in http/hls/link_receipts.rs: one refusal-only read requires
 # an already published incumbent; the intake race fixture sets the blocked
 # field then confirms zero. Neither observation nor fixture publishes media.
-expected_occurrences = 96
+# A05 prepared observations: +4 refusal-only/publication references: initial
+# and final staged route checks, intake staged route check, and one actual
+# blocked activation fixture. No observation publishes a body or moves a fence.
+expected_occurrences = 100
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1292,7 +1295,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # before.
 # A05 #683: +1 blocked activation fixture in link_receipts.rs, subsequently
 # confirmed through the existing durable activation API; no shipped write.
-expected_occurrences = 29
+# The same four prepared observations above; three refusal-only reads and
+# one blocked activation fixture. Existing publication ownership is unchanged.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -3584,7 +3589,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # filtering (100 ms), and public measured projection (100 ms). create.rs
 # bounds opaque measured_candidate_cost reacquisition (100 ms). Missing proof
 # stays Unknown; none starts media, owns recovery, or refreshes original EOF.
-expected_occurrences = 1148
+# A05 prepared observations: +5 bounded awaited queries: optional auth,
+# accepted capture, proposed cost/Link proof, post-prime registration, and
+# staged intake actor queries. All preserve original EOF/absolute deadlines;
+# no producer, periodic lifecycle timer, recovery owner, or authority renewal.
+expected_occurrences = 1153
 
 [[module_structures]]
 id = "bare-time-constructor"
