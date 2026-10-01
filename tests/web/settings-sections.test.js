@@ -449,6 +449,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("clusterClockCard"),
       shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the
       // head of the stored-subtitle section without composing it here.
@@ -541,6 +542,11 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   const ranges = /Parallel playback subtitle ranges[\s\S]*?(?=<div class="setsection"|TOG:subsrc)/.exec(html);
   assert.ok(ranges, "Developer shows the automatic playback-ranges card");
   assert.doesNotMatch(ranges[0], /TOG:/, "playback ranges have no enable switch");
+  const clocks = /Cluster clock observation[\s\S]*?(?=<div class="setsection")/.exec(html);
+  assert.ok(clocks, "Developer shows clock observation");
+  assert.doesNotMatch(clocks[0], /TOG:|FOOT:/, "clock observation has no meaningful manual switch or save");
+  assert.match(clocks[0], /observes clocks without changing acquisition or readiness/);
+  assert.match(clocks[0], /Leaves Developer when/);
   const unverified = panels.developerPanel({...settings, hevc_unverified_copy:true,
     hevc_header_trace_available:false, vod_index_cluster_cache:false, vod_index_mins:0}, readiness);
   assert.match(unverified, /TOG:hevc-unverified\|[^|]*\|[^|]*\|checked=true\|/);

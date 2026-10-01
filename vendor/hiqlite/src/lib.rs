@@ -126,6 +126,8 @@ mod migration;
 #[cfg(feature = "sqlite")]
 mod query;
 #[cfg(feature = "sqlite")]
+pub mod snapshot_admission;
+#[cfg(feature = "sqlite")]
 mod snapshot_metrics;
 #[cfg(any(feature = "sqlite", feature = "cache"))]
 mod split_brain_check;

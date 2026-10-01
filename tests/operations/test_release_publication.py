@@ -209,6 +209,8 @@ class ReleasePublicationContractCase(unittest.TestCase):
             generated,
         )
         self.assertNotIn("FROM rust:", generated)
+        self.assertNotIn("FROM node:", generated)
+        self.assertNotIn("FROM runtime-assets AS ci", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
 
