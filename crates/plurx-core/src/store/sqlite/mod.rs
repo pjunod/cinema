@@ -1185,6 +1185,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
     // v88: preserve the resolved audio recipe across offline queue retries.
     "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;",
+    // v89: independently attributed completed-transfer Link negatives.
+    super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2296,6 +2298,35 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a05_v89_sqlite_prior_migration_preserves_unattributed_history() {
+        let dir = tempfile::tempdir().expect("prior root");
+        let db = dir.path().join("prior.db");
+        {
+            let conn = Connection::open(&db).expect("legacy database");
+            for sql in MIGRATIONS.iter().take(88) {
+                conn.execute_batch(sql).expect("legacy migration");
+            }
+            conn.execute("INSERT INTO network_priors VALUES (42, 'test-gen', 'safari', 'network', 8000, 720, 100000, 1, 100000)", []).expect("seed legacy negative");
+            conn.pragma_update(None, "user_version", 88)
+                .expect("legacy version");
+        }
+        let store = SqliteStore::open(&db).expect("migrate database");
+        drop(store);
+        let conn = Connection::open(&db).expect("reopen database");
+        let prior = crate::store::telemetry::get_prior(&conn, "test-gen", "safari", "network")
+            .expect("read migrated prior")
+            .expect("preserved legacy prior");
+        assert_eq!(prior.active_starved_rung(100_000), Some(720));
+        assert_eq!(prior.active_link_starved_rung(100_000), None);
+        assert_eq!(prior.sustained_kbps, Some(8000));
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("schema version"),
+            SQLITE_SCHEMA_VERSION
+        );
+    }
     use crate::domain::{MetadataPatch, ReadingStateWrite};
     use crate::store::{
         MediaStore, PlaybackTelemetryStore, ReadingStore, SettingsStore, WatchStore,
