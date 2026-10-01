@@ -137,7 +137,7 @@ struct Rows {
     receipts: HashMap<String, Receipt>,
 }
 #[derive(Default)]
-pub(crate) struct LinkReceipts(Mutex<Rows>);
+pub(crate) struct LinkReceipts(Mutex<Rows>, #[cfg(test)] crate::seam_hooks::PauseSlot);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -484,6 +484,20 @@ impl LinkReceipts {
         if !fence.unchanged() || fence.object_version() != captured.source.source_object_version {
             return None;
         }
+        #[cfg(test)]
+        self.1.hold().await;
+        // Source lookup can suspend while the exact serving attachment is
+        // retired or replaced. Claim only after its current authority fence.
+        let route = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.store.media_session_route(&captured.session),
+        )
+        .await
+        .ok()?
+        .ok()??;
+        if !Self::same_route(&captured, &route, &state.node_id) {
+            return None;
+        }
         let mut rows = self.0.lock().ok()?;
         let now = Instant::now();
         Self::prune(&mut rows, now);
@@ -692,6 +706,373 @@ fn measured_margin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn actual_intake_state() -> (
+        AppState,
+        plurx_core::domain::User,
+        MediaFile,
+        tempfile::TempDir,
+    ) {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let root = crate::test_tempdir().expect("private fixture");
+        let path = root.path().join("source.mp4");
+        std::fs::write(&path, vec![0_u8; 4096]).expect("physical source identity");
+        let store: Arc<dyn plurx_core::store::Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let library = store
+            .create_library(&NewLibrary {
+                name: "A05".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "A05".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let metadata = std::fs::metadata(&path).expect("metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let id = store
+            .upsert_file(
+                item,
+                path.to_str().expect("path"),
+                4096,
+                mtime,
+                &ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("h264".into()),
+                    width: Some(1920),
+                    height: Some(1080),
+                    bit_depth: Some(8),
+                    duration_ms: Some(12000),
+                    raw_json: Some(
+                        serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+                "codec_name":"h264","profile":"High","width":1920,"height":1080,
+                "pix_fmt":"yuv420p","sample_aspect_ratio":"1:1",
+                "r_frame_rate":"24/1","avg_frame_rate":"24/1"}]})
+                        .to_string(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let user = store.create_user("a05", "hash", true).await.expect("user");
+        let state = AppState::new(
+            "test".into(),
+            store,
+            crate::state::Dirs {
+                artwork: root.path().join("artwork"),
+                transcode: root.path().join("transcode"),
+                cache: root.path().join("cache"),
+                subs: root.path().join("subs"),
+                runtime_cache: root.path().join("runtime"),
+                renditions: root.path().join("renditions"),
+            },
+            "test-node".into(),
+            Default::default(),
+            Default::default(),
+            Arc::new(crate::logbuf::LogBuffer::new(8)),
+        );
+        let file = state
+            .store
+            .get_file(id)
+            .await
+            .expect("file read")
+            .expect("file");
+        (state, user, file, root)
+    }
+
+    #[tokio::test]
+    async fn a05_actual_decision_keeps_negative_candidate_public_and_manual_but_not_auto() {
+        use axum::{
+            extract::{Path, Query, State},
+            http::HeaderMap,
+        };
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+            .await
+            .expect("Auto setting");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("prior setting");
+        let caps = serde_json::from_value(serde_json::json!({"v":2,
+            "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
+        .expect("caps");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let remote = "192.168.4.9:1234".parse().expect("peer");
+        let q = crate::http::stream::Caps {
+            caps_v2: Some(caps),
+            force: Some("original".into()),
+            ..Default::default()
+        };
+        let before = crate::http::stream::decision(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            Path(file.id),
+            Query(q.clone()),
+            headers.clone(),
+            crate::http::network::RemoteAddress(Some(remote)),
+        )
+        .await
+        .expect("manual decision")
+        .0;
+        let selected = before
+            .quality_candidate_id
+            .expect("real selected candidate");
+        let catalog = before.quality_candidates.expect("real public catalog");
+        let candidate = catalog
+            .iter()
+            .find(|row| row.id == selected)
+            .expect("selected in menu");
+        let mut network = crate::http::network::identity(&headers, Some(remote)).expect("network");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        ));
+        let source = binding(&network, &file, candidate.recipe_digest, candidate.route)
+            .await
+            .expect("exact source");
+        let now = crate::media_sessions::unix_ms();
+        state
+            .store
+            .observe_candidate_link(
+                &CandidateLinkObservation {
+                    binding: source,
+                    body_bytes: 4096,
+                    body_duration_ms: 5000,
+                    completed_at_ms: now,
+                    negative: true,
+                },
+                now,
+            )
+            .await
+            .expect("exact negative");
+        let manual = crate::http::stream::decision(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            Path(file.id),
+            Query(q.clone()),
+            headers.clone(),
+            crate::http::network::RemoteAddress(Some(remote)),
+        )
+        .await
+        .expect("manual with negative")
+        .0;
+        assert_eq!(manual.quality_candidate_id, Some(selected));
+        assert_eq!(
+            serde_json::to_value(&manual.quality_candidates).expect("menu"),
+            serde_json::to_value(&catalog).expect("original menu")
+        );
+        let auto = crate::http::stream::decision(
+            crate::http::extract::AuthUser(user),
+            State(state),
+            Path(file.id),
+            Query(crate::http::stream::Caps {
+                force: Some("auto".into()),
+                ..q
+            }),
+            headers,
+            crate::http::network::RemoteAddress(Some(remote)),
+        )
+        .await
+        .expect("Auto with negative")
+        .0;
+        assert_ne!(
+            auto.quality_candidate_id,
+            Some(selected),
+            "exact negative excluded only from Auto admission"
+        );
+        assert!(auto
+            .quality_candidates
+            .expect("Auto public menu")
+            .iter()
+            .any(|row| row.id == selected));
+    }
+
+    #[tokio::test]
+    async fn a05_real_intake_rechecks_retired_or_changed_owner_after_source_await_without_claim() {
+        use plurx_core::domain::{
+            MediaSessionActivation, MediaSessionActivationSettlement, MediaSessionTakeover,
+        };
+        for retire in [true, false] {
+            let (state, user, file, _root) = actual_intake_state().await;
+            let now = crate::media_sessions::unix_ms();
+            let activation = MediaSessionActivation {
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                user_id: user.id,
+                playback_id: "player".into(),
+                recovery_epoch: String::new(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: state.node_id.clone(),
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: now,
+                lease_expires_at_ms: now + 60000,
+                expected_desired_revision: None,
+            };
+            state
+                .store
+                .activate_media_session(&activation)
+                .await
+                .expect("activate")
+                .expect("activation accepted");
+            state
+                .store
+                .settle_media_session_activation(
+                    &activation,
+                    MediaSessionActivationSettlement::Confirm {
+                        publication_ready_at_ms: 0,
+                    },
+                    now,
+                )
+                .await
+                .expect("confirm")
+                .expect("published");
+            let network = NetworkIdentity {
+                user_id: Some(user.id),
+                credential_generation: Some(plurx_core::domain::CredentialGeneration::derive(
+                    user.id,
+                    user.created_at,
+                    &user.password_hash,
+                )),
+                client_class: "web".into(),
+                network_fingerprint: "192.168.4.0/24".into(),
+            };
+            let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
+                .await
+                .expect("physical source");
+            let session = SessionBinding {
+                source,
+                session: activation.session_id.clone(),
+                incarnation: activation.incarnation_id.clone(),
+                owner_epoch: 1,
+            };
+            state.link_receipts.register(session.clone());
+            let (nonce, eof) = state
+                .link_receipts
+                .mint(
+                    &session.session,
+                    "seg00001.m4s",
+                    "etag",
+                    4096,
+                    Some(4000),
+                    true,
+                )
+                .expect("mint");
+            let original_eof = Instant::now();
+            eof(original_eof, now);
+            let mut sample = ClientLinkSample {
+                receipt: nonce.clone(),
+                object_name: "seg00001.m4s".into(),
+                etag: "etag".into(),
+                body_bytes: 4096,
+                body_duration_ms: 5000,
+                age_ms: 0,
+                network_load: Some(true),
+                from_cache: Some(false),
+                producer_paced: Some(false),
+                cause: NetworkPriorCause::Link,
+                negative: false,
+                media_duration_ms: Some(4000),
+                presenting: true,
+                stalled: true,
+                runway_ms: 1000,
+            };
+            assert!(
+                state
+                    .link_receipts
+                    .accept(&state, &network, Some(&session.session), &sample)
+                    .await
+                    .is_some(),
+                "unraced real intake must accept the raw claim"
+            );
+            sample.negative = true;
+            let pause = state.link_receipts.1.arm("intake after source validation");
+            let task = {
+                let state = state.clone();
+                let id = session.session.clone();
+                tokio::spawn(async move {
+                    state
+                        .link_receipts
+                        .accept(&state, &network, Some(&id), &sample)
+                        .await
+                })
+            };
+            let held = pause.reached().await;
+            if retire {
+                state
+                    .store
+                    .end_media_session(&session.session, "deleted", now)
+                    .await
+                    .expect("retire")
+                    .expect("retired");
+            } else {
+                // Real storage CAS with its explicit server-clock input; no sleep,
+                // registry age reset or claim-time replacement is used.
+                state
+                    .store
+                    .claim_media_session_takeover(&MediaSessionTakeover {
+                        incarnation_id: session.incarnation.clone(),
+                        expected_owner_node_id: state.node_id.clone(),
+                        expected_owner_epoch: 1,
+                        next_owner_node_id: "replacement-node".into(),
+                        now_ms: now + 60001,
+                        lease_expires_at_ms: now + 120000,
+                    })
+                    .await
+                    .expect("takeover")
+                    .expect("changed epoch");
+            }
+            held.release();
+            assert!(task.await.expect("intake task").is_none());
+            let rows = state.link_receipts.0.lock().expect("receipts");
+            let row = rows.receipts.get(&nonce).expect("same receipt");
+            assert_eq!(
+                row.completion,
+                Some((original_eof, now)),
+                "authority refusal cannot refresh EOF"
+            );
+            assert!(
+                row.raw
+                    .as_ref()
+                    .is_some_and(|raw| raw.bytes == 4096 && raw.duration_ms == 5000),
+                "refused negative must preserve original raw claim"
+            );
+            assert!(
+                !row.negative_claimed,
+                "refused claim must not consume negative stage"
+            );
+        }
+    }
     #[test]
     fn a05_warm_server_margin_uses_qualified_full_output_not_planned_candidate_rates() {
         use plurx_core::playback::candidate::{CandidateId, QualityCandidate};

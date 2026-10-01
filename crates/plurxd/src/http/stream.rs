@@ -2451,7 +2451,7 @@ pub async fn decision(
     // The media endpoints announce it once delivery is actually happening.
 
     let mut measured_candidate_outputs = None;
-    let mut quality_candidates = if state
+    let quality_candidates = if state
         .store
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
@@ -2492,16 +2492,17 @@ pub async fn decision(
     } else {
         None
     };
-    if let Some(catalog) = quality_candidates.take() {
-        quality_candidates = Some(
-            super::hls::link_receipts::filter_catalog(&state, identity.as_ref(), &file, catalog)
-                .await,
-        );
-    }
     // Keep the public menu/explicit choices. This narrows only this warm Auto
     // advisory selection, never the feature switch or a manual request.
     let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
+            let catalog = super::hls::link_receipts::filter_catalog(
+                &state,
+                identity.as_ref(),
+                &file,
+                catalog.clone(),
+            )
+            .await;
             Some(
                 super::hls::link_receipts::positive_catalog(
                     &state,
@@ -2509,7 +2510,7 @@ pub async fn decision(
                     &file,
                     super::hls::link_receipts::requested_receipt(&headers),
                     None,
-                    catalog.clone(),
+                    catalog,
                     measured_candidate_outputs.as_deref(),
                 )
                 .await,
