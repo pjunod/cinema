@@ -7,12 +7,67 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import time
 
 ROOT = Path(__file__).resolve().parents[2]
 ACQUIRE = importlib.machinery.SourceFileLoader("rolling_acquire", str(ROOT / "scripts/rolling-grid-acquire")).load_module()
 
 
 class RollingAcquireOwnershipTests(unittest.TestCase):
+    def test_absolute_supervisor_bounds_stalled_operation_including_drain_and_close(self):
+        class Worker:
+            pid = 123
+            returncode = None
+            waits = 0
+            def wait(self, timeout):
+                self.waits += 1
+                if self.waits == 1:
+                    time.sleep(timeout)
+                    raise subprocess.TimeoutExpired('fake blocked browser/body/drain', timeout)
+                self.returncode = -9
+                return self.returncode
+            def poll(self): return self.returncode
+            def kill(self): self.returncode = -9
+        class Group:
+            killed = False
+            def kill(self): self.killed = True
+            def empty(self): return self.killed
+            def remove(self): assert self.killed
+        worker, group, receipts = Worker(), Group(), []
+        start = time.monotonic()
+        with self.assertRaisesRegex(RuntimeError, 'absolute wall deadline'):
+            ACQUIRE.supervise_owned(worker, group, start + 15.05, lambda: None, receipts.append)
+        self.assertLess(time.monotonic() - start, .5)
+        self.assertTrue(group.killed)
+        self.assertTrue(receipts[0]['expired'])
+        self.assertEqual(worker.returncode, -9)
+
+    def test_supervisor_cleanup_survives_close_stop_receipt_errors_and_covers_owned_descendants(self):
+        class Worker:
+            pid = 123
+            returncode = 1  # fake worker's browser close raised
+            def wait(self, timeout): return self.returncode
+            def poll(self): return self.returncode
+            def kill(self): raise AssertionError('already reaped worker')
+        class Group:
+            # Synthetic namespace model includes detached-session descendants.
+            owned = {'ffmpeg', 'browser-setsid', 'driver'}
+            removed = False
+            def kill(self): self.owned = set()
+            def empty(self): return not self.owned
+            def remove(self): self.removed = True
+        def stop(): raise OSError('fake stop write failure')
+        def record(result):
+            self.assertTrue(group.removed)
+            self.assertFalse(group.owned)
+            self.assertIn('worker failed: 1', result['errors'])
+            raise OSError('fake receipt failure')
+        group = Group()
+        with self.assertRaisesRegex(RuntimeError, 'worker failed: 1.*stop.*supervisor receipt'):
+            ACQUIRE.supervise_owned(Worker(), group, time.monotonic() + 20, stop, record)
+        self.assertTrue(group.removed)
+        self.assertFalse(group.owned)
+
     def test_actual_manifest_refuses_foreign_owner_short_source_and_changed_frame_page(self):
         with tempfile.TemporaryDirectory(prefix="rolling-contract-",dir="/private/tmp") as directory:
             root=Path(directory);root.chmod(0o700)
