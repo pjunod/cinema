@@ -1,0 +1,264 @@
+#!/usr/bin/env node
+"use strict";
+
+// Current-source lint only. Never import a test runner or execute served code.
+const fs = require("node:fs");
+const path = require("node:path");
+const assert = require("node:assert/strict");
+const {shellSource, WEB, SIDECARS} = require("../tests/web/shell-source.js");
+const {analyze} = require("../tests/web/asset-graph.js");
+const generated = require("./player-contract-table");
+const ROOT = path.resolve(__dirname, "..");
+const read = rel => fs.readFileSync(path.join(ROOT, rel), "utf8");
+
+function tableRows(source) {
+  const table = source.match(/pub const WEB_ASSETS: &\[\(&str, WebAsset, &str\)\] = &\[\n([\s\S]*?)\n\];/);
+  assert.ok(table, "cannot parse WEB_ASSETS declaration");
+  return table[1].split("\n").filter(line => line.trim()).map(line => {
+    const row = line.match(/^\s*\("([^"\n]+)",\s*WebAsset::(HeadStyle|HeadScript|BodyScript),\s*include_str!\("\.\.\/web\/([^"\n]+)"\)\),$/);
+    assert.ok(row, `unrecognized WEB_ASSETS row: ${line}`);
+    assert.equal(row[1], row[3], "asset route and embedded source differ");
+    return {file: row[1], kind: row[2]};
+  });
+}
+
+function assetShape(shell, rust, doc, onDisk) {
+  const table = tableRows(rust);
+  const headEnd = shell.html.indexOf("</head>");
+  assert.ok(headEnd >= 0, "missing head boundary");
+  const tags = [...shell.html.matchAll(/^(?:<script src="\/assets\/([^"?]+)"><\/script>|<link rel="stylesheet" href="\/assets\/([^"?]+)">)$/gm)]
+    .map(m => ({file: m[1] || m[2], style: Boolean(m[2]), head: m.index < headEnd}));
+  assert.equal((shell.html.match(/"\/assets\//g) || []).length, table.length + SIDECARS.length, "unknown or malformed asset URL");
+  assert.equal(tags.length, table.length + SIDECARS.length, "asset tags must use the supported plain-script form");
+  assert.equal(new Set(tags.map(t => t.file)).size, tags.length, "duplicate asset tag");
+  for (const sidecar of SIDECARS) {
+    const tag = tags.find(t => t.file === sidecar);
+    assert.ok(tag, `missing sidecar ${sidecar}`);
+    assert.equal(tag.style, sidecar.endsWith(".css"));
+    assert.equal(tag.head, sidecar.endsWith(".css"));
+    assert.ok(doc.includes(sidecar), `undocumented sidecar ${sidecar}`);
+  }
+  const served = tags.filter(t => !SIDECARS.includes(t.file));
+  assert.deepEqual(served.map(t => t.file), table.map(t => t.file), "shell and WEB_ASSETS order differ");
+  const readerAt = tags.findIndex(t => t.file === "reader.css");
+  const lastSidecar = tags.reduce((at, t, i) => SIDECARS.includes(t.file) ? i : at, -1);
+  let lastStyle = readerAt;
+  table.forEach((row, i) => {
+    const tag = served[i], at = tags.indexOf(tag);
+    assert.equal(tag.style, row.kind === "HeadStyle", `${row.file} tag kind`);
+    assert.equal(tag.head, row.kind !== "BodyScript", `${row.file} head/body placement`);
+    if (row.kind === "HeadStyle") { assert.ok(at > readerAt); lastStyle = Math.max(lastStyle, at); }
+    if (row.kind === "HeadScript") assert.ok(at > lastStyle, "head script precedes stylesheet");
+    if (row.kind === "BodyScript") assert.ok(at > lastSidecar, "body script precedes sidecars");
+  });
+  const documented = [...doc.matchAll(/^\| (\d+) \| \[`([^`]+)`\]\(([^)]+)\) \| (.+?) \| (.+?) \|$/gm)];
+  assert.deepEqual(documented.map(m => m[2]), table.map(t => t.file), "layout doc and served order differ");
+  documented.forEach((m, i) => {
+    assert.equal(Number(m[1]), i + 1);
+    assert.equal(m[3], `../../crates/plurxd/src/web/${m[2]}`);
+    assert.ok(m[4].trim().length > 20, `${m[2]} has no useful description`);
+    if (m[2] === "hls.min.js") assert.equal(m[5], "Vendored dependency.");
+    else assert.match(m[5], /^(\d+–\d+|\*\*Relocated\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/);
+  });
+  assert.deepEqual(onDisk.filter(f => !table.some(t => t.file === f)), [], "unserved shell file");
+  for (const row of table) assert.ok(fs.statSync(path.join(WEB, row.file)).isFile(), `missing asset ${row.file}`);
+}
+
+function exactBlock(text, begin, end, expected) {
+  assert.equal(text.split(begin).length, 2, `missing or duplicate ${begin}`);
+  assert.equal(text.split(end).length, 2, `missing or duplicate ${end}`);
+  const start = text.indexOf(begin), stop = text.indexOf(end);
+  assert.ok(stop > start, `reversed ${begin}`);
+  assert.equal(text.slice(start, stop + end.length), expected, `stale ${begin}`);
+}
+
+function infoShape(fields) {
+  const ids = new Set(), labels = new Set();
+  for (const field of fields.fields) {
+    assert.ok(!ids.has(field.id), "duplicate info field"); ids.add(field.id);
+    assert.ok(fields.sections.includes(field.section));
+    assert.ok(Object.hasOwn(fields.formats, field.format), "unknown info format");
+    assert.ok(Array.isArray(field.modes) && field.modes.length > 0, "info field has no modes");
+    for (const mode of field.modes) assert.ok(Object.hasOwn(fields.modes, mode));
+    if (field.modes.includes("mini")) assert.ok(field.modes.includes("standard"));
+    if (field.modes.includes("standard")) assert.ok(field.modes.includes("debug"));
+    const label = `${field.section}/${field.label}`;
+    assert.ok(!labels.has(label), "duplicate info label in section"); labels.add(label);
+    for (const client of field.available_on || []) assert.ok(["web", "apple", "android"].includes(client));
+  }
+}
+
+function fixtureShape() {
+  const contract = JSON.parse(fs.readFileSync(generated.FIXTURE, "utf8"));
+  const fields = JSON.parse(fs.readFileSync(generated.FIELDS, "utf8"));
+  const surface = JSON.parse(fs.readFileSync(generated.SURFACE_FIXTURE, "utf8"));
+  for (const fixture of [contract, contract.live]) {
+    assert.deepEqual(Object.keys(fixture.routing).sort(), Object.keys(fixture.surfaces).sort());
+    for (const states of Object.values(fixture.routing)) {
+      assert.deepEqual(Object.keys(states).sort(), Object.keys(fixture.states).sort());
+      for (const inputs of Object.values(states)) {
+        assert.deepEqual(Object.keys(inputs).sort(), [...fixture.inputs].sort());
+        for (const outcome of Object.values(inputs)) assert.ok(Object.hasOwn(fixture.outcomes, outcome), `unknown outcome ${outcome}`);
+      }
+    }
+  }
+  infoShape(fields);
+  assert.equal(new Set(surface.sources.map(s => s.id)).size, surface.sources.length, "duplicate surface source");
+  for (const source of surface.sources) if (source.class !== null) assert.ok(Object.hasOwn(surface.classes, source.class));
+  for (const cls of Object.values(surface.classes)) {
+    assert.ok(Object.hasOwn(surface.severity_rank, cls.severity));
+    if (cls.blocking === true) assert.equal(cls.requires_player_stopped, true);
+  }
+  const actions = new Set(surface.actions), contexts = new Set([...surface.contexts, "any"]);
+  for (const cls of Object.values(surface.classes)) for (const action of cls.default_actions || []) assert.ok(actions.has(action));
+  const raised = new Set(), caseNames = new Set();
+  for (const item of surface.cases) {
+    assert.ok(!caseNames.has(item.name), "duplicate surface case"); caseNames.add(item.name);
+    for (const expected of item.expect) if (expected.surface != null) assert.ok(Object.hasOwn(surface.kinds, expected.surface));
+    for (const event of item.events) {
+      if (event.raise) raised.add(event.raise);
+      if (event.system_paused === true) raised.add("system_interruption");
+    }
+  }
+  for (const source of surface.sources) {
+    assert.ok(contexts.has(source.context));
+    assert.ok(raised.has(source.id), `surface source ${source.id} has no fixture case`);
+    for (const action of source.actions || []) assert.ok(actions.has(action));
+  }
+  for (const name of Object.keys(surface.classes)) assert.ok(surface.sources.some(row => row.class === name), `unreachable surface class ${name}`);
+  const blocks = [
+    [generated.DOC, "BEGIN", "END", "renderBlock", contract],
+    ...["OUTCOMES", "ROWS", "TIMINGS", "LIVE"].map((name, i) => [generated.DOC, `${name}_BEGIN`, `${name}_END`, ["renderOutcomesBlock", "renderRowsBlock", "renderTimingsBlock", "renderLiveBlock"][i], contract]),
+    [generated.DOC, "INFO_BEGIN", "INFO_END", "renderInfoBlock", fields],
+    [generated.SURFACE_DOC, "SURFACE_CLASSES_BEGIN", "SURFACE_CLASSES_END", "renderSurfaceClassesBlock", surface],
+    [generated.SURFACE_DOC, "SURFACE_SOURCES_BEGIN", "SURFACE_SOURCES_END", "renderSurfaceSourcesBlock", surface],
+    [generated.POLICY, "EMBED_BEGIN", "EMBED_END", "renderEmbedBlock", contract],
+    [generated.POLICY, "LIVE_EMBED_BEGIN", "LIVE_EMBED_END", "renderLiveEmbedBlock", contract],
+    [generated.POLICY, "SURFACE_EMBED_BEGIN", "SURFACE_EMBED_END", "renderSurfaceEmbedBlock", surface],
+    [generated.WEB, "FIELDS_EMBED_BEGIN", "FIELDS_EMBED_END", "renderFieldsEmbedBlock", fields],
+  ];
+  for (const [file, begin, end, render, value] of blocks) exactBlock(fs.readFileSync(file, "utf8"), generated[begin], generated[end], generated[render](value));
+  return contract;
+}
+
+function jsconfigShape(shell) {
+  const {files, compilerOptions} = JSON.parse(fs.readFileSync(path.join(WEB, "jsconfig.json"), "utf8"));
+  const {NOT_CHECKED} = require("./web-jsconfig");
+  const expected = [...shell.rows.head, ...shell.rows.body].filter(f => !NOT_CHECKED.includes(f));
+  assert.deepEqual(files, ["types/globals.d.ts", ...expected]);
+  assert.ok(expected.length >= 60);
+  for (const f of [...SIDECARS, ...NOT_CHECKED]) assert.ok(!files.includes(f));
+  assert.equal(compilerOptions.moduleDetection, "legacy");
+  assert.equal(compilerOptions.checkJs, true);
+  assert.equal(compilerOptions.noEmit, true);
+}
+
+function domShape(shell, contract) {
+  const source = `${shell.html}\n${shell.bodyScript}`;
+  const player = shell.html.split("\n").find(line => line.includes('id="player"'));
+  assert.ok(player, "missing player markup");
+  const timelineAt = player.indexOf('id="ptimeline"'), transportAt = player.indexOf('id="ptransport"');
+  assert.ok(timelineAt >= 0 && transportAt > timelineAt, "timeline must precede transport");
+  const timeline = player.slice(timelineAt, transportAt);
+  assert.equal((timeline.match(/tabindex=/g) || []).length, 1);
+  assert.match(timeline, /id="pseek"[^>]*tabindex="0"/);
+  const modal = player.match(/^<div class="modal"[^>]*>/)?.[0] || "";
+  for (const attribute of ['role="dialog"', 'aria-modal="true"', 'aria-label="Player"']) assert.ok(modal.includes(attribute));
+  const buttons = [...player.matchAll(/<button class="[^"]+"[^>]*onclick="toggleMenu\([^>]+>/g)];
+  assert.ok(buttons.length >= 4);
+  for (const [button] of buttons) {
+    assert.match(button, /aria-haspopup="menu"/);
+    assert.match(button, /aria-expanded="false"/);
+  }
+  const ids = {skip_back: "pbback", play_pause: "pbplay", skip_forward: "pbforward", audio: "pbaudio", subtitles: "pbsubs", quality: "pbquality", settings: "pbsettings", info: "statsbtn", pip: "pbpip", title_info: "pbinfo", fullscreen: "pbfs", larger: "pblarger", close: "pbclose", airplay: "apbtn", spacer: null};
+  const rowFor = id => { const row = contract.controls.rows.find(r => r.id === id); assert.ok(row, `missing row ${id}`); return row; };
+  const moved = Object.entries(rowFor("transport").surface_placement || {}).filter(([, where]) => where.desktop).map(([item, where]) => ({item, ...where.desktop}));
+  const barAt = player.indexOf('id="pbar"');
+  assert.ok(barAt >= 0 && barAt < timelineAt);
+  const infoAt = player.indexOf('id="pinfo"');
+  assert.ok(infoAt > transportAt);
+  for (const [rowId, markup] of [["bar", player.slice(barAt, timelineAt)], ["transport", player.slice(transportAt, infoAt)]]) {
+    const items = rowFor(rowId).items.filter(item => !moved.some(move => move.item === item));
+    for (const move of moved) if (move.row === rowId) items.splice(move.position, 0, move.item);
+    let previous = -1;
+    for (const item of items) {
+      assert.ok(Object.hasOwn(ids, item), `unknown DOM item ${item}`);
+      if (!ids[item]) continue;
+      const at = markup.indexOf(`id="${ids[item]}"`);
+      assert.ok(at > previous, `${item} missing or out of ${rowId} order`);
+      previous = at;
+    }
+  }
+  for (const pattern of [/function settingsMenuHtml\(\)/, /Auto-skip intro and credits/, /Autoplay next episode/, /<div class="amsec">Audio sync<\/div>/]) assert.match(source, pattern);
+}
+
+// In-memory type annotation of actual source, not synthetic probes. tsc reads
+// but never evaluates the served scripts; no emitted files or temporary writes.
+function playerShape() {
+  const TS = path.join(ROOT, "tools/web-types/node_modules/typescript");
+  const locked = JSON.parse(read("tools/web-types/package-lock.json")).packages["node_modules/typescript"].version;
+  assert.equal(JSON.parse(fs.readFileSync(path.join(TS, "package.json"), "utf8")).version, locked, "run scripts/web-types to install the pinned checker");
+  const ts = require(TS), dir = path.join(WEB, "player");
+  const player = fs.readFileSync(path.join(dir, "player.js"), "utf8");
+  const count = (player.match(/^ \* @property /gm) || []).length;
+  const named = new Set([...player.matchAll(/^ \* @property \{.*?\} \[?([A-Za-z_$][\w$]*)/gm)].map(m => m[1]));
+  assert.ok(count >= 94); assert.equal(named.size, count);
+  assert.match(player, /^\/\*\* @type \{Player\} \*\/\nlet PLAYER=\{/m);
+  assert.match(fs.readFileSync(path.join(dir, "decode-tiers.js"), "utf8"), /^\/\*\* @returns \{Player\}[^\n]*\nfunction buildPlayer\(/m);
+  const WRITE = /\b(?:p|player|PLAYER|[a-z]+Player)\.([A-Za-z_$][\w$]*)\s*(?:=(?!=)|\+\+|--|(?:\+|-|\*|\/|\|\||&&|\?\?)=)/g;
+  for (const file of fs.readdirSync(dir).filter(f => f.endsWith(".js"))) {
+    for (const match of fs.readFileSync(path.join(dir, file), "utf8").matchAll(WRITE)) assert.ok(named.has(match[1]), `${file} writes unnamed Player.${match[1]}`);
+  }
+  const parsed = ts.getParsedCommandLineOfConfigFile(path.join(WEB, "jsconfig.json"), {}, {...ts.sys, onUnRecoverableConfigFileDiagnostic: d => { throw new Error(ts.flattenDiagnosticMessageText(d.messageText, " ")); }});
+  const host = ts.createCompilerHost(parsed.options), original = host.readFile.bind(host);
+  let typed = 0;
+  host.readFile = file => {
+    const text = original(file);
+    if (text == null || path.dirname(path.resolve(file)) !== dir || !file.endsWith(".js")) return text;
+    return text.split("\n").map(line => {
+      const m = line.match(/^(\s*)((?:async\s+)?function\s*\*?\s*[\w$]+\s*\(([^)]*)\))/);
+      if (!m) return line;
+      const name = m[3].split(",").map(a => a.split("=")[0].trim()).find(a => /^(?:p|player|[a-z]+Player)$/.test(a));
+      if (!name) return line;
+      typed++;
+      return `${m[1]}/** @param {Player} ${name} */ ${line.slice(m[1].length)}`;
+    }).join("\n");
+  };
+  const program = ts.createProgram(parsed.fileNames, parsed.options, host);
+  const missing = ts.getPreEmitDiagnostics(program).filter(d => /on type 'Player'/.test(ts.flattenDiagnosticMessageText(d.messageText, " "))).map(d => ts.flattenDiagnosticMessageText(d.messageText, " "));
+  assert.ok(typed >= 100, "Player parameter matcher lost coverage");
+  assert.deepEqual(missing, [], "actual source names absent Player fields");
+}
+
+function main() {
+  const shell = shellSource();
+  const onDisk = ["core", "layouts", "detail", "player", "pages"]
+    .flatMap(folder => fs.readdirSync(path.join(WEB, folder)).map(name => `${folder}/${name}`))
+    .concat(fs.readdirSync(WEB).filter(name => name === "router.js" || name === "app.css"))
+    .filter(name => /\.(js|css)$/.test(name));
+  assetShape(shell, read("crates/plurxd/src/http/web.rs"), read("docs/clients/WEB-SHELL-LAYOUT.md"), onDisk);
+  const graph = analyze();
+  for (const key of ["missingPrologue", "duplicates", "forwardRefs"]) assert.deepEqual(graph[key], [], key);
+  // Acorn already refuses import/export in sourceType:script. Also refuse
+  // CommonJS exports in authored global rows without evaluating those rows.
+  function visit(node, file) {
+    if (!node || typeof node !== "object") return;
+    if (node.type === "MemberExpression" && node.object?.type === "Identifier" && node.object.name === "module") {
+      const property = node.computed ? node.property.value : node.property.name;
+      assert.notEqual(property, "exports", `${file} is not a CommonJS module`);
+    }
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(child => visit(child, file));
+      else if (value && typeof value === "object") visit(value, file);
+    }
+  }
+  for (const row of graph.rows) if (row.path !== "hls.min.js") visit(row.program, row.path);
+  jsconfigShape(shell);
+  const contract = fixtureShape();
+  domShape(shell, contract);
+  playerShape();
+  console.log("web-shape-check: current-source assets, graph, DOM, embeds and Player shape OK (no behavior fixtures)");
+}
+
+module.exports = {tableRows, assetShape, exactBlock, fixtureShape, infoShape, jsconfigShape, domShape};
+if (require.main === module) main();
