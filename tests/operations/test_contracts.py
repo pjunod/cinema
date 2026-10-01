@@ -3807,7 +3807,8 @@ assert.equal(context.ACT_TIMER, null);
 
         jobs = workflow_job_blocks(".github/workflows/ci.yml")
         image = None
-        for name in ("check", "cluster_daemon", "web_layout", "vod_web", "coverage"):
+        self.assertNotIn("coverage", jobs)
+        for name in ("check", "cluster_daemon", "web_layout", "vod_web"):
             with self.subTest(job=name):
                 block = jobs[name]
                 self.assertNotIn("ffmpeg-6", block)
@@ -3847,6 +3848,11 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("container: ubuntu:24.04", fast)
         self.assertIn('major: "6"', fast)
         self.assertIn("make unit", fast)
+        coverage = workflow_job_blocks(".github/workflows/coverage.yml")["coverage"]
+        self.assertIn("container: ubuntu:24.04", coverage)
+        self.assertIn('major: "6"', coverage)
+        self.assertNotIn("plurx-ci@sha256:", coverage)
+        self.assertIn("cargo llvm-cov --workspace --locked --exclude plurx-cluster-check", coverage)
         action = read(".github/actions/ffmpeg/action.yml")
         self.assertIn('if [ -n "$WANT_BINARY" ]', action)
 

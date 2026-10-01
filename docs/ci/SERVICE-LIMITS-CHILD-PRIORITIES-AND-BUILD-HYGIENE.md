@@ -687,7 +687,7 @@ Two options; the plan takes the first and keeps the second as fallback:
   the persistent lab runners installs `jellyfin-ffmpeg8` from the same
   Jellyfin apt repository the `Dockerfile` uses, symlinks it first on
   `PATH` for runner jobs, and relabels those runners `ffmpeg-8`. `ci.yml`'s
-  `check`, `cluster_daemon`, `web_layout`, `vod_web`, `coverage` move to
+  `check`, `cluster_daemon`, `web_layout`, `vod_web` move to
   `ffmpeg-8` with `major: "8"`. The action already fails on a mismatch, so
   a runner that did not get the package fails loudly.
 - **Run in the `runtime-assets` image** (fallback): a `container:` job
@@ -756,6 +756,19 @@ Forgejo provisioning owner was identified. M5 therefore takes the
 assertions. The full-sweep jobs move to Jellyfin 8 only after a separately
 published CI image has been smoke-checked and its immutable digest written
 into `ci.yml`. No runner label or live host is changed by this choice.
+
+**Current-main composition, 2026-10-01.** The four full-sweep jobs are
+`check`, `cluster_daemon`, `web_layout` and `vod_web`. Main's landed #660
+removed the old fifth `ci.yml` coverage job and moved diagnostic measurement
+and dated badge publication to `coverage.yml`; #661 runs that workflow on
+general/high-cpu workers in `ubuntu:24.04` with pinned FFmpeg 6, and #667
+corrects its installer action pin. P02 preserves all three complete deltas.
+The diagnostic coverage lane and the fast lane remain separate FFmpeg 6
+consumers; neither uses the private Jellyfin 8 image. The fast lane's
+`make unit` still retains the burst-honouring regression. The M5 contract
+`test_m5_shipped_ffmpeg_jobs_use_one_digest_and_keep_burst_coverage` checks
+this four-job/older-runtime split. The historical five-job audit above is
+not a claim about the current workflow.
 
 ### 3.5 Dockerfile base pin and the release profile
 
