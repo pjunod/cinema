@@ -675,6 +675,7 @@ class Controller internal constructor(
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
     private var autoNextTickMs = 0L
+    private val autoLinkClaims = LinkedHashMap<String, Pair<Long, Boolean>>()
     private var autoUpgradeSinceMs: Long? = null
     private var autoLastSwitchMs: Long? = null
     private val autoSwitchTimes = mutableListOf<Long>()
@@ -3036,6 +3037,7 @@ class Controller internal constructor(
             sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
             sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
             sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true
+        if (!producer && (severe || mild)) reportCandidateLinkSample(negative = true)
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
@@ -3080,6 +3082,7 @@ class Controller internal constructor(
             autoUpgradeSinceMs = null
             return
         }
+        reportCandidateLinkSample(negative = false)
         val transfer = latestAutoCompletedTransfer
         val duration = transfer?.bodyDurationMs
         val link = if (transfer != null && duration != null && transfer.networkLoad &&
@@ -3152,6 +3155,40 @@ class Controller internal constructor(
                 else -> failAutoPreparation()
             }
         }
+    }
+
+    private fun reportCandidateLinkSample(negative: Boolean) {
+        val now = monotonicNowMs()
+        autoLinkClaims.entries.removeAll { now < it.value.first || now - it.value.first > 15_000L }
+        val sample = latestAutoCompletedTransfer ?: return
+        val currentSession = sessionId ?: return
+        val candidate = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val duration = sample.bodyDurationMs ?: return
+        val receipt = sample.receipt ?: return
+        val etag = sample.etag ?: return
+        val uri = android.net.Uri.parse(sample.segmentId)
+        if (playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            sample.pipelineIdentity !== autoTransfersByPlayer[player] ||
+            !uri.pathSegments.contains(currentSession) || candidate.id != autoActiveCandidateId ||
+            !Regex("seg[0-9]+\\.(m4s|ts)").matches(uri.lastPathSegment.orEmpty()) ||
+            sample.statusCode != 200 || !sample.networkLoad || sample.fromLocalCache != false ||
+            sample.producerPaced != false || sample.ageMs(now) > 15_000L ||
+            duration !in 1..120_000L || sample.bodyBytes <= 0 || receipt.length != 36 || etag.isEmpty()) return
+        val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        if (negative) {
+            if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
+                !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
+                playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+                runway > 1500 || sample.mediaDurationMs?.let { it > 0 && duration > it } != true) return
+        } else if (autoLinkClaims.containsKey(receipt)) return
+        if (autoLinkClaims.size >= 32 && !autoLinkClaims.containsKey(receipt)) return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+            message = "Completed candidate body", ua = "Android Media3", sessionId = currentSession,
+            linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), etag,
+                sample.bodyBytes, duration, sample.ageMs(now), true, false, false, "link", negative,
+                sample.mediaDurationMs, establishedPlayback && presentationForeground,
+                player.playbackState == Player.STATE_BUFFERING, runway)))
+        autoLinkClaims[receipt] = sample.completedAtMs to negative
     }
 
     private fun failAutoPreparation() {
@@ -4668,6 +4705,10 @@ internal data class AutoCompletedTransfer(
     val producerPaced: Boolean?,
     val segmentId: String = "",
     val mediaDurationMs: Long? = null,
+    val receipt: String? = null,
+    val etag: String? = null,
+    val statusCode: Int? = null,
+    val pipelineIdentity: Any? = null,
 ) {
     fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
 }
@@ -4714,7 +4755,8 @@ internal fun autoTrialMayCommit(requestedId: String?, offeredId: String?, reques
 @UnstableApi
 internal class AutoTransferEvidence(private val delegate: TransferListener) : TransferListener {
     private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
-                            val origin: String?, val paced: Boolean?, var bytes: Long = 0)
+                            val origin: String?, val paced: Boolean?, val receipt: String?,
+                            val etag: String?, val statusCode: Int?, var bytes: Long = 0)
     private val active = java.util.IdentityHashMap<DataSource, Body>()
     private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
     private var completed: AutoCompletedTransfer? = null
@@ -4744,12 +4786,15 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
         delegate.onTransferStart(source, dataSpec, isNetwork)
         val headers = source.responseHeaders
         val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }?.value?.singleOrNull()
+        val receipt = headers.entries.firstOrNull { it.key.equals("X-Plurx-Link-Receipt", true) }?.value?.singleOrNull()
+        val etag = headers.entries.firstOrNull { it.key.equals("ETag", true) }?.value?.singleOrNull()
         val uri = source.uri ?: dataSpec.uri
         val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}${if (uri.port >= 0) ":${uri.port}" else ""}" else null
         synchronized(this) {
             if (active.size >= 32) active.clear()
             active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
-                when (paced) { "0" -> false; "1" -> true; else -> null })
+                when (paced) { "0" -> false; "1" -> true; else -> null }, receipt, etag,
+                (source as? HttpDataSource)?.responseCode)
         }
     }
     override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
@@ -4763,7 +4808,8 @@ internal class AutoTransferEvidence(private val delegate: TransferListener) : Tr
             val now = monotonicNowMs()
             val duration = (now - body.startedAtMs).takeIf { it in 1..120_000 }
             ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
-                if (body.network) false else null, body.paced)
+                if (body.network) false else null, body.paced, receipt = body.receipt, etag = body.etag,
+                statusCode = body.statusCode, pipelineIdentity = this)
             while (ended.size > 32) ended.remove(ended.keys.first())
         }
     }

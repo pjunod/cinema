@@ -743,6 +743,17 @@ async fn vod_segment_response_before(
         completion_permit,
     );
     let mut delivered = 0_u64;
+    let (link_nonce, link_completion) = match state.link_receipts.mint(
+        session,
+        seg,
+        &etag,
+        len,
+        None,
+        status == StatusCode::OK && complete_object,
+    ) {
+        Some((nonce, observer)) => (Some(nonce), Some(observer)),
+        None => (None, None),
+    };
     tokio::spawn(pump_local_media(
         reader,
         sender,
@@ -778,6 +789,7 @@ async fn vod_segment_response_before(
                 authorization,
                 complete_object,
                 permit,
+                link_completion,
             );
         },
     ));
@@ -790,9 +802,14 @@ async fn vod_segment_response_before(
     // The source body is a held complete immutable object; response-body
     // timing excludes the bounded wait before headers were published.
     headers_mut.insert("x-plurx-producer-paced", "0".parse().expect("provenance"));
+    if let Some(nonce) = link_nonce {
+        headers_mut.insert("x-plurx-link-receipt", nonce.parse().expect("UUID receipt"));
+    }
     headers_mut.insert(
         header::ACCESS_CONTROL_EXPOSE_HEADERS,
-        "X-Plurx-Producer-Paced".parse().expect("expose"),
+        "X-Plurx-Producer-Paced, X-Plurx-Link-Receipt, ETag"
+            .parse()
+            .expect("expose"),
     );
     headers_mut.insert(header::ETAG, etag.parse().expect("etag"));
     headers_mut.insert(header::ACCEPT_RANGES, "bytes".parse().expect("ranges"));
@@ -1277,6 +1294,17 @@ pub(super) async fn segment_local_before(
     // This producer is the sole owner of the file, delivery tracker, and EOF
     // authorization after headers are exposed. Both deadlines keep advancing
     // even if downstream stops polling; receiver Drop ends it immediately.
+    let (link_nonce, link_completion) = match state.link_receipts.mint(
+        session,
+        seg,
+        &etag,
+        opened_len,
+        None,
+        status == StatusCode::OK && complete_object,
+    ) {
+        Some((nonce, observer)) => (Some(nonce), Some(observer)),
+        None => (None, None),
+    };
     tokio::spawn(pump_local_media(
         reader,
         sender,
@@ -1308,6 +1336,7 @@ pub(super) async fn segment_local_before(
                 authorization,
                 complete_object,
                 permit,
+                link_completion,
             );
         },
     ));
@@ -1318,13 +1347,16 @@ pub(super) async fn segment_local_before(
         .header("x-plurx-producer-paced", "0")
         .header(
             header::ACCESS_CONTROL_EXPOSE_HEADERS,
-            "X-Plurx-Producer-Paced",
+            "X-Plurx-Producer-Paced, X-Plurx-Link-Receipt, ETag",
         )
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::ETAG, etag)
         // A finished segment never changes: ffmpeg writes `.tmp` and
         // renames. The URI carries a capability-scoped session id.
         .header(header::CACHE_CONTROL, "private, max-age=3600, immutable");
+    if let Some(nonce) = link_nonce {
+        response = response.header("x-plurx-link-receipt", nonce);
+    }
     if status == StatusCode::PARTIAL_CONTENT {
         response = response.header(
             header::CONTENT_RANGE,

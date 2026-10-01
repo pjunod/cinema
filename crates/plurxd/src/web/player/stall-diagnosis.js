@@ -671,6 +671,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     &&p.healthObservedAt!=null
     &&PlaybackPolicy.qualityEncodeProof(p.health,current.id,now-p.healthObservedAt)
     &&speed<1000) cause='encode';
+  reportCandidateLinkSample(p,v,cause,now);
   const result=PlaybackPolicy.decideCandidateTransition({
     state:p.abr.candidateState||{},candidates:p.qualityCandidates,currentId:current.id,
     aspect:current.width/current.height,target:measuredPresentationTarget(),
@@ -686,6 +687,29 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
     {action:result.candidate?'change':'suppressed',reason:result.reason,
       evidence:{age_ms:transfer?transfer.age_ms:null}},bufferRunway(v),link>0?link/1000:null);
   if(result.candidate) await switchAutoCandidate(p,v,current,result);
+}
+function reportCandidateLinkSample(p,v,cause,now){
+  const sample=p.abr&&p.abr.qualityTransfer;
+  if(!sample||!sample.receipt||!sample.etag||sample.attachment!==p.mediaAttachment
+    ||sample.session_id!==p.sessionId||sample.candidate_id!==p.qualityCandidateId
+    ||PLAYER!==p||!playbackOwnsAttachedMedia(p)||qualityForce()!=='auto'
+    ||!sample.completed||sample.from_cache!==false||sample.producer_paced!==false
+    ||now-sample.atMs<0||now-sample.atMs>15000
+    ||['encode','decode','hold','authority'].includes(cause)) return;
+  // A completed acquisition reports raw Link evidence once. A later actual
+  // low-runway Link stall may claim this same body, without refreshing it.
+  const negative=!!sample.linkPositiveReported;
+  if(negative&&(sample.linkNegativeReported||cause!=='link'||!p.started||v.paused
+    ||v.seeking||p.controlSeek||p.pendingMediaChange||!p.waitAt||bufferRunway(v)>1.5
+    ||!(sample.media_duration_ms>0&&sample.elapsed_ms>sample.media_duration_ms))) return;
+  clientLog({event:'candidate_link_sample',message:'Completed candidate body',session_id:p.sessionId,
+    link_sample:{receipt:sample.receipt,object_name:sample.object_name,etag:sample.etag,
+      body_bytes:sample.bytes,body_duration_ms:Math.round(sample.elapsed_ms),age_ms:Math.round(now-sample.atMs),
+      network_load:true,from_cache:false,producer_paced:false,cause:'link',negative,
+      media_duration_ms:Math.round(sample.media_duration_ms||0),presenting:!!p.started,
+      stalled:!!p.waitAt,runway_ms:Math.max(0,Math.round(bufferRunway(v)*1000))}});
+  if(negative) sample.linkNegativeReported=true;
+  else sample.linkPositiveReported=true;
 }
 async function switchAutoCandidate(p,v,current,decision){
   if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;

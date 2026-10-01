@@ -1088,6 +1088,7 @@ pub(super) async fn plan_preparation_candidate(
             file_id: predecessor.request.file_id,
             source: Some(source),
             network_prior: None,
+            network_identity: None,
         },
         Some(review),
         body,

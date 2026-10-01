@@ -645,7 +645,8 @@ function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=n
   const video=/** @type {HTMLVideoElement|null} */ (document.getElementById("video"));
   if(document.hidden||!video||video.paused||video.seeking||p.controlSeek) return;
   const evidence=completedQualityTransfer(networkDetails,url,loading,now);
-  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment};
+  if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment,
+    session_id:p.sessionId,candidate_id:p.qualityCandidateId};
 }
 function completedQualityTransfer(networkDetails,url,loading,now){
   // Upgrade evidence needs a completed network body from bytes already sealed
@@ -662,6 +663,8 @@ function completedQualityTransfer(networkDetails,url,loading,now){
       ||Math.abs(timing.responseEnd-now)>1000
       ||Math.abs(timing.startTime-Number(loading.start))>1000) return;
     return {bytes:timing.encodedBodySize,
+      receipt:networkDetails.getResponseHeader("X-Plurx-Link-Receipt"),
+      etag:networkDetails.getResponseHeader("ETag"),object_name:new URL(name).pathname.split('/').at(-1),
       elapsed_ms:timing.responseEnd-timing.responseStart,atMs:now,completed:true,
       from_cache:false,producer_paced:false};
   }catch(e){}

@@ -120,6 +120,31 @@ private struct ApplePlaybackFailureLog: Encodable {
     }
 }
 
+private struct AppleCandidateLinkLog: Encodable {
+    let event = "candidate_link_sample"
+    let message = "Completed candidate body"
+    let ua = "Apple AVPlayer"
+    let session_id: String
+    let link_sample: Sample
+    struct Sample: Encodable {
+        let receipt: String
+        let object_name: String
+        let etag: String
+        let body_bytes: Int64
+        let body_duration_ms: Int
+        let age_ms: Int
+        let network_load = true
+        let from_cache = false
+        let producer_paced = false
+        let cause = "link"
+        let negative: Bool
+        let media_duration_ms: Int?
+        let presenting: Bool
+        let stalled: Bool
+        let runway_ms: Int
+    }
+}
+
 /// One `surface_raised` / `surface_cleared` / `surface_disagreement` /
 /// `surface_log_only` event, with the identities the server-side session log
 /// joins on (contract §3.6). `surface_disagreement` is the one to watch: each
@@ -2376,17 +2401,23 @@ final class PlayerController: ObservableObject {
         let statusCode: Int?
         let segmentId: String
         let mediaDurationSeconds: Double?
+        var receipt: String? = nil
+        var etag: String? = nil
+        var installedSessionId: String? = nil
+        var installedCandidateId: String? = nil
         func ageMs(nowMs: Int) -> Int { nowMs >= completedAtMs ? nowMs - completedAtMs : Int.max }
     }
     private(set) var latestAutoCompletedTransfer: AutoCompletedTransfer?
     private var autoTransferMetricTask: Task<Void, Never>?
     private var autoStagedTransferMetricTask: Task<Void, Never>?
     private var autoStagedTransfers: [AutoCompletedTransfer] = []
+    private var autoLinkClaims: [String: (completedAtMs: Int, negative: Bool)] = [:]
 
     private func retireAutoTransferMetrics() {
         autoTransferMetricTask?.cancel()
         autoTransferMetricTask = nil
         latestAutoCompletedTransfer = nil
+        autoLinkClaims.removeAll()
     }
 
     private func installAutoTransferMetrics(for item: AVPlayerItem, staged: Bool = false) {
@@ -2395,6 +2426,8 @@ final class PlayerController: ObservableObject {
             autoStagedTransfers.removeAll()
         } else { retireAutoTransferMetrics() }
         guard #available(iOS 18, tvOS 18, *) else { return }
+        let installedSessionId = sessionId
+        let installedCandidateId = autoActiveCandidateId
         let task = Task { @MainActor [weak self, weak item] in
             guard let item else { return }
             do {
@@ -2434,13 +2467,20 @@ final class PlayerController: ObservableObject {
                             statusCode: response?.statusCode,
                             segmentId: event.url?.absoluteString ?? url?.absoluteString ?? "",
                             mediaDurationSeconds: event.segmentDuration.isFinite && event.segmentDuration > 0
-                                ? event.segmentDuration : nil
+                                ? event.segmentDuration : nil,
+                            receipt: response?.value(forHTTPHeaderField: "X-Plurx-Link-Receipt"),
+                            etag: response?.value(forHTTPHeaderField: "ETag"),
+                            installedSessionId: staged ? nil : installedSessionId,
+                            installedCandidateId: staged ? nil : installedCandidateId
                         )
                         if staged {
                             self.autoStagedTransfers.removeAll { $0.segmentId == sample.segmentId }
                             self.autoStagedTransfers.append(sample)
                             if self.autoStagedTransfers.count > 4 { self.autoStagedTransfers.removeFirst() }
-                        } else { self.latestAutoCompletedTransfer = sample }
+                        } else {
+                            self.latestAutoCompletedTransfer = sample
+                            self.reportCandidateLinkSample(negative: false)
+                        }
                     }
                 }
             } catch {
@@ -2448,6 +2488,40 @@ final class PlayerController: ObservableObject {
             }
         }
         if staged { autoStagedTransferMetricTask = task } else { autoTransferMetricTask = task }
+    }
+
+    private func reportCandidateLinkSample(negative: Bool) {
+        let now = PlaybackControlSession.monotonicMs()
+        autoLinkClaims = autoLinkClaims.filter { now >= $0.value.completedAtMs && now - $0.value.completedAtMs <= 15_000 }
+        guard model?.displayAwareAuto == true, selectedHeight == nil, !selectedQualityIsOriginal,
+              let sample = latestAutoCompletedTransfer,
+              let sessionId, sample.installedSessionId == sessionId,
+              let candidateId = autoActiveCandidateId, sample.installedCandidateId == candidateId,
+              let runway = bufferedRunwaySeconds(), runway.isFinite, runway >= 0,
+              sample.statusCode == 200, sample.networkLoad, !sample.fromLocalCache,
+              sample.producerPaced == false, sample.ageMs(nowMs: now) <= 15_000,
+              let duration = sample.bodyDurationSeconds, duration > 0, duration <= 120,
+              sample.bodyBytes > 0, let receipt = sample.receipt, receipt.count == 36,
+              let etag = sample.etag, !etag.isEmpty,
+              let url = URL(string: sample.segmentId), url.pathComponents.contains(sessionId),
+              url.lastPathComponent.range(of: "^seg[0-9]+\\.(m4s|ts)$", options: .regularExpression) != nil
+        else { return }
+        if negative {
+            guard autoLinkClaims[receipt]?.negative == false, wantsPlayback, surface.presenting,
+                  seekState.pendingMs == nil, preparedPlayer == nil,
+                  player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+                  let media = sample.mediaDurationSeconds, media > 0, duration > media,
+                  runway <= 1.5 else { return }
+        } else if autoLinkClaims[receipt] != nil { return }
+        if autoLinkClaims.count >= 32, autoLinkClaims[receipt] == nil { return }
+        postClientLog(AppleCandidateLinkLog(session_id: sessionId, link_sample: .init(
+            receipt: receipt, object_name: url.lastPathComponent, etag: etag,
+            body_bytes: sample.bodyBytes, body_duration_ms: Int((duration * 1000).rounded()),
+            age_ms: sample.ageMs(nowMs: now), negative: negative,
+            media_duration_ms: sample.mediaDurationSeconds.map { Int(($0 * 1000).rounded(.up)) },
+            presenting: surface.presenting, stalled: player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+            runway_ms: Int(min(runway * 1000, Double(UInt32.max))))))
+        autoLinkClaims[receipt] = (sample.completedAtMs, negative)
     }
 
     private var itemObserver: AVPlayerItemObserver?
@@ -10072,6 +10146,7 @@ extension PlayerController {
             sessionStatus?.activeEncodeSegments.map { $0 >= 2 } == true &&
             sessionStatus?.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
             sessionStatus?.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true
+        if !producer && (severe || mild) { reportCandidateLinkSample(negative: true) }
         guard severe || producer || mild else { return }
         autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
         guard severe || (autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true)) else { return }

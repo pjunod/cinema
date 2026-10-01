@@ -6,6 +6,47 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 genuine completed body carries the response receipt without cache promotion", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/player.js","utf8");
+  const begin=source.indexOf("function completedQualityTransfer(");
+  const end=source.indexOf("\nfunction ",begin+1);
+  const timing={encodedBodySize:4096,transferSize:4500,responseStart:100,responseEnd:5100,startTime:90};
+  const context=vm.createContext({URL,location:{href:"http://server/"},performance:{getEntriesByName:()=>[timing]}});
+  vm.runInContext(source.slice(begin,end),context);
+  const response={status:200,getResponseHeader:name=>({"X-Plurx-Producer-Paced":"0","X-Plurx-Link-Receipt":"nonce",ETag:"etag"})[name]};
+  const sample=context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90},5100);
+  assert.equal(sample.receipt,"nonce"); assert.equal(sample.etag,"etag");
+  assert.equal(sample.object_name,"seg00001.m4s"); assert.equal(sample.elapsed_ms,5000);
+  timing.transferSize=0;
+  assert.equal(context.completedQualityTransfer(response,"/hls/s/seg00001.m4s",{start:90},5100),undefined);
+});
+
+test("a05 completed link sender permits only immutable two-stage active attachment claims", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const begin=source.indexOf("function reportCandidateLinkSample(");
+  const end=source.indexOf("\nasync function ",begin+1);
+  const sent=[];
+  const player={sessionId:"session",qualityCandidateId:"candidate",mediaAttachment:{},started:true,waitAt:1,
+    abr:{qualityTransfer:{receipt:"nonce",etag:"etag",object_name:"seg00001.m4s",bytes:4096,elapsed_ms:5000,
+      atMs:100,completed:true,from_cache:false,producer_paced:false,session_id:"session",candidate_id:"candidate",media_duration_ms:4000}}};
+  player.abr.qualityTransfer.attachment=player.mediaAttachment;
+  const context=vm.createContext({PLAYER:player,playbackOwnsAttachedMedia:()=>true,qualityForce:()=>"auto",
+    bufferRunway:()=>1,clientLog:value=>sent.push(value)});
+  vm.runInContext(source.slice(begin,end),context);
+  const video={paused:false,seeking:false};
+  context.reportCandidateLinkSample(player,video,"encode",200);
+  assert.equal(sent.length,0);
+  context.reportCandidateLinkSample(player,video,"unknown",200);
+  context.reportCandidateLinkSample(player,video,"link",300);
+  context.reportCandidateLinkSample(player,video,"link",400);
+  assert.equal(sent.length,2); assert.equal(sent[0].link_sample.negative,false);
+  assert.equal(sent[1].link_sample.negative,true); assert.equal(sent[1].link_sample.age_ms,200);
+  player.abr.qualityTransfer.linkPositiveReported=false;
+  player.mediaAttachment={};
+  context.reportCandidateLinkSample(player,video,"link",500);
+  assert.equal(sent.length,2);
+});
+
 test("current main switch budget composes with effort decode-once protection", () => {
   const sample = {
     ladder: [
