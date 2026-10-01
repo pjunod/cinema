@@ -138,6 +138,9 @@ pub(super) struct ServedPlaylistSnapshot {
 pub(super) struct RollingPublicationClock {
     pub(super) served: Option<ServedPlaylistSnapshot>,
     pub(super) staged_attempt: Option<u64>,
+    /// Actual monotonic observation of the writer's first gated inventory.
+    /// Diagnostic only; never used to grant publication or reset a deadline.
+    pub(super) first_staged_at: Option<Instant>,
     pub(super) staged_last_segment: Option<i64>,
     pub(super) staged_end_ms: Option<i64>,
     pub(super) next_publish_at: Option<Instant>,
@@ -169,6 +172,7 @@ impl RollingPublicationClock {
                 .is_some_and(|snapshot| snapshot.producer_attempt != producer_attempt)
         {
             self.served = None;
+            self.first_staged_at = None;
             self.staged_last_segment = None;
             self.staged_end_ms = None;
             self.next_publish_at = None;

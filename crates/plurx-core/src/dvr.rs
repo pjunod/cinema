@@ -50,6 +50,30 @@ pub const DVR_DEFAULT_FREE_FLOOR_GB: i64 = 50;
 /// the source carries no explicit `<new/>` marker.
 pub const DVR_NEW_WINDOW_S: i64 = 7 * 24 * 60 * 60;
 
+/// Run together after the recording's physical artifacts have been removed.
+/// Recover an as-yet unlinked scan by its exact path; never sweep a library or
+/// delete another file version of the same item. Keep the DVR history itself.
+pub(crate) const DVR_PURGE_CATALOG: [&str; 4] = [
+    "UPDATE dvr_recordings SET
+       file_id = (SELECT f.id FROM files f JOIN items i ON i.id=f.item_id
+                  JOIN libraries l ON l.id=i.library_id
+                  WHERE f.path=dvr_recordings.path AND l.kind='recordings'),
+       item_id = (SELECT f.item_id FROM files f JOIN items i ON i.id=f.item_id
+                  JOIN libraries l ON l.id=i.library_id
+                  WHERE f.path=dvr_recordings.path AND l.kind='recordings')
+     WHERE id=$1 AND state='deleted' AND file_id IS NULL AND path IS NOT NULL",
+    "DELETE FROM files WHERE id IN (
+       SELECT f.id FROM dvr_recordings r JOIN files f ON f.id=r.file_id AND f.item_id=r.item_id
+       JOIN items i ON i.id=f.item_id JOIN libraries l ON l.id=i.library_id
+       WHERE r.id=$1 AND r.state='deleted' AND l.kind='recordings')",
+    "DELETE FROM items WHERE id IN (
+       SELECT r.item_id FROM dvr_recordings r WHERE r.id=$1 AND r.state='deleted')
+       AND library_id IN (SELECT id FROM libraries WHERE kind='recordings')
+       AND NOT EXISTS (SELECT 1 FROM files WHERE files.item_id=items.id)
+       AND NOT EXISTS (SELECT 1 FROM items child WHERE child.parent_id=items.id)",
+    "UPDATE dvr_recordings SET item_id=NULL, file_id=NULL WHERE id=$1 AND state='deleted'",
+];
+
 /// Durable DVR entities, shared verbatim by both Store backends.
 ///
 /// Every clock and random value is supplied by the application: `unixepoch()`
