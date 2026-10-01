@@ -35,6 +35,7 @@ pub mod library_channels;
 pub mod live_tv_resource;
 pub mod mediafacts;
 pub mod metadata;
+pub mod output_measurement;
 pub mod playback;
 pub mod process;
 pub mod scan;
