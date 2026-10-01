@@ -1,6 +1,17 @@
 version = 1
 enforce_after = "e8a910f"
 
+# Original A05 height controller was removed before landing because PR669 owns
+# the combined route-v1 controller. This anchors its historical client commit
+# to the current removal contract, not to an adapter claimed to be shipped.
+[[fixes]]
+id = "android.a05-height-controller-superseded"
+commits = ["7bd6af988"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "class Controller internal constructor("
+test = "tests/operations/test_a05_superseded_controller.py"
+test_anchor = "test_removed_height_controller_does_not_reappear"
+
 # A-04 physical shaping acceptance refuses a saved-server fallback when the
 # explicit Debug launch proxy is absent or does not match the server identity.
 [[fixes]]
