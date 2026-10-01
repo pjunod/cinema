@@ -633,7 +633,9 @@
         delivery: std::sync::Arc<crate::meter::Meter>,
     ) -> crate::vodserve::SegmentReady {
         crate::vodserve::SegmentReady {
+            observed_media_duration_ms: None,
             delivery,
+            retained_lease: None,
             file: tokio::fs::File::open(path)
                 .await
                 .expect("open VOD response object"),
@@ -1691,6 +1693,7 @@
             .expect("oversized init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,
@@ -1732,6 +1735,7 @@
             .expect("unreadable init");
 
         let context = crate::transcode::HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: 1,
             start_seconds: 0.0,

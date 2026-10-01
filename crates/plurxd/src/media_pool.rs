@@ -147,6 +147,8 @@ fn media_io_observation() -> MediaIoObservation {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaNodeSnapshot {
+    #[serde(default)]
+    pub retained_output_receipts: bool,
     pub node_id: String,
     pub observed_at_unix_ms: i64,
     pub build: String,
@@ -408,6 +410,18 @@ pub(crate) struct MediaPool {
 }
 
 impl MediaPool {
+    pub(crate) async fn retained_output_receiver(&self, node_id: &str) -> bool {
+        let now = tokio::time::Instant::now();
+        self.snapshots
+            .read()
+            .await
+            .get(node_id)
+            .is_some_and(|cached| {
+                now <= cached.expires_at
+                    && cached.snapshot.protocol_version == PROTOCOL_VERSION
+                    && cached.snapshot.retained_output_receipts
+            })
+    }
     pub(crate) fn new(membership: MembershipManager) -> Arc<Self> {
         Arc::new(Self {
             transport: PeerTransport::new(membership.clone()),
@@ -1211,6 +1225,7 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         capacity_pressure(runtime.scratch_bytes_free, runtime.scratch_target_bytes);
     let workload_pressure = count_pressure(runtime.active_sessions, runtime.session_pressure_limit);
     MediaNodeSnapshot {
+        retained_output_receipts: true,
         node_id: state.node_id.clone(),
         observed_at_unix_ms: unix_ms(),
         build: crate::version::BUILD.to_owned(),
@@ -1711,8 +1726,52 @@ mod tests {
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
 
+    #[tokio::test]
+    async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
+        let pool = MediaPool::new(MembershipManager::unavailable());
+        assert!(!pool.retained_output_receiver("worker").await);
+        let legacy = snapshot("worker", &["h264"], 1080);
+        let mut wire = serde_json::to_value(&legacy).expect("snapshot");
+        wire.as_object_mut()
+            .expect("snapshot object")
+            .remove("retained_output_receipts");
+        let restored: MediaNodeSnapshot = serde_json::from_value(wire).expect("old advertisement");
+        assert!(!restored.retained_output_receipts);
+        let now = tokio::time::Instant::now();
+        pool.snapshots.write().await.insert(
+            "worker".to_owned(),
+            CachedSnapshot {
+                snapshot: restored,
+                expires_at: now + Duration::from_secs(15),
+            },
+        );
+        assert!(!pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .snapshot
+            .retained_output_receipts = true;
+        assert!(pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .expires_at = now - Duration::from_secs(1);
+        assert!(!pool.retained_output_receiver("worker").await);
+        let mut snapshots = pool.snapshots.write().await;
+        let cached = snapshots.get_mut("worker").expect("cached peer");
+        cached.expires_at = now + Duration::from_secs(15);
+        cached.snapshot.protocol_version = PROTOCOL_VERSION - 1;
+        drop(snapshots);
+        assert!(!pool.retained_output_receiver("worker").await);
+    }
+
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {
+            retained_output_receipts: false,
             node_id: node.to_owned(),
             observed_at_unix_ms: unix_ms(),
             build: "test".to_owned(),
@@ -2199,6 +2258,7 @@ mod tests {
             "peer".to_owned(),
             CachedSnapshot {
                 snapshot: MediaNodeSnapshot {
+                    retained_output_receipts: false,
                     node_id: "peer".to_owned(),
                     observed_at_unix_ms: 1,
                     build: "test".to_owned(),

@@ -903,6 +903,8 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2071,6 +2073,8 @@
             .await
             .expect("terminal cancellation user");
         let recipe = RemoteStartRequest {
+            retained_output: None,
+            retained_output_receiver: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2338,6 +2342,8 @@
             let generation = uuid::Uuid::new_v4().to_string();
             let client_instance_id = uuid::Uuid::new_v4().to_string();
             let recipe = RemoteStartRequest {
+                retained_output: None,
+                retained_output_receiver: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,

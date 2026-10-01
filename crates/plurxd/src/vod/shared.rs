@@ -702,6 +702,7 @@ impl Shared {
             completed_cache_budget: settings.completed_cache_bytes,
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
+            output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
             identity: Mutex::new(identity_state),
             slot: ProducerSlot::new(),
             readers: Mutex::new(HashMap::new()),

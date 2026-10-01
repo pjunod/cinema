@@ -296,6 +296,13 @@ impl TranscodeManager {
             None => request,
         };
         transcode::resolve_transcode(&request, facts, &capabilities, &policy, restrictions)
+            .map(|plan| {
+                let frame_rate = facts.frame_rate();
+                let cadence = (frame_rate.provenance() != transcode::FrameRateProvenance::Variable)
+                    .then(|| frame_rate.value())
+                    .flatten();
+                plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr)
+            })
             .map_err(|error| format!("decoder plan refused: {error}"))
     }
 

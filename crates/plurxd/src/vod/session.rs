@@ -33,6 +33,7 @@ pub(super) struct Rendition {
     pub(super) completed_cache_budget: u64,
     pub(super) materialize_budget: Duration,
     pub(super) manifest: Mutex<Manifest>,
+    pub(super) output_measurement: StdMutex<PublishedOutputMeasurement>,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
@@ -573,6 +574,7 @@ pub(super) struct Session {
     /// identity without retaining manifests, source handles, readers, or the
     /// producer graph until the next maintenance tick.
     pub(super) rendition: Option<Arc<Rendition>>,
+    pub(super) retained_output: Option<Arc<retained::RetainedVodArtifact>>,
     pub(super) rendition_key: String,
     pub(super) file: Arc<MediaFile>,
     pub(super) playback_id: String,
@@ -682,6 +684,11 @@ impl Session {
         ResponseOwner {
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
+            retained_output: self
+                .retained_output
+                .as_ref()
+                .filter(|_| self.tombstone.is_none())
+                .map(Arc::clone),
             rendition: self.rendition.as_ref().map(Arc::clone),
             rendition_key: self.rendition_key.clone(),
             file: Arc::clone(&self.file),

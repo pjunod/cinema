@@ -375,6 +375,11 @@ pub(super) async fn exact_hls_context_at(
         hevc_codec_from_init(&init, sample_entry)
     };
     let video = derived.ok_or_else(HlsInitInspectionError::unsupported)?;
+    if sample_entry == "avc1" {
+        if let Some(facts) = &mut context.codec_facts {
+            facts.bind_output_avc_init(video.clone());
+        }
+    }
     context.codecs = match context.codecs.split_once(',') {
         Some((_, audio)) if !audio.trim().is_empty() => format!("{video},{}", audio.trim()),
         _ => video,
