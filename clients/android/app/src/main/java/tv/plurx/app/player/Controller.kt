@@ -2788,6 +2788,7 @@ class Controller internal constructor(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
+        rebindMediaSessionTransport()
         attachRecipe(recipe, transport)
         presentationSequence?.let { sequence ->
             markIntentExecuted(sequence, recipe)
