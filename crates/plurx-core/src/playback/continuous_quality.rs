@@ -295,6 +295,22 @@ pub struct QualityLedger {
     receipts: Vec<ReplayReceipt>,
 }
 
+/// Owner-side physical publication contract. Inputs are server-reduced facts
+/// and a locally verified family, never a client-supplied ledger or family.
+/// A deadline can lose an acknowledgement; implementations retain physical
+/// guards until any submitted durable mutation actually settles.
+pub trait QualityReservationPublisher: Send + Sync {
+    fn commit_quality_reservations(
+        &self,
+        owner_node_id: &str,
+        expected: &crate::store::QualityLedgerSnapshot,
+        candidate: &QualityLedger,
+        family: &crate::transcode::VodVideoFamily,
+        now_ms: i64,
+        deadline: std::time::Instant,
+    ) -> impl std::future::Future<Output = Result<bool, String>> + Send;
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QualityTransitionError {
     Invalid,

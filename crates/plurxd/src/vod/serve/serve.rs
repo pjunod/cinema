@@ -1,5 +1,150 @@
 use super::*;
 
+impl plurx_core::playback::continuous_quality::QualityReservationPublisher for VodServe {
+    /// Publish reservations only while their verified bytes cannot be evicted
+    /// or replaced. Old dependencies survive takeover even without a producer.
+    async fn commit_quality_reservations(
+        &self,
+        owner_node_id: &str,
+        expected: &plurx_core::store::QualityLedgerSnapshot,
+        candidate: &plurx_core::playback::continuous_quality::QualityLedger,
+        family: &plurx_core::transcode::VodVideoFamily,
+        now_ms: i64,
+        deadline: Instant,
+    ) -> Result<bool, String> {
+        let commit = async {
+            if !candidate.valid()
+                || !expected.ledger.valid()
+                || expected.revision <= 0
+                || candidate.generation != expected.ledger.generation
+                || candidate.attachment != expected.ledger.attachment
+                || candidate.attachment.family_id != family.id()
+                || candidate.control_epoch < expected.ledger.control_epoch
+                || self
+                    .shared
+                    .cluster_node_id
+                    .as_deref()
+                    .is_some_and(|node| node != owner_node_id)
+            {
+                return Err("continuous reservation owner or family changed".into());
+            }
+            let old: Vec<_> = expected
+                .ledger
+                .transactions
+                .iter()
+                .flat_map(|transaction| &transaction.reserved)
+                .collect();
+            let current: Vec<_> = candidate
+                .transactions
+                .iter()
+                .flat_map(|transaction| &transaction.reserved)
+                .collect();
+            let mut keys: Vec<_> = old
+                .iter()
+                .chain(&current)
+                .map(|interval| interval.rendition_id.as_str())
+                .collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let mut guards = Vec::with_capacity(keys.len());
+            for key in keys {
+                guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
+            }
+            for interval in current.iter().filter(|interval| !old.contains(interval)) {
+                let rung = family
+                    .rungs()
+                    .iter()
+                    .find(|rung| rung.rendition_id() == interval.rendition_id)
+                    .ok_or("reservation target is outside its verified video family")?;
+                let rendition = self
+                    .shared
+                    .renditions
+                    .lock()
+                    .await
+                    .get(&interval.rendition_id)
+                    .cloned()
+                    .ok_or("reserved rendition is not locally attached")?;
+                if rendition.closed.load(Relaxed)
+                    || rendition.failure().is_some()
+                    || rendition
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| !source.unchanged())
+                    || rendition.recipe.encoding.as_ref().is_none_or(|encoding| {
+                        encoding.shared_audio.is_some()
+                            || encoding.grid != rung.grid()
+                            || encoding.plan.options().input_has_audio
+                            || encoding.plan.options().video_sample_envelope
+                                != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                            || rendition.recipe.source_object_version.as_deref()
+                                != Some(encoding.source_object_version.as_str())
+                    })
+                {
+                    return Err("reservation source or rendition is no longer verified".into());
+                }
+                let entry = rendition
+                    .plan
+                    .entries
+                    .iter()
+                    .find(|entry| {
+                        entry.start_ticks == interval.from_tick
+                            && entry.end_ticks() == interval.through_tick
+                    })
+                    .ok_or("reservation does not name one exact planned entry")?;
+                if interval.timescale != rendition.timescale
+                    || !rendition
+                        .manifest
+                        .lock()
+                        .await
+                        .state(entry.index)
+                        .is_some_and(SegState::is_materialized)
+                {
+                    return Err("reserved media is not materialized on its exact clock".into());
+                }
+                let init = read_quality_artifact(&rendition.dir.path().join(INIT_NAME), 256 * 1024)
+                    .await?;
+                let media = read_quality_artifact(
+                    &rendition
+                        .dir
+                        .path()
+                        .join(segment_name(u64::from(entry.index))),
+                    interval.byte_length,
+                )
+                .await?;
+                verify_cached_quality_interval(&init, &media, rung, interval)?;
+                if rendition
+                    .source
+                    .as_ref()
+                    .is_none_or(|source| !source.unchanged())
+                {
+                    return Err("reservation source changed during artifact verification".into());
+                }
+            }
+            let store = Arc::clone(&self.shared.store);
+            let candidate = candidate.clone();
+            let owner = owner_node_id.to_owned();
+            let revision = expected.revision;
+            let submitted_at_ms = now_ms.max(super::now_ms());
+            // A caller deadline may lose the acknowledgement, never release
+            // these physical gates while a queued Store mutation can still land.
+            let settlement = tokio::spawn(async move {
+                let result = store
+                    .write_quality_ledger(&candidate, &owner, revision, submitted_at_ms)
+                    .await
+                    .map_err(|error| format!("publishing continuous reservations: {error}"));
+                drop(guards);
+                result
+            });
+            settlement
+                .await
+                .map_err(|error| format!("continuous reservation settlement failed: {error}"))?
+        };
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), commit)
+            .await
+            .map_err(|_| "continuous reservation exceeded its inherited deadline".to_owned())?
+    }
+}
+
 impl VodServe {
     /// The facts a stall-reopen's normalization checks against its
     /// predecessor. `None` for unknown/tombstoned.
@@ -590,4 +735,89 @@ impl VodServe {
             .as_ref()
             .is_some_and(|source| !source.unchanged())
     }
+}
+
+async fn read_quality_artifact(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().await.map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > limit {
+        return Err("continuous artifact is missing or exceeds its byte bound".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > limit || bytes.len() as u64 != metadata.len() {
+        return Err("continuous artifact changed while being read".into());
+    }
+    Ok(bytes)
+}
+
+pub(super) fn verify_cached_quality_interval(
+    init_bytes: &[u8],
+    media: &[u8],
+    rung: &plurx_core::transcode::VodVideoRung,
+    interval: &plurx_core::playback::continuous_quality::QualityInterval,
+) -> Result<(), String> {
+    if interval.rendition_id != rung.rendition_id()
+        || !interval.matches_bytes(media)
+        || hex::encode(Sha256::digest(init_bytes)) != rung.init_id()
+    {
+        return Err("continuous artifact bytes do not match their immutable identities".into());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(init_bytes);
+    let Some(Unit::Init(init)) = reader.next_unit().map_err(|error| error.to_string())? else {
+        return Err("continuous artifact has no complete init".into());
+    };
+    if reader.buffered() != 0
+        || init.tracks.len() != 1
+        || plurx_core::fmp4::avc_sample_entry_facts(&init)
+            .map_err(|error| error.to_string())?
+            .as_ref()
+            != Some(rung.facts())
+    {
+        return Err("continuous artifact init shape changed".into());
+    }
+    let video = init
+        .video()
+        .ok_or("continuous artifact has no video track")?;
+    if video.timescale != interval.timescale || video.timescale != rung.grid().numerator {
+        return Err("continuous artifact clock changed".into());
+    }
+    reader.push(media);
+    let mut next = interval.from_tick;
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+        let Unit::Fragment(fragment) = unit else {
+            return Err("continuous media contains an unexpected init or trailer".into());
+        };
+        let track = fragment
+            .track(video.id)
+            .ok_or("continuous media lost its video track")?;
+        if fragment.tracks.len() != 1
+            || track.samples().next().is_none()
+            || track.base_decode_time != next
+            || (fragments == 0 && !plurx_core::fmp4::classify(&fragment, &init).is_clean())
+            || track
+                .samples()
+                .any(|sample| sample.cto != 0 || sample.duration != rung.grid().denominator)
+        {
+            return Err("continuous media does not match its clean rational sample grid".into());
+        }
+        next = next
+            .checked_add(track.duration())
+            .ok_or("continuous media clock overflow")?;
+        if next > interval.through_tick {
+            return Err("continuous media exceeds its declared interval".into());
+        }
+        fragments += 1;
+    }
+    if fragments == 0 || reader.buffered() != 0 || next != interval.through_tick {
+        return Err("continuous media does not complete its declared interval".into());
+    }
+    Ok(())
 }

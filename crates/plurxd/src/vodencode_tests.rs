@@ -265,6 +265,79 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
 }
 
 #[tokio::test]
+async fn continuous_reservation_verifies_actual_init_and_sample_bounds() {
+    use plurx_core::transcode::*;
+    testfixtures::require_ffmpeg();
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("reservation media");
+    let mut file = media_file_at(base.path().join("verified-source.mkv"), 4_004);
+    file.video_codec = Some("h264".into());
+    file.width = Some(128);
+    file.height = Some(72);
+    file.audio_streams.clear();
+    let options = TranscodeOptions { target_height: 36, video_bitrate_kbps: 300,
+        software_threads: Some(1), ..Default::default() };
+    let facts = DecodeFacts::from_ffprobe_json(&serde_json::json!({"streams":[{
+        "index":0,"codec_type":"video","codec_name":"h264","width":128,"height":72,
+        "pix_fmt":"yuv420p","avg_frame_rate":"24000/1001","r_frame_rate":"24000/1001",
+        "sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
+    }]}), DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source")).expect("facts");
+    let capabilities = DecodeCapabilities::new(
+        DecodeCapabilitySnapshotIdentity::new("b".repeat(64), "reservation-fixture".into(), None)
+            .expect("capability identity"), vec![],
+        vec![SoftwareDecoder { codec:"h264".into(), implementation:Some("h264".into()) }],
+    ).expect("capabilities");
+    let plan = resolve_transcode(
+        &TranscodeRequest::new(Encoder::Software, TranscodeMediaOptions::from_options(&file, &options))
+            .with_continuous_avc_video(),
+        &facts, &capabilities, &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+        &AttemptRestrictions::none(),
+    ).expect("continuous video plan");
+    let output = tokio::process::Command::new(ffmpeg_bin()).args([
+        "-hide_banner","-loglevel","error","-f","lavfi","-i",
+        "testsrc2=size=64x36:rate=24000/1001","-frames:v","96",
+        "-c:v","libx264","-preset","veryfast","-threads","1",
+        "-profile:v","high","-level:v","5.0","-pix_fmt","yuv420p","-bf","0",
+        "-g","48","-keyint_min","48","-sc_threshold","0",
+        "-color_primaries","bt709","-color_trc","bt709","-colorspace","bt709",
+        "-color_range","tv","-an","-video_track_timescale","24000",
+        "-movflags","frag_keyframe+empty_moov+default_base_moof+delay_moov",
+        "-f","mp4","pipe:1",
+    ]).kill_on_drop(true).output().await.expect("encode interval fixture");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mut reader = FragmentReader::new();
+    reader.push(&output.stdout);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("init") else { panic!("init first"); };
+    let Some(Unit::Fragment(fragment)) = reader.next_unit().expect("fragment") else { panic!("media second"); };
+    let grid = VodFrameGrid::new(24_000, 1_001).expect("grid");
+    let rung = VodVideoRung::from_verified_init(&file, &plan, &init, grid,
+        &"c".repeat(64), "held-object-fixture", None).expect("actual verified rung");
+    let interval = plurx_core::playback::continuous_quality::QualityInterval {
+        artifact_id:hex::encode(Sha256::digest(&fragment.bytes)), rendition_id:rung.rendition_id().into(),
+        timescale:grid.numerator, from_tick:0, through_tick:grid.segment_ticks(),
+        byte_length:fragment.bytes.len() as u64,
+    };
+    let verify = super::vod_serve_serve::verify_cached_quality_interval;
+    verify(&init.bytes, &fragment.bytes, &rung, &interval).expect("exact real samples");
+    let mut short = interval.clone();
+    short.through_tick -= 1_001;
+    assert!(verify(&init.bytes, &fragment.bytes, &rung, &short).is_err());
+    let mut shifted = interval.clone();
+    shifted.from_tick += 1_001;
+    shifted.through_tick += 1_001;
+    assert!(verify(&init.bytes, &fragment.bytes, &rung, &shifted).is_err());
+    let truncated = &fragment.bytes[..fragment.bytes.len()-1];
+    let mut incomplete = interval.clone();
+    incomplete.artifact_id = hex::encode(Sha256::digest(truncated));
+    incomplete.byte_length = truncated.len() as u64;
+    assert!(verify(&init.bytes, truncated, &rung, &incomplete).is_err());
+    let mut wrong_init = init.bytes.clone();
+    let last = wrong_init.len()-1;
+    wrong_init[last] ^= 1;
+    assert!(verify(&wrong_init, &fragment.bytes, &rung, &interval).is_err());
+}
+
+#[tokio::test]
 async fn candidate_vod_cache_requires_exact_complete_present_members() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
     let base = crate::test_tempdir().expect("candidate cache proof");

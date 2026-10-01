@@ -1335,3 +1335,34 @@ Exact regeneration, changed equal-length payload, wrong clock, partial
 interval, neighboring publication and disposal release are covered by an
 authored regression. The physical schedule writer and shared-cache pins
 remain outstanding; this publication fence is not their completion.
+
+### 10.13 Physical reservation publisher
+
+`QualityReservationPublisher` defines the owner-side write contract; VOD
+implements it with its existing sorted exact-rendition gates. Inputs are a
+server-reduced candidate ledger, the observed store revision and a verified
+family. They are not accepted as client-supplied ledger or family objects.
+Both removed and retained dependency keys remain locked through the CAS.
+Old dependencies survive takeover without requiring their producer to live.
+
+A new reservation must name a locally attached, materialized video-only
+continuous recipe. The held source, frozen object version and frame grid
+must still match. The writer bounds init and media reads, verifies their
+actual SHA-256 identities, parses the actual init and fragments, and refuses
+extra tracks, changed init facts, non-clean starts, composition offsets,
+off-grid samples, gaps, overlaps and incomplete intervals. It publishes only
+through the store's exact parent-owner/epoch/revision fence.
+
+The inherited caller deadline covers preflight and acknowledgement. Once a
+store mutation is submitted, a settlement task retains the physical gates
+until that operation finishes even if the caller leaves or times out. A lost
+acknowledgement is therefore unknown, not an absence or cleanup receipt.
+The store write uses current submission time after preflight for its lease
+comparison. No reservation is acknowledged before the CAS completes.
+
+The authored actual-fMP4 regression checks init identity, exact sample bounds,
+shifted clock, shortened promise and truncated payload despite a recomputed
+payload digest. Workspace/all-target compilation passed; tests remain
+deferred. The actor, HTTP/peer callers, durable family metadata and shared
+cache consumer pins still need integration before continuous delivery is
+advertised.
