@@ -1042,6 +1042,13 @@ an all-done child does not revoke its published bytes; mixed-epoch or repeated
 publication still poisons measurement. Seven new focused IDs have individually
 passed once (four before seal hardening, plus the repaired real consumer and
 two new seal/trailer negative controls); earlier failures remain recorded.
+Sole review45 identified that healthy rendition sharing discarded the incoming
+logical tuple. The repair preserves that tuple outside the moved Recipe and
+checks it during lazy reacquisition and final attachment; ordinary differing
+requests receive no borrowed proof rather than losing playback. The shared
+process-salted production key remains unchanged. One additional real-consumer
+regression checks same-key reuse, exact-tuple success, differing-tuple issued
+refusal/incumbent preservation and ordinary uncaptured playback.
 The new branch requires its own focused once-per-PR receipts and independent
 review; no earlier unit pass is claimed as its evidence. Rolling-copy/PUT,
 arbitrary cold-copy preparation and physical/corpus acceptance remain open.
