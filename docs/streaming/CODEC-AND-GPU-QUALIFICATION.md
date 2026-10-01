@@ -865,6 +865,14 @@ already populated namespace execution refuses. A normal owned container can
 provide this without writable cgroup delegation or privileged mounts. The
 independent PID 1 supervisor bounds synchronous browser/body/drain/close calls:
 585 s work plus a 15 s cleanup reserve within the absolute 600 s deadline.
+The deadline starts before cheap bounded owner/root admission and launch
+setup; full source/tool hashing, probe and page validation run only inside the
+supervised worker, with no deadline reset. At operational execution, the outer
+owner must also impose a 600 s container wall watchdog plus bounded exact-ID
+terminal cleanup, recording nonce/labels/container ID/start/deadline/exit and
+namespace termination. This protects against controller setup or filesystem
+syscalls themselves failing to return; an internal receipt cannot prove that
+external terminal condition. No operational container/watchdog ran here.
 Cleanup signals only pidfd-bound identities in the initially empty task-owned
 namespace, reaps descendants (including detached sessions), and refuses success
 unless only PID 1 remains. Kernel namespace teardown on PID 1 exit is the final
