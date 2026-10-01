@@ -14,6 +14,18 @@ import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonClassDiscriminator
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.intOrNull
 
 /**
  * Android's passive playback-control reporter.
@@ -268,24 +280,58 @@ enum class ClientErrorCode {
  * `{"mode":"auto"}` or `{"mode":"manual","height":1080}` — the server tags
  * this one internally on `mode`, not on the shared `type` discriminator.
  */
-@OptIn(ExperimentalSerializationApi::class)
-@Serializable
-@JsonClassDiscriminator("mode")
+@Serializable(with = QualitySelectionSerializer::class)
 sealed class QualitySelection {
-    @Serializable
-    @SerialName("auto")
     data object Auto : QualitySelection()
-
-    @Serializable
-    @SerialName("original")
     data object Original : QualitySelection()
-
-    @Serializable
-    @SerialName("manual")
     data class Manual(val height: Int) : QualitySelection()
+    data class AutoCandidate(val height: Int?, val candidateId: String) : QualitySelection()
 
     val isValid: Boolean
-        get() = this !is Manual || height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+        get() = when (this) {
+            Auto, Original -> true
+            is Manual -> height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+            is AutoCandidate -> (height == null || height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT) &&
+                candidateId.matches(Regex("[0-9a-f]{32}"))
+        }
+}
+
+object QualitySelectionSerializer : KSerializer<QualitySelection> {
+    override val descriptor = buildClassSerialDescriptor("QualitySelection")
+    override fun serialize(encoder: Encoder, value: QualitySelection) {
+        val json = encoder as? JsonEncoder ?: throw SerializationException("JSON required")
+        json.encodeJsonElement(buildJsonObject {
+            put("mode", when (value) {
+                QualitySelection.Auto, is QualitySelection.AutoCandidate -> "auto"
+                QualitySelection.Original -> "original"
+                is QualitySelection.Manual -> "manual"
+            })
+            when (value) {
+                is QualitySelection.Manual -> put("height", value.height)
+                is QualitySelection.AutoCandidate -> {
+                    value.height?.let { put("height", it) }
+                    put("candidate_id", value.candidateId)
+                }
+                else -> Unit
+            }
+        })
+    }
+    override fun deserialize(decoder: Decoder): QualitySelection {
+        val json = decoder as? JsonDecoder ?: throw SerializationException("JSON required")
+        val fields = json.decodeJsonElement().jsonObject
+        return when (fields["mode"]?.jsonPrimitive?.content) {
+            "auto" -> {
+                val id = fields["candidate_id"]?.jsonPrimitive?.content
+                val height = fields["height"]?.jsonPrimitive?.intOrNull
+                if (id != null) QualitySelection.AutoCandidate(height, id)
+                else QualitySelection.Auto
+            }
+            "original" -> QualitySelection.Original
+            "manual" -> QualitySelection.Manual(fields["height"]?.jsonPrimitive?.intOrNull
+                ?: throw SerializationException("missing manual height"))
+            else -> throw SerializationException("unknown quality mode")
+        }
+    }
 }
 
 @Serializable
@@ -313,12 +359,46 @@ data class ClientSelection(
 }
 
 @Serializable
+data class DecoderCapabilitySnapshot(
+    val revision: Long,
+    val video: List<RuntimeVideoConstraint>,
+) {
+    companion object {
+        fun fromVideo(revision: Long, video: List<tv.plurx.app.data.VideoEntry>) =
+            DecoderCapabilitySnapshot(revision, video.map { entry ->
+                RuntimeVideoConstraint(entry.codec, entry.profiles, true,
+                    (entry.present.mapNotNull { when (it) {
+                        "sdr" -> DynamicRangePolicy.SDR
+                        "pq" -> DynamicRangePolicy.HDR10
+                        "hlg" -> DynamicRangePolicy.HLG
+                        else -> null
+                    } } + if (!entry.dv_profiles.isNullOrEmpty()) listOf(DynamicRangePolicy.DOLBY_VISION) else emptyList()).distinct(),
+                    entry.dv_profiles.orEmpty(), entry.max_width, entry.max_height, entry.max_frame_rate)
+            }.distinct().take(16)) // A bounded subset can only remove capability claims, never add them.
+    }
+}
+
+@Serializable
+data class RuntimeVideoConstraint(
+    val codec: String,
+    val profiles: List<String>,
+    val available: Boolean,
+    @SerialName("dynamic_ranges") val dynamicRanges: List<DynamicRangePolicy>,
+    @SerialName("dv_profiles") val dvProfiles: List<Int>,
+    @SerialName("max_width") val maxWidth: Int? = null,
+    @SerialName("max_height") val maxHeight: Int? = null,
+    @SerialName("max_frame_rate") val maxFrameRate: tv.plurx.app.data.DecoderFrameRate? = null,
+)
+
+@Serializable
 data class DynamicCapabilities(
     val platform: String,
     @SerialName("max_height") val maxHeight: Int,
     val codecs: List<CodecPolicy>,
     @SerialName("dynamic_ranges") val dynamicRanges: List<DynamicRangePolicy>,
     @SerialName("dual_player_preparation") val dualPlayerPreparation: Boolean,
+    @SerialName("presentation_target") val presentationTarget: tv.plurx.app.data.PresentationTarget? = null,
+    @SerialName("decoder_caps") val decoderCaps: DecoderCapabilitySnapshot? = null,
 ) {
     val isValid: Boolean
         get() = maxHeight in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT &&
@@ -339,6 +419,7 @@ data class DynamicCapabilities(
  */
 @Serializable
 data class EffectiveSelection(
+    @SerialName("candidate_id") val candidateId: String? = null,
     // No defaults on the four the server declares as plain fields. It carries
     // `deny_unknown_fields` and no `Option` on these, so a payload omitting one
     // is a serde error there — and a Kotlin default here would turn that

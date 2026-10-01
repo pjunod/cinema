@@ -218,3 +218,33 @@ Paul then explicitly requested a **GPT-6.1 Sol agent to build the reconciled
 plan**. Implementation starts with current-main census, the pinned compiler
 loop and the named evidence prerequisites; none of the physical acceptance or
 release gates is waived by that authorization.
+
+
+## 6. Final implementation review — PR 669
+
+The independent review examined `de156dbc7` after integration with main
+`1b2ae4f62`. It finished before any new regression tests were run under Paul's
+batched workflow. A second agent independently inspected the native clients.
+The review found nine actionable issues; the correction batch addresses them
+before the final fast lane.
+
+| ID | Finding | Correction |
+|---|---|---|
+| I1 | Native runtime capability snapshots reused the incompatible create schema | Explicit Android and Apple runtime DTO adapters serialize the server's strict field names and required fields. |
+| I2 | Apple could lose the incumbent after failed voluntary exposure | Retain the incumbent item and session attribution through first-frame proof; restore it on failure without reopening. |
+| I3 | Original routes with unknown peak could never establish link pressure | Use source average and fresh unpaced segment demand only as downside evidence; keep peak and upgrade proof unknown. |
+| I4 | Cold recovery required an already-proved lower producer | Compatible lower routes may enter bounded recovery trials within measured link capacity; this does not grant upgrade sustainability. |
+| I5 | Ingress advertised a protocol an older selected worker might not support | Bind negotiation and client snapshot emission to the actual session owner and restrict negotiated placement/takeover to capable workers. |
+| I6 | A later control sequence could carry an older capability revision | Reject lower revisions and conflicting equal revisions, retain omitted snapshots, and fence preparation commit against the latest accepted snapshots. |
+| I7 | Native runtime selection ignored the current optimum and 10% allowance | Rank the incumbent with alternatives and apply the same two-axis 1.10 fit rule. |
+| I8 | Apple trial proof could expire while alignment awaited | Revalidate target, viewer intent and trial proof immediately before exposing the successor. |
+| I9 | Catalog generation omitted higher, HDR and compatible existing cached routes | Enumerate resolved source/HDR/cache alternatives with complete source, geometry and recipe identity. Incompatible legacy bytes never receive a fabricated normalized identity. |
+
+An initial concern about ignoring a legacy network prior was withdrawn.
+Those aggregate records lack completed-transfer/cache/pacing provenance and
+cannot be presented as fresh evidence for the new policy.
+
+Correction compilation and final fast-lane execution remain pending in this
+record. Physical TCL playback, the complete device/source-grade matrix and
+production deployment remain unverified. The live status page and PR record
+carry the subsequent qualification receipts.

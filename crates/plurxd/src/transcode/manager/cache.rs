@@ -193,6 +193,31 @@ impl TranscodeManager {
     /// again. Unqualified bytes may still be served to the viewer waiting for
     /// them; refusing to reuse them is a decision for the paths that publish
     /// and claim, not for the one that says which node already has the film.
+    pub(super) async fn candidate_complete_vod_cache(
+        &self,
+        file_id: i64,
+        plan: &ResolvedTranscode,
+        source_object_version: Option<&str>,
+    ) -> bool {
+        let (Some(source_object_version), Some(pipeline)) = (source_object_version, self.digest())
+        else {
+            return false;
+        };
+        let Ok(recipe) = self.candidate_recipe_digest(plan, super::Presentation::Vod) else {
+            return false;
+        };
+        self.vod
+            .complete_candidate_cache_bound(
+                file_id,
+                recipe,
+                &plan.plan_digest(),
+                Some(&pipeline),
+                Some(source_object_version),
+                plan.output_contract().normalized_geometry().is_none(),
+            )
+            .await
+    }
+
     pub(super) async fn verified_cache_hit(&self, plan: &ResolvedTranscode) -> bool {
         let Some(cache) = self.cache.as_ref() else {
             return false;
@@ -842,9 +867,10 @@ impl TranscodeManager {
             opts.audio.as_ref(),
         );
         let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
-        let frozen_presentation = FrozenHlsPresentation::new(
+        let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
+                bandwidth: None,
                 file_id: file.id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,
@@ -853,6 +879,7 @@ impl TranscodeManager {
                 frame_rate: frozen_video_frame_rate(cached_probe_json.as_deref()),
             },
             &cached_kind,
+            Some(plan.output_contract()),
         );
         let control = crate::playback_control::RollingControlHandle::spawn("session-start");
         let failed = Arc::new(AtomicBool::new(false));

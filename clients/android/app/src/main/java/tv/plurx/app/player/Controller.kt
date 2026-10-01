@@ -47,6 +47,11 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -218,6 +223,11 @@ class Controller internal constructor(
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private val autoTransfersByPlayer = java.util.WeakHashMap<ExoPlayer, AutoTransferEvidence>().apply {
+        put(builtPlayer.player, builtPlayer.autoTransfers)
+    }
+    internal val latestAutoCompletedTransfer: AutoCompletedTransfer?
+        get() = autoTransfersByPlayer[player]?.latest()
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
 
     var audioOffsetMs: Long = initialAudioOffsetMs.coerceIn(-15_000, 15_000)
@@ -660,6 +670,25 @@ class Controller internal constructor(
      * player exists — so asking it per snapshot would be both illegal here and
      * wasteful.
      */
+    private var autoCatalog = plan.qualityCandidates
+    private var autoDesiredCandidate: tv.plurx.app.data.QualityCandidate? = null
+    private var autoActiveCandidateId: String? = plan.qualityCandidateId
+    private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
+    private var autoNextTickMs = 0L
+    private var autoUpgradeSinceMs: Long? = null
+    private var autoLastSwitchMs: Long? = null
+    private val autoSwitchTimes = mutableListOf<Long>()
+    private val autoBlockedUntil = mutableMapOf<String, Long>()
+    private var autoPreparing = false
+    private var autoVoluntary = true
+    private var autoMildSamples = 0
+    private var autoMildTransferCompletedMs: Long? = null
+    private val autoDecoderRejected = playbackIntent.rejectedAutoCandidateIds
+    private var autoPreparedTargetRevision: Long? = null
+    private var autoPreparedMutationEpoch: Long? = null
+    private var autoStagedStatus: PlaybackSessionStatus? = null
+    private var autoStagedStatusObservedMs: Long? = null
+
     private var deviceControlCapabilities: DynamicCapabilities? = null
 
     /**
@@ -909,6 +938,7 @@ class Controller internal constructor(
                 return
             }
             if (handleAudioSinkFailure(error, refusal)) return
+            if (controlErrorCode(error.errorCode) == ClientErrorCode.DECODER) noteAutoDecodeFailure()
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -1218,6 +1248,15 @@ class Controller internal constructor(
 
     init {
         applyEffectivePlayWhenReady()
+        if (playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+            playbackIntent.automaticCandidateId == null &&
+            tv.plurx.app.data.Session.displayAwareAuto &&
+            tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" &&
+            plan.displayAwareAutoProtocol == "route-v1") {
+            autoCatalog.firstOrNull { it.hasValidIdentity && it.id == plan.qualityCandidateId }?.let {
+                playbackIntent.requestAutomaticCandidate(it.id, it.target_height)
+            }
+        }
         player.addListener(listener)
         player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
@@ -1358,12 +1397,16 @@ class Controller internal constructor(
     }
 
     fun seekTo(targetMs: Long) {
+        playbackIntent.noteViewerDestination()
+        resetAutoQualityBudgetForViewer()
         val t = targetMs.coerceIn(0, if (plan.durationMs > 0) plan.durationMs else Long.MAX_VALUE)
         enqueueSeek { playbackIntent.beginSeek(t, realPosition()) }
     }
 
     /** Repeated transport nudges accumulate while the newest seek is coalescing. */
     fun seekBy(deltaMs: Long) {
+        playbackIntent.noteViewerDestination()
+        resetAutoQualityBudgetForViewer()
         enqueueSeek {
             playbackIntent.beginRelativeSeek(deltaMs, realPosition(), plan.durationMs)
         }
@@ -1474,6 +1517,9 @@ class Controller internal constructor(
         quality: PlaybackQuality,
         onPrepared: (Long, PlaybackQuality) -> Unit,
     ) {
+        resetAutoQualityBudgetForViewer()
+        autoDesiredCandidate = null
+        playbackIntent.requestAutomaticCandidate(null, null)
         if (!playbackControlBootstrapFence.isActive()) return
         planReplacement.retain(onPrepared)
         stallGuard.invalidateForUserAction()
@@ -1577,6 +1623,7 @@ class Controller internal constructor(
      * is no viewer intent outstanding, so there is nothing to fall back to.
      */
     private fun fallBackAfterPreparedFailure(reason: String = "fallback"): Boolean {
+        if (autoPreparing) { failAutoPreparation(); return true }
         val change = directedChange ?: return false
         return fallBackDirectedChange(change, reason)
     }
@@ -1730,6 +1777,7 @@ class Controller internal constructor(
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         selectedAudio = index
+        refreshAutoCatalogForViewerRecipe()
         val pending = playbackIntent.beginSeek(position, position)
         currentRecipe()
         sampleTargetPresentationDeadline()
@@ -1766,6 +1814,7 @@ class Controller internal constructor(
         playbackControl.clearVerdict()
         selectedSubtitle = index
         subtitleDelivery = route.delivery
+        refreshAutoCatalogForViewerRecipe()
         val recipe = currentRecipe()
         val pending = playbackIntent.beginSeek(position, position)
         sampleTargetPresentationDeadline()
@@ -1808,6 +1857,7 @@ class Controller internal constructor(
         // current selection has to be re-routed, not just replayed.
         subtitleDelivery =
             routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
+        refreshAutoCatalogForViewerRecipe()
         val pending = playbackIntent.beginSeek(position, position)
         currentRecipe()
         sampleTargetPresentationDeadline()
@@ -2151,6 +2201,7 @@ class Controller internal constructor(
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
         if (verdict != null && applyStallVerdict(verdict, event)) return
+        selectAutoStallRecoveryCandidate()
         // A reopen is a new recovery episode. If the replacement freezes at
         // the same playhead, it must receive its own bounded deadline rather
         // than inheriting the fired latch from the item it replaced.
@@ -2234,7 +2285,7 @@ class Controller internal constructor(
                         compatibilityTranscode = recipe.recipe.compatibilityTranscode,
                         delivery = recipe.recipe.subtitleDelivery,
                     ),
-                )
+                ).let(::applyAutoIntent)
                 val hls = try {
                     sessionCreateCoordinator.reopenAfterStall(
                         body = body,
@@ -2332,7 +2383,22 @@ class Controller internal constructor(
             compatibilityTranscode = recipe.compatibilityTranscode,
             delivery = recipe.subtitleDelivery,
         ),
-    )
+    ).let(::applyAutoIntent)
+
+    private fun applyAutoIntent(body: CreateSessionReq): CreateSessionReq =
+        if (tv.plurx.app.data.Session.displayAwareAuto &&
+            tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" &&
+            plan.displayAwareAutoProtocol == "route-v1") body.copy(
+                caps = decisionCaps.copy(display = decisionCaps.display.copy(presentation_target = autoPresentationTarget)),
+                intent = playbackIntent.mediaIntent(playbackControlSelection()),
+                height = if (playbackIntent.desiredQuality == PlaybackQuality.Auto)
+                    playbackIntent.automaticCandidateId?.let {
+                        playbackIntent.automaticCandidateHeight?.takeIf { height ->
+                            height in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+                        }
+                    } ?: if (playbackIntent.automaticCandidateId == null) body.height else null
+                else body.height,
+            ) else body
 
     private fun trackFor(index: Long?): SubTrack? =
         index?.let { i -> plan.subtitles.firstOrNull { it.index == i } }
@@ -2490,6 +2556,18 @@ class Controller internal constructor(
                 try {
                     val observed = vm.hlsSessionStatus(polledSessionId)
                     if (!isActive || sessionId != polledSessionId) return@launch
+                    if (autoPreparing && autoVoluntary) {
+                        val staged = preparedLedger.action
+                        val stagedId = staged?.sessionId
+                        if (stagedId != null) {
+                            val stagedStatus = try { vm.hlsSessionStatus(stagedId) } catch (_: Exception) { null }
+                            if (!isActive || sessionId != polledSessionId) return@launch
+                            if (preparedLedger.action?.sessionId == stagedId) {
+                                autoStagedStatus = stagedStatus
+                                autoStagedStatusObservedMs = if (stagedStatus != null) monotonicNowMs() else null
+                            }
+                        }
+                    }
                     sessionStatus = observed
                     sessionStatusObservedAtMs = monotonicNowMs()
                 } catch (_: Exception) {
@@ -2611,6 +2689,11 @@ class Controller internal constructor(
      * does not depend on the control plane and never should.
      */
     private fun beginPlaybackControl(hls: HlsStart) {
+        autoRouteProtocol = hls.display_aware_auto_protocol
+        if (hls.display_aware_auto_protocol == "route-v1") {
+            autoCatalog = hls.quality_candidates
+            autoActiveCandidateId = hls.quality_candidate_id
+        }
         endPlaybackControl()
         // The override describes the session that just ended. Carrying it into
         // the replacement would make its very first exchange — a session that
@@ -2641,6 +2724,10 @@ class Controller internal constructor(
             },
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
+                onEffectiveSelection = { effective ->
+                    if (tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1")
+                        autoActiveCandidateId = effective.candidateId
+                },
                 onGaveUp = ::controlReportingGaveUp,
             )
         }
@@ -2791,7 +2878,13 @@ class Controller internal constructor(
 
     private fun playbackControlObservation(): PlayerControlObservation? {
         if (controlObservationIsClosed) return null
-        val capabilities = deviceControlCapabilities ?: return null
+        val baseCapabilities = deviceControlCapabilities ?: return null
+        val capabilities = if (tv.plurx.app.data.Session.displayAwareAuto &&
+            tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1" &&
+            autoRouteProtocol == "route-v1") baseCapabilities.copy(
+                presentationTarget = autoPresentationTarget,
+                decoderCaps = DecoderCapabilitySnapshot.fromVideo(1L, decisionCaps.video),
+            ) else baseCapabilities
         val position = realPosition()
         val duration = player.duration
         // Only the runway *ahead* is protocol runway. Media3's bufferedPosition
@@ -2851,7 +2944,15 @@ class Controller internal constructor(
         }
         return ClientSelection(
             quality = when (val requested = playbackIntent.desiredQuality) {
-                PlaybackQuality.Auto -> QualitySelection.Auto
+                PlaybackQuality.Auto -> if (tv.plurx.app.data.Session.displayAwareAuto &&
+                    autoRouteProtocol == "route-v1" &&
+                    tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1") {
+                    playbackIntent.automaticCandidateId?.let { id ->
+                        QualitySelection.AutoCandidate(playbackIntent.automaticCandidateHeight?.takeIf {
+                            it in PlaybackControl.MIN_HEIGHT..PlaybackControl.MAX_HEIGHT
+                        }, id)
+                    } ?: QualitySelection.Auto
+                } else QualitySelection.Auto
                 PlaybackQuality.Original -> QualitySelection.Original
                 else -> requested.rungHeight
                     ?.let(QualitySelection::Manual)
@@ -2873,7 +2974,196 @@ class Controller internal constructor(
      * coalesces, so a notification between exchanges costs nothing but
      * replaces what the next exchange will carry.
      */
+    private var autoPresentationTarget = decisionCaps.display.presentation_target
+
+    fun updatePresentationTarget(target: tv.plurx.app.data.PresentationTarget?) {
+        if (autoPresentationTarget != target) autoUpgradeSinceMs = null
+        autoPresentationTarget = target
+    }
+
+    private fun refreshAutoCatalogForViewerRecipe() {
+        autoDesiredCandidate = null
+        autoPreparing = false
+        autoUpgradeSinceMs = null
+        playbackIntent.requestAutomaticCandidate(null, null)
+        if (!tv.plurx.app.data.Session.displayAwareAuto ||
+            tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1") return
+        autoCatalog = emptyList()
+        val selectionKey = Triple(selectedAudio, selectedSubtitle, audioOffsetMs)
+        val target = autoPresentationTarget
+        scope.launch {
+            val fresh = try {
+                vm.playbackDecision(plan.fileId, PreplayTracks(selectedAudio, SubtitleChoice(selectedSubtitle)),
+                    PlaybackQuality.Auto, target, selectionKey.third).decision
+            } catch (_: Exception) { return@launch }
+            if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
+            if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog = fresh.quality_candidates
+            // Only an attached-session receipt may change the active identity.
+        }
+    }
+
+    private fun resetAutoQualityBudgetForViewer() {
+        autoSwitchTimes.clear()
+        autoLastSwitchMs = null
+        autoUpgradeSinceMs = null
+        autoMildSamples = 0
+        if (autoPreparing) {
+            autoDesiredCandidate = null
+            playbackIntent.requestAutomaticCandidate(null, null)
+            autoPreparing = false
+        }
+    }
+
+    private fun selectAutoStallRecoveryCandidate() {
+        if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
+            tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
+            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            !player.playWhenReady || playbackIntent.pendingSeek != null) return
+        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        val now = monotonicNowMs()
+        val transfer = latestAutoCompletedTransfer
+        val duration = transfer?.bodyDurationMs
+        val link = if (transfer != null && duration != null && transfer.networkLoad &&
+            transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0)
+            transfer.bodyBytes.toDouble() * 8_000.0 / duration else null
+        val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
+        val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        val mild = autoMildSamples >= 2 && link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
+        val producer = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
+            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
+            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
+            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
+            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
+            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true
+        if (!severe && !producer && !mild) return
+        autoSwitchTimes.removeAll { now - it >= 3_600_000L }
+        if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected,
+            link.takeIf { severe || mild }) ?: return
+        autoDesiredCandidate = next
+        playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
+        autoPreparing = false
+        autoUpgradeSinceMs = null
+        surfaceOwner.logOnly(mediaMutationEpoch, "auto_quality_recovery:${if (severe) "link" else "encode"}:${next.id}")
+    }
+
+    private fun noteAutoDecodeFailure() {
+        if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
+            tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
+            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return
+        val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return
+        if (!autoDecoderRejected.add(current.id)) return
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return
+        autoDesiredCandidate = next
+        playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
+        autoPreparing = false
+        autoUpgradeSinceMs = null
+    }
+
+    private fun tickDisplayAwareAuto() {
+        val now = monotonicNowMs()
+        if (now < autoNextTickMs) return
+        autoNextTickMs = now + 5_000L
+        if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
+            tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
+            autoRouteProtocol != "route-v1" ||
+            playbackIntent.desiredQuality != PlaybackQuality.Auto || !establishedPlayback ||
+            !player.isPlaying || !presentationForeground || playbackIntent.pendingSeek != null || autoPreparing ||
+            preparedPlayer != null || directedChange != null || controlObservationIsClosed) {
+            autoUpgradeSinceMs = null
+            return
+        }
+        val target = autoPresentationTarget ?: return
+        val current = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        if (sessionStatusAgeMs?.let { it <= 15_000L } == true && sessionStatus?.producer_state == "held") {
+            autoUpgradeSinceMs = null
+            return
+        }
+        val transfer = latestAutoCompletedTransfer
+        val duration = transfer?.bodyDurationMs
+        val link = if (transfer != null && duration != null && transfer.networkLoad &&
+            transfer.fromLocalCache == false && transfer.producerPaced == false &&
+            transfer.ageMs(now) <= 10_000L && duration > 0 && transfer.bodyBytes > 0) {
+            (transfer.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
+        } else null
+        autoSwitchTimes.removeAll { now - it >= 3_600_000L }
+        val area = current.width.toLong() * current.height
+        val eligible = autoCatalog.filter {
+            it.hasValidIdentity && it.id !in autoDecoderRejected && it.width > 0 && it.height > 0 &&
+            it.decoder_compatible && (it.route != "encode" || it.grade == current.grade) && (autoBlockedUntil[it.id] ?: 0L) <= now }
+        val downsideCost = autoDownsideCostBps(current, transfer, sessionId, now)
+        val severe = link?.let { bps -> downsideCost?.let { bps < it * 0.7 } } == true
+        val mild = link?.let { bps -> downsideCost?.let { bps < it * (if (current.peak_bps != null) 1.3 else 1.0) } } == true
+        if (!mild) { autoMildSamples = 0; autoMildTransferCompletedMs = null }
+        else if (autoMildTransferCompletedMs != transfer?.completedAtMs) {
+            autoMildSamples = (autoMildSamples + 1).coerceAtMost(2)
+            autoMildTransferCompletedMs = transfer?.completedAtMs
+        }
+        val producerPressure = sessionStatusAgeMs?.let { it <= 15_000L } == true &&
+            sessionStatus?.producer_state == "running" && sessionStatus?.active_encode_candidate_id == current.id &&
+            sessionStatus?.active_encode_age_ms?.let { it >= 0 && it + (sessionStatusAgeMs ?: 15_001L) <= 15_000L } == true &&
+            sessionStatus?.active_encode_segments?.let { it >= 2 } == true &&
+            sessionStatus?.active_encode_active_ms?.let { it >= 2_000L } == true &&
+            sessionStatus?.active_encode_milli_realtime?.let { it in 1..999 } == true &&
+            player.bufferedPosition - player.currentPosition < 10_000L
+        val pressure = ((severe || autoMildSamples >= 2) &&
+            (current.peak_bps != null || player.bufferedPosition - player.currentPosition < 10_000L)) || producerPressure
+        val aspect = current.width.toDouble() / current.height
+        val neededWidth = minOf(target.width_px.toDouble(), target.height_px * aspect)
+        val neededHeight = minOf(target.height_px.toDouble(), target.width_px / aspect)
+        val chosen = if (pressure) {
+            autoUpgradeSinceMs = null
+            autoRecoveryCandidate(eligible, current, autoDecoderRejected,
+                link.takeIf { severe || autoMildSamples >= 2 })
+        } else {
+            val fitting = eligible.filter { candidate -> link?.let { bps -> (candidate.peak_bps?.let { peak -> bps >= peak * 1.8 } ?: (candidate.route != "encode")) } == true }
+            val pick = autoPreferredDisplayCandidate(fitting, neededWidth, neededHeight)
+            if (pick == null || !(pick.width.toLong() * pick.height > area ||
+                    current.route == "encode" && pick.route != "encode") ||
+                player.bufferedPosition - player.currentPosition < 10_000L ||
+                autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true) {
+                autoUpgradeSinceMs = null
+                return
+            }
+            if (autoUpgradeSinceMs == null) autoUpgradeSinceMs = now
+            if (now - (autoUpgradeSinceMs ?: now) < 45_000L) return
+            pick
+        } ?: return
+        if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
+        autoDesiredCandidate = chosen
+        autoVoluntary = !pressure
+        playbackIntent.requestAutomaticCandidate(chosen.id, chosen.target_height)
+        autoPreparing = true
+        autoPreparedTargetRevision = target.revision
+        autoPreparedMutationEpoch = mediaMutationEpoch
+        val epoch = mediaMutationEpoch
+        val incumbent = player
+        scope.launch {
+            playbackControl.reportIntent()
+            when (val step = playbackControl.awaitPreparedOffer(now)) {
+                is PreparedOfferWait.Step.Offered -> {
+                    if (mediaMutationEpoch == epoch && player === incumbent &&
+                        playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+                        step.action.effectiveSelection?.candidateId == chosen.id) {
+                        onPrepareAction(step.action)
+                    } else failAutoPreparation()
+                }
+                else -> failAutoPreparation()
+            }
+        }
+    }
+
+    private fun failAutoPreparation() {
+        autoDesiredCandidate?.let { autoBlockedUntil[it.id] = monotonicNowMs() + 300_000L }
+        autoDesiredCandidate = null
+        playbackIntent.requestAutomaticCandidate(null, null)
+        autoPreparing = false
+        autoUpgradeSinceMs = null
+    }
+
     private fun playbackControlPlayerChanged() {
+        tickDisplayAwareAuto()
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
         pollPreparedReplacement()
@@ -3615,6 +3905,7 @@ class Controller internal constructor(
         }
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
+        autoTransfersByPlayer[built.player] = built.autoTransfers
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -3826,6 +4117,23 @@ class Controller internal constructor(
         val successor = preparedPlayer ?: return
         val action = preparedLedger.action ?: return
         val originMs = action.mediaOriginMs ?: return
+        if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
+                autoPreparedTargetRevision, autoPresentationTarget?.revision,
+                autoPreparedMutationEpoch, mediaMutationEpoch,
+                playbackIntent.desiredQuality == PlaybackQuality.Auto && tv.plurx.app.data.Session.autoAbr,
+                player.isPlaying && presentationForeground, playbackIntent.pendingSeek != null)) {
+            abandonPreparedReplacement(failed = true)
+            return
+        }
+        val desired = autoDesiredCandidate
+        if (autoPreparing && autoVoluntary && desired != null) {
+            if (desired.route == "encode" && !desired.complete_cache &&
+                !autoStagedEncodeProof(autoStagedStatus, autoStagedStatusObservedMs, monotonicNowMs(),
+                    action.sessionId ?: return, desired.id)) return
+            if (desired.route != "encode" && desired.peak_bps == null &&
+                !autoOriginalTransferMarginProven(autoTransfersByPlayer[successor]?.recent().orEmpty(),
+                    action.sessionId ?: return, monotonicNowMs())) return
+        }
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
         if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
@@ -3981,6 +4289,15 @@ class Controller internal constructor(
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
+        autoDesiredCandidate?.let { requested ->
+            if (preparedLedger.action?.effectiveSelection?.candidateId == requested.id) {
+                autoActiveCandidateId = requested.id
+                autoLastSwitchMs = monotonicNowMs()
+                if (autoVoluntary) autoSwitchTimes.add(monotonicNowMs())
+            }
+            autoPreparing = false
+            autoUpgradeSinceMs = null
+        }
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
@@ -4111,6 +4428,8 @@ class Controller internal constructor(
      * is a second decoder the viewer is paying for and cannot see.
      */
     private fun releaseSuccessor() {
+        autoStagedStatus = null
+        autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return
         preparedListener?.let { successor.removeListener(it) }
         preparedListener = null
@@ -4264,6 +4583,9 @@ internal fun isTelevision(context: Context): Boolean =
 
 /** Minimal view of [Plan] so the controller doesn't depend on the screen file. */
 interface PlanLike {
+    val qualityCandidates: List<tv.plurx.app.data.QualityCandidate> get() = emptyList()
+    val qualityCandidateId: String? get() = null
+    val displayAwareAutoProtocol: String? get() = null
     val title: String
     val isAudioOnly: Boolean get() = false
     val fileId: Long
@@ -4307,10 +4629,151 @@ interface PlanLike {
     val deliveredDolbyVisionProfile: Int?
 }
 
+internal fun autoRecoveryCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
+    current: tv.plurx.app.data.QualityCandidate, rejected: Set<String>, linkCeiling: Double? = null,
+    decoderRecovery: Boolean = false): tv.plurx.app.data.QualityCandidate? =
+    candidates.filter { it.hasValidIdentity && it.decoder_compatible && it.id !in rejected &&
+        (decoderRecovery || it.route != "encode" || it.grade == current.grade) &&
+        it.width.toLong() * it.height < current.width.toLong() * current.height &&
+        (linkCeiling == null || it.peak_bps?.let { peak -> peak > 0 && peak <= linkCeiling } == true)
+    }.maxByOrNull { it.width.toLong() * it.height }
+
+internal fun autoPreferredDisplayCandidate(candidates: List<tv.plurx.app.data.QualityCandidate>,
+    neededWidth: Double, neededHeight: Double): tv.plurx.app.data.QualityCandidate? =
+    candidates.firstOrNull { it.route != "encode" } ?: candidates.filter {
+        autoDisplayFits(it.width, it.height, neededWidth, neededHeight)
+    }.minByOrNull { it.width.toLong() * it.height }
+
+internal fun autoDisplayFits(width: Int, height: Int, neededWidth: Double, neededHeight: Double): Boolean =
+    width > 0 && height > 0 && width.toDouble() * 11 >= neededWidth * 10 &&
+        height.toDouble() * 11 >= neededHeight * 10
+
+internal fun autoDownsideCostBps(candidate: tv.plurx.app.data.QualityCandidate,
+    sample: AutoCompletedTransfer?, sessionId: String?, nowMs: Long): Double? {
+    candidate.peak_bps?.takeIf { it > 0 }?.let { return it.toDouble() }
+    if (candidate.route == "encode" || sample == null || sessionId == null ||
+        !sample.segmentId.contains("/$sessionId/") || autoCompletedTransferBps(sample, nowMs) == null) return null
+    val measured = sample.mediaDurationMs?.takeIf { it > 0 }?.let { sample.bodyBytes.toDouble() * 8_000 / it }
+    return listOfNotNull(candidate.average_bps?.takeIf { it > 0 }?.toDouble(), measured).maxOrNull()
+}
+
+/** A source-body sample confirmed by Media3's completed media load event. */
+internal data class AutoCompletedTransfer(
+    val bodyBytes: Long,
+    val bodyDurationMs: Long?,
+    val completedAtMs: Long,
+    val origin: String?,
+    val networkLoad: Boolean,
+    val fromLocalCache: Boolean?,
+    val producerPaced: Boolean?,
+    val segmentId: String = "",
+    val mediaDurationMs: Long? = null,
+) {
+    fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
+}
+
+internal fun autoCompletedTransferBps(sample: AutoCompletedTransfer, nowMs: Long, maximumAgeMs: Long = 10_000L): Double? {
+    val duration = sample.bodyDurationMs ?: return null
+    if (!sample.networkLoad || sample.fromLocalCache != false || sample.producerPaced != false ||
+        sample.ageMs(nowMs) > maximumAgeMs || sample.bodyBytes <= 0 || duration <= 0) return null
+    return (sample.bodyBytes.toDouble() * 8_000.0 / duration).takeIf { it.isFinite() && it > 0 }
+}
+
+internal fun autoOriginalTransferMarginProven(samples: List<AutoCompletedTransfer>, sessionId: String, nowMs: Long): Boolean {
+    val usable = samples.filter { it.segmentId.contains("/$sessionId/") &&
+        autoCompletedTransferBps(it, nowMs, 15_000L) != null && (it.mediaDurationMs ?: 0L) > 0
+    }.associateBy { it.segmentId }.values
+    if (usable.size < 2 || usable.sumOf { it.mediaDurationMs ?: 0L } < 2_000L) return false
+    val link = usable.mapNotNull { autoCompletedTransferBps(it, nowMs, 15_000L) }.minOrNull() ?: return false
+    val wire = usable.maxOf { it.bodyBytes.toDouble() * 8_000.0 / (it.mediaDurationMs ?: 1L) }
+    return wire.isFinite() && link >= wire * 1.8
+}
+
+internal fun autoStagedEncodeProof(status: PlaybackSessionStatus?, observedAtMs: Long?, nowMs: Long,
+                                  sessionId: String, candidateId: String): Boolean {
+    if (status == null || observedAtMs == null || nowMs < observedAtMs) return false
+    val age = status.active_encode_age_ms ?: return false
+    val elapsed = nowMs - observedAtMs
+    return elapsed <= 15_000L && age >= 0 && age <= 15_000L - elapsed &&
+        status.id == sessionId && status.active_encode_candidate_id == candidateId &&
+        status.active_encode_segments?.let { it >= 2 } == true &&
+        status.active_encode_active_ms?.let { it >= 2_000L } == true &&
+        status.active_encode_milli_realtime?.let { it >= 1_150 } == true
+}
+
+internal fun autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTargetRevision: Long?,
+                                targetRevision: Long?, requestedViewerEpoch: Long?, viewerEpoch: Long,
+                                automatic: Boolean, presenting: Boolean, seeking: Boolean): Boolean =
+    requestedId != null && requestedId == offeredId && requestedTargetRevision != null &&
+        requestedTargetRevision == targetRevision && requestedViewerEpoch == viewerEpoch &&
+        automatic && presenting && !seeking
+
+/** Bounded per-pipeline evidence; a failed/closed transfer is not completion.
+ * The existing HTTP factory has no local HTTP cache. A nonnetwork source is
+ * nonetheless unknown cache provenance rather than a network-link measurement. */
+@UnstableApi
+internal class AutoTransferEvidence(private val delegate: TransferListener) : TransferListener {
+    private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
+                            val origin: String?, val paced: Boolean?, var bytes: Long = 0)
+    private val active = java.util.IdentityHashMap<DataSource, Body>()
+    private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
+    private var completed: AutoCompletedTransfer? = null
+    private val recent = mutableListOf<AutoCompletedTransfer>()
+    @Synchronized fun latest(): AutoCompletedTransfer? = completed
+    @Synchronized fun recent(): List<AutoCompletedTransfer> = recent.toList()
+    @Synchronized fun reset() { active.clear(); ended.clear(); completed = null; recent.clear() }
+    @Synchronized fun discard(uri: String) { ended.remove(uri) }
+    @Synchronized fun complete(load: LoadEventInfo, media: MediaLoadData) {
+        val sample = ended.remove(load.uri.toString()) ?: return
+        val path = load.uri.lastPathSegment.orEmpty()
+        // Exclude playlists, initialization maps, subtitles and progressive
+        // resources. These are server media segments, not arbitrary requests.
+        if (!Regex("seg[0-9]+\\.(m4s|ts)").matches(path) || load.bytesLoaded <= 0 ||
+            sample.bodyBytes != load.bytesLoaded) return
+        val duration = if (media.mediaStartTimeMs != C.TIME_UNSET && media.mediaEndTimeMs != C.TIME_UNSET)
+            (media.mediaEndTimeMs - media.mediaStartTimeMs).takeIf { it > 0 } else null
+        val confirmed = sample.copy(segmentId = load.uri.toString(), mediaDurationMs = duration)
+        completed = confirmed
+        recent.removeAll { it.segmentId == confirmed.segmentId }
+        recent.add(confirmed)
+        if (recent.size > 4) recent.removeAt(0)
+    }
+    override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) =
+        delegate.onTransferInitializing(source, dataSpec, isNetwork)
+    override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+        delegate.onTransferStart(source, dataSpec, isNetwork)
+        val headers = source.responseHeaders
+        val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }?.value?.singleOrNull()
+        val uri = source.uri ?: dataSpec.uri
+        val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}${if (uri.port >= 0) ":${uri.port}" else ""}" else null
+        synchronized(this) {
+            if (active.size >= 32) active.clear()
+            active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
+                when (paced) { "0" -> false; "1" -> true; else -> null })
+        }
+    }
+    override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+        delegate.onBytesTransferred(source, dataSpec, isNetwork, bytesTransferred)
+        synchronized(this) { active[source]?.let { if (bytesTransferred > 0) it.bytes += bytesTransferred } }
+    }
+    override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+        delegate.onTransferEnd(source, dataSpec, isNetwork)
+        synchronized(this) {
+            val body = active.remove(source) ?: return
+            val now = monotonicNowMs()
+            val duration = (now - body.startedAtMs).takeIf { it in 1..120_000 }
+            ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
+                if (body.network) false else null, body.paced)
+            while (ended.size > 32) ended.remove(ended.keys.first())
+        }
+    }
+}
+
 @UnstableApi
 class BuiltPlayer internal constructor(
     val player: ExoPlayer,
     internal val progressiveMediaOrigin: ProgressiveMediaOrigin,
+    internal val autoTransfers: AutoTransferEvidence = AutoTransferEvidence(progressiveMediaOrigin),
 )
 
 @UnstableApi
@@ -4353,12 +4816,27 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
 @UnstableApi
 private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole): BuiltPlayer {
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
+    val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
-        transferListener = progressiveMediaOrigin,
+        transferListener = autoTransfers,
     )
-    return BuiltPlayer(player, progressiveMediaOrigin)
+    player.addAnalyticsListener(object : AnalyticsListener {
+        override fun onMediaItemTransition(eventTime: AnalyticsListener.EventTime, mediaItem: MediaItem?, reason: Int) {
+            autoTransfers.reset()
+        }
+        override fun onLoadCompleted(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+            if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA) autoTransfers.complete(loadEventInfo, mediaLoadData)
+        }
+        override fun onLoadError(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData, error: java.io.IOException, wasCanceled: Boolean) {
+            autoTransfers.discard(loadEventInfo.uri.toString())
+        }
+        override fun onLoadCanceled(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+            autoTransfers.discard(loadEventInfo.uri.toString())
+        }
+    })
+    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)
 }
 
 /**

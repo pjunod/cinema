@@ -198,6 +198,7 @@ impl VodServe {
                         control.snapshot.acknowledgement.as_ref(),
                         control.snapshot.request_fingerprint.as_deref(),
                         &control.snapshot.selection,
+                        control.snapshot.capabilities.as_ref(),
                     ),
                 );
                 // Only for an accepted exchange: a replay is the same exchange

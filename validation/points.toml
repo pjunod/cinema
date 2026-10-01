@@ -1103,6 +1103,7 @@ paths = [
   "scripts/image-base-drift",
   "scripts/p02-release-cost.py",
   "scripts/p02-release-cost.Dockerfile",
+  "scripts/build-static-ffprobe",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",

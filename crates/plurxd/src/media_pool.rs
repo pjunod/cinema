@@ -22,6 +22,8 @@ use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
+pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
+pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
 /// Protocol 7 requires pre-filter HEVC proof and source-fenced copy VOD.
 /// Exact-version placement/takeover checks exclude pre-fix workers. Old
@@ -168,6 +170,61 @@ pub(crate) struct MediaNodeSnapshot {
     /// Durable resource admission; distinct from the removed protocol-4 relay.
     #[serde(default)]
     pub live_tv_resource_processing: bool,
+}
+
+/// Separate additive protocol: old workers return 404 rather than parsing a
+/// changed legacy placement envelope. Catalog inspection never starts media.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualityCatalogRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_claim: Option<plurx_core::playback::audio::AudioClaim>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_delivery: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copy_contract: Option<(bool, bool, bool)>,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub caps: plurx_core::playback::DeviceCaps,
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub subtitle_burn: Option<i64>,
+    pub presentation: crate::transcode::Presentation,
+}
+
+impl QualityCatalogRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.audio_claim
+            .as_ref()
+            .is_none_or(|claim| claim.valid_snapshot())
+            && self
+                .audio_delivery
+                .as_ref()
+                .is_none_or(|audio| audio.valid_snapshot())
+            && self
+                .copy_contract
+                .is_none_or(|(_, preserve, convert)| !convert || preserve)
+            && self.file_id > 0
+            && self.source_size >= 0
+            && self.source_mtime >= 0
+            && self.caps.v == plurx_core::playback::DeviceCaps::VERSION
+            && self.caps.video.len() <= MAX_CAPABILITIES
+            && self.caps.validate_audio_sinks().is_ok()
+            && self.caps.validate_progressive_hevc_sample_entries().is_ok()
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && [self.audio_index, self.subtitle_burn]
+                .into_iter()
+                .flatten()
+                .all(|index| (0..=MAX_TRACK_INDEX).contains(&index))
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkerQualityCandidate {
+    pub node_id: String,
+    pub candidate: plurx_core::playback::candidate::QualityCandidate,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -823,6 +880,86 @@ impl MediaPool {
         )
     }
 
+    /// Local and remote catalogs share one deadline. Missing/old/busy workers
+    /// contribute no evidence; a successful worker stays explicitly attached
+    /// to its exact recipe so placement cannot spend another worker's proof.
+    pub(crate) async fn quality_candidates(
+        &self,
+        state: &AppState,
+        request: QualityCatalogRequest,
+    ) -> Vec<WorkerQualityCandidate> {
+        if !request.is_valid() {
+            return Vec::new();
+        }
+        let deadline = deadline_after(QUALITY_CATALOG_DEADLINE);
+        let local = tokio::time::timeout_at(deadline, local_quality_candidates(state, &request));
+        let remote = async {
+            let peers = tokio::time::timeout_at(deadline, self.membership.media_peers())
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
+            let Ok(body) = serde_json::to_vec(&request) else {
+                return Vec::new();
+            };
+            if body.len() > MAX_REQUEST_BYTES {
+                return Vec::new();
+            }
+            stream::iter(
+                peers
+                    .into_iter()
+                    .filter(|peer| {
+                        peer.reachable && peer.http_base.is_some() && peer.node_id != state.node_id
+                    })
+                    .take(MAX_PEERS)
+                    .map(|peer| {
+                        let body = body.clone();
+                        async move {
+                            let base = peer.http_base.as_deref()?;
+                            let response = self
+                                .transport
+                                .request(
+                                    &peer.node_id,
+                                    base,
+                                    reqwest::Method::POST,
+                                    QUALITY_CANDIDATES_PATH,
+                                    body,
+                                    deadline,
+                                    MAX_OFFER_BYTES,
+                                    PeerAuthMode::ExactRequest,
+                                )
+                                .await
+                                .ok()?;
+                            if !response.status.is_success() {
+                                return None;
+                            }
+                            let candidates: Vec<WorkerQualityCandidate> =
+                                serde_json::from_slice(&response.body).ok()?;
+                            (candidates.len() <= 32
+                                && candidates.iter().all(|entry| {
+                                    entry.node_id == peer.node_id
+                                        && entry.candidate.identity_matches()
+                                        && (1..=16_384).contains(&entry.candidate.width)
+                                        && (1..=16_384).contains(&entry.candidate.height)
+                                }))
+                            .then_some(candidates)
+                        }
+                    }),
+            )
+            .buffer_unordered(8)
+            .filter_map(|result| async move { result })
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+        };
+        let (local, remote) = tokio::join!(local, remote);
+        let mut candidates = local.unwrap_or_default();
+        candidates.extend(remote);
+        candidates
+    }
+
     pub(crate) async fn offers(
         &self,
         state: &AppState,
@@ -1108,6 +1245,45 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         live_tv_resource_processing: state.serving.is_ready()
             && !state.membership.local_maintenance_active(),
     }
+}
+
+pub(crate) async fn local_quality_candidates(
+    state: &AppState,
+    request: &QualityCatalogRequest,
+) -> Vec<WorkerQualityCandidate> {
+    if !request.is_valid()
+        || state.membership.local_maintenance_active()
+        || !state.serving.accepting_new_media().await
+    {
+        return Vec::new();
+    }
+    let Ok(Some(file)) = state.store.get_file(request.file_id).await else {
+        return Vec::new();
+    };
+    if file.size != request.source_size || file.mtime != request.source_mtime {
+        return Vec::new();
+    }
+    state
+        .transcode
+        .quality_candidates_with_copy_contract(
+            &file,
+            &request.caps,
+            request.audio_index,
+            request.audio_offset_ms,
+            request.subtitle_burn,
+            request.presentation,
+            request.copy_contract,
+            request.audio_delivery.as_ref(),
+            request.audio_claim.as_ref(),
+        )
+        .await
+        .into_iter()
+        .take(32)
+        .map(|candidate| WorkerQualityCandidate {
+            node_id: state.node_id.clone(),
+            candidate,
+        })
+        .collect()
 }
 
 pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
@@ -1561,6 +1737,38 @@ mod tests {
             live_tv_processing: false,
             live_tv_resource_processing: true,
         }
+    }
+
+    #[test]
+    fn quality_catalog_requires_bounded_source_tracks_and_current_caps() {
+        let mut request = QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 1,
+            caps: plurx_core::playback::DeviceCaps {
+                v: 2,
+                ..Default::default()
+            },
+            audio_index: Some(0),
+            audio_offset_ms: 15_000,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        assert!(request.is_valid());
+        request.audio_offset_ms = 15_001;
+        assert!(!request.is_valid());
+        request.audio_offset_ms = 0;
+        request.subtitle_burn = Some(-1);
+        assert!(!request.is_valid());
+        request.subtitle_burn = None;
+        request.caps.v = 1;
+        assert!(!request.is_valid());
+        request.caps.v = 2;
+        request.source_size = -1;
+        assert!(!request.is_valid());
     }
 
     fn offer(node: &str) -> MediaOffer {

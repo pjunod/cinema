@@ -300,6 +300,42 @@ fn format_name(format: crate::subtitle_source::RepresentationFormat) -> &'static
     }
 }
 
+pub(crate) async fn quality_candidates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<
+    (
+        [(HeaderName, &'static str); 1],
+        Json<Vec<crate::media_pool::WorkerQualityCandidate>>,
+    ),
+    StatusCode,
+> {
+    authorize(
+        &state,
+        &headers,
+        "POST",
+        crate::media_pool::QUALITY_CANDIDATES_PATH,
+        &body,
+    )
+    .await?;
+    let request = serde_json::from_slice::<crate::media_pool::QualityCatalogRequest>(&body)
+        .ok()
+        .filter(crate::media_pool::QualityCatalogRequest::is_valid)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    static READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+    let _permit = READS
+        .try_acquire()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    let candidates = tokio::time::timeout(
+        crate::media_pool::QUALITY_CATALOG_DEADLINE,
+        crate::media_pool::local_quality_candidates(&state, &request),
+    )
+    .await
+    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?;
+    Ok((private_no_store_headers(), Json(candidates)))
+}
+
 pub(crate) async fn offers(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -557,6 +593,15 @@ mod tests {
                 .expect_err("household bearer must not authorize a media offer"),
             StatusCode::UNAUTHORIZED
         );
+    }
+
+    #[tokio::test]
+    async fn quality_catalog_refuses_unsigned_inspection_before_source_access() {
+        let (_, state) = crate::http::tests::test_app_with_state();
+        let error = quality_candidates(State(state), HeaderMap::new(), Bytes::from_static(b"{}"))
+            .await
+            .expect_err("unsigned catalog inspection");
+        assert_eq!(error, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

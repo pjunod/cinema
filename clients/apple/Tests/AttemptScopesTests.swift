@@ -99,6 +99,10 @@ final class AttemptScopesTests: XCTestCase {
         .nativeSeekAfterSelection: [.open, .viewerAction, .seek],
         // Status sampling follows an attachment through Pause but not reopen.
         .recoveryEvidencePoll: [.open],
+        .autoInitialLayout: [.initialDecision],
+        .autoCatalogRefresh: [.lifecycle, .viewerAction],
+        .autoQualityOffer: [.lifecycle, .viewerAction],
+        .autoQualityRollback: [.lifecycle, .open, .viewerAction],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -137,7 +141,7 @@ final class AttemptScopesTests: XCTestCase {
                 [.viewerAction],
                 "a Pause is expected to move the viewer-action epoch and nothing else"
             )
-            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession {
+            if fence == .recoveryEvidencePoll || fence == .seekTelemetrySupersession || fence == .autoInitialLayout {
                 XCTAssertTrue(controller.attemptStillCurrent(captured, fence: fence),
                               "status sampling and seek telemetry must survive a viewer Pause")
                 XCTAssertNil(controller.lastAttemptStaleDetail)
@@ -170,6 +174,10 @@ final class AttemptScopesTests: XCTestCase {
             .nativeSeekCompletion: .open,
             .nativeSeekAfterSelection: .open,
             .recoveryEvidencePoll: .open,
+            .autoInitialLayout: .initialDecision,
+            .autoCatalogRefresh: .lifecycle,
+            .autoQualityOffer: .lifecycle,
+            .autoQualityRollback: .lifecycle,
         ]
         for fence in AttemptFence.allCases {
             // The intent fences are intentionally scoped to the seek and

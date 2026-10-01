@@ -263,6 +263,7 @@ function setQuality(q){
   closeMenu();
   toast("Quality: "+qualityLabel());
   if(PLAYER && PLAYER.fileId){
+    if(PLAYER.abr) PLAYER.abr.switchBudgetTimes=[];
     clientLog(Object.assign({level:"warn",event:"quality_switch",
       message:`quality ${from} → ${q}`,detail:`from=${from} to=${q}`,reason:"manual"},
       playbackContext()));
@@ -272,6 +273,10 @@ function setQuality(q){
     // The viewer picked a rung by hand. Whatever the automatic controller was
     // asking for is not what they want.
     PLAYER.autoRequestedHeight=null;
+    if(PLAYER.abr){
+      PLAYER.abr.requestedCandidateId=null;
+      PLAYER.abr.candidateState=null;
+    }
     // A quality choice is not a seek, and marking one is what used to bump the
     // control intent generation here -- which retires every outstanding ask,
     // including the one this change is about to make. Only a destination that
@@ -288,4 +293,3 @@ function setQuality(q){
     if(running&&running.catch) running.catch(()=>{});
   }
 }
-

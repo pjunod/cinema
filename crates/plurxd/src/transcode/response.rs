@@ -747,6 +747,8 @@ impl Drop for SegmentDelivery {
 /// compatibility established by physical-device testing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HlsContext {
+    /// A versioned resolved output budget; absence preserves legacy metadata.
+    pub bandwidth: Option<plurx_core::transcode::OutputBandwidth>,
     pub file_id: i64,
     pub start_seconds: f64,
     /// The source timestamp that this session's media calls t=0. See

@@ -318,6 +318,9 @@ function capsDocument(c, limits){
     }
     video.push(entry);
   }
+  // MediaCapabilities answers one tested tuple, not the decoder's maximum
+  // width or cadence. Preserve unknown new limits instead of advertising the
+  // 24fps probe as a ceiling that would refuse a healthy 30/60fps original.
   const dvProfiles=String(c.dvprofile||"").split(",").filter(Boolean).map(Number).filter(n=>n>0);
   for(const entry of video){ if(entry.codec==="hevc") entry.dv_profiles=dvProfiles; }
   return {
@@ -376,8 +379,35 @@ function capsDocument(c, limits){
 // on this fleet. A shared helper rather than two call sites because the two
 // documents drifting apart is the failure, not either one being wrong.
 //
+let PRESENTATION_TARGET_REVISION=0;
+/** @type {{width_px:number,height_px:number,revision:number}|null} */
+let PRESENTATION_TARGET_RECT=null;
+function measuredPresentationTarget(){
+  const host=document.getElementById("player");
+  if(!host||!host.isConnected||document.hidden||typeof host.getClientRects!=="function"
+    ||typeof getComputedStyle!=="function"||!host.getClientRects().length){
+    PRESENTATION_TARGET_RECT=null;return null;
+  }
+  const style=getComputedStyle(host),rect=host.getBoundingClientRect();
+  const scale=Number(window.devicePixelRatio);
+  const width=Math.round(rect.width*scale),height=Math.round(rect.height*scale);
+  if(style.display==="none"||style.visibility!=="visible"||!(scale>0)
+    ||!Number.isFinite(scale)||!(width>0&&width<=16384&&height>0&&height<=16384)){
+    PRESENTATION_TARGET_RECT=null;return null;
+  }
+  if(!PRESENTATION_TARGET_RECT||PRESENTATION_TARGET_RECT.width_px!==width||PRESENTATION_TARGET_RECT.height_px!==height){
+    PRESENTATION_TARGET_REVISION=Math.min(Number.MAX_SAFE_INTEGER,PRESENTATION_TARGET_REVISION+1);
+    PRESENTATION_TARGET_RECT={width_px:width,height_px:height,revision:PRESENTATION_TARGET_REVISION};
+  }
+  return {...PRESENTATION_TARGET_RECT};
+}
 function currentCapsDocument(){
-  return capsDocument(PLAY_CAPS, decodeLimits());
+  const caps=capsDocument(PLAY_CAPS, decodeLimits());
+  const target=measuredPresentationTarget();
+  if(SERVER&&SERVER.playback_display_aware_auto&&target){
+    Object.assign(caps.display,{presentation_target:target});
+  }
+  return caps;
 }
 // What this browser was handed, and what it had said it could take.
 //
@@ -521,6 +551,17 @@ const QUALITY_MODES=[["auto","Auto"],["original","Original"],
                      ["nomse","Original · one stream"]];
 function playQuality(){ try{ return localStorage.getItem("plurx_quality")||"auto"; }catch(e){ return "auto"; } }
 function qualityOptions(){
+  const candidates=PLAYER&&PLAYER.qualityCandidates;
+  if(Array.isArray(candidates)){
+    // The catalog describes this source, selected tracks and decoder. An
+    // empty catalog is authoritative too; do not invent manual encode rungs.
+    const heights=[...new Set(candidates.filter(candidate=>candidate
+      &&candidate.route==='encode'&&candidate.decoder_compatible===true
+      &&Number.isInteger(candidate.target_height)&&candidate.target_height>0
+      &&candidate.target_height<=2160)
+      .map(candidate=>candidate.target_height))].sort((a,b)=>b-a);
+    return QUALITY_MODES.concat(heights.map(height=>[String(height),`${height}p`]));
+  }
   const ladder=PlaybackPolicy.normalizedLadder(PLAYER&&PLAYER.ladder);
   return QUALITY_MODES.concat(ladder.slice().reverse().map(r=>[String(r.height),`${r.height}p`]));
 }
@@ -774,12 +815,13 @@ function capturePlayInputs(fileId,meta,retryIntent){
 }
 async function decideForPlay(attempt){
   const {fileId,preparation,selection,openIsCurrent,failPreparation}=attempt;
+  const requestSelection={...(selection||{}),audio_offset_ms:attempt.sessionAudioOffset||0};
   // The selection travels WITH the decision, so `method`, `reasons`, `delivery`
   // and the marked default tracks all describe the tracks that are about to
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), selection,signal));}
+  try{ decision=await preparation.run(signal=>askDecision(fileId, qualityForce(), requestSelection,signal));}
   catch(e){failPreparation(e,attempt);return null;}
   if(!openIsCurrent()) return null;
   let retestDecodeLimit=false;
@@ -814,7 +856,7 @@ async function decideForPlay(attempt){
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await preparation.run(signal=>askDecision(fileId,"transcode",selection,signal));
+        const d2=await preparation.run(signal=>askDecision(fileId,"transcode",requestSelection,signal));
         if(!openIsCurrent()) return null;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
@@ -838,6 +880,7 @@ function preparePlayOutgoing(attempt,decision){
   const ladder=decision.ladder||[];
   const priorKbps=decision.prior_kbps||null;
   const autoStartHeight=qualityForce()==='auto' && decision.method==='transcode'
+    && !Array.isArray(decision.quality_candidates)
     // The decision ladder does not know this node's grade-specific hardware
     // ceiling. Let the session endpoint choose its highest proved HDR10 rung
     // instead of allowing an old 720p SDR last-good value to cap it.
@@ -934,8 +977,13 @@ function buildPlayer(attempt,decided,prepared){
     playStartedAt:clickedAt, ttffMs:null, stalls:0, sessionId:null, streamId:null, health:null,
     attemptId:null, attemptReason:null, bufferLimits:null,
     ladder, priorKbps, autoHeight:autoStartHeight,
+    qualityCandidates:Array.isArray(decision.quality_candidates)?decision.quality_candidates:null,
+    qualityCandidateId:decision.quality_candidate_id||null,
     bandwidthSeedBps:replacementBandwidthSeed,
-    abr:{lastSwitchAtMs:clickedAt,lastStallAtMs:null,mildSamples:0,
+    abr:{requestedCandidateId:decision.quality_candidate_id||null,
+      catalogSelectionKey:JSON.stringify([(decision.audio||[]).find(a=>a.default)?.index??0,
+        preBurn??-1,preBurn,sessionAudioOffset]),
+      lastSwitchAtMs:clickedAt,lastStallAtMs:null,mildSamples:0,
       upgradeSinceMs:null,previousRunway:null,stallEvents:{supply:[],decode:[]},
       recentEstimateKbps:null,recentEstimateAtMs:null,
       recentEstimateSource:null,recentEstimateUrl:null,
@@ -1221,6 +1269,7 @@ async function executePlaybackMediaChange(p,change){
     options:transcodeOpts(pos,audio,change.height),forceReopen:!!change.forceReopen,
     method,sessionId:change.previousSessionId||p.sessionId,
     cause:change.recoveryCause||"unknown"}):null;
+  if(opts&&change.candidateId) Object.assign(opts,{candidate_id:change.candidateId});
   newAttempt(change.reason||"stream-change");
   p.stallFrom=pos;
   if(change.automatic&&p.abr) p.abr.switching=true;
@@ -1278,6 +1327,10 @@ async function executePlaybackMediaChange(p,change){
     return true;
   }catch(e){
     if(!live()) return false;
+    if(change.naturalBoundary){
+      if(p.abr) p.abr.switching=false;
+      return false;
+    }
     if(change.automatic&&p.abr){
       p.abr.switching=false;
       if(change.height>0){
