@@ -29,6 +29,8 @@ def _codeview(executable: Path) -> tuple[bytes, int, str]:
     header = _read(executable, pe, 24)
     if header[:4] != b"PE\0\0":
         raise ValueError("missing executable PE header")
+    if struct.unpack_from("<H", header, 4)[0] != 0x8664:
+        raise ValueError("expected the Windows x86_64 release machine")
     count, optional_size = struct.unpack_from("<H", header, 6)[0], struct.unpack_from("<H", header, 20)[0]
     optional = _read(executable, pe + 24, optional_size)
     if len(optional) < 168 or struct.unpack_from("<H", optional)[0] != 0x20B:

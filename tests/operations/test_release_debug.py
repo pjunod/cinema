@@ -112,7 +112,8 @@ class PackedDebugCase(unittest.TestCase):
             self.assertEqual(verify(root, **common), manifest)
             self.assertEqual(manifest["schema"], 2)
             self.assertEqual(manifest["debug_artifacts"]["plurxd.dwp"]["dwo_units"], 1)
-            (root / "plurxd.dwp").write_bytes(b"tampered")
+            path = root / "plurxd.dwp"
+            path.write_bytes(path.read_bytes() + b"tampered")
             with self.assertRaisesRegex(ValueError, "digest"):
                 verify(root, **common)
 

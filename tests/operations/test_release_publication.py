@@ -580,6 +580,15 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
             )
             self.assertNotEqual(wrong_tree.returncode, 0)
             self.assertIn("does not match", wrong_tree.stderr)
+            (source / "Cargo.toml").write_text("# tracked source changed\n", encoding="utf-8")
+            dirty_tree = subprocess.run(
+                [str(ROOT / "scripts/release-package-candidate"), str(source),
+                 str(ROOT), str(export), str(fixture / "dirty"),
+                 "x86_64-unknown-linux-gnu", commit, commit],
+                capture_output=True, text=True, env=own_repository_environment(),
+            )
+            self.assertNotEqual(dirty_tree.returncode, 0)
+            self.assertIn("tracked changes", dirty_tree.stderr)
 
 
 if __name__ == "__main__":
