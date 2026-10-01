@@ -757,18 +757,27 @@ pub enum SessionKind {
 }
 
 /// Why a client is replacing an existing session. This is deliberately typed
-/// even while `stall` is the only server-normalized cause: an unknown future
-/// value must be refused, not accidentally treated as ordinary create.
+/// with closed cause vocabulary: unknown future values must be refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReopenReason {
     Stall,
+    Link,
+    Encode,
+    Decode,
+    Hold,
+    Authority,
 }
 
 impl ReopenReason {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Stall => "stall",
+            Self::Link => "link",
+            Self::Encode => "encode",
+            Self::Decode => "decode",
+            Self::Hold => "hold",
+            Self::Authority => "authority",
         }
     }
 }
