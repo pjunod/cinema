@@ -1924,6 +1924,66 @@ pub struct NetworkPrior {
     pub updated_at_ms: i64,
 }
 
+/// Internal-only exact source/recipe and credential namespace. Never client wire.
+#[derive(Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CandidateLinkBinding {
+    pub user_id: i64,
+    pub credential_generation: String,
+    pub client_class: String,
+    pub network_fingerprint: String,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub source_object_version: String,
+    pub recipe_digest: [u8; 32],
+    pub route: crate::playback::candidate::CandidateRoute,
+}
+
+#[derive(Clone)]
+pub struct CandidateLinkObservation {
+    pub binding: CandidateLinkBinding,
+    pub body_bytes: u64,
+    pub body_duration_ms: u32,
+    pub completed_at_ms: i64,
+    pub negative: bool,
+}
+impl CandidateLinkObservation {
+    pub fn valid_at(&self, now: i64) -> bool {
+        self.binding.user_id > 0
+            && self.binding.file_id > 0
+            && !self.binding.source_object_version.is_empty()
+            && self.binding.source_object_version.len() <= 256
+            && self.binding.credential_generation.len() == 64
+            && !self.binding.client_class.is_empty()
+            && self.binding.client_class.len() <= 16
+            && !self.binding.network_fingerprint.is_empty()
+            && self.binding.network_fingerprint.len() <= 64
+            && self.body_bytes > 0
+            && self.body_bytes <= 1_073_741_824
+            && (1..=120_000).contains(&self.body_duration_ms)
+            && now
+                .checked_sub(self.completed_at_ms)
+                .is_some_and(|age| (0..=15_000).contains(&age))
+    }
+}
+
+#[derive(Clone)]
+pub struct CandidateLinkPrior {
+    pub binding: CandidateLinkBinding,
+    pub body_bytes: u64,
+    pub body_duration_ms: u32,
+    pub completed_at_ms: i64,
+    pub negative_at_ms: Option<i64>,
+}
+impl CandidateLinkPrior {
+    pub fn negative_active(&self, now: i64) -> bool {
+        self.negative_at_ms
+            .and_then(|at| now.checked_sub(at))
+            .is_some_and(|age| (0..=7 * 24 * 60 * 60 * 1000).contains(&age))
+    }
+}
+
 /// How long a supply-starvation verdict is believed after the starvation that
 /// produced it.
 ///
@@ -2063,7 +2123,8 @@ pub struct NetworkPriorObservation {
 
 /// Closed cause vocabulary for network-prior attribution, separate from the
 /// legacy telemetry strings. Only Link can establish measured negative proof.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NetworkPriorCause {
     Link,
     Encode,

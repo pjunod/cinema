@@ -1362,3 +1362,32 @@ explicit candidate lookup and manual 1440 selection remain unchanged.
 This does not yet apply a measured negative to a candidate: the stored pair
 has no failed recipe/route identity. Fresh transfer rate proof, candidate-aware
 negative selection and the reachable provenance producer remain required.
+
+### 9.10 A-05 ordinary completed-body producer and exact reader (2026-10-01)
+
+The ordinary Decision/Create follow-up binds optional HTTP-only incumbent
+receipts to the exact active attachment, authenticated credential/class/network
+namespace, serving owner and physical source version. Local authorized complete
+unpaced VOD responses issue bounded opaque nonces; accepted EOF precedes async
+authority settlement, and proof becomes visible only after settlement succeeds.
+One raw claim and one later Link-negative claim share immutable bytes/time and
+the original 15-second EOF freshness. Materialized VOD supplies actual immutable
+segment duration; rolling bodies without that fact remain Unknown for negatives.
+Historical negatives retain their separate TTL; restart or wall-clock rollback
+cannot recreate a fresh positive sample.
+
+Web and native completed-body adapters carry this response's nonce/ETag and
+server-observed duration. Warm candidate admission requires fresh exact incumbent
+Link evidence plus S-10's separately reacquired complete-full-mux cost/artifact
+proof. Optional public sidecars are advisory, omitted on durable replay, and do
+not change strict worker candidates or original intent fingerprints. Missing
+proof does not block ordinary cold/manual/recovery playback or Auto enablement.
+
+Prepared control remains a finite separate follow-up: optional independently
+authenticated HTTP observation context must survive accepted actor attachment,
+generation and deadline fences; local staged registration follows successful
+actual owner prime, not reservation. A trial may use incumbent evidence to start
+but must prove its own staged response before positive commit. Capability UUIDs
+are not credential/network authority; remote/unknown proof stays Unknown.
+Physical 14-versus-20 admission, typed recovery and complete A-05 qualification
+remain open; synthetic comparator cases and source builds do not satisfy them.

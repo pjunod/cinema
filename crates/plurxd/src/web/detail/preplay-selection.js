@@ -53,12 +53,14 @@ function decisionUrl(fileId, force, sel){
 // statuses. A document carrying the progressive packaging constraint never
 // does: dropping even [] would silently turn a restrictive claim into the
 // unrestricted legacy path. Serving nodes therefore roll before this client.
-async function askDecision(fileId, force, sel, signal=null){
+async function askDecision(fileId, force, sel, signal=null, incumbent=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
   const caps=currentCapsDocument();
+  const linkReceipt=force==='auto'&&typeof candidateLinkReceipt==='function'
+    ? candidateLinkReceipt(incumbent,fileId):null;
   try{
     const decision=await api(`/files/${fileId}/decision?${query}`,
-      {method:"POST", body:{caps},signal});
+      {method:"POST", body:{caps},signal,linkReceipt});
     // The create must act on the exact settled snapshot that produced this
     // decision, even if the page refreshes capability state in between.
     Object.defineProperty(decision,"_capsSnapshot",{value:caps,enumerable:false});
@@ -69,7 +71,7 @@ async function askDecision(fileId, force, sel, signal=null){
       &&caps.progressive_hevc_sample_entries!==null;
     if(!constrained && e && (e.status===404 || e.status===405 || e.status===400)
       &&e.code!=="invalid_capabilities"&&e.code!=="unsupported_hevc_delivery"){
-      return api(decisionUrl(fileId, force, sel),{signal});
+      return api(decisionUrl(fileId, force, sel),{signal,linkReceipt});
     }
     throw e;
   }
