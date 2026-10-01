@@ -693,6 +693,14 @@ impl NodeLocalTelemetry {
         .await
     }
 
+    pub(crate) async fn fragment_index_status(
+        &self,
+        wanted: Vec<(i64, crate::segplan::SourceIdentity)>,
+    ) -> Result<Vec<crate::store::FragmentIndexStatus>, StoreError> {
+        self.with_conn(move |conn| crate::store::fragindex::status(conn, &wanted))
+            .await
+    }
+
     pub(crate) async fn put_fragment_index(
         &self,
         file_id: i64,
@@ -1301,6 +1309,60 @@ mod tests {
             .await
             .expect("read second")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sidecar_status_projects_validated_metadata_without_unpacking() {
+        let directory = tempfile::tempdir().expect("owned sidecar");
+        let path = directory.path().join("telemetry.db");
+        let sidecar = NodeLocalTelemetry::open(&path).expect("sidecar");
+        let source = crate::segplan::SourceIdentity::new(4096, 100, "projection-fixture");
+        let index = crate::segplan::FragmentIndex::new(
+            1000,
+            vec![
+                crate::segplan::IndexRow {
+                    dts: 0,
+                    duration: 1000,
+                    bytes: 100,
+                    video_bytes: 90,
+                    class: crate::fmp4::CutClass::CleanIdr,
+                };
+                4100
+            ],
+            "fixture",
+            source.clone(),
+        );
+        sidecar
+            .put_fragment_index(42, index, 1)
+            .await
+            .expect("publish");
+        let before = crate::store::fragment_index_unpack_calls();
+        let wanted = vec![(42, source.clone()), (43, source.clone())];
+        let answers = sidecar
+            .fragment_index_status(wanted.clone())
+            .await
+            .expect("projection");
+        assert_eq!(answers[0].presence, crate::store::IndexPresence::Ready);
+        assert_eq!(answers[0].fragments, 4100);
+        assert_eq!(answers[1].presence, crate::store::IndexPresence::Absent);
+        assert_eq!(crate::store::fragment_index_unpack_calls(), before);
+        let conn = Connection::open(&path).expect("legacy fixture connection");
+        conn.execute("UPDATE fragment_indexes SET validated_revision = 0", [])
+            .expect("legacy");
+        assert_eq!(
+            sidecar
+                .fragment_index_status(wanted)
+                .await
+                .expect("legacy projection")[0]
+                .presence,
+            crate::store::IndexPresence::Unverified
+        );
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM fragment_indexes", [], |r| r
+                .get::<_, i64>(0))
+                .expect("retained"),
+            1
+        );
     }
 
     #[tokio::test]

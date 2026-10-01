@@ -541,8 +541,11 @@ Acceptance: `cargo test -p plurxd browse` and `cargo test -p plurx-core
 store::fragindex` green;
 `grep -n "rows_packed" crates/plurx-core/src/store/fragindex.rs` shows the
 projection's only occurrence inside `length(`;
-`grep -rn "fragment_index(" crates/plurxd/src/http/browse.rs` finds
-nothing.
+The production prefix of `browse.rs` (before its `#[cfg(test)] mod tests`)
+contains no `fragment_index(` call. The test-only decoder positive control
+deliberately calls the full reader once before measuring the real route, so
+the unpack counter cannot pass merely because it was disconnected. The
+counter must remain unchanged across the authenticated detail request itself.
 
 ### 5.3 M3 — bounded availability observations (`core/storage-availability-cache`)
 
@@ -663,6 +666,57 @@ badge". Three independent checks, all in M2:
 
 ## Execution log
 
+**M2 source implementation, 2026-09-30:** The separately owned
+`codex/c05-detail-index-projection` task starts from effort commit
+`8a7dbf5337584b2bb0556d0b617fef48122def2e`, which already contains M1 and
+M3. The new projection uses the existing marker, not a new migration or a
+second backfill. A metadata row with a changed source or segment-plan version
+answers `Absent`, matching the full reader's invalidation-by-mismatch rule;
+a matching row with an absent/stale validation revision, empty row count or
+inconsistent packed length answers `Unverified`. Only `Ready` exposes its
+fragment count. Neither answer deletes anything.
+
+The shared SQLite reader prepares fixed-arity metadata SQL once for each
+batch, calls the existing refusal reader for non-ready identities under the
+same connection lease, and preserves input order and duplicate identities.
+`FRAGMENT_INDEX_STATUS_CHUNK = 256` is also checked at the shared reader so
+an accidental oversized internal call fails rather than holding an unbounded
+lease. Standalone SQLite uses its read pool; Hiqlite uses its node-local
+sidecar, never Raft. The detail handler collects identities and the one
+probe-JSON read per file, validates returned batch identity/order, then builds
+DTOs from those projections. M3's observations and playback's authoritative
+open are unchanged.
+
+The unpack counter is compiled under `cfg(any(test, feature = "fixtures"))`:
+`cfg(test)` alone would not reach `plurx-core` when it is a dependency of the
+daemon test binary. The existing `fixtures` dev-dependency feature makes the
+real authenticated detail-route proof possible and excludes instrumentation
+from shipping builds. A request-scoped Store counter records actual
+projection calls for the 300-part handler proof, rather than counting a
+helper's imagined calls. The fixed-label projection/pair metrics and
+`plurx_detail_probe_json_bytes` histogram are atomics only; a scrape does not
+read a Store or an index. Probe-byte buckets are 1 KiB, 16 KiB, 64 KiB,
+256 KiB, 1 MiB, 4 MiB, 16 MiB and `+Inf`; no real-library p95 decision is
+claimed from synthetic fixtures.
+
+Focused source evidence before final task qualification: core fragment-index
+25 tests, node-local sidecar 19 tests, placeholder census 14 tests and daemon
+browse/API 13 tests passed on Rust 1.97.1. The nine original M3 regressions
+(eight availability tests and the real playback-decision bypass) and the
+Store-free Prometheus scrape test also passed using that compiled daemon test
+binary. The first DV fixture run correctly rejected its missing level as
+non-convertible (two identities rather than the asserted three); adding the
+required level 6 made the three-identity proof meaningful. No production
+predicate or expected identity count was relaxed. Exact-head compiler, normal
+hook and final focused receipts belong in the task PR, not this earlier
+source-stage row.
+
+This is source implementation, not rollout acceptance. M1's exact-boundary
+deployment and active legacy backfill-convergence receipt remain required
+before M2 promotion, as do the named before/after detail timings and the M3
+unmount/remount exercise. No production voter, mount, playback or seek path
+is changed by this task's validation.
+
 **M3 ownership receipt, 2026-09-30:** Effort gate API run 3630 (UI 3609)
 stopped before Rust compilation: the module-wide inventory had not recorded
 M3's one task, two timer constructors and one Tokio time import. The
@@ -699,6 +753,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k05_lan_lab_sol61 | M2 source implementation | Draft task PR pending | Based on effort `8a7dbf533`; pinned Rust 1.97.1 all-target baseline passed before edits. Metadata-only status projection, 256-identity bounds before backend scheduling, two-pass detail DTO construction and fixed-label metrics; initial core 25, sidecar 19, placeholder census 14 and browse/API 13 focused tests passed, alongside the nine retained M3 regressions and Store-free scrape. Exact-head compiler and normal-hook evidence will be recorded in the task PR. This row claims neither active M1 convergence nor before/after detail timings or fleet availability acceptance. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#435](http://192.168.4.7:3000/noirr/plurx/pulls/435) | Exact deployable M1 boundary `33e66cfd1`: standalone v66 and sidecar v10 marker, publication proof, node-local bounded backfill, refusal-without-deletion, and fixed-cardinality convergence metric. Focused Rust 1.97.1 evidence: `cargo test --locked -p plurx-core --features hiqlite-store store::fragindex -- --test-threads=1` (20 passed), `cargo test --locked -p plurx-core --features hiqlite-store store::telemetry -- --test-threads=1` (14 passed), `cargo test --locked -p plurxd prometheus_scrape_has_no_store_operation -- --test-threads=1` (1 passed), `cargo check --locked -p plurxd --all-targets`, and `cargo clippy --locked -p plurxd --all-targets -- -D warnings`. M2/M3 remain pending; M2 is deliberately not implemented or promotable until the exact M1 boundary is deployed and its backfill receipt exists. |
 | 2026-09-29 | gpt-6-sol | agent:/root/c05_m3_builder | M3 claim | [draft #621](http://192.168.4.7:3000/noirr/plurx/pulls/621) | Independent M3 branch from `main` @ `38c917225`; pinned Rust 1.97.1 compiler loop established before source edits. This branch owns only bounded detail-page availability observations, its DTO, metrics, API contract and tests. M2 and the active backfill/fleet acceptance remain open. |

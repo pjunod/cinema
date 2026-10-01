@@ -5041,8 +5041,42 @@ pub struct FragmentIndexValidationBackfill {
     pub remaining: u64,
 }
 
+/// Bound one metadata projection's connection lease, including audiobook pages.
+pub const FRAGMENT_INDEX_STATUS_CHUNK: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndexPresence {
+    Ready,
+    Unverified,
+    Absent,
+}
+
+#[derive(Clone, Debug)]
+pub struct FragmentIndexStatus {
+    pub file_id: i64,
+    pub argv_fingerprint: String,
+    pub presence: IndexPresence,
+    /// Zero unless this revision's publication proof still matches.
+    pub fragments: u32,
+    pub outcome: Option<crate::segplan::FragmentIndexOutcome>,
+}
+
+/// Test-only packed-index decoding counter, also visible to daemon tests.
+#[cfg(any(test, feature = "fixtures"))]
+pub fn fragment_index_unpack_calls() -> usize {
+    fragindex::unpack_calls()
+}
+
 #[async_trait]
 pub trait FragmentIndexStore: Send + Sync + 'static {
+    /// Metadata-only badge answers in input order, including duplicates.
+    /// The validation marker proves the payload; no packed rows leave SQLite.
+    /// Callers chunk at [`FRAGMENT_INDEX_STATUS_CHUNK`].
+    async fn fragment_index_status(
+        &self,
+        wanted: &[(i64, crate::segplan::SourceIdentity)],
+    ) -> Result<Vec<FragmentIndexStatus>, StoreError>;
+
     /// Store or replace one file's index.
     async fn put_fragment_index(
         &self,
@@ -5339,9 +5373,17 @@ pub async fn requeue_cluster_fragment_index_after_no_holder(
 pub struct HttpStoreOperationCounts {
     counts: std::sync::Arc<[std::sync::atomic::AtomicU64; 3]>,
     watch_reads: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    index_status_calls: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl HttpStoreOperationCounts {
+    /// Physical node-local projection leases inside this request, on either
+    /// backend. This is not a SQL-statement or replicated-operation count.
+    #[must_use]
+    pub fn index_status_calls(&self) -> u64 {
+        self.index_status_calls
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
     #[must_use]
     pub fn snapshot(&self) -> [u64; 3] {
         use std::sync::atomic::Ordering;
@@ -5393,6 +5435,14 @@ pub(super) fn record_http_watch_read() {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
         counts
             .watch_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    });
+}
+
+pub(super) fn record_http_index_status_call() {
+    let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| {
+        counts
+            .index_status_calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     });
 }

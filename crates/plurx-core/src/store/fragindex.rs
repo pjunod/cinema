@@ -213,6 +213,16 @@ const MAX_IDENTITIES_PER_FILE: i64 = 12;
 /// cheapest possible integrity check on a blob that came off a disk.
 const ROW_BYTES: usize = 24;
 
+// `cfg(test)` alone does not compile into a dependency of plurxd's test binary.
+// The existing dev-only fixtures feature keeps this out of shipping builds.
+#[cfg(any(test, feature = "fixtures"))]
+static UNPACK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(super) fn unpack_calls() -> usize {
+    UNPACK_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(test)]
 pub(crate) fn validation_marker_matches(marker: i64, revision: u32) -> bool {
     marker == i64::from(revision)
@@ -236,6 +246,8 @@ fn pack(rows: &[IndexRow]) -> Vec<u8> {
 }
 
 fn unpack(blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> {
+    #[cfg(any(test, feature = "fixtures"))]
+    UNPACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     if !blob.len().is_multiple_of(ROW_BYTES) {
         return Err(StoreError::Migration(format!(
             "a stored fragment index is {} bytes, not a whole number of \
@@ -473,6 +485,77 @@ pub(crate) fn get(
     };
     index.parameter_sets_constant = constant != 0;
     Ok(Some(index))
+}
+
+pub(crate) fn check_status_batch(wanted: &[(i64, SourceIdentity)]) -> Result<(), StoreError> {
+    if wanted.len() > super::FRAGMENT_INDEX_STATUS_CHUNK {
+        return Err(StoreError::Task(
+            "fragment status batch exceeds 256 pairs".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// One connection checkout for a bounded badge batch. Only the BLOB's length
+/// is selected; its publication proof is never inferred from that length.
+pub(crate) fn status(
+    conn: &Connection,
+    wanted: &[(i64, SourceIdentity)],
+) -> Result<Vec<super::FragmentIndexStatus>, StoreError> {
+    use super::{FragmentIndexStatus, IndexPresence};
+    check_status_batch(wanted)?;
+    let mut statement = conn.prepare(
+        "SELECT source_size, source_mtime, segplan_version, fragments,
+                validated_revision, length(rows_packed)
+           FROM fragment_indexes WHERE file_id = ?1 AND argv_fingerprint = ?2",
+    )?;
+    wanted
+        .iter()
+        .map(|(file_id, identity)| {
+            let row = statement
+                .query_row(params![file_id, identity.argv_fingerprint], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })
+                .optional()?;
+            let (presence, fragments) = match row {
+                None => (IndexPresence::Absent, 0),
+                Some((size, mtime, version, fragments, revision, packed_len)) => {
+                    let stored =
+                        SourceIdentity::new(size.max(0) as u64, mtime, &identity.argv_fingerprint);
+                    if version != i64::from(SEGPLAN_VERSION) || !stored.matches(identity) {
+                        (IndexPresence::Absent, 0)
+                    } else if revision == i64::from(VALIDATION_REVISION)
+                        && fragments > 0
+                        && u32::try_from(fragments).is_ok()
+                        && fragments.checked_mul(ROW_BYTES as i64) == Some(packed_len)
+                    {
+                        (IndexPresence::Ready, fragments as u32)
+                    } else {
+                        (IndexPresence::Unverified, 0)
+                    }
+                }
+            };
+            let outcome = if presence == IndexPresence::Ready {
+                None
+            } else {
+                outcome(conn, *file_id, identity)?
+            };
+            Ok(FragmentIndexStatus {
+                file_id: *file_id,
+                argv_fingerprint: identity.argv_fingerprint.clone(),
+                presence,
+                fragments,
+                outcome,
+            })
+        })
+        .collect()
 }
 
 /// Validate one bounded page of legacy rows without moving their packed bytes
@@ -847,6 +930,122 @@ pub(crate) fn forget(conn: &Connection, file_id: i64) -> Result<bool, StoreError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn metadata_projection_preserves_identity_order_and_never_unpacks() {
+        let conn = typed_conn();
+        let mut built = index();
+        built.rows = vec![built.rows[0].clone(); 4_100];
+        put(&conn, 7, &built, 1).expect("publish");
+        let changed =
+            SourceIdentity::new(built.source.size + 1, built.source.mtime_ms, "fingerprint");
+        let before = unpack_calls();
+        let answers = status(
+            &conn,
+            &[
+                (7, built.source.clone()),
+                (8, built.source.clone()),
+                (7, changed),
+                (7, built.source.clone()),
+            ],
+        )
+        .expect("projection");
+        assert_eq!(
+            unpack_calls(),
+            before,
+            "metadata must not decode the 4100-row payload"
+        );
+        assert_eq!(
+            answers.iter().map(|s| s.file_id).collect::<Vec<_>>(),
+            [7, 8, 7, 7]
+        );
+        assert_eq!(
+            answers.iter().map(|s| s.presence).collect::<Vec<_>>(),
+            [
+                super::super::IndexPresence::Ready,
+                super::super::IndexPresence::Absent,
+                super::super::IndexPresence::Absent,
+                super::super::IndexPresence::Ready
+            ]
+        );
+        assert_eq!(answers[0].fragments, 4_100);
+        assert_eq!(answers[2].fragments, 0);
+        assert!(status(&conn, &vec![(7, built.source.clone()); 257]).is_err());
+    }
+
+    #[test]
+    fn a_row_whose_length_disagrees_with_fragments_is_unverified() {
+        let conn = typed_conn();
+        let built = index();
+        put(&conn, 7, &built, 1).expect("publish");
+        conn.execute("UPDATE fragment_indexes SET fragments = fragments + 1", [])
+            .expect("inconsistent count");
+        let answer = status(&conn, &[(7, built.source)]).expect("projection");
+        assert_eq!(answer[0].presence, super::super::IndexPresence::Unverified);
+        assert_eq!(answer[0].fragments, 0);
+    }
+
+    #[test]
+    fn projection_refuses_legacy_empty_and_stale_revision_rows_without_deleting() {
+        let conn = typed_conn();
+        let built = index();
+        put(&conn, 7, &built, 1).expect("publish");
+        for revision in [0, -1, i64::from(VALIDATION_REVISION) + 1] {
+            conn.execute(
+                "UPDATE fragment_indexes SET validated_revision = ?1",
+                [revision],
+            )
+            .expect("legacy/stale");
+            let answer = status(&conn, &[(7, built.source.clone())]).expect("projection");
+            assert_eq!(answer[0].presence, super::super::IndexPresence::Unverified);
+            assert_eq!(answer[0].fragments, 0);
+            assert_eq!(validation_marker(&conn, 7, "fingerprint"), revision);
+        }
+        conn.execute(
+            "UPDATE fragment_indexes SET fragments = 0, rows_packed = x'', validated_revision = 1",
+            [],
+        )
+        .expect("empty");
+        assert_eq!(
+            status(&conn, &[(7, built.source)]).expect("projection")[0].presence,
+            super::super::IndexPresence::Unverified
+        );
+    }
+
+    #[test]
+    fn projection_outcome_uses_the_existing_source_mismatch_rule() {
+        let conn = typed_conn();
+        let source = index().source;
+        record_outcome(
+            &conn,
+            7,
+            &source,
+            IndexRefusal::Unsupported,
+            "unsupported fixture",
+            1,
+        )
+        .expect("refusal");
+        let answers = status(
+            &conn,
+            &[
+                (7, source.clone()),
+                (
+                    7,
+                    SourceIdentity::new(source.size + 1, source.mtime_ms, "fingerprint"),
+                ),
+            ],
+        )
+        .expect("projection");
+        assert_eq!(
+            answers[0]
+                .outcome
+                .as_ref()
+                .expect("same source refusal")
+                .reason,
+            "unsupported fixture"
+        );
+        assert!(answers[1].outcome.is_none());
+    }
 
     fn index() -> FragmentIndex {
         FragmentIndex::new(
