@@ -378,6 +378,9 @@ fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static
 }
 
 pub(super) fn cancel_preparations_for_incumbent_wait(playback_id: &str) {
+    // A candidate can still be planning across Store awaits and have no
+    // registered successor yet. Stop it before it acquires spare capacity.
+    cancel_pending_candidate(playback_id);
     for active in take_active_preparations_for_playback(playback_id) {
         spawn_cancelled_preparation(active, "incumbent playback needed prepared capacity");
     }

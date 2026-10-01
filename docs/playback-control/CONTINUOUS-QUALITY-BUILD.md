@@ -859,10 +859,10 @@ historical measured outcomes as current evidence.
 
 | Milestone | Commit/tree | Focused command / device run | Result |
 |---|---|---|---|
-| Upstream ownership | `424f7d162` + dirty work in the named session | Read-only scope inspection, 2026-09-30 | Active dependency; no shared production edits authorized yet |
+| Upstream ownership | PR #669, main `91917940e`; integrated tree `7c2a950ef` | Forgejo merged receipt and upstream completed status, 2026-10-01; pinned `cargo check --workspace --locked --all-targets` | Dependency released; integrated source compiles |
 | CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
-| CQ2a | — | — | Not run |
-| CQ1 | — | — | Not run |
+| CQ2a | Integrated upstream route-v1 floor | Reconciliation in progress; tests deferred to final fast lane | Owner/start negotiation reused; independent cancellation extension remains |
+| CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap being closed |
 | CQ2 | — | — | Not run |
 | CQ3 | — | — | Not run |
 | CQ4 | — | — | Not run |
@@ -1052,14 +1052,18 @@ CQ0 is runnable and retainable, with those evidence rows incomplete; it is
 not a second acceptance oracle. Port the measurements into the existing
 playback lab after §1.2 is satisfied.
 
-The latest compact read-only check on 2026-09-30 found the named upstream
-chat still `active`, with its current turn `inProgress`. Its server/web batch
-is committed, but cluster worker routing remains, followed by current-main
-integration, final adversarial review and the fast lane. Its surfaces are not released. CQ2a/CQ1 and every shared
-production edit remain blocked until upstream landing, authoritative-main
-integration and ownership reconciliation. Adversarial review follows the
-user-directed main-readiness timing recorded below.
-No message was sent to the upstream chat and no scope transfer was inferred.
+**Ownership reconciliation, 2026-10-01:** the named upstream task is
+complete and PR #669 landed on main as `91917940e` at 06:20:23 UTC.
+The independent clone integrated that authoritative main in `7c2a950ef`.
+Rust 1.97.1 `cargo check --workspace --locked --all-targets` passed against
+that integrated source. Shared production work may now proceed. Reuse the
+landed display-aware route-v1 worker/owner negotiation and voluntary
+retain-current/admission policy. It does not yet provide an independent
+cancel-by-intent extension or continuous rendition protocol. The existing
+incumbent-wait cleanup takes registered successors but misses planning
+candidates; CQ1 closes that gap through the same pending-candidate owner.
+No competing Auto reducer or discovery stack is introduced. Final adversarial
+review follows the workflow below; no intermediate review or unit run.
 
 **Workflow supersession, 2026-09-30:** Paul directed normal commits in the
 independent clone, batched into one larger PR, with adversarial review only

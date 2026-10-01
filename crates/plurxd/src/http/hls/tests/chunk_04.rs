@@ -1310,6 +1310,25 @@
         );
     }
 
+    #[tokio::test]
+    async fn incumbent_wait_cancels_planning_without_cancelling_a_later_ask() {
+        let playback_id = unique_playback_id("incumbent-wait-planning");
+        let planning = PendingCandidateGuard::begin(&playback_id, "optional-target");
+        cancel_preparations_for_incumbent_wait(&playback_id);
+        assert!(planning.cancelled());
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+        assert!(pending_candidate_superseded(&playback_id, Some("optional-target")));
+
+        // A late destructor from cancelled planning must not evict a fresh
+        // explicit choice accepted after the incumbent recovered.
+        let later = PendingCandidateGuard::begin(&playback_id, "later-target");
+        drop(planning);
+        assert!(!later.cancelled());
+        assert_eq!(pending_candidate_for_playback(&playback_id).as_deref(), Some("later-target"));
+        drop(later);
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+    }
+
     /// A plain create is a supersession too.
     ///
     /// M0 has one call site, at the top of `settle_activation_predecessor` and
