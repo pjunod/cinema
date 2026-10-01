@@ -1210,3 +1210,25 @@ eviction on the owning rendition. A lookup followed by an unguarded unlink
 would race a newly scheduled interval, so the store projection alone is not
 a completed physical pin implementation. Directory cleanup and shared cache
 GC need the same rule before continuous delivery is advertised.
+
+### 10.7 VOD retention bridge
+
+Working-set eviction now obtains the rendition's existing exact-key build
+gate, reads durable dependencies outside the manifest lock, then maps only
+whole entries on the exact stored clock into protected windows. Invalid or
+unavailable dependency facts retain bytes and retire a capacity-held producer
+rather than overriding the retention obligation. Cached GETs can continue
+while the store lookup runs. The gate is released before producer retirement.
+
+Dormant purge, obsolete encoded-generation cleanup and adopted-init drift
+now retain reserved directories and identities. An encoder restart or
+missing marker cannot overwrite a reserved immutable URI; it refuses with
+attachment repair needed. A matching head regeneration may still restore
+the same init bytes. These retention reads do not depend on a live producer.
+
+The schedule publisher must obtain those same sorted rendition gates while
+verifying actual cached artifacts and committing a reservation. That writer
+funnel and its HTTP/peer integration remain outstanding. Shared completed
+cache publication also needs its existing consumer-pin integration; the VOD
+retention bridge alone does not complete CQ2/CQ4. Exact-window eviction and
+malformed-clock regressions are authored and compiled without execution.

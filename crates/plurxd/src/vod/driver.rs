@@ -440,7 +440,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
         // snapshot before the manifest lock so cached GET publication never
         // waits behind policy or admission I/O.
         let windows = eviction_windows(shared, rendition).await;
-        let mut manifest = rendition.manifest.lock().await;
+        let manifest = rendition.manifest.lock().await;
         let (demands, prewarm_ledgers) = {
             let readers = rendition.readers.lock().await;
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
@@ -629,11 +629,61 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 }
             }
             Step::MakeRoom { wanted } => {
-                match rendition
-                    .dir
-                    .make_room(&mut manifest, &windows, wanted)
+                // Continuous schedule writers must own this same exact-key gate
+                // through verification and durable reservation. Query outside
+                // the manifest lock so cached GETs can drain during Store I/O.
+                drop(manifest);
+                let _dependency_guard = shared
+                    .rendition_build_gate(&rendition.key)
+                    .lock_owned()
+                    .await;
+                let intervals = match shared
+                    .store
+                    .quality_reserved_intervals(&rendition.key)
                     .await
                 {
+                    Ok(intervals) => intervals,
+                    Err(error) => {
+                        tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                            %error, "retaining media because continuous dependencies are unknown");
+                        drop(_dependency_guard);
+                        rendition.gen_epoch.fetch_add(1, Relaxed);
+                        let _ = perform_driver_step(
+                            shared,
+                            rendition,
+                            Step::Terminate {
+                                why: Termination::IndefiniteHold,
+                            },
+                        )
+                        .await;
+                        return;
+                    }
+                };
+                let mut windows = windows;
+                let Ok(dependencies) = continuous_dependency_windows(&rendition.plan, &intervals)
+                else {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %rendition.key,
+                        "retaining media because a continuous dependency does not match the immutable plan");
+                    drop(_dependency_guard);
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    let _ = perform_driver_step(
+                        shared,
+                        rendition,
+                        Step::Terminate {
+                            why: Termination::IndefiniteHold,
+                        },
+                    )
+                    .await;
+                    return;
+                };
+                windows.extend(dependencies);
+                let mut manifest = rendition.manifest.lock().await;
+                let sweep = rendition
+                    .dir
+                    .make_room(&mut manifest, &windows, wanted)
+                    .await;
+                drop(_dependency_guard);
+                match sweep {
                     Ok(freed) => {
                         sub_saturating(&shared.working_set, freed.bytes);
                         if let Some(error) = freed.error {
@@ -762,4 +812,37 @@ pub(super) async fn eviction_windows(shared: &Shared, rendition: &Rendition) -> 
             }),
     );
     windows
+}
+
+/// Every dependency must name whole immutable plan entries on the exact clock.
+/// A corrupt projection is a retention refusal, never permission to evict.
+pub(super) fn continuous_dependency_windows(
+    plan: &SegmentPlan,
+    intervals: &[plurx_core::playback::continuous_quality::QualityInterval],
+) -> Result<Vec<ReaderWindow>, ()> {
+    intervals
+        .iter()
+        .map(|interval| {
+            if !interval.valid() || interval.timescale != plan.timescale {
+                return Err(());
+            }
+            let first = plan
+                .entries
+                .binary_search_by_key(&interval.from_tick, |entry| entry.start_ticks)
+                .map_err(|_| ())?;
+            let last = plan
+                .entries
+                .partition_point(|entry| entry.end_ticks() < interval.through_tick);
+            let end = plan.entries.get(last).ok_or(())?;
+            if end.end_ticks() != interval.through_tick || first > last {
+                return Err(());
+            }
+            Ok(ReaderWindow {
+                back: 0,
+                playhead: plan.entries[first].index,
+                frontier: end.index,
+                ahead: 0,
+            })
+        })
+        .collect()
 }

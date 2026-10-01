@@ -3526,3 +3526,27 @@
         assert!(serve.owns("sess-a").await, "tombstoned is still addressed");
         assert!(serve.frontier_ms("sess-x").await.is_none());
     }
+
+    #[test]
+    fn durable_dependency_windows_protect_exact_intervals_from_eviction() {
+        let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
+        let plan = grid.plan(6_000, 1_000_000);
+        let entry = plan.entry(1).expect("middle");
+        let interval = plurx_core::playback::continuous_quality::QualityInterval {
+            artifact_id: "a".repeat(64), rendition_id: "b".repeat(64),
+            timescale: plan.timescale, from_tick: entry.start_ticks,
+            through_tick: entry.end_ticks(), byte_length: 100,
+        };
+        let windows = continuous_dependency_windows(&plan, std::slice::from_ref(&interval))
+            .expect("exact dependency");
+        let mut manifest = Manifest::new(plan.clone());
+        for index in 0..3 { manifest.materialize(index, 100, i64::from(index)); }
+        assert_eq!(manifest.eviction_candidates(&windows, u64::MAX), vec![0, 2]);
+        let mut wrong_clock = interval.clone();
+        wrong_clock.timescale = 48_000;
+        assert!(continuous_dependency_windows(&plan, &[wrong_clock]).is_err());
+        let mut partial = interval;
+        partial.from_tick += 1;
+        assert!(continuous_dependency_windows(&plan, &[partial]).is_err());
+        assert_eq!(manifest.eviction_candidates(&[], u64::MAX), vec![0, 1, 2]);
+    }

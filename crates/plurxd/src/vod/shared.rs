@@ -36,6 +36,27 @@ impl Shared {
             let Some(candidate) = pending.front().cloned() else {
                 break;
             };
+            let Ok(_dependency_guard) = self.rendition_build_gate(&candidate.key).try_lock_owned()
+            else {
+                if let Some(candidate) = pending.pop_front() {
+                    pending.push_back(candidate);
+                }
+                continue;
+            };
+            match self.store.quality_reserved_intervals(&candidate.key).await {
+                Ok(intervals) if intervals.is_empty() => {}
+                Ok(_) => {
+                    if let Some(candidate) = pending.pop_front() {
+                        pending.push_back(candidate);
+                    }
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "plurxd::vodserve", rendition = %candidate.key,
+                        %error, "retaining obsolete media with unknown continuous dependencies");
+                    break;
+                }
+            }
             if let Err(error) = self.store.forget_rendition_plan(&candidate.key).await {
                 tracing::warn!(
                     target: "plurxd::vodserve",
@@ -512,6 +533,16 @@ impl Shared {
         .await?;
         let dir = RenditionDir::new(self.base.join(key));
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        let protected = !self
+            .store
+            .quality_reserved_intervals(key)
+            .await
+            .map_err(|error| format!("reading continuous media dependencies: {error}"))?
+            .is_empty();
+        if protected && !existed {
+            return Err("a reserved rendition has lost its immutable directory; attachment repair is required".into());
+        }
+
         let encoded_process = recipe
             .encoding
             .as_ref()
@@ -521,6 +552,9 @@ impl Shared {
                 match tokio::fs::read_to_string(dir.path().join(ENCODED_PROCESS_NAME)).await {
                     Ok(owner) if owner.trim() == process => {}
                     Ok(_) => {
+                        if protected {
+                            return Err("a reserved rendition belongs to an earlier encoder process; attachment repair is required".into());
+                        }
                         tokio::fs::remove_dir_all(dir.path())
                             .await
                             .map_err(|error| {
@@ -529,6 +563,9 @@ impl Shared {
                         existed = false;
                     }
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        if protected {
+                            return Err("a reserved rendition has no encoder process marker; attachment repair is required".into());
+                        }
                         // An encoded directory without its generation marker
                         // is unverifiable. Never adopt it under a new marker.
                         tokio::fs::remove_dir_all(dir.path())
@@ -629,6 +666,11 @@ impl Shared {
                                 // Mismatch (or an unverifiable head): purge to
                                 // planned-only and establish fresh — before
                                 // the counters below, so nothing is adopted.
+                                if protected {
+                                    return Err(format!(
+                                        "a reserved rendition's init cannot be verified: {why}"
+                                    ));
+                                }
                                 let freed = dir.purge(&mut manifest).await;
                                 if let Some(error) = freed.error {
                                     tracing::warn!(
@@ -661,6 +703,9 @@ impl Shared {
                 None => {
                     // No identity means nothing on disk is verifiable: purge
                     // to planned-only and establish fresh.
+                    if protected {
+                        return Err("a reserved rendition has no immutable init identity; attachment repair is required".into());
+                    }
                     if manifest.materialized_count() > 0 || dir.has_init().await {
                         let freed = dir.purge(&mut manifest).await;
                         if let Some(error) = freed.error {
@@ -835,6 +880,15 @@ impl Shared {
             .is_some_and(|since| since.elapsed() > ttl);
         if !dormant {
             return;
+        }
+        match self.store.quality_reserved_intervals(key).await {
+            Ok(intervals) if intervals.is_empty() => {}
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(target: "plurxd::vodserve", rendition = %key,
+                    %error, "retaining dormant media with unknown continuous dependencies");
+                return;
+            }
         }
         // Keep the manifest fence through the short exact map removal. That
         // makes admission and purge mutually exclusive without ever holding

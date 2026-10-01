@@ -543,6 +543,23 @@ pub(super) async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Renditio
     let from_disk = rendition.identity.lock().await.from_disk;
     let admitted = rendition.manifest.lock().await.is_admitted();
     if from_disk && !admitted {
+        let _dependency_guard = shared
+            .rendition_build_gate(&rendition.key)
+            .lock_owned()
+            .await;
+        let dependencies = shared
+            .store
+            .quality_reserved_intervals(&rendition.key)
+            .await;
+        if !matches!(dependencies, Ok(ref intervals) if intervals.is_empty()) {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::RenditionInitChanged,
+                format!("retaining reserved or unverified media after init drift: {cause}"),
+            );
+            return;
+        }
         {
             let mut manifest = rendition.manifest.lock().await;
             let freed = rendition.dir.purge(&mut manifest).await;
