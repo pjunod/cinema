@@ -679,6 +679,19 @@ refusal or score PQ/HLG against SDR as if the result meant quality. A versioned
 all-class corpus receipt requires genuine inputs and appropriate HDR-reference
 scoring, plus §3.6's independent fidelity checks. No manifest alone closes it.
 
+**2026-10-01 actual acquisition continuation:** unchanged 45-second animation,
+sport and PGS-track fixtures were generated in an owned CPU-only container on
+the frozen `4f243a01` tool image, using the current `b65be8773` harness. A
+small genuine P5 packet copy also yielded 50 actual Profile 5 RPUs; it is not
+a 45-second corpus input, decoded reshape or independently graded reference.
+The ten-bit gradient encoded but its unchanged checker refused it: the HEVC
+VUI contains unspecified primaries/transfer (2/2), with BT.709 matrix (1).
+The narrow candidate fix supplies explicit x265 `colorprim`, `transfer`,
+`colormatrix` and limited `range` for that fixture alone. Existing generic
+flags and the refusal remain; every other fixture argv is unchanged. Actual
+corrected tiny/full generation remains pending at this source checkpoint.
+No GPU, production bitmap-burn or physical HDR acceptance follows.
+
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
 `identity`/`class`/`dynamic_range`/`trim`/`rung` rows matching the existing
