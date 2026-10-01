@@ -3545,3 +3545,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
+
+[[fixes]]
+id = "apple.auto-boundary-captured-typed-epoch-ownership"
+commits = ["1fb06ba8b"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes"
