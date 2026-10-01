@@ -53,6 +53,13 @@ reconciliation even when a later clock ticket refuses new acquisition.
 
 ### E0 interfaces — local policy without an irreversible operation
 
+The 2026-10-01 review correction invalidates current evidence and advances
+its generation inside the publication lock when a matching-generation round
+omits or adds roster peers. Acquisition cannot race a later caller cleanup.
+An obsolete-generation round is rejected without overwriting newer evidence.
+The focused regression is
+`acquisition_current_missing_peer_invalidates_atomically_but_stale_round_does_not`.
+
 The [shared core handle](../../crates/plurx-core/src/cluster/clock.rs) offers
 `acquire() -> Result<ClockAcquisitionTicket<'_>, ClockRefusal>` and
 `revalidate(&ClockAcquisitionTicket<'_>) -> Result<(), ClockRefusal>`.

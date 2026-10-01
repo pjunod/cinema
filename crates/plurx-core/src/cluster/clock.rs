@@ -134,6 +134,27 @@ mod tests {
     }
 
     #[test]
+    fn acquisition_current_missing_peer_invalidates_atomically_but_stale_round_does_not() {
+        let guard = ClusterClockGuard::new(true);
+        publish_offset(&guard, 0, 1_000);
+        let safe = guard.acquire().expect("safe prior evidence");
+        let round = guard.roster(&["peer".into()]);
+        assert!(!guard.publish(round, BTreeMap::new()));
+        assert_eq!(
+            guard.revalidate(&safe),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+
+        let stale = guard.roster(&["peer".into()]);
+        publish_offset(&guard, 0, 1_000);
+        let newer = guard.acquire().expect("newer safe evidence");
+        assert!(!guard.publish(stale, BTreeMap::new()));
+        assert_eq!(guard.revalidate(&newer), Ok(()));
+        assert!(guard.acquire().is_ok());
+    }
+
+    #[test]
     fn acquisition_requires_exact_fresh_roster_and_safe_upper_bound() {
         let standalone = ClusterClockGuard::new(false);
         let ticket = standalone.acquire().expect("standalone proof");
@@ -675,9 +696,21 @@ impl ClusterClockGuard {
             || current.state_generation != ticket.state_generation
             || inner.snapshot.clock_generation != ticket.clock_generation
             || inner.snapshot.state_generation != ticket.state_generation
-            || inner.snapshot.peers.keys().ne(peers.keys())
         {
+            // An obsolete round has no authority to invalidate newer evidence.
+            return false;
+        }
+        if inner.snapshot.peers.keys().ne(peers.keys()) {
+            // A failed current round must invalidate proofs before releasing the lock.
+            inner.roster_proved = false;
+            inner.roster_observed_at = None;
+            for peer in inner.snapshot.peers.values_mut() {
+                *peer = PeerClockOffset::Unknown;
+            }
+            inner.snapshot.state_generation += 1;
+            inner.snapshot.unknown_rounds += 1;
             inner.snapshot.readiness = ClockReadiness::default();
+            Self::recompute(&mut inner);
             return false;
         }
         let failed = peers
