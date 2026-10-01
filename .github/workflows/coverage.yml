@@ -52,7 +52,7 @@ jobs:
         uses: ./.github/actions/cargo-cache
         with:
           lane: coverage
-      - uses: https://github.com/taiki-e/install-action@711afc95f818c1e7c7b527b2d34c6925a825d206 # cargo-llvm-cov
+      - uses: https://github.com/taiki-e/install-action@72f835688cb6c15903b796f704b01e652a2b8835 # cargo-llvm-cov
       # Instrumented tests need the same ffmpeg as the regular Rust unit lane.
       - uses: ./.github/actions/ffmpeg
         with:
