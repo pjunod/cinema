@@ -75,6 +75,7 @@ fn facts(stream: Value) -> DecodeFacts {
 
 fn options(pipeline: Pipeline) -> TranscodeMediaOptions {
     TranscodeMediaOptions {
+        video_sample_envelope: plurx_core::transcode::VideoSampleEnvelope::EncoderDefault,
         target_height: 1080,
         video_bitrate_kbps: 8_000,
         effective_rate_control: EffectiveRateControl::Vbr,

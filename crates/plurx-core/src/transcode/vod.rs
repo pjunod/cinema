@@ -144,6 +144,180 @@ impl VodFrameGrid {
     }
 }
 
+/// A video-only rendition with actual init facts matched to its resolved plan.
+/// Membership describes a compatible media shape, not a platform join receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodVideoRung {
+    rendition_id: String,
+    init_id: String,
+    compatibility_id: String,
+    facts: crate::fmp4::AvcSampleEntryFacts,
+    grid: VodFrameGrid,
+    video_bitrate_kbps: u32,
+}
+
+impl VodVideoRung {
+    /// The caller still owns source continuity and the exact encoder receipt.
+    /// Dimensions/color come from the init; the recipe URI is supplied by the
+    /// existing immutable rendition registry, never chosen by a client.
+    pub fn from_verified_init(
+        source: &MediaFile,
+        plan: &ResolvedTranscode,
+        init: &crate::fmp4::Init,
+        grid: VodFrameGrid,
+        rendition_id: &str,
+        source_object_version: &str,
+        shared_audio_recipe_id: Option<&str>,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        use sha2::{Digest, Sha256};
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "rendition does not match the initial continuous H.264 SDR family".into(),
+            )
+        };
+        let digest_id = |id: &str| {
+            id.len() == 64
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        let contract = plan.output_contract();
+        if !digest_id(rendition_id)
+            || source_object_version.is_empty()
+            || source_object_version.len() > 512
+            || source_object_version
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || shared_audio_recipe_id.is_some_and(|id| !digest_id(id))
+            || source.audio_streams.is_empty() != shared_audio_recipe_id.is_none()
+            || plan.cache_identity() != &super::DecodeCacheIdentity::from_media_file(source)
+            || plan.options().video_sample_envelope
+                != super::VideoSampleEnvelope::ContinuousAvcHigh50
+            || plan.options().input_has_audio
+            || plan.options().subtitle_burn.is_some()
+            || contract.normalized_geometry().is_none()
+            || contract.output_grade() != super::OutputGrade::Sdr
+            || contract.output_codec() != "h264"
+            || contract.output_pixel_format() != "yuv420p"
+            || init.tracks.len() != 1
+            || init
+                .video()
+                .is_none_or(|video| video.timescale != grid.numerator)
+            || VodFrameGrid::new(grid.numerator, grid.denominator) != Some(grid)
+        {
+            return Err(refuse());
+        }
+        let facts = crate::fmp4::avc_sample_entry_facts(init)?.ok_or_else(refuse)?;
+        if !super::decode::continuous_avc_envelope_accepts(
+            u32::from(facts.width),
+            u32::from(facts.height),
+            grid.numerator,
+            grid.denominator,
+            plan.options().video_bitrate_kbps,
+        ) || facts.codec != "avc1.640032"
+            || contract.effective_width() != Some(u32::from(facts.width))
+            || contract.effective_height() != Some(u32::from(facts.height))
+            || facts.color_primaries != 1
+            || facts.color_transfer != 1
+            || facts.color_matrix != 1
+            || facts.full_range
+        {
+            return Err(refuse());
+        }
+        let mut family = Sha256::new();
+        for value in [
+            "continuous-h264-sdr-family-v1".to_owned(),
+            source_object_version.to_owned(),
+            plan.cache_identity().as_str().to_owned(),
+            plan.source_facts_digest().to_owned(),
+            facts.codec.clone(),
+            grid.frame_rate(),
+            grid.frames_per_segment.to_string(),
+            "bt709-limited-yuv420p".to_owned(),
+            "external-subtitles".to_owned(),
+            shared_audio_recipe_id.unwrap_or("silent").to_owned(),
+            plan.options()
+                .audio_index
+                .map_or_else(|| "default".to_owned(), |index| index.to_string()),
+            plan.options().audio_offset_ms.to_string(),
+            plan.options().audio_channels.to_string(),
+            plan.options().audio_bitrate_kbps.to_string(),
+        ] {
+            family.update((value.len() as u64).to_le_bytes());
+            family.update(value.as_bytes());
+        }
+        Ok(Self {
+            rendition_id: rendition_id.to_owned(),
+            init_id: hex::encode(Sha256::digest(&init.bytes)),
+            compatibility_id: hex::encode(family.finalize()),
+            facts,
+            grid,
+            video_bitrate_kbps: plan.options().video_bitrate_kbps,
+        })
+    }
+
+    pub fn rendition_id(&self) -> &str {
+        &self.rendition_id
+    }
+    pub fn init_id(&self) -> &str {
+        &self.init_id
+    }
+    pub fn compatibility_id(&self) -> &str {
+        &self.compatibility_id
+    }
+    pub fn facts(&self) -> &crate::fmp4::AvcSampleEntryFacts {
+        &self.facts
+    }
+    pub fn grid(&self) -> VodFrameGrid {
+        self.grid
+    }
+    pub fn video_bitrate_kbps(&self) -> u32 {
+        self.video_bitrate_kbps
+    }
+}
+
+/// A stable set of verified rungs. Controlled attachment can demand one at a
+/// time; native autonomous attachment must reserve its advertised pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodVideoFamily {
+    id: String,
+    rungs: Vec<VodVideoRung>,
+}
+
+impl VodVideoFamily {
+    pub fn new(mut rungs: Vec<VodVideoRung>) -> Result<Self, crate::fmp4::Fmp4Error> {
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "continuous rungs do not form one verified family".into(),
+            )
+        };
+        if !(2..=8).contains(&rungs.len()) {
+            return Err(refuse());
+        }
+        let id = rungs[0].compatibility_id.clone();
+        if rungs.iter().any(|rung| rung.compatibility_id != id) {
+            return Err(refuse());
+        }
+        rungs.sort_by_key(|rung| (rung.facts.height, rung.facts.width, rung.video_bitrate_kbps));
+        let mut ids = std::collections::BTreeSet::new();
+        let mut shapes = std::collections::BTreeSet::new();
+        for rung in &rungs {
+            if !ids.insert(&rung.rendition_id)
+                || !shapes.insert((rung.facts.width, rung.facts.height))
+            {
+                return Err(refuse());
+            }
+        }
+        Ok(Self { id, rungs })
+    }
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub fn rungs(&self) -> &[VodVideoRung] {
+        &self.rungs
+    }
+}
+
 /// AAC correction shared by muxed VOD and the single family soundtrack.
 /// Seek and trim on the global sample lattice rather than restarting its phase.
 struct AudioClock {
@@ -473,7 +647,7 @@ mod tests {
                 "index":0,"codec_type":"video","codec_name":"hevc",
                 "profile":"Main","width":640,"height":360,
                 "pix_fmt":"yuv420p","avg_frame_rate":"24/1",
-                "r_frame_rate":"24/1","disposition":{"attached_pic":0}
+                "r_frame_rate":"24/1","sample_aspect_ratio":"1:1","disposition":{"attached_pic":0}
             }]}),
             crate::transcode::DecodeSourceIdentity::from_sha256("a".repeat(64))
                 .expect("source identity"),
@@ -558,6 +732,44 @@ mod tests {
             .any(|pair| pair[0] == "-af" && pair[1] == clock.filter()));
         restart.start_seconds = 12.0;
         assert!(vod_shared_audio_args(&audio_plan, &restart, 12.0).is_none());
+        let continuous_plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(
+                crate::transcode::Encoder::Software,
+                plan.options().clone(),
+            )
+            .with_continuous_avc_video(),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("continuous video plan");
+        let continuous_args = vod_pipe_args(
+            &source,
+            &continuous_plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+        );
+        assert!(continuous_args
+            .windows(2)
+            .any(|pair| pair == ["-profile:v", "high"]));
+        assert!(continuous_args
+            .windows(2)
+            .any(|pair| pair == ["-level:v", "5.0"]));
+        assert!(continuous_args.iter().any(|arg| arg == "-an"));
+        assert_ne!(continuous_plan.plan_digest(), plan.plan_digest());
+        assert_eq!(
+            continuous_plan.output_contract().effective_width(),
+            Some(640)
+        );
+        assert_eq!(
+            continuous_plan.output_contract().effective_height(),
+            Some(360)
+        );
         let chapter_options = args
             .windows(2)
             .filter(|pair| pair[0] == "-map_chapters")
@@ -568,6 +780,51 @@ mod tests {
             args.iter().position(|arg| arg == "-map_chapters")
                 < args.iter().position(|arg| arg == "pipe:1")
         );
+    }
+
+    #[test]
+    fn continuous_avc_limits_use_exact_rational_macroblock_rate() {
+        let accepts = super::super::decode::continuous_avc_envelope_accepts;
+        assert!(accepts(1920, 1080, 60_000, 1001, 12_000));
+        assert!(accepts(3840, 2160, 24_000, 1001, 40_000));
+        assert!(!accepts(3840, 2160, 30, 1, 40_000));
+        assert!(!accepts(4096, 2304, 24, 1, 40_000));
+        assert!(!accepts(1921, 1080, 24, 1, 12_000));
+        assert!(!accepts(1920, 1080, 24, 0, 12_000));
+        assert!(accepts(640, 360, 24, 1, 112_500));
+        assert!(!accepts(640, 360, 24, 1, 112_501));
+    }
+
+    #[test]
+    fn family_membership_varies_raster_but_never_audio_or_timeline_identity() {
+        let rung = |id: &str, width, height| VodVideoRung {
+            rendition_id: id.repeat(64),
+            init_id: "c".repeat(64),
+            compatibility_id: "d".repeat(64),
+            facts: crate::fmp4::AvcSampleEntryFacts {
+                codec: "avc1.640032".into(),
+                width,
+                height,
+                color_primaries: 1,
+                color_transfer: 1,
+                color_matrix: 1,
+                full_range: false,
+            },
+            grid: VodFrameGrid::new(24_000, 1_001).expect("grid"),
+            video_bitrate_kbps: 4_000,
+        };
+        let low = rung("a", 1280, 720);
+        let high = rung("b", 1920, 1080);
+        let family = VodVideoFamily::new(vec![high.clone(), low.clone()]).expect("family");
+        assert_eq!(family.rungs()[0].facts().height, 720);
+        assert_eq!(family.rungs()[1].facts().height, 1080);
+        let mut changed = high.clone();
+        changed.compatibility_id = "e".repeat(64);
+        assert!(VodVideoFamily::new(vec![low.clone(), changed]).is_err());
+        assert!(VodVideoFamily::new(vec![low.clone(), low.clone()]).is_err());
+        let mut same_shape = low.clone();
+        same_shape.rendition_id = "f".repeat(64);
+        assert!(VodVideoFamily::new(vec![low, same_shape]).is_err());
     }
 
     #[test]

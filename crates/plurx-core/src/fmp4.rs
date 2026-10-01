@@ -62,6 +62,72 @@ pub enum Fmp4Error {
     MultipleHevcSampleEntries { count: usize },
 }
 
+/// Output facts read structurally from the one actual AVC sample entry.
+/// These are container facts; decoded joins still need separate qualification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AvcSampleEntryFacts {
+    pub codec: String,
+    pub width: u16,
+    pub height: u16,
+    pub color_primaries: u16,
+    pub color_transfer: u16,
+    pub color_matrix: u16,
+    pub full_range: bool,
+}
+
+pub fn avc_sample_entry_facts(init: &Init) -> Result<Option<AvcSampleEntryFacts>, Fmp4Error> {
+    let Some(codec) = avc_rfc6381_codec(init)? else {
+        return Ok(None);
+    };
+    let video = init.video().expect("AVC codec requires video");
+    let (count, entries) = locate_avc_sample_entries(&init.bytes, video.id)?;
+    if count != 1 || entries.len() != 1 || entries[0].sample_entry != *b"avc1" {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC requires one avc1 sample entry".into(),
+        ));
+    }
+    let entry = &entries[0];
+    let header = peek_box(&init.bytes, entry.entry.start)?
+        .ok_or_else(|| Fmp4Error::Malformed("missing AVC sample entry".into()))?;
+    let body = entry.entry.start + entry.entry.header_len;
+    let end = entry.entry.start + header.size;
+    let width = u16::from_be_bytes(
+        init.bytes[body + 24..body + 26]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    let height = u16::from_be_bytes(
+        init.bytes[body + 26..body + 28]
+            .try_into()
+            .expect("validated visual header"),
+    );
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return malformed("continuous AVC has an invalid even raster");
+    }
+    let colors = find_children(&init.bytes, body + 78..end, b"colr")?;
+    if colors.len() != 1 {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC needs one explicit color record".into(),
+        ));
+    }
+    let (at, color) = &colors[0];
+    let data = &init.bytes[at.start + color.header_len..at.start + color.size];
+    if data.len() != 11 || &data[..4] != b"nclx" || data[10] & 0x7f != 0 {
+        return Err(Fmp4Error::Unsupported(
+            "continuous AVC needs a complete nclx color record".into(),
+        ));
+    }
+    Ok(Some(AvcSampleEntryFacts {
+        codec,
+        width,
+        height,
+        color_primaries: u16::from_be_bytes([data[4], data[5]]),
+        color_transfer: u16::from_be_bytes([data[6], data[7]]),
+        color_matrix: u16::from_be_bytes([data[8], data[9]]),
+        full_range: data[10] & 0x80 != 0,
+    }))
+}
+
 /// The validated HEVC sample-description shape carried by an initialization
 /// segment. Every reported description has already had its decoder
 /// configuration checked; this is therefore safe policy input rather than an
@@ -2732,9 +2798,7 @@ struct HvcCLocation {
 struct AvcCLocation {
     sample_entry: [u8; 4],
     payload: Range<usize>,
-    /// Read only by the fixture builders that duplicate or rewrite a sample
-    /// entry; the production reader needs `sample_entry` and `payload` alone.
-    #[cfg_attr(not(any(test, feature = "fixtures")), expect(dead_code))]
+    /// Structural visual header used by actual raster/color facts and fixtures.
     entry: BoxAt,
     /// `stsd` first, then every enclosing box through `moov`. Fixture-only,
     /// like `entry`.
@@ -5450,6 +5514,62 @@ mod tests {
         assert_eq!(published.len(), 1);
         assert_eq!(published[0].index, 0);
         assert!(!cutter.complete());
+    }
+
+    #[test]
+    fn continuous_avc_facts_come_from_the_actual_single_sample_entry() {
+        crate::testfixtures::require_ffmpeg();
+        let mut command = Command::new(ffmpeg());
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=640x360:rate=24000/1001",
+            "-t",
+            "0.3",
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "high",
+            "-level:v",
+            "5.0",
+            "-pix_fmt",
+            "yuv420p",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-colorspace",
+            "bt709",
+            "-an",
+            "-video_track_timescale",
+            "24000",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+delay_moov",
+            "-f",
+            "mp4",
+            "pipe:1",
+        ]);
+        let (mut init, _, _) = read_all(&run(&mut command));
+        let facts = avc_sample_entry_facts(&init)
+            .expect("actual facts")
+            .expect("AVC");
+        assert_eq!((facts.width, facts.height), (640, 360));
+        assert_eq!(facts.codec, "avc1.640032");
+        assert_eq!(
+            (
+                facts.color_primaries,
+                facts.color_transfer,
+                facts.color_matrix
+            ),
+            (1, 1, 1)
+        );
+        assert!(!facts.full_range);
+        duplicate_avc_sample_entry_for_fixture(&mut init);
+        assert!(avc_sample_entry_facts(&init).is_err());
     }
 
     /// Everything a feed produces, in order.

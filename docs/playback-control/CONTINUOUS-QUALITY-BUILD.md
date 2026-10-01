@@ -1232,3 +1232,30 @@ funnel and its HTTP/peer integration remain outstanding. Shared completed
 cache publication also needs its existing consumer-pin integration; the VOD
 retention bridge alone does not complete CQ2/CQ4. Exact-window eviction and
 malformed-clock regressions are authored and compiled without execution.
+
+### 10.8 Verified video family shape
+
+Continuous video uses an explicit video-only H.264 High level 5.0 recipe,
+with normalized square-pixel geometry and SDR output. Resolution and bitrate
+remain rung facts; source object version, source facts, audio recipe, color,
+codec and exact rational frame grid form the shared family identity. An
+immutable rung records the hash of its actual init bytes. Families contain
+two to eight distinct rung IDs and raster shapes.
+
+Membership inspects the actual single AVC sample entry: codec triplet,
+dimensions and BT.709 limited-range `nclx` facts must match the resolved
+recipe, and the init must contain only its one video track on the exact
+frame-grid clock. A declared family does not prove decoder join continuity.
+Actual SPS constraints and platform joins still need qualification.
+
+Admission checks level 5.0 macroblock size and rate limits using rational
+integer arithmetic, and bounds the VBR peak. The limits follow the primary
+[FFmpeg H.264 level table](https://www.ffmpeg.org/doxygen/4.4/h264__levels_8c_source.html).
+Unsupported cadence, deinterlacing or output shape refuses this family recipe
+and leaves prepared replacement available. Default recipes retain their
+existing cache identities.
+
+Actual-init inspection, family identity separation and exact level-boundary
+regressions are authored. Workspace/all-target compilation is the current
+verification; tests remain deferred. Production actor creation, resource
+admission, audio pairing and delivery are still outstanding.

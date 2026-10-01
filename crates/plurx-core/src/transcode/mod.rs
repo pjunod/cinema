@@ -33,7 +33,7 @@ pub use decode::{
     FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
     OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
     ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
-    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest, VideoSampleEnvelope,
     HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
@@ -46,7 +46,7 @@ pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
     vod_audio_anchor, vod_pipe_args, vod_shared_audio_args, vod_shared_audio_plan, VodFrameGrid,
-    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    VodVideoFamily, VodVideoRung, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
 };
 
 use crate::domain::MediaFile;
@@ -1843,6 +1843,9 @@ fn hls_args_inner(
         .and_then(|plan| plan.output_contract().normalized_geometry())
         .and_then(|geometry| geometry.rate_profile)
         .is_some()
+        || plan.is_some_and(|plan| {
+            plan.options().video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50
+        })
     {
         // The class explicitly promises H.264 High level5.0, not a profile
         // inferred from the requested height or encoder default.
