@@ -13,6 +13,7 @@ struct ServerInfo: Codable {
     var version: String?
     var build: String?
     var instanceId: String?
+    var playbackDisplayAwareAuto: Bool?
 }
 
 struct ClusterIngress: Codable {

@@ -1976,6 +1976,20 @@ final class PlayerController: ObservableObject {
     /// Immutable facts used to obtain `decision`; every session opened by this
     /// controller repeats them even if another screen probes in the meantime.
     private var decisionCaps: DeviceCaps?
+    private var presentationTarget: PresentationTarget?
+    private var presentationRevision: UInt64 = 0
+
+    /// The view supplies active backing pixels before AVPlayerLayer letterboxing.
+    func updatePresentationTarget(widthPx: Int?, heightPx: Int?) {
+        guard let widthPx, let heightPx,
+              (1...16384).contains(widthPx), (1...16384).contains(heightPx) else {
+            presentationTarget = nil
+            return
+        }
+        guard presentationTarget?.widthPx != widthPx || presentationTarget?.heightPx != heightPx else { return }
+        presentationRevision = min(presentationRevision + 1, 9_007_199_254_740_991)
+        presentationTarget = PresentationTarget(widthPx: widthPx, heightPx: heightPx, revision: presentationRevision)
+    }
     @Published private(set) var sessionStatus: PlaybackSessionStatus?
     /// Last successful status response for a stall report. The visible status
     /// is allowed to become unavailable when a poll fails, but that failure is
@@ -2252,6 +2266,76 @@ final class PlayerController: ObservableObject {
     /// about it, and whether an offered one is a replay. `lazy` because it
     /// holds this controller as its host.
     private(set) lazy var preparedReplacement = PreparedReplacementCoordinator(host: self)
+    /// A completed media-segment transaction, never an access-log average.
+    struct AutoCompletedTransfer: Sendable {
+        let bodyBytes: Int64
+        let bodyDurationSeconds: Double?
+        let completedAtMs: Int
+        let origin: String?
+        let networkLoad: Bool
+        let fromLocalCache: Bool
+        let producerPaced: Bool?
+        let statusCode: Int?
+        func ageMs(nowMs: Int) -> Int { nowMs >= completedAtMs ? nowMs - completedAtMs : Int.max }
+    }
+    private(set) var latestAutoCompletedTransfer: AutoCompletedTransfer?
+    private var autoTransferMetricTask: Task<Void, Never>?
+
+    private func retireAutoTransferMetrics() {
+        autoTransferMetricTask?.cancel()
+        autoTransferMetricTask = nil
+        latestAutoCompletedTransfer = nil
+    }
+
+    private func installAutoTransferMetrics(for item: AVPlayerItem) {
+        retireAutoTransferMetrics()
+        guard #available(iOS 18, tvOS 18, *) else { return }
+        autoTransferMetricTask = Task { @MainActor [weak self, weak item] in
+            guard let item else { return }
+            do {
+                for try await event in item.metrics(forType: AVMetricHLSMediaSegmentRequestEvent.self) {
+                    guard let self, !Task.isCancelled, self.player.currentItem === item else { return }
+                    guard !event.isMapSegment, let resource = event.mediaResourceRequestEvent,
+                          resource.errorEvent == nil else { continue }
+                    // Only an actual completed transaction supplies a body span.
+                    // Missing metrics, caches, errors and unknown pacing never
+                    // become an unpaced-link sample by observing a stationary clock.
+                    guard let transactions = resource.networkTransactionMetrics?.transactionMetrics else { continue }
+                    for transfer in transactions {
+                        guard let end = transfer.responseEndDate,
+                              transfer.countOfResponseBodyBytesReceived > 0 else { continue }
+                        let age = Date().timeIntervalSince(end)
+                        guard age.isFinite, age >= 0, age <= 120 else { continue }
+                        let duration = transfer.responseStartDate.map { end.timeIntervalSince($0) }
+                            .flatMap { $0.isFinite && $0 > 0 && $0 <= 120 ? $0 : nil }
+                        let response = transfer.response as? HTTPURLResponse
+                        let paced = response?.value(forHTTPHeaderField: "X-Plurx-Producer-Paced")
+                        let now = PlaybackControlSession.monotonicMs()
+                        let ageMs = Int(age * 1000)
+                        let url = response?.url ?? resource.url
+                        let origin = url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }
+                            .flatMap { components -> String? in
+                                guard let scheme = components.scheme, let host = components.host else { return nil }
+                                return "\(scheme)://\(host)\(components.port.map { ":\($0)" } ?? "")"
+                            }
+                        self.latestAutoCompletedTransfer = AutoCompletedTransfer(
+                            bodyBytes: transfer.countOfResponseBodyBytesReceived,
+                            bodyDurationSeconds: duration,
+                            completedAtMs: now >= ageMs ? now - ageMs : 0,
+                            origin: origin,
+                            networkLoad: transfer.resourceFetchType == .networkLoad,
+                            fromLocalCache: resource.wasReadFromCache || transfer.resourceFetchType == .localCache,
+                            producerPaced: paced == "0" ? false : (paced == "1" ? true : nil),
+                            statusCode: response?.statusCode
+                        )
+                    }
+                }
+            } catch {
+                // Metrics are optional observation, never a playback failure.
+            }
+        }
+    }
+
     private var itemObserver: AVPlayerItemObserver?
     private var itemEventTask: Task<Void, Never>?
     private var lastItemFailureDetail: (item: AVPlayerItem, detail: PlayerItemFailure.Detail)?
@@ -4323,6 +4407,7 @@ final class PlayerController: ObservableObject {
     }
 
     func stop(deactivateAudioSession: Bool = true) {
+        retireAutoTransferMetrics()
         abandonSeekMeasurement()
         requestedSeekGeneration = nil
         resetSurface()
@@ -4564,7 +4649,18 @@ final class PlayerController: ObservableObject {
         guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
               initialDecisionGeneration == generation, let model else { return }
         do {
-            let playbackDecision = try await requestPlaybackDecision(model, file, request.selection, request.quality)
+            // Allow the mounted surface to report its first layout; no panel/model
+            // estimate substitutes for a hidden or unmeasured container.
+            if model.displayAwareAuto {
+                for _ in 0..<25 where presentationTarget == nil {
+                    try await Task.sleep(for: .milliseconds(10))
+                }
+            }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), initialDecisionGeneration == generation else { return }
+            let target = presentationTarget
+            let playbackDecision = try await Caps.PresentationContext.$target.withValue(target) {
+                try await requestPlaybackDecision(model, file, request.selection, request.quality)
+            }
             let decision = playbackDecision.decision
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
                   initialDecisionGeneration == generation else { return }
@@ -7428,6 +7524,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func retireItemObserver() {
+        retireAutoTransferMetrics()
         itemObserver?.cancel()
         itemObserver = nil
         itemEventTask?.cancel()
@@ -7436,6 +7533,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func installItemObserver(for item: AVPlayerItem) {
+        installAutoTransferMetrics(for: item)
         let observer = AVPlayerItemObserver(item: item, player: player)
         itemObserver = observer
         itemEventTask = Task { @MainActor [weak self, weak observer] in

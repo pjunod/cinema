@@ -22,6 +22,10 @@ object Session {
     @Volatile
     var displayModeMatch: Boolean = false
 
+    /** Optional create-time geometry is emitted only for the advertised feature. */
+    @Volatile
+    var displayAwareAuto: Boolean = false
+
     private val nodeLock = Any()
     private var mediaFailoverOrigins: List<String> = emptyList()
     private var mediaFailoverIndex: Int = 0

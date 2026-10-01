@@ -18,6 +18,7 @@ data class Server(
     val version: String? = null,
     val instance_id: String? = null,
     val display_mode_match: Boolean = false,
+    val playback_display_aware_auto: Boolean = false,
 )
 
 @Serializable

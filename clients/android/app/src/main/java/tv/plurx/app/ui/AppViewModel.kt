@@ -18,6 +18,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import retrofit2.HttpException
 import java.net.URI
+import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.CapabilitySnapshot
 import tv.plurx.app.data.DecisionCapsReq
@@ -206,6 +207,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 bindOrigin(recovered.origin, saved.token)
                                 serverName = recovered.info.name
                                 Session.displayModeMatch = recovered.info.display_mode_match
+                                Session.displayAwareAuto = recovered.info.playback_display_aware_auto
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -481,6 +483,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         OfflineBooks.interruptProfile(serverInstanceId, currentUserId)
         Session.token = null
         Session.displayModeMatch = false
+        Session.displayAwareAuto = false
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -777,8 +780,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         fileId: Long,
         tracks: PreplayTracks = PreplayTracks.NONE,
         quality: PlaybackQuality = _preferences.value.playbackQuality,
+        presentationTarget: PresentationTarget? = null,
     ): PlaybackDecision {
-        val snapshot = Caps.snapshot(getApplication<Application>())
+        val measured = Caps.snapshot(getApplication<Application>())
+        val snapshot = measured.copy(document = measured.document.copy(
+            display = measured.document.display.copy(
+                presentation_target = presentationTarget.takeIf { Session.displayAwareAuto },
+            ),
+        ))
         // Request-local only. Omitting a parameter keeps the shared playback-
         // default policy and the response older clients get; the server never
         // writes a Playback setting from these.
@@ -939,6 +948,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         serverName = info.name
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
+        Session.displayAwareAuto = info.playback_display_aware_auto
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -986,6 +996,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         if (serverInstanceId != info.instance_id) invalidateLibraryPager()
         serverInstanceId = info.instance_id
         Session.displayModeMatch = info.display_mode_match
+        Session.displayAwareAuto = info.playback_display_aware_auto
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }

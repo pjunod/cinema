@@ -47,6 +47,11 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.TransferListener
+import androidx.media3.exoplayer.source.LoadEventInfo
+import androidx.media3.exoplayer.source.MediaLoadData
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
@@ -218,6 +223,11 @@ class Controller internal constructor(
     private val planReplacement = PlaybackPlanReplacement(activeQuality)
 
     private var progressiveMediaOrigin = builtPlayer.progressiveMediaOrigin
+    private val autoTransfersByPlayer = java.util.WeakHashMap<ExoPlayer, AutoTransferEvidence>().apply {
+        put(builtPlayer.player, builtPlayer.autoTransfers)
+    }
+    internal val latestAutoCompletedTransfer: AutoCompletedTransfer?
+        get() = autoTransfersByPlayer[player]?.latest()
     val observedBitsPerSecond: Long? get() = progressiveMediaOrigin.currentObservedBitsPerSecond()
 
     var audioOffsetMs: Long = initialAudioOffsetMs.coerceIn(-15_000, 15_000)
@@ -586,6 +596,7 @@ class Controller internal constructor(
                     // has to be told apart from a viewer's pause.
                     if (!value) {
                         playbackTelemetry.cancelPending()
+        autoTransfersByPlayer.clear()
                         viewerTransport.ownerStopping()
                     }
                     if (value && lifecyclePaused) applyEffectivePlayWhenReady()
@@ -3615,6 +3626,7 @@ class Controller internal constructor(
         }
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
+        autoTransfersByPlayer[built.player] = built.autoTransfers
         rendezvousJob?.cancel()
         rendezvousJob = null
         rendezvous = null
@@ -4307,10 +4319,77 @@ interface PlanLike {
     val deliveredDolbyVisionProfile: Int?
 }
 
+/** A source-body sample confirmed by Media3's completed media load event. */
+internal data class AutoCompletedTransfer(
+    val bodyBytes: Long,
+    val bodyDurationMs: Long?,
+    val completedAtMs: Long,
+    val origin: String?,
+    val networkLoad: Boolean,
+    val fromLocalCache: Boolean?,
+    val producerPaced: Boolean?,
+) {
+    fun ageMs(nowMs: Long): Long = if (nowMs >= completedAtMs) nowMs - completedAtMs else Long.MAX_VALUE
+}
+
+/** Bounded per-pipeline evidence; a failed/closed transfer is not completion.
+ * The existing HTTP factory has no local HTTP cache. A nonnetwork source is
+ * nonetheless unknown cache provenance rather than a network-link measurement. */
+@UnstableApi
+internal class AutoTransferEvidence(private val delegate: TransferListener) : TransferListener {
+    private data class Body(val uri: String, val startedAtMs: Long, val network: Boolean,
+                            val origin: String?, val paced: Boolean?, var bytes: Long = 0)
+    private val active = java.util.IdentityHashMap<DataSource, Body>()
+    private val ended = LinkedHashMap<String, AutoCompletedTransfer>()
+    private var completed: AutoCompletedTransfer? = null
+    @Synchronized fun latest(): AutoCompletedTransfer? = completed
+    @Synchronized fun reset() { active.clear(); ended.clear(); completed = null }
+    @Synchronized fun discard(uri: String) { ended.remove(uri) }
+    @Synchronized fun complete(load: LoadEventInfo) {
+        val sample = ended.remove(load.uri.toString()) ?: return
+        val path = load.uri.lastPathSegment.orEmpty()
+        // Exclude playlists, initialization maps, subtitles and progressive
+        // resources. These are server media segments, not arbitrary requests.
+        if (!Regex("seg[0-9]+\\.(m4s|ts)").matches(path) || load.bytesLoaded <= 0 ||
+            sample.bodyBytes != load.bytesLoaded) return
+        completed = sample
+    }
+    override fun onTransferInitializing(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) =
+        delegate.onTransferInitializing(source, dataSpec, isNetwork)
+    override fun onTransferStart(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+        delegate.onTransferStart(source, dataSpec, isNetwork)
+        val headers = source.responseHeaders
+        val paced = headers.entries.firstOrNull { it.key.equals("X-Plurx-Producer-Paced", true) }?.value?.singleOrNull()
+        val uri = source.uri ?: dataSpec.uri
+        val origin = if (uri.scheme != null && uri.host != null) "${uri.scheme}://${uri.host}${if (uri.port >= 0) ":${uri.port}" else ""}" else null
+        synchronized(this) {
+            if (active.size >= 32) active.clear()
+            active[source] = Body(uri.toString(), monotonicNowMs(), isNetwork, origin,
+                when (paced) { "0" -> false; "1" -> true; else -> null })
+        }
+    }
+    override fun onBytesTransferred(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean, bytesTransferred: Int) {
+        delegate.onBytesTransferred(source, dataSpec, isNetwork, bytesTransferred)
+        synchronized(this) { active[source]?.let { if (bytesTransferred > 0) it.bytes += bytesTransferred } }
+    }
+    override fun onTransferEnd(source: DataSource, dataSpec: DataSpec, isNetwork: Boolean) {
+        delegate.onTransferEnd(source, dataSpec, isNetwork)
+        synchronized(this) {
+            val body = active.remove(source) ?: return
+            val now = monotonicNowMs()
+            val duration = (now - body.startedAtMs).takeIf { it in 1..120_000 }
+            ended[body.uri] = AutoCompletedTransfer(body.bytes, duration, now, body.origin, body.network,
+                if (body.network) false else null, body.paced)
+            while (ended.size > 32) ended.remove(ended.keys.first())
+        }
+    }
+}
+
 @UnstableApi
 class BuiltPlayer internal constructor(
     val player: ExoPlayer,
     internal val progressiveMediaOrigin: ProgressiveMediaOrigin,
+    internal val autoTransfers: AutoTransferEvidence = AutoTransferEvidence(progressiveMediaOrigin),
 )
 
 @UnstableApi
@@ -4353,12 +4432,27 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
 @UnstableApi
 private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole): BuiltPlayer {
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
+    val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
-        transferListener = progressiveMediaOrigin,
+        transferListener = autoTransfers,
     )
-    return BuiltPlayer(player, progressiveMediaOrigin)
+    player.addAnalyticsListener(object : AnalyticsListener {
+        override fun onMediaItemTransition(eventTime: AnalyticsListener.EventTime, mediaItem: MediaItem?, reason: Int) {
+            autoTransfers.reset()
+        }
+        override fun onLoadCompleted(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+            if (mediaLoadData.dataType == C.DATA_TYPE_MEDIA) autoTransfers.complete(loadEventInfo)
+        }
+        override fun onLoadError(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData, error: java.io.IOException, wasCanceled: Boolean) {
+            autoTransfers.discard(loadEventInfo.uri.toString())
+        }
+        override fun onLoadCanceled(eventTime: AnalyticsListener.EventTime, loadEventInfo: LoadEventInfo, mediaLoadData: MediaLoadData) {
+            autoTransfers.discard(loadEventInfo.uri.toString())
+        }
+    })
+    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers)
 }
 
 /**

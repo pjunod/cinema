@@ -84,6 +84,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
@@ -118,6 +120,9 @@ import androidx.core.util.Consumer
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -127,6 +132,7 @@ import kotlin.math.roundToInt
 import tv.plurx.app.BuildConfig
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.AudioOutputRoute
+import tv.plurx.app.data.PresentationTarget
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DeviceCaps
@@ -224,6 +230,7 @@ private suspend fun loadPlan(
     fileId: Long,
     tracks: PreplayTracks,
     requestedQuality: PlaybackQuality,
+    presentationTarget: PresentationTarget?,
 ): Plan {
     val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
@@ -231,7 +238,7 @@ private suspend fun loadPlan(
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
     val playbackDecision = planLoadStage("decision") {
-        vm.playbackDecision(fileId, tracks, requestedQuality)
+        vm.playbackDecision(fileId, tracks, requestedQuality, presentationTarget)
     }
     val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
@@ -469,6 +476,9 @@ fun PlayerScreen(
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
+    val presentationLifecycle = LocalLifecycleOwner.current
+    var presentationTarget by remember(itemId, fileId) { mutableStateOf<PresentationTarget?>(null) }
+    var presentationRevision by remember(itemId, fileId) { mutableLongStateOf(0L) }
     var plan by remember(itemId, fileId) { mutableStateOf<Plan?>(null) }
     var failed by remember(itemId, fileId) { mutableStateOf(false) }
     var generation by remember(itemId, fileId) { mutableIntStateOf(0) }
@@ -507,12 +517,20 @@ fun PlayerScreen(
         // preparation latency.
         attemptOpenedAtMs = monotonicNowMs()
         try {
+            // Wait only for the actual player container's first layout. A
+            // hidden/unlaid-out surface remains unknown rather than using the panel.
+            val measuredTarget = withTimeoutOrNull(250L) {
+                snapshotFlow { presentationTarget }.first { it != null }
+            }?.takeIf {
+                presentationLifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            }
             plan = loadPlan(
                 vm,
                 itemId,
                 fileId,
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
                 requestedQuality = requestedQuality,
+                presentationTarget = measuredTarget,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -533,7 +551,19 @@ fun PlayerScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    Box(Modifier.fillMaxSize().background(Color.Black).onGloballyPositioned { coordinates ->
+        // Compose layout sizes are physical backing pixels, before FIT letterboxing.
+        val visible = coordinates.isAttached && !coordinates.boundsInWindow().isEmpty &&
+            presentationLifecycle.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        val width = coordinates.size.width
+        val height = coordinates.size.height
+        if (!visible || width !in 1..16384 || height !in 1..16384) {
+            presentationTarget = null
+        } else if (presentationTarget?.width_px != width || presentationTarget?.height_px != height) {
+            presentationRevision = (presentationRevision + 1L).coerceAtMost(9_007_199_254_740_991L)
+            presentationTarget = PresentationTarget(width, height, presentationRevision)
+        }
+    }) {
         when {
             failed -> PlaybackFailed(
                 fault = preplayerStoppedFault("Couldn't start playback."),
