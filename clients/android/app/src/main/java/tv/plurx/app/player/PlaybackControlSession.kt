@@ -397,6 +397,7 @@ class PlaybackControlSession(
         onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
         onAcknowledged: (ActionAcknowledgement) -> Unit = {},
+        onEffectiveSelection: (EffectiveSelection) -> Unit = {},
         /** The reporter stopped for good. A fact to record, never a surface. */
         onGaveUp: (String) -> Unit = {},
     ) {
@@ -457,6 +458,15 @@ class PlaybackControlSession(
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence
                         answerPreparation = exchange.response?.delivery?.preparation
+                    }
+                }
+                exchange.response?.effectiveSelection?.let { effective ->
+                    dispatchSubtitleReady {
+                        synchronized(verdictLock) {
+                            if (generation == verdictGeneration &&
+                                exchange.intentGeneration == verdictIntentGeneration &&
+                                exchange.capture.hasSameIntent(latest.get())) onEffectiveSelection(effective)
+                        }
                     }
                 }
                 // A memoised extraction failure is not "warming". Telling the

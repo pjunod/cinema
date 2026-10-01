@@ -5587,6 +5587,15 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
         metric.outcome = TAKEOVER_SKIPPED;
         return Ok(());
     }
+    // Persisted candidate envelopes omit process-local execution context. Rebind
+    // the exact source/worker recipe before dispatch; never silently execute
+    // an ordinary height plan after takeover.
+    tokio::time::timeout_at(
+        deadline,
+        state.transcode.restore_candidate_context(&mut envelope),
+    )
+    .await
+    .map_err(|_| "candidate takeover validation timed out".to_owned())??;
     let user = tokio::time::timeout_at(deadline, state.store.get_user(route.user_id))
         .await
         .map_err(|_| "media-session takeover timed out".to_owned())?

@@ -1296,7 +1296,13 @@ pub(super) async fn process_preparation_candidate(
             decision,
             crate::playback_control::PreparationDecision::Prepare { .. }
         )
-        .then(|| state.node_id.clone()),
+        .then(|| {
+            candidate
+                .candidate_context
+                .as_ref()
+                .and_then(|context| context.owner_node_id.clone())
+                .unwrap_or_else(|| state.node_id.clone())
+        }),
         PreparationPurpose::PlannedRelocation(fence)
             if capabilities
                 .as_ref()
@@ -1559,16 +1565,25 @@ pub(super) async fn stage_prepared_successor_with_prime(
         quality_candidates: if let Some(caps) = predecessor.decoder_caps.as_ref() {
             Some(
                 state
-                    .transcode
+                    .media_pool
                     .quality_candidates(
-                        source,
-                        &caps.device_caps(),
-                        candidate.audio_index,
-                        candidate.audio_offset_ms,
-                        candidate.subtitle_burn,
-                        candidate.presentation,
+                        state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: candidate.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.device_caps(),
+                            audio_index: candidate.audio_index,
+                            audio_offset_ms: candidate.audio_offset_ms,
+                            subtitle_burn: candidate.subtitle_burn,
+                            presentation: candidate.presentation,
+                        },
                     )
-                    .await,
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect(),
             )
         } else {
             None

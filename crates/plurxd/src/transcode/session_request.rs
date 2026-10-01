@@ -478,6 +478,8 @@ pub struct SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    /// Dispatch location for the exact process-bound recipe, never client wire.
+    pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
     pub recipe_digest: [u8; 32],
     pub profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
@@ -791,6 +793,19 @@ pub(super) struct SessionOwner<'a> {
     pub(super) supersession_user: &'a str,
     pub(super) playback_id: &'a str,
     pub(super) automatic: bool,
+}
+
+impl SessionKind {
+    pub(crate) fn copy_contract(self) -> Option<(bool, bool, bool)> {
+        match self {
+            Self::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+            Self::Transcode { .. } => None,
+        }
+    }
 }
 
 impl SessionRequest {

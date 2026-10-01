@@ -3,6 +3,48 @@ import Combine
 import Foundation
 import MediaPlayer
 
+func autoCompletedTransferBps(_ sample: PlayerController.AutoCompletedTransfer, nowMs: Int, maximumAgeMs: Int = 10_000) -> Double? {
+    guard sample.networkLoad, !sample.fromLocalCache, sample.producerPaced == false,
+          sample.ageMs(nowMs: nowMs) <= maximumAgeMs, sample.bodyBytes > 0,
+          let duration = sample.bodyDurationSeconds, duration.isFinite, duration > 0 else { return nil }
+    let bps = Double(sample.bodyBytes) * 8 / duration
+    return bps.isFinite && bps > 0 ? bps : nil
+}
+
+func autoOriginalTransferMarginProven(_ samples: [PlayerController.AutoCompletedTransfer], sessionId: String, nowMs: Int) -> Bool {
+    var distinct: [String: PlayerController.AutoCompletedTransfer] = [:]
+    for sample in samples {
+        guard sample.segmentId.contains("/\(sessionId)/"),
+              autoCompletedTransferBps(sample, nowMs: nowMs, maximumAgeMs: 15_000) != nil,
+              let mediaDuration = sample.mediaDurationSeconds, mediaDuration.isFinite, mediaDuration > 0 else { continue }
+        distinct[sample.segmentId] = sample
+    }
+    let usable = Array(distinct.values)
+    guard usable.count >= 2, usable.reduce(0, { $0 + ($1.mediaDurationSeconds ?? 0) }) >= 2 else { return false }
+    let link = usable.compactMap { autoCompletedTransferBps($0, nowMs: nowMs, maximumAgeMs: 15_000) }.min() ?? 0
+    let wire = usable.map { Double($0.bodyBytes) * 8 / ($0.mediaDurationSeconds ?? .infinity) }.max() ?? .infinity
+    return wire.isFinite && link >= wire * 1.8
+}
+
+func autoStagedEncodeProof(_ status: PlaybackSessionStatus?, observedAtMs: Int?, nowMs: Int,
+                          sessionId: String, candidateId: String) -> Bool {
+    guard let status, let observedAtMs, nowMs >= observedAtMs,
+          let age = status.activeEncodeAgeMs, age >= 0 else { return false }
+    return nowMs - observedAtMs <= 15_000 && age <= 15_000 - (nowMs - observedAtMs) &&
+        status.id == sessionId && status.activeEncodeCandidateId == candidateId &&
+        status.activeEncodeSegments.map({ $0 >= 2 }) == true &&
+        status.activeEncodeActiveMs.map({ $0 >= 2_000 }) == true &&
+        status.activeEncodeMilliRealtime.map({ $0 >= 1_150 }) == true
+}
+
+func autoTrialMayCommit(requestedId: String?, offeredId: String?, requestedTargetRevision: UInt64?,
+                       targetRevision: UInt64?, requestedViewerEpoch: Int?, viewerEpoch: Int,
+                       automatic: Bool, presenting: Bool, seeking: Bool) -> Bool {
+    requestedId != nil && requestedId == offeredId && requestedTargetRevision != nil &&
+        requestedTargetRevision == targetRevision && requestedViewerEpoch == viewerEpoch &&
+        automatic && presenting && !seeking
+}
+
 private struct NowPlayingState: Equatable {
     let title: String
     let durationMs: Int
@@ -1975,6 +2017,29 @@ final class PlayerController: ObservableObject {
     @Published private(set) var decision: Decision?
     /// Immutable facts used to obtain `decision`; every session opened by this
     /// controller repeats them even if another screen probes in the meantime.
+    private var autoDesiredCandidate: QualityCandidate?
+    private var autoActiveCandidateId: String?
+    private var autoRouteProtocol: String?
+    private var autoNextTickMs = 0
+    private var autoUpgradeSinceMs: Int?
+    private var autoLastSwitchMs: Int?
+    private var autoSwitchTimes: [Int] = []
+    private var autoBlockedUntil: [String: Int] = [:]
+    private var autoPreparing = false
+    private var autoVoluntary = true
+    private var autoExposed = false
+    private var autoMildSamples = 0
+    private var autoMildTransferCompletedMs: Int?
+    private var autoDecoderRejected: Set<String> = []
+    private var autoPreparedTargetRevision: UInt64?
+    private var autoPreparedViewerEpoch: Int?
+    private var autoTransportRevision: UInt64 = 1
+    private var autoDestinationRevision: UInt64 = 1
+    private var autoRecipeRevision: UInt64 = 1
+    private var autoEnvelopeSelection: MediaIntentSelection?
+    private var autoStagedStatus: PlaybackSessionStatus?
+    private var autoStagedStatusObservedMs: Int?
+
     private var decisionCaps: DeviceCaps?
     private var presentationTarget: PresentationTarget?
     private var presentationRevision: UInt64 = 0
@@ -1984,9 +2049,11 @@ final class PlayerController: ObservableObject {
         guard let widthPx, let heightPx,
               (1...16384).contains(widthPx), (1...16384).contains(heightPx) else {
             presentationTarget = nil
+            autoUpgradeSinceMs = nil
             return
         }
         guard presentationTarget?.widthPx != widthPx || presentationTarget?.heightPx != heightPx else { return }
+        autoUpgradeSinceMs = nil
         presentationRevision = min(presentationRevision + 1, 9_007_199_254_740_991)
         presentationTarget = PresentationTarget(widthPx: widthPx, heightPx: heightPx, revision: presentationRevision)
     }
@@ -2276,10 +2343,14 @@ final class PlayerController: ObservableObject {
         let fromLocalCache: Bool
         let producerPaced: Bool?
         let statusCode: Int?
+        let segmentId: String
+        let mediaDurationSeconds: Double?
         func ageMs(nowMs: Int) -> Int { nowMs >= completedAtMs ? nowMs - completedAtMs : Int.max }
     }
     private(set) var latestAutoCompletedTransfer: AutoCompletedTransfer?
     private var autoTransferMetricTask: Task<Void, Never>?
+    private var autoStagedTransferMetricTask: Task<Void, Never>?
+    private var autoStagedTransfers: [AutoCompletedTransfer] = []
 
     private func retireAutoTransferMetrics() {
         autoTransferMetricTask?.cancel()
@@ -2287,14 +2358,17 @@ final class PlayerController: ObservableObject {
         latestAutoCompletedTransfer = nil
     }
 
-    private func installAutoTransferMetrics(for item: AVPlayerItem) {
-        retireAutoTransferMetrics()
+    private func installAutoTransferMetrics(for item: AVPlayerItem, staged: Bool = false) {
+        if staged {
+            autoStagedTransferMetricTask?.cancel()
+            autoStagedTransfers.removeAll()
+        } else { retireAutoTransferMetrics() }
         guard #available(iOS 18, tvOS 18, *) else { return }
-        autoTransferMetricTask = Task { @MainActor [weak self, weak item] in
+        let task = Task { @MainActor [weak self, weak item] in
             guard let item else { return }
             do {
                 for try await event in item.metrics(forType: AVMetricHLSMediaSegmentRequestEvent.self) {
-                    guard let self, !Task.isCancelled, self.player.currentItem === item else { return }
+                    guard let self, !Task.isCancelled, (staged ? self.preparedItem === item : self.player.currentItem === item) else { return }
                     guard !event.isMapSegment, let resource = event.mediaResourceRequestEvent,
                           resource.errorEvent == nil else { continue }
                     // Only an actual completed transaction supplies a body span.
@@ -2318,7 +2392,7 @@ final class PlayerController: ObservableObject {
                                 guard let scheme = components.scheme, let host = components.host else { return nil }
                                 return "\(scheme)://\(host)\(components.port.map { ":\($0)" } ?? "")"
                             }
-                        self.latestAutoCompletedTransfer = AutoCompletedTransfer(
+                        let sample = AutoCompletedTransfer(
                             bodyBytes: transfer.countOfResponseBodyBytesReceived,
                             bodyDurationSeconds: duration,
                             completedAtMs: now >= ageMs ? now - ageMs : 0,
@@ -2326,14 +2400,23 @@ final class PlayerController: ObservableObject {
                             networkLoad: transfer.resourceFetchType == .networkLoad,
                             fromLocalCache: resource.wasReadFromCache || transfer.resourceFetchType == .localCache,
                             producerPaced: paced == "0" ? false : (paced == "1" ? true : nil),
-                            statusCode: response?.statusCode
+                            statusCode: response?.statusCode,
+                            segmentId: event.url?.absoluteString ?? url?.absoluteString ?? "",
+                            mediaDurationSeconds: event.segmentDuration.isFinite && event.segmentDuration > 0
+                                ? event.segmentDuration : nil
                         )
+                        if staged {
+                            self.autoStagedTransfers.removeAll { $0.segmentId == sample.segmentId }
+                            self.autoStagedTransfers.append(sample)
+                            if self.autoStagedTransfers.count > 4 { self.autoStagedTransfers.removeFirst() }
+                        } else { self.latestAutoCompletedTransfer = sample }
                     }
                 }
             } catch {
                 // Metrics are optional observation, never a playback failure.
             }
         }
+        if staged { autoStagedTransferMetricTask = task } else { autoTransferMetricTask = task }
     }
 
     private var itemObserver: AVPlayerItemObserver?
@@ -2588,6 +2671,7 @@ final class PlayerController: ObservableObject {
     private(set) var wantsPlayback = true {
         didSet {
             guard wantsPlayback != oldValue else { return }
+            autoTransportRevision = min(autoTransportRevision + 1, 9_007_199_254_740_991)
             present(.playbackRequested(wantsPlayback))
         }
     }
@@ -2595,7 +2679,12 @@ final class PlayerController: ObservableObject {
     /// at 1.5× resumes at 1.5× rather than at the 0 the transport reports
     /// while paused (P2-5).
     private var preferredRate: Float = 1 {
-        didSet { if preferredRate != oldValue { updateNowPlaying() } }
+        didSet {
+            if preferredRate != oldValue {
+                autoTransportRevision = min(autoTransportRevision + 1, 9_007_199_254_740_991)
+                updateNowPlaying()
+            }
+        }
     }
     /// The viewer's audio language, kept because this controller now performs
     /// media selection itself instead of leaving it to AVPlayer criteria.
@@ -2647,7 +2736,11 @@ final class PlayerController: ObservableObject {
 
     var subtitles: [SubtitleTrack] { decision?.subtitles ?? [] }
     var audioTracks: [AudioTrack] { decision?.audio ?? [] }
-    var qualityRungs: [QualityRung] { decision?.ladder ?? [] }
+    var qualityRungs: [QualityRung] {
+        guard decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
+              let candidates = decision?.qualityCandidates else { return decision?.ladder ?? [] }
+        return manualCatalogHeights(candidates).map { QualityRung(height: $0, totalKbps: 0, peakKbps: 0) }
+    }
     var activeMarker: Marker? {
         decision?.markers?.first { currentMs >= $0.startMs && currentMs < $0.endMs }
     }
@@ -3740,6 +3833,8 @@ final class PlayerController: ObservableObject {
     }
 
     func seek(toMs requested: Int) {
+        autoDestinationRevision = min(autoDestinationRevision + 1, 9_007_199_254_740_991)
+        resetAutoQualityBudgetForViewer()
         if let markerEnd = lastMarkerSkipEndMs,
            requested < markerEnd - 1_000,
            currentMs >= markerEnd - 1_000 {
@@ -3933,6 +4028,7 @@ final class PlayerController: ObservableObject {
         let actionEpoch = beginViewerAction()
         let activeOverlay = pgsOverlayTrackIndex
         selectedSubtitle = index
+        refreshAutoCatalogForViewerRecipe()
         if cold {
             initialDecisionRequest.selection.subtitleIndex = requestedIndex
             let destination = seekState.absolute(
@@ -4077,6 +4173,7 @@ final class PlayerController: ObservableObject {
         )
         currentMs = destination.target
         selectedAudio = index
+        refreshAutoCatalogForViewerRecipe()
         recipeRevision.change()
         if started && decision == nil {
             // The selection-aware decision decides whether this track can
@@ -4097,6 +4194,8 @@ final class PlayerController: ObservableObject {
     }
 
     func selectQuality(_ height: Int?) {
+        resetAutoQualityBudgetForViewer()
+        autoDesiredCandidate = nil
         let cold = started && decision == nil
         let requestedQuality = height.map { Self.initialQuality(height: $0) } ?? .auto
         guard height != selectedHeight || selectedQualityIsOriginal
@@ -4648,6 +4747,7 @@ final class PlayerController: ObservableObject {
     ) async {
         guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
               initialDecisionGeneration == generation, let model else { return }
+        let layoutAttempt = snapshotAttempt()
         do {
             // Allow the mounted surface to report its first layout; no panel/model
             // estimate substitutes for a hidden or unmeasured container.
@@ -4656,7 +4756,8 @@ final class PlayerController: ObservableObject {
                     try await Task.sleep(for: .milliseconds(10))
                 }
             }
-            guard !Task.isCancelled, isCurrentLifecycle(lifecycle), initialDecisionGeneration == generation else { return }
+            guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
+                  attemptStillCurrent(layoutAttempt, fence: .autoInitialLayout) else { return }
             let target = presentationTarget
             let playbackDecision = try await Caps.PresentationContext.$target.withValue(target) {
                 try await requestPlaybackDecision(model, file, request.selection, request.quality)
@@ -4668,6 +4769,8 @@ final class PlayerController: ObservableObject {
             initialDecisionDeadlineTask = nil
             decisionCaps = playbackDecision.caps
             self.decision = decision
+            autoActiveCandidateId = decision.qualityCandidateId
+            autoRouteProtocol = decision.displayAwareAutoProtocol
             if knownDurationMs <= 0 { knownDurationMs = decision.source?.durationMs ?? 0 }
             // The standing Quality preference becomes this playback's rung
             // now that the ladder says which rungs exist for this source. An
@@ -4677,6 +4780,13 @@ final class PlayerController: ObservableObject {
                 for: request.quality, ladder: decision.ladder ?? []
             )
             selectedQualityIsOriginal = request.quality == .original
+            if request.quality == .auto, selectedHeight == nil,
+               model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
+               decision.displayAwareAutoProtocol == "route-v1" {
+                autoDesiredCandidate = decision.qualityCandidates?.first {
+                    $0.hasValidIdentity && $0.id == decision.qualityCandidateId
+                }
+            }
             // `default` on a decision track is the server's own shared-policy
             // pick, not the muxer's flag (crates/plurxd http/stream.rs
             // overwrites both lists from `select_tracks`) — and for a
@@ -4942,7 +5052,7 @@ final class PlayerController: ObservableObject {
             let orderedControlSequence = [reporterControlSequence, pendingControlSequence]
                 .compactMap { $0 }
                 .max()
-            let body = Self.applyOpenIntent(
+            var body = Self.applyOpenIntent(
                 to: CreateSessionRequest(
                     playbackId: playbackId,
                     controlSequence: orderedControlSequence,
@@ -4978,6 +5088,28 @@ final class PlayerController: ObservableObject {
                 selectedHeight: requestedHeight,
                 qualityIsOriginal: requestedOriginal
             )
+            if model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
+               decision.displayAwareAutoProtocol == "route-v1" {
+                if var caps = body.caps {
+                    caps.display.presentationTarget = presentationTarget
+                    body.caps = caps
+                }
+                let selection = playbackControlSelection()
+                let envelopeSelection = MediaIntentSelection(quality: selection.quality, codec: selection.codec,
+                    dynamicRange: selection.dynamicRange, audioTrack: selection.audioTrack,
+                    audioOffsetMs: selection.audioOffsetMs, subtitles: selection.subtitle)
+                if let prior = autoEnvelopeSelection, prior != envelopeSelection {
+                    autoRecipeRevision = min(autoRecipeRevision + 1, 9_007_199_254_740_991)
+                }
+                autoEnvelopeSelection = envelopeSelection
+                body.intent = MediaIntentEnvelope(lifetimeId: playbackId,
+                    recipeRevision: autoRecipeRevision, destinationRevision: autoDestinationRevision,
+                    transportRevision: autoTransportRevision, selection: envelopeSelection)
+                if let candidate = autoDesiredCandidate, selectedHeight == nil, !selectedQualityIsOriginal {
+                    body.height = (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains(candidate.targetHeight) ? candidate.targetHeight : nil
+                    body.qualityAuto = true
+                }
+            }
             // The rung this open is stepping down *from*, read before the
             // successor overwrites it. Only a strictly lower answer proves the
             // ladder still has somewhere to go.
@@ -5622,6 +5754,15 @@ final class PlayerController: ObservableObject {
                       self.attemptStillCurrent(pollAttempt, fence: .recoveryEvidencePoll),
                       self.sessionId == polledSessionId
                 else { return }
+                if self.autoPreparing, self.autoVoluntary,
+                   let staged = self.preparedReplacement.activeAction {
+                    let stagedStatus = try? await model.hlsStatus(staged.sessionId)
+                    guard !Task.isCancelled, self.sessionId == polledSessionId else { return }
+                    if self.preparedReplacement.activeAction?.sessionId == staged.sessionId {
+                        self.autoStagedStatus = stagedStatus
+                        self.autoStagedStatusObservedMs = stagedStatus == nil ? nil : PlaybackControlSession.monotonicMs()
+                    }
+                }
                 if status == nil {
                     // Row 18: a stats poll is telemetry. The picture is
                     // untouched and the log line is the only trace.
@@ -5858,6 +5999,7 @@ final class PlayerController: ObservableObject {
            applyStallVerdict(verdict, event: event, deferralDeadline: deferralDeadline) {
             return
         }
+        selectAutoStallRecoveryCandidate()
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -7623,6 +7765,7 @@ final class PlayerController: ObservableObject {
             eventStatus: detail?.eventStatus,
             eventComment: detail?.eventComment
         )
+        if isCompatibilityFailure { noteAutoDecodeFailure() }
         // Only a transport failure can be answered by another node; see
         // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
         // same question and would walk the whole list for a terminal 404.
@@ -8605,6 +8748,7 @@ final class PlayerController: ObservableObject {
     /// then say so.
     private func handleBlackFrameDecodeFailure(at position: Int) async {
         guard started, !isChangingStream, player.currentItem != nil else { return }
+        noteAutoDecodeFailure()
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()
@@ -9635,6 +9779,11 @@ extension PlayerController {
     /// leaves the reporter silent. That is the passive M2 behaviour: playback
     /// does not depend on the control plane and never should.
     func beginPlaybackControl(_ hls: HlsStart, origin: String) {
+        autoRouteProtocol = hls.displayAwareAutoProtocol
+        if hls.displayAwareAutoProtocol == "route-v1" {
+            if let candidates = hls.qualityCandidates { decision?.qualityCandidates = candidates }
+            autoActiveCandidateId = hls.qualityCandidateId
+        }
         guard let bootstrap = hls.control, bootstrap.isValid else {
             playbackControl.end()
             playbackControlSummary = nil
@@ -9671,6 +9820,10 @@ extension PlayerController {
             },
             onAcknowledgementDelivered: { [weak self] acknowledgement in
                 self?.preparedReplacement.acknowledgementDelivered(acknowledgement)
+            },
+            onEffectiveSelection: { [weak self] effective in
+                guard let self, self.model?.displayAwareAutoProtocol == "route-v1" else { return }
+                self.autoActiveCandidateId = effective.candidateId
             },
             onExchangeFailure: { [weak self] failure in
                 guard let self else { return }
@@ -9772,7 +9925,7 @@ extension PlayerController {
             observationOverride: controlObservationOverride,
             renderOverride: controlRenderOverride,
             selection: playbackControlSelection(),
-            capabilities: Caps.controlCapabilities(),
+            capabilities: autoControlCapabilities(),
             // Sticky until the exchange that carried it comes back: the
             // reporter coalesces, so a settlement parked anywhere but the
             // newest snapshot is the one thing a position update can drop.
@@ -9785,11 +9938,26 @@ extension PlayerController {
     /// Codec and dynamic range are `auto` on purpose: after `/decision` this
     /// client never forces either, and reporting anything else would tell the
     /// server it had made a choice it has not made.
+    private func autoControlCapabilities() -> DynamicCapabilities {
+        var caps = Caps.controlCapabilities()
+        if model?.displayAwareAuto == true, model?.displayAwareAutoProtocol == "route-v1",
+           decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1" {
+            caps.presentationTarget = presentationTarget
+            if let video = decisionCaps?.video {
+                caps.decoderCaps = DecoderCapabilitySnapshot(revision: 1, video: video)
+            }
+        }
+        return caps
+    }
+
     func playbackControlSelection() -> ClientSelection {
         let mode = playbackControlSubtitleMode()
         return ClientSelection(
             quality: selectedHeight.map { .manual(height: $0) }
-                ?? (selectedQualityIsOriginal ? .original : .auto),
+                ?? (selectedQualityIsOriginal ? .original :
+                    (model?.displayAwareAuto == true &&
+                     model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1" ? autoDesiredCandidate : nil)
+                        .map { .autoCandidate(height: (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0.targetHeight) ? $0.targetHeight : nil, candidateId: $0.id) } ?? .auto),
             audioTrack: selectedAudio,
             subtitle: SubtitleSelection(
                 mode: mode,
@@ -9810,7 +9978,228 @@ extension PlayerController {
 
     /// Called wherever the player's state moves. The reporter coalesces, so
     /// this is cheap enough for the periodic time observer.
+    /// Uses only fresh completed network bodies with explicit producer pacing provenance.
+    /// Selects the next route for the existing bounded compatibility recovery owner.
+    private func refreshAutoCatalogForViewerRecipe() {
+        autoDesiredCandidate = nil
+        autoPreparing = false
+        autoUpgradeSinceMs = nil
+        guard let model, model.displayAwareAuto, model.displayAwareAutoProtocol == "route-v1",
+              let fileId = decision?.fileId else { return }
+        decision?.qualityCandidates = nil
+        let selection = PrePlaySelection(audioIndex: selectedAudio,
+                                        subtitleIndex: selectedSubtitle ?? PrePlaySelection.subtitleOff)
+        let catalogAttempt = snapshotAttempt()
+        let target = presentationTarget
+        Task { @MainActor [weak self] in
+            let fresh = try? await Caps.PresentationContext.$target.withValue(target) {
+                try await model.playbackDecision(fileId: fileId, selection: selection, quality: .auto, audioOffsetMs: 0)
+            }
+            guard let self, self.started,
+                  self.attemptStillCurrent(catalogAttempt, fence: .autoCatalogRefresh),
+                  self.decision?.fileId == fileId else { return }
+            if fresh?.decision.displayAwareAutoProtocol == "route-v1" {
+                self.decision?.qualityCandidates = fresh?.decision.qualityCandidates
+            }
+            // A decision is a plan; it cannot relabel the attached presentation.
+        }
+    }
+
+    private func resetAutoQualityBudgetForViewer() {
+        autoSwitchTimes.removeAll()
+        autoLastSwitchMs = nil
+        autoUpgradeSinceMs = nil
+        autoMildSamples = 0
+        if autoPreparing { autoDesiredCandidate = nil; autoPreparing = false }
+    }
+
+    private func selectAutoStallRecoveryCandidate() {
+        guard model?.displayAwareAuto == true, model?.autoAbr == true,
+              model?.displayAwareAutoProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
+              selectedHeight == nil, !selectedQualityIsOriginal, wantsPlayback,
+              seekState.pendingMs == nil, let candidates = decision?.qualityCandidates,
+              let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
+        else { return }
+        let now = PlaybackControlSession.monotonicMs()
+        if sessionStatusAgeMs.map({ $0 <= 15_000 }) == true, sessionStatus?.producerState == "held" {
+            autoUpgradeSinceMs = nil
+            return
+        }
+        let link: Double? = {
+            guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
+                  !transfer.fromLocalCache, transfer.producerPaced == false,
+                  transfer.ageMs(nowMs: now) <= 10_000, let duration = transfer.bodyDurationSeconds,
+                  duration > 0, transfer.bodyBytes > 0 else { return nil }
+            return Double(transfer.bodyBytes) * 8 / duration
+        }()
+        let severe = link.map { bps in current.peakBps.map { bps < Double($0) * 0.7 } ?? false } ?? false
+        let mild = autoMildSamples >= 2 && link.map { bps in current.peakBps.map { bps < Double($0) * 1.3 } ?? false } == true
+        let producer = sessionStatusAgeMs.map { $0 <= 15_000 } == true &&
+            sessionStatus?.producerState == "running" && sessionStatus?.activeEncodeCandidateId == current.id &&
+            sessionStatus?.activeEncodeAgeMs.map { $0 >= 0 && $0 + (sessionStatusAgeMs ?? 15_001) <= 15_000 } == true &&
+            sessionStatus?.activeEncodeSegments.map { $0 >= 2 } == true &&
+            sessionStatus?.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
+            sessionStatus?.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true
+        guard severe || producer || mild else { return }
+        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
+        guard severe || (autoSwitchTimes.count < 6 && (autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true)) else { return }
+        let area = Int64(current.width) * Int64(current.height)
+        let next = candidates.filter { candidate in
+            candidate.hasValidIdentity && !autoDecoderRejected.contains(candidate.id) &&
+            candidate.decoderCompatible && (candidate.completeCache || candidate.sustainable) &&
+            candidate.grade == current.grade && Int64(candidate.width) * Int64(candidate.height) < area &&
+            (!severe || link.map { bps in candidate.peakBps.map { Double($0) <= bps } ?? false } == true)
+        }.max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+        if let next {
+            autoDesiredCandidate = next
+            autoPreparing = false
+            autoUpgradeSinceMs = nil
+            recipeRevision.change()
+            noteSurfaceLogOnly("auto_quality_recovery:\(severe ? "link" : "encode"):\(next.id)")
+        }
+    }
+
+    private func noteAutoDecodeFailure() {
+        guard model?.displayAwareAuto == true, model?.autoAbr == true,
+              model?.displayAwareAutoProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
+              selectedHeight == nil, !selectedQualityIsOriginal,
+              let candidates = decision?.qualityCandidates,
+              let current = candidates.first(where: { $0.id == autoActiveCandidateId }),
+              !autoDecoderRejected.contains(current.id) else { return }
+        autoDecoderRejected.insert(current.id)
+        let area = Int64(current.width) * Int64(current.height)
+        let next = candidates.filter { $0.hasValidIdentity && !autoDecoderRejected.contains($0.id) &&
+            $0.decoderCompatible && ($0.route != "encode" || $0.grade == current.grade) &&
+            Int64($0.width) * Int64($0.height) < area }
+            .max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+        if let next {
+            autoDesiredCandidate = next
+            autoPreparing = false
+            autoUpgradeSinceMs = nil
+            recipeRevision.change()
+        }
+    }
+
+    private func autoStagedOriginalAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
+        guard autoPreparing, autoVoluntary, let desired = autoDesiredCandidate,
+              desired.route != "encode", desired.peakBps == nil else { return true }
+        return autoOriginalTransferMarginProven(autoStagedTransfers, sessionId: action.sessionId,
+                                               nowMs: PlaybackControlSession.monotonicMs())
+    }
+
+    private func autoStagedProductionAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
+        guard autoPreparing, autoVoluntary, let desired = autoDesiredCandidate,
+              desired.route == "encode", !desired.completeCache else { return true }
+        return autoStagedEncodeProof(autoStagedStatus, observedAtMs: autoStagedStatusObservedMs,
+            nowMs: PlaybackControlSession.monotonicMs(), sessionId: action.sessionId, candidateId: desired.id)
+    }
+
+    private func tickDisplayAwareAuto() {
+        let now = PlaybackControlSession.monotonicMs()
+        guard now >= autoNextTickMs else { return }
+        autoNextTickMs = now + 5_000
+        guard model?.displayAwareAuto == true, model?.autoAbr == true,
+              model?.displayAwareAutoProtocol == "route-v1",
+              decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
+              selectedHeight == nil, !selectedQualityIsOriginal, wantsPlayback,
+              player.rate > 0, surface.presenting, seekState.pendingMs == nil, !autoPreparing,
+              preparedPlayer == nil, preparedReplacement.shouldAskForPreparation,
+              let target = presentationTarget,
+              let candidates = decision?.qualityCandidates,
+              let current = candidates.first(where: { $0.hasValidIdentity && $0.id == autoActiveCandidateId })
+        else { autoUpgradeSinceMs = nil; return }
+        if sessionStatusAgeMs.map({ $0 <= 15_000 }) == true, sessionStatus?.producerState == "held" {
+            autoUpgradeSinceMs = nil
+            return
+        }
+        let link: Double? = {
+            guard let transfer = latestAutoCompletedTransfer, transfer.networkLoad,
+                  !transfer.fromLocalCache, transfer.producerPaced == false,
+                  transfer.ageMs(nowMs: now) <= 10_000,
+                  let duration = transfer.bodyDurationSeconds, duration > 0,
+                  transfer.bodyBytes > 0 else { return nil }
+            let bps = Double(transfer.bodyBytes) * 8 / duration
+            return bps.isFinite && bps > 0 ? bps : nil
+        }()
+        autoSwitchTimes.removeAll { now - $0 >= 3_600_000 }
+        let eligible = candidates.filter {
+            $0.id != current.id && $0.hasValidIdentity && !autoDecoderRejected.contains($0.id) &&
+            $0.width > 0 && $0.height > 0 && $0.decoderCompatible &&
+            ($0.completeCache || $0.sustainable) && $0.grade == current.grade &&
+            (autoBlockedUntil[$0.id] ?? 0) <= now
+        }
+        let severe = link.map { bps in current.peakBps.map { bps < Double($0) * 0.7 } ?? false } ?? false
+        let currentArea = Int64(current.width) * Int64(current.height)
+        let mild = link.map { bps in current.peakBps.map { bps < Double($0) * 1.3 } ?? false } ?? false
+        if !mild { autoMildSamples = 0; autoMildTransferCompletedMs = nil }
+        else if autoMildTransferCompletedMs != latestAutoCompletedTransfer?.completedAtMs {
+            autoMildSamples = min(2, autoMildSamples + 1)
+            autoMildTransferCompletedMs = latestAutoCompletedTransfer?.completedAtMs
+        }
+        let producerPressure = sessionStatusAgeMs.map { $0 <= 15_000 } == true &&
+            sessionStatus?.producerState == "running" && sessionStatus?.activeEncodeCandidateId == current.id &&
+            sessionStatus?.activeEncodeAgeMs.map { $0 >= 0 && $0 + (sessionStatusAgeMs ?? 15_001) <= 15_000 } == true &&
+            sessionStatus?.activeEncodeSegments.map { $0 >= 2 } == true &&
+            sessionStatus?.activeEncodeActiveMs.map { $0 >= 2_000 } == true &&
+            sessionStatus?.activeEncodeMilliRealtime.map { $0 > 0 && $0 < 1_000 } == true &&
+            (bufferedRunwaySeconds() ?? 0) < 10
+        let pressure = severe || autoMildSamples >= 2 || producerPressure
+        let aspect = Double(current.width) / Double(current.height)
+        let neededWidth = min(Double(target.widthPx), Double(target.heightPx) * aspect)
+        let neededHeight = min(Double(target.heightPx), Double(target.widthPx) / aspect)
+        let chosen: QualityCandidate?
+        if pressure {
+            chosen = eligible.filter { candidate in
+                Int64(candidate.width) * Int64(candidate.height) < currentArea &&
+                (!severe || link.map { bps in candidate.peakBps.map { Double($0) <= bps } ?? false } == true) }
+                .max { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+            autoUpgradeSinceMs = nil
+        } else {
+            let fitting = eligible.filter { candidate in
+                link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? (candidate.route != "encode") } == true
+            }
+            let originals = fitting.filter { $0.route != "encode" }
+            let cover = fitting.filter { $0.route == "encode" && Double($0.width) >= neededWidth && Double($0.height) >= neededHeight }
+            chosen = originals.first ?? cover.min { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) }
+            guard let chosen,
+                  Int64(chosen.width) * Int64(chosen.height) > currentArea ||
+                    (current.route == "encode" && chosen.route != "encode"),
+                  (bufferedRunwaySeconds() ?? 0) >= 10,
+                  autoSwitchTimes.count < 6,
+                  autoLastSwitchMs.map({ now - $0 >= 60_000 }) ?? true
+            else { autoUpgradeSinceMs = nil; return }
+            if autoUpgradeSinceMs == nil { autoUpgradeSinceMs = now }
+            guard now - (autoUpgradeSinceMs ?? now) >= 45_000 else { return }
+        }
+        guard let chosen else { return }
+        guard severe || ((autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true) && autoSwitchTimes.count < 6) else { return }
+        autoDesiredCandidate = chosen
+        autoVoluntary = !pressure
+        autoPreparing = true
+        autoExposed = false
+        autoPreparedTargetRevision = target.revision
+        autoPreparedViewerEpoch = viewerActionEpoch
+        recipeRevision.change()
+        let offerAttempt = snapshotAttempt()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let offered = await self.offerPreparedQualityChange()
+            guard self.attemptStillCurrent(offerAttempt, fence: .autoQualityOffer) else {
+                // The newer intent owns its flags; an old offer cannot clear them.
+                return
+            }
+            if !offered {
+                self.autoBlockedUntil[chosen.id] = PlaybackControlSession.monotonicMs() + 300_000
+                self.autoDesiredCandidate = nil
+                self.autoPreparing = false
+                self.autoUpgradeSinceMs = nil
+                self.playbackControl.reportEvidence()
+            }
+        }
+    }
+
     func playbackControlPlayerChanged() {
+        tickDisplayAwareAuto()
         sampleSeekPresentationClocks()
         refreshControlWaiting()
         expireControlEvidenceIfProgressed()
@@ -9913,6 +10302,7 @@ extension PlayerController: PreparedSuccessorHost {
         successor.appliesMediaSelectionCriteriaAutomatically = false
         preparedPlayer = successor
         preparedItem = item
+        installAutoTransferMetrics(for: item, staged: true)
         preparedFilmPositionMs = max(0, filmPositionMs)
         // The successor's session-relative zero is not the film's. This is the
         // same arithmetic a created session gets, over a raw origin — and it
@@ -9949,12 +10339,25 @@ extension PlayerController: PreparedSuccessorHost {
     /// session and its pointer are exactly as they were — so this raises the
     /// one source that maps to no class and draws nothing.
     func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        if autoPreparing {
+            if let candidate = autoDesiredCandidate {
+                autoBlockedUntil[candidate.id] = PlaybackControlSession.monotonicMs() + 300_000
+            }
+            autoDesiredCandidate = nil
+            autoPreparing = false
+            autoUpgradeSinceMs = nil
+        }
         noteSurfaceLogOnly(
             "prepared_successor_abandoned:\(reason == .failed ? "failed" : "aborted")"
         )
     }
 
     func discardPreparedSuccessor() {
+        autoStagedTransferMetricTask?.cancel()
+        autoStagedTransferMetricTask = nil
+        autoStagedTransfers.removeAll()
+        autoStagedStatus = nil
+        autoStagedStatusObservedMs = nil
         preparedMonitor?.cancel()
         preparedMonitor = nil
         preparedLifecycle.removeAll()
@@ -10038,7 +10441,8 @@ extension PlayerController: PreparedSuccessorHost {
                         continue
                     } else if let throughMs = self.preparedBufferedThroughMs(item),
                               throughMs >= self.preparedFilmPositionMs
-                                  + PreparedReplacementBounds.switchRunwayMs {
+                                  + PreparedReplacementBounds.switchRunwayMs,
+                              self.preparedReplacement.activeAction.map({ self.autoStagedProductionAllowsCommit($0) && self.autoStagedOriginalAllowsCommit($0) }) == true {
                         self.preparedReplacement.successorIsBuffered(throughMs: throughMs)
                         await self.preparedReplacement.commit()
                         return
@@ -10089,6 +10493,18 @@ extension PlayerController: PreparedSuccessorHost {
     func commitPreparedSuccessor(
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
+        if autoPreparing {
+            guard selectedHeight == nil, !selectedQualityIsOriginal,
+                  autoTrialMayCommit(requestedId: autoDesiredCandidate?.id, offeredId: action.effectiveSelection.candidateId,
+                      requestedTargetRevision: autoPreparedTargetRevision, targetRevision: presentationTarget?.revision,
+                      requestedViewerEpoch: autoPreparedViewerEpoch, viewerEpoch: viewerActionEpoch,
+                      automatic: selectedHeight == nil && !selectedQualityIsOriginal,
+                      presenting: wantsPlayback && surface.presenting, seeking: seekState.pendingMs != nil),
+                  model?.autoAbr == true, wantsPlayback, seekState.pendingMs == nil
+            else { return .refused }
+        }
+        guard autoStagedProductionAllowsCommit(action) else { return .refused }
+        guard autoStagedOriginalAllowsCommit(action) else { return .refused }
         guard started,
               let successor = preparedPlayer,
               let item = preparedItem,
@@ -10206,6 +10622,7 @@ extension PlayerController: PreparedSuccessorHost {
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
+        if autoPreparing { autoExposed = true }
         sessionId = action.sessionId
         baseMs = action.mediaOriginMs
         activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
@@ -10246,6 +10663,15 @@ extension PlayerController: PreparedSuccessorHost {
         // exact route that CAS is bound to, so even a visibly successful
         // switch could never settle durably.
         guard let firstFrameUnixMs else { return .switchedWithoutAFrame }
+        if let requested = autoDesiredCandidate, action.effectiveSelection.candidateId == requested.id {
+            let now = PlaybackControlSession.monotonicMs()
+            autoActiveCandidateId = requested.id
+            autoLastSwitchMs = now
+            if autoVoluntary { autoSwitchTimes.append(now) }
+            autoPreparing = false
+            autoUpgradeSinceMs = nil
+            autoExposed = false
+        }
         Caps.PreparedHandoffTelemetry.shared.note(
             outcome: "committed \(max(0, firstFrameUnixMs - exposedAtUnixMs)) ms"
         )
@@ -10350,6 +10776,12 @@ extension PlayerController: PreparedSuccessorHost {
     /// slot, which M5.5 did not rule out — and it has to be as ordinary as the
     /// path it replaces.
     func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) {
+        if action.effectiveSelection.qualityAuto, action.effectiveSelection.candidateId != nil,
+           selectedHeight == nil, !selectedQualityIsOriginal, !autoExposed {
+            notePreparedSuccessorAbandoned(.failed)
+            playbackControl.reportEvidence()
+            return
+        }
         let actionEpoch = viewerActionEpoch
         Task { @MainActor [weak self] in
             guard let self, self.started, self.viewerActionEpoch == actionEpoch else { return }

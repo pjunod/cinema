@@ -1858,19 +1858,27 @@ async fn candidate_snapshot_current(
         return false;
     };
     let candidates = state
-        .transcode
+        .media_pool
         .quality_candidates(
-            &file,
-            &snapshot.device_caps(),
-            recipe.request.audio_index,
-            recipe.request.audio_offset_ms,
-            recipe.request.subtitle_burn,
-            recipe.request.presentation,
+            state,
+            crate::media_pool::QualityCatalogRequest {
+                copy_contract: recipe.request.kind.copy_contract(),
+                file_id: file.id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                caps: snapshot.device_caps(),
+                audio_index: recipe.request.audio_index,
+                audio_offset_ms: recipe.request.audio_offset_ms,
+                subtitle_burn: recipe.request.subtitle_burn,
+                presentation: recipe.request.presentation,
+            },
         )
         .await;
-    candidates
-        .iter()
-        .any(|candidate| Some(candidate.id) == recipe.candidate_id && candidate.decoder_compatible)
+    candidates.iter().any(|entry| {
+        entry.node_id == route.owner_node_id
+            && Some(entry.candidate.id) == recipe.candidate_id
+            && entry.candidate.decoder_compatible
+    })
 }
 
 async fn staged_successor_action(

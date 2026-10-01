@@ -189,15 +189,19 @@ enum ClientErrorCode: String, Codable, Equatable {
 /// internally tagged `QualitySelection`.
 enum QualitySelection: Codable, Equatable {
     case auto
+    case autoCandidate(height: Int?, candidateId: String)
     case original
     case manual(height: Int)
 
-    private enum CodingKeys: String, CodingKey { case mode, height }
+    private enum CodingKeys: String, CodingKey { case mode, height, candidateId }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         switch try container.decode(String.self, forKey: .mode) {
-        case "auto": self = .auto
+        case "auto":
+            if let id = try container.decodeIfPresent(String.self, forKey: .candidateId) {
+                self = .autoCandidate(height: try container.decodeIfPresent(Int.self, forKey: .height), candidateId: id)
+            } else { self = .auto }
         case "original": self = .original
         case "manual": self = .manual(height: try container.decode(Int.self, forKey: .height))
         default:
@@ -212,6 +216,10 @@ enum QualitySelection: Codable, Equatable {
         switch self {
         case .auto:
             try container.encode("auto", forKey: .mode)
+        case .autoCandidate(let height, let id):
+            try container.encode("auto", forKey: .mode)
+            try container.encodeIfPresent(height, forKey: .height)
+            try container.encode(id, forKey: .candidateId)
         case .original:
             try container.encode("original", forKey: .mode)
         case .manual(let height):
@@ -221,8 +229,14 @@ enum QualitySelection: Codable, Equatable {
     }
 
     var isValid: Bool {
-        guard case .manual(let height) = self else { return true }
-        return (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains(height)
+        switch self {
+        case .auto, .original: return true
+        case .manual(let height):
+            return (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains(height)
+        case .autoCandidate(let height, let id):
+            return height.map { (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains($0) } != false
+                && id.range(of: "^[0-9a-f]{32}$", options: .regularExpression) != nil
+        }
     }
 }
 
@@ -251,12 +265,19 @@ struct ClientSelection: Codable, Equatable {
     }
 }
 
+struct DecoderCapabilitySnapshot: Codable, Equatable {
+    var revision: UInt64
+    var video: [VideoCaps]
+}
+
 struct DynamicCapabilities: Codable, Equatable {
     var platform: String
     var maxHeight: Int
     var codecs: [CodecPolicy]
     var dynamicRanges: [DynamicRangePolicy]
     var dualPlayerPreparation: Bool
+    var presentationTarget: PresentationTarget? = nil
+    var decoderCaps: DecoderCapabilitySnapshot? = nil
 
     var isValid: Bool {
         (PlaybackControl.minimumHeight...PlaybackControl.maximumHeight).contains(maxHeight)
@@ -433,6 +454,7 @@ struct ControlAction: Codable, Equatable {
 /// replace it. Comparing the two is how a client knows what is about to
 /// change.
 struct EffectiveSelection: Codable, Equatable {
+    var candidateId: String? = nil
     var qualityAuto: Bool
     var height: Int
     var audioTrack: Int?

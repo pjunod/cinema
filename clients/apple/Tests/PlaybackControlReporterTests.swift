@@ -1449,3 +1449,85 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertFalse(transition.record("ready"), "control cadence cannot retry again")
     }
 }
+
+final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    private func sample(_ segment: String = "a", bodySeconds: Double = 0.5,
+                        mediaSeconds: Double? = 1, completedAt: Int = 1_000,
+                        cached: Bool = false, paced: Bool? = false) -> PlayerController.AutoCompletedTransfer {
+        PlayerController.AutoCompletedTransfer(bodyBytes: 100_000, bodyDurationSeconds: bodySeconds,
+            completedAtMs: completedAt, origin: "https://example.invalid", networkLoad: true,
+            fromLocalCache: cached, producerPaced: paced, statusCode: 200,
+            segmentId: "/api/v1/hls/staged/seg\(segment).m4s", mediaDurationSeconds: mediaSeconds)
+    }
+
+    func testFreshLinkRejectsStaleCachedPacedAndUnknownProvenance() {
+        XCTAssertNotNil(autoCompletedTransferBps(sample(), nowMs: 2_000))
+        XCTAssertNil(autoCompletedTransferBps(sample(completedAt: 0), nowMs: 10_001))
+        XCTAssertNil(autoCompletedTransferBps(sample(cached: true), nowMs: 2_000))
+        XCTAssertNil(autoCompletedTransferBps(sample(paced: true), nowMs: 2_000))
+        XCTAssertNil(autoCompletedTransferBps(sample(paced: nil), nowMs: 2_000))
+    }
+
+    func testUnknownPeakOriginalNeedsDistinctSegmentsAndEmpiricalMargin() {
+        XCTAssertFalse(autoOriginalTransferMarginProven([sample(), sample()], sessionId: "staged", nowMs: 2_000))
+        XCTAssertTrue(autoOriginalTransferMarginProven([sample("a"), sample("b")], sessionId: "staged", nowMs: 2_000))
+        XCTAssertFalse(autoOriginalTransferMarginProven([sample("a", bodySeconds: 0.6), sample("b")], sessionId: "staged", nowMs: 2_000))
+        XCTAssertFalse(autoOriginalTransferMarginProven([sample("a"), sample("b", mediaSeconds: nil)], sessionId: "staged", nowMs: 2_000))
+        XCTAssertFalse(autoOriginalTransferMarginProven([sample("a"), sample("b")], sessionId: "another", nowMs: 2_000))
+    }
+
+    func testStagedProductionProofRequiresExactCandidateAndCombinedAge() {
+        var status = PlaybackSessionStatus(id: "staged")
+        status.activeEncodeCandidateId = "candidate"
+        status.activeEncodeMilliRealtime = 1_150
+        status.activeEncodeAgeMs = 1_000
+        status.activeEncodeActiveMs = 2_000
+        status.activeEncodeSegments = 2
+        XCTAssertTrue(autoStagedEncodeProof(status, observedAtMs: 1_000, nowMs: 2_000, sessionId: "staged", candidateId: "candidate"))
+        XCTAssertFalse(autoStagedEncodeProof(status, observedAtMs: 1_000, nowMs: 2_000, sessionId: "staged", candidateId: "other"))
+        status.activeEncodeAgeMs = 14_500
+        XCTAssertFalse(autoStagedEncodeProof(status, observedAtMs: 1_000, nowMs: 2_000, sessionId: "staged", candidateId: "candidate"))
+        status.activeEncodeAgeMs = 0
+        status.activeEncodeSegments = 1
+        XCTAssertFalse(autoStagedEncodeProof(status, observedAtMs: 1_000, nowMs: 2_000, sessionId: "staged", candidateId: "candidate"))
+    }
+
+    func testSupersededAutoTrialCannotReplaceIncumbent() {
+        XCTAssertTrue(autoTrialMayCommit(requestedId: "a", offeredId: "a", requestedTargetRevision: 2,
+            targetRevision: 2, requestedViewerEpoch: 4, viewerEpoch: 4, automatic: true, presenting: true, seeking: false))
+        XCTAssertFalse(autoTrialMayCommit(requestedId: "a", offeredId: "a", requestedTargetRevision: 2,
+            targetRevision: 3, requestedViewerEpoch: 4, viewerEpoch: 4, automatic: true, presenting: true, seeking: false))
+        XCTAssertFalse(autoTrialMayCommit(requestedId: "a", offeredId: "a", requestedTargetRevision: 2,
+            targetRevision: 2, requestedViewerEpoch: 4, viewerEpoch: 5, automatic: true, presenting: true, seeking: false))
+    }
+
+    func testManual1440RemainsSelectableBeforeProductionProof() {
+        let candidate = QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
+            route: "encode", width: 2_560, height: 1_440, targetHeight: 1_440, grade: "sdr",
+            decoderCompatible: true, completeCache: false, sustainable: false)
+        XCTAssertEqual(manualCatalogHeights([candidate]), [1_440])
+    }
+}
+
+final class DisplayAwareAutoIntentTests: XCTestCase {
+    func testAutomaticCandidateRecoveryKeepsAutoAndOmitsOutOfFloorCopyHeight() throws {
+        let id = "0a7ba9bab6fbdd31bab5e5e362a3fac7"
+        let selection = MediaIntentSelection(quality: .autoCandidate(height: nil, candidateId: id),
+            codec: .auto, dynamicRange: .auto, audioTrack: 2, audioOffsetMs: 0,
+            subtitles: SubtitleSelection(mode: .off, track: nil))
+        let envelope = MediaIntentEnvelope(lifetimeId: "same-player", recipeRevision: 2,
+            destinationRevision: 3, transportRevision: 4, selection: selection)
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(envelope)) as? [String: Any])
+        let ask = try XCTUnwrap(object["selection"] as? [String: Any])
+        let quality = try XCTUnwrap(ask["quality"] as? [String: Any])
+        XCTAssertEqual(quality["mode"] as? String, "auto")
+        XCTAssertEqual(quality["candidate_id"] as? String, id)
+        XCTAssertNil(quality["height"])
+        XCTAssertEqual(object["lifetime_id"] as? String, "same-player")
+        XCTAssertEqual(object["recipe_revision"] as? Int, 2)
+        XCTAssertEqual(object["destination_revision"] as? Int, 3)
+        XCTAssertEqual(object["transport_revision"] as? Int, 4)
+    }
+}

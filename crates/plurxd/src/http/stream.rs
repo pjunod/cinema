@@ -2443,16 +2443,26 @@ pub async fn decision(
         if let Some(caps) = q.caps_v2.as_ref() {
             Some(
                 state
-                    .transcode
+                    .media_pool
                     .quality_candidates(
-                        &file,
-                        caps,
-                        selected_audio,
-                        file.audio_offset_ms,
-                        selected_subtitle.filter(|_| selected_subtitle_requires_burn),
-                        crate::transcode::Presentation::Vod,
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: None,
+                            file_id: file.id,
+                            source_size: file.size,
+                            source_mtime: file.mtime,
+                            caps: caps.clone(),
+                            audio_index: selected_audio,
+                            audio_offset_ms: file.audio_offset_ms,
+                            subtitle_burn: selected_subtitle
+                                .filter(|_| selected_subtitle_requires_burn),
+                            presentation: crate::transcode::Presentation::Vod,
+                        },
                     )
-                    .await,
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect::<Vec<_>>(),
             )
         } else {
             None

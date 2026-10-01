@@ -1322,6 +1322,12 @@ natural-boundary recovery still follows the original-first compatibility rule.
 Rust1.97.1 daemon all-target compiler checks passed after the catalog, relay and
 commit-fence integration. Web syntax/types and native compilers remain source
 checks; new focused regression definitions have not been run under the user's
-batched workflow. Full client controller integration, exact cache offering and
-final adversarial/fast-lane qualification remain in progress. No physical D3,
+batched workflow. Client controllers and exact resident-cache offering are now
+connected. Cluster catalogs use a separate authenticated, bounded inspection
+endpoint; legacy strict placement envelopes remain unchanged. Exact advertised
+worker recipes pin create and prepared placement, and takeover reconstructs the
+retained candidate before local dispatch. Native Android unit-test compilation
+and iOS/tvOS build-for-testing passed without executing tests (versions 140/202).
+Final main integration, adversarial review and fast-lane qualification remain
+in progress. No physical D3,
 TCL playback, source-grade 1440 throughput or production deployment is claimed.

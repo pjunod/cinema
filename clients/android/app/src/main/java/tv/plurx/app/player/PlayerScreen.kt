@@ -198,6 +198,9 @@ private data class Plan(
     override val audio: List<AudioTrack>,
     override val subtitles: List<SubTrack>,
     val ladder: List<Rung>,
+    override val qualityCandidates: List<tv.plurx.app.data.QualityCandidate>,
+    override val qualityCandidateId: String?,
+    override val displayAwareAutoProtocol: String?,
     val declaredOffsetMs: Long?,
     val progressOffsetMs: Long,
     val itemDurationMs: Long?,
@@ -231,6 +234,7 @@ private suspend fun loadPlan(
     tracks: PreplayTracks,
     requestedQuality: PlaybackQuality,
     presentationTarget: PresentationTarget?,
+    audioOffsetMs: Long,
 ): Plan {
     val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
@@ -238,7 +242,7 @@ private suspend fun loadPlan(
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
     val playbackDecision = planLoadStage("decision") {
-        vm.playbackDecision(fileId, tracks, requestedQuality, presentationTarget)
+        vm.playbackDecision(fileId, tracks, requestedQuality, presentationTarget, audioOffsetMs)
     }
     val decision: Decision = playbackDecision.decision
     val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
@@ -284,7 +288,12 @@ private suspend fun loadPlan(
             source = file,
             audio = decision.audio,
             subtitles = decision.subtitles,
-            ladder = decision.ladder,
+            ladder = if (decision.display_aware_auto_protocol == "route-v1" && decision.quality_candidates.isNotEmpty()) {
+                tv.plurx.app.data.manualCatalogHeights(decision.quality_candidates).map { Rung(height = it) }
+            } else decision.ladder,
+            qualityCandidates = decision.quality_candidates,
+            qualityCandidateId = decision.quality_candidate_id,
+            displayAwareAutoProtocol = decision.display_aware_auto_protocol,
             declaredOffsetMs = decision.declared_offset_ms,
             progressOffsetMs = if (detail.item.isAudiobook) file?.part_offset_ms ?: 0L else 0L,
             itemDurationMs = if (detail.item.isAudiobook) detail.item.runtime_ms else null,
@@ -531,6 +540,7 @@ fun PlayerScreen(
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
                 requestedQuality = requestedQuality,
                 presentationTarget = measuredTarget,
+                audioOffsetMs = playbackAudioOffset,
             )
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -588,6 +598,7 @@ fun PlayerScreen(
                 startReason = startReason,
                 attemptOpenedAtMs = attemptOpenedAtMs,
                 playbackIntent = playbackIntent,
+                presentationTarget = presentationTarget,
                 audioOffsetMs = playbackAudioOffset,
                 onAudioOffsetChanged = { playbackAudioOffset = it },
                 // The plan's own answer wins over the request that produced it:
@@ -762,6 +773,7 @@ private fun PlayerContent(
     startReason: String,
     attemptOpenedAtMs: Long,
     playbackIntent: PlaybackIntent,
+    presentationTarget: PresentationTarget?,
     audioOffsetMs: Long,
     onAudioOffsetChanged: (Long) -> Unit,
     retainedAudio: Long?,
@@ -812,6 +824,7 @@ private fun PlayerContent(
             replan = onReload,
         )
     }
+    SideEffect { controller.updatePresentationTarget(presentationTarget) }
     // The one surface, projected from the player by the presenter.
     val collectedSurface by controller.surface.collectAsStateWithLifecycle()
     // A plain local, because a delegated property cannot be smart-cast.

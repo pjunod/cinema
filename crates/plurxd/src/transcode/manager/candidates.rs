@@ -5,7 +5,8 @@ impl TranscodeManager {
     /// Resolve the same output contracts used at dispatch. This never reserves
     /// capacity: incomplete cache verification and unknown production remain
     /// unknown, and a later owner must resolve and compare the full recipe.
-    pub(crate) async fn quality_candidates(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn quality_candidates_with_copy_contract(
         &self,
         file: &plurx_core::domain::MediaFile,
         caps: &plurx_core::playback::DeviceCaps,
@@ -13,6 +14,7 @@ impl TranscodeManager {
         audio_offset_ms: i64,
         subtitle: Option<i64>,
         presentation: Presentation,
+        retained_copy: Option<(bool, bool, bool)>,
     ) -> Vec<QualityCandidate> {
         let mut catalog_file = file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
@@ -30,6 +32,11 @@ impl TranscodeManager {
             plurx_core::playback::RenderCaps::strip_only(crate::ffmpeg::has_dovi_rpu().await);
         node.dolby_vision_convert = self.dv_convert_enabled().await;
         let copy_decision = plurx_core::playback::decide(file, &profile, &node);
+        let (copy_audio, copy_dv, copy_conversion) = retained_copy.unwrap_or((
+            copy_decision.transcode_audio,
+            copy_decision.preserve_dolby_vision,
+            copy_decision.convert_dolby_vision,
+        ));
         let copy_engine = crate::ffmpeg::EncodedExecutable::capture().await.ok();
         let copy_runtime_engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok();
         let copy_source = crate::fragment_index_cluster::open_source_fence(file, None)
@@ -78,9 +85,9 @@ impl TranscodeManager {
                         audio,
                         audio_offset_ms,
                         subtitle,
-                        copy_decision.transcode_audio,
-                        copy_decision.preserve_dolby_vision,
-                        copy_decision.convert_dolby_vision,
+                        copy_audio,
+                        copy_dv,
+                        copy_conversion,
                         file.dolby_vision,
                         copy_source.as_ref().map(|source| source.object_version()),
                         copy_engine.as_ref().map(|engine| engine.digest.as_str()),
@@ -296,14 +303,23 @@ impl TranscodeManager {
         if file.size != envelope.source_size || file.mtime != envelope.source_mtime {
             return Err("candidate source changed".to_owned());
         }
+        let retained_copy = match envelope.request.kind {
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
+            SessionKind::Transcode { .. } => None,
+        };
         let candidates = self
-            .quality_candidates(
+            .quality_candidates_with_copy_contract(
                 &file,
                 &snapshot.device_caps(),
                 envelope.request.audio_index,
                 envelope.request.audio_offset_ms,
                 envelope.request.subtitle_burn,
                 envelope.request.presentation,
+                retained_copy,
             )
             .await;
         let candidate = candidates
@@ -323,6 +339,7 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            owner_node_id: None,
             candidate_id: candidate.id,
             recipe_digest: candidate.recipe_digest,
             profile: (candidate.target_height == 1440)

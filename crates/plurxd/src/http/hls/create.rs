@@ -1154,17 +1154,27 @@ pub(crate) async fn resolve_plan(
                 .transcode
                 .candidate_audio_index(source, body.audio)
                 .await;
-            let catalog = state
-                .transcode
+            let worker_catalog = state
+                .media_pool
                 .quality_candidates(
-                    source,
-                    caps,
-                    body.audio,
-                    body.audio_offset_ms.unwrap_or(0),
-                    body.subtitle_burn,
-                    crate::transcode::Presentation::Vod,
+                    state,
+                    crate::media_pool::QualityCatalogRequest {
+                        copy_contract: None,
+                        file_id: source.id,
+                        source_size: source.size,
+                        source_mtime: source.mtime,
+                        caps: caps.clone(),
+                        audio_index: body.audio,
+                        audio_offset_ms: body.audio_offset_ms.unwrap_or(0),
+                        subtitle_burn: body.subtitle_burn,
+                        presentation: crate::transcode::Presentation::Vod,
+                    },
                 )
                 .await;
+            let catalog: Vec<_> = worker_catalog
+                .iter()
+                .map(|entry| entry.candidate.clone())
+                .collect();
             let picked = if requested.is_none() && body.height != Some(1440) {
                 state
                     .transcode
@@ -1200,9 +1210,12 @@ pub(crate) async fn resolve_plan(
             candidate_copy =
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
-            candidate_context = Some(crate::transcode::TranscodeManager::candidate_context(
-                candidate,
-            ));
+            let mut context = crate::transcode::TranscodeManager::candidate_context(candidate);
+            context.owner_node_id = worker_catalog
+                .iter()
+                .find(|entry| entry.candidate.id == candidate.id)
+                .map(|entry| entry.node_id.clone());
+            candidate_context = Some(context);
         }
     } else if body.intent.as_ref().is_some_and(|intent| {
         matches!(
@@ -1945,7 +1958,11 @@ async fn create_with_purpose(
     } else {
         None
     };
-    let mut owner_candidates = if let Some(owner) = pinned_owner {
+    let candidate_owner = request
+        .candidate_context
+        .as_ref()
+        .and_then(|context| context.owner_node_id.clone());
+    let mut owner_candidates = if let Some(owner) = candidate_owner.or(pinned_owner) {
         vec![owner]
     } else if !state.media_pool.remote_placement_ready(&state).await {
         vec![state.node_id.clone()]
@@ -2275,16 +2292,25 @@ async fn create_with_purpose(
         ) {
             Some(
                 state
-                    .transcode
+                    .media_pool
                     .quality_candidates(
-                        source,
-                        &caps.device_caps(),
-                        request.audio_index,
-                        request.audio_offset_ms,
-                        request.subtitle_burn,
-                        request.presentation,
+                        &state,
+                        crate::media_pool::QualityCatalogRequest {
+                            copy_contract: request.kind.copy_contract(),
+                            file_id: source.id,
+                            source_size: source.size,
+                            source_mtime: source.mtime,
+                            caps: caps.device_caps(),
+                            audio_index: request.audio_index,
+                            audio_offset_ms: request.audio_offset_ms,
+                            subtitle_burn: request.subtitle_burn,
+                            presentation: request.presentation,
+                        },
                     )
-                    .await,
+                    .await
+                    .into_iter()
+                    .map(|entry| entry.candidate)
+                    .collect(),
             )
         } else {
             None

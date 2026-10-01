@@ -168,6 +168,12 @@ enum AttemptFence: String, CaseIterable, Sendable {
     /// `startRecoveryEvidencePoll`: one attachment's status stream. A viewer
     /// Pause does not end the poll; session identity is checked beside it.
     case recoveryEvidencePoll = "recovery_evidence_poll"
+    /// A mounted display may arrive while the initial decision is waiting.
+    case autoInitialLayout = "auto_initial_layout"
+    /// A catalog refresh belongs to this title and viewer's recipe choice.
+    case autoCatalogRefresh = "auto_catalog_refresh"
+    /// An asynchronous Auto offer cannot alter a newer title or viewer intent.
+    case autoQualityOffer = "auto_quality_offer"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -183,6 +189,9 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .nativeSeekCompletion: return [.open, .viewerAction, .seek]
         case .nativeSeekAfterSelection: return [.open, .viewerAction, .seek]
         case .recoveryEvidencePoll: return [.open]
+        case .autoInitialLayout: return [.initialDecision]
+        case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
+        case .autoQualityOffer: return [.lifecycle, .viewerAction]
         }
     }
 }

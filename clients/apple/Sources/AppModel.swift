@@ -50,6 +50,8 @@ final class AppModel: ObservableObject {
     private(set) var userId: Int?
     private(set) var serverName: String?
     private(set) var displayAwareAuto = false
+    private(set) var autoAbr = false
+    private(set) var displayAwareAutoProtocol: String?
 
     private let settings = SettingsStore()
     private var api: PlurxAPI?
@@ -209,6 +211,8 @@ final class AppModel: ObservableObject {
         // server's credential attached to this address.
         Session.shared.setCredentials(origin: normalized, token: nil)
         displayAwareAuto = false
+        autoAbr = false
+        displayAwareAutoProtocol = nil
         let a = PlurxAPI(origin: normalized)
         do {
             let info = try await a.serverInfo()
@@ -216,6 +220,8 @@ final class AppModel: ObservableObject {
             api = a
             serverName = info.name
             displayAwareAuto = info.playbackDisplayAwareAuto == true
+            autoAbr = info.playbackAutoAbr == true
+            displayAwareAutoProtocol = info.displayAwareAutoProtocol
             userId = nil
             // The persisted half of the same invariant. A relaunch between here
             // and the login below must not be able to hand server A's bearer to
@@ -441,6 +447,8 @@ final class AppModel: ObservableObject {
         origin = recovered.origin
         serverName = recovered.name
         displayAwareAuto = false
+        autoAbr = false
+        displayAwareAutoProtocol = nil
         api = PlurxAPI(origin: recovered.origin)
         Session.shared.setCredentials(origin: recovered.origin, token: token)
         // The same server instance at a new address: a move, not a change of
@@ -499,6 +507,8 @@ final class AppModel: ObservableObject {
         if settings.instanceId == nil { settings.instanceId = info.instanceId }
         serverName = info.name
         displayAwareAuto = info.playbackDisplayAwareAuto == true
+        autoAbr = info.playbackAutoAbr == true
+        displayAwareAutoProtocol = info.displayAwareAutoProtocol
         await refreshClusterIngress()
     }
 
@@ -921,12 +931,15 @@ final class AppModel: ObservableObject {
     func playbackDecision(
         fileId: Int,
         selection: PrePlaySelection = .none,
-        quality: PlaybackQuality = .auto
+        quality: PlaybackQuality = .auto,
+        audioOffsetMs: Int = 0
     ) async throws -> (decision: Decision, caps: DeviceCaps) {
         let snapshot = Caps.snapshot()
         var document = snapshot.document
         document.display.presentationTarget = displayAwareAuto ? Caps.PresentationContext.target : nil
-        let query = quality.decisionQueryItems + selection.queryItems
+        let query = quality.decisionQueryItems + selection.queryItems +
+            (displayAwareAuto && displayAwareAutoProtocol == "route-v1"
+                ? [URLQueryItem(name: "audio_offset_ms", value: String(audioOffsetMs))] : [])
         do {
             let decision = try await requireAPI().decision(
                 fileId: fileId,
