@@ -141,6 +141,9 @@ impl AcceptedObservation {
         request: &mut crate::transcode::SessionRequest,
         candidate: &plurx_core::playback::candidate::QualityCandidate,
     ) -> Option<PreparedProof> {
+        if request.file_id != file.id {
+            return None;
+        }
         let context = request.candidate_context.as_ref()?;
         let owner = context.owner_node_id.as_deref()?;
         if owner != state.node_id {
@@ -153,11 +156,32 @@ impl AcceptedObservation {
         let cost = state
             .transcode
             .measured_candidate_cost(candidate, request, None)
-            .await?;
+            .await;
         let link = self.current_link(state, file, owner).await?;
-        if u128::from(link.transfer()?.usable_bps()?) * 10 < u128::from(cost.rfc_peak_bps()) * 18 {
-            return None;
-        }
+        let admission = match cost {
+            Some(cost) => {
+                if u128::from(link.transfer()?.usable_bps()?) * 10
+                    < u128::from(cost.rfc_peak_bps()) * 18
+                {
+                    return None;
+                }
+                PreparedAdmission::QualifiedOutput(cost)
+            }
+            None if unknown_original_trial(candidate, request) => {
+                if !super::link_receipts::admissible(
+                    state,
+                    Some(&self.http.network),
+                    file,
+                    candidate,
+                )
+                .await
+                {
+                    return None;
+                }
+                PreparedAdmission::UnknownOriginalTrial(Instant::now() + Duration::from_secs(15))
+            }
+            None => return None,
+        };
         let source = super::link_receipts::binding(
             &self.http.network,
             file,
@@ -169,11 +193,13 @@ impl AcceptedObservation {
             return None;
         }
         link.transfer()?;
-        request.candidate_context.as_mut()?.retained_output = Some(cost.artifact_facts());
+        if let PreparedAdmission::QualifiedOutput(cost) = &admission {
+            request.candidate_context.as_mut()?.retained_output = Some(cost.artifact_facts());
+        }
         Some(PreparedProof {
             accepted: self.clone(),
             source,
-            cost,
+            admission,
         })
     }
 }
@@ -187,13 +213,37 @@ pub(super) struct StagedProof {
     pub(super) owner_epoch: i64,
     pub(super) deadline_unix_ms: i64,
     pub(super) cancelled: tokio_util::sync::CancellationToken,
+    pub(super) trial_deadline: Option<Instant>,
 }
 
 pub(super) struct PreparedProof {
     accepted: AcceptedObservation,
     source: plurx_core::domain::CandidateLinkBinding,
+    admission: PreparedAdmission,
+}
+
+enum PreparedAdmission {
     // Keeps the exact qualified output live across staging and dispatch.
-    cost: crate::vodserve::retained::MeasuredCandidateCostProof,
+    QualifiedOutput(crate::vodserve::retained::MeasuredCandidateCostProof),
+    // Stage-owned empirical observations cannot qualify a complete output.
+    UnknownOriginalTrial(Instant),
+}
+
+fn unknown_original_trial(
+    candidate: &plurx_core::playback::candidate::QualityCandidate,
+    request: &crate::transcode::SessionRequest,
+) -> bool {
+    super::link_receipts::unknown_stageable_original(candidate, &[])
+        && matches!(request.kind, crate::transcode::SessionKind::Copy { .. })
+        && request.presentation == crate::transcode::Presentation::Vod
+        && request.subtitle_burn.is_none()
+        && request.candidate_context.as_ref().is_some_and(|context| {
+            context.candidate_id == candidate.id
+                && context.recipe_digest == candidate.recipe_digest
+                && context.grade == candidate.grade
+                && context.normalized_geometry == candidate.normalized_geometry
+                && context.retained_output.is_none()
+        })
 }
 
 impl PreparedProof {
@@ -205,6 +255,13 @@ impl PreparedProof {
         deadline_unix_ms: i64,
         cancelled: tokio_util::sync::CancellationToken,
     ) {
+        let trial_deadline = match &self.admission {
+            PreparedAdmission::QualifiedOutput(_) => None,
+            PreparedAdmission::UnknownOriginalTrial(deadline) => Some(*deadline),
+        };
+        if trial_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return;
+        }
         let Ok(Some(route)) = state.store.media_session_route(session).await else {
             return;
         };
@@ -220,6 +277,7 @@ impl PreparedProof {
         let owner_epoch = route.owner_epoch;
         if cancelled.is_cancelled()
             || deadline_unix_ms <= crate::media_sessions::unix_ms()
+            || trial_deadline.is_some_and(|deadline| Instant::now() >= deadline)
             || !self
                 .accepted
                 .gate
@@ -287,10 +345,13 @@ impl PreparedProof {
             || !self.accepted.fence.still_live()
             || !stage.still_live()
             || deadline_unix_ms <= crate::media_sessions::unix_ms()
+            || trial_deadline.is_some_and(|deadline| Instant::now() >= deadline)
         {
             return;
         }
-        let _held = self.cost.artifact_facts();
+        if let PreparedAdmission::QualifiedOutput(cost) = &self.admission {
+            let _held = cost.artifact_facts();
+        }
         state.link_receipts.register_staged(
             super::link_receipts::SessionBinding {
                 source,
@@ -306,6 +367,7 @@ impl PreparedProof {
                 owner_epoch,
                 deadline_unix_ms,
                 cancelled,
+                trial_deadline,
             },
         );
     }

@@ -123,6 +123,21 @@ preserves the foundation bytes after #675 landed; final same-record review
 publication and Effort gate remain required. This does not close typed
 recovery, decoder evidence, D3 or physical acceptance.
 
+**A-05 unknown original trial continuation, 2026-10-01 (gpt-6.1-sol,
+agent:/root/a05_unknown_original_trial_sol61):** branch
+`codex/a05-unknown-original-trial` starts from current effort `aa0d6382b`.
+Private qualified output and unknown source-copy trial authority are separate;
+only the actual stageable `Remux`/`Copy` original-video contract may use the
+unknown branch. Web staging binds completed bodies to its exact pipeline/item
+and candidate digest, then checks two distinct nonoverlapping segments and
+their observed 1.8 margin without inventing a whole-title peak. The new browser
+regression fails old source and passes changed source once; the captured
+item/digest browser regression and both new Rust catalog/authenticated-stage
+IDs each pass once. Pinned baseline compilation passed before Rust edits and
+changed-source all-target checking passes. Final committed-tree checks, native
+composition, formal review and effort gate remain pending. See combined plan
+§9.12; no device, production or A-05 closure claim.
+
 The scoped A-05 reader-isolation follow-up removes legacy supply/aggregate
 rate hints only from actual negotiated candidate Auto policy. It preserves
 legacy/manual routes and does not claim the remaining attributable producer
