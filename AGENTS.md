@@ -32,15 +32,20 @@ scripts in one global scope, so served order is load order, and `export` /
 
 ## Optional features and the Developer tab
 
-There are no feature gates: an optional or unfinished feature gets an
-explicit switch in Settings → Developer with advisory readiness that never
-disables the switch, rejects its Save, or overrides the saved choice.
+There are no feature gates. An optional or unfinished feature gets an
+explicit switch in Settings → Developer **only where manual enable/disable
+has a meaningful purpose** (Paul clarified 2026-09-30). Advisory readiness
+never disables the switch, rejects its Save, or overrides the saved choice.
+Internal correctness fixes and automatic infrastructure do not acquire
+gratuitous toggles merely because implementation or acceptance is unfinished;
+their Developer entries can explain read-only facts and remaining evidence.
 Developer is where a feature waits while it is not fully active or not fully
 tested, and each card says what it is waiting on (`devGraduation` in
 `web/pages/settings-developer.js`; `tests/web/settings-sections.test.js`
 enforces it). When the feature is done it leaves Developer — to its proper
-settings section if a permanent on/off makes sense, otherwise the toggle is
-removed and the feature is simply on. The rule and the current audit are in
+settings section if a permanent on/off makes sense, otherwise the advisory
+card (and any temporary toggle) is removed and the feature is simply on.
+The rule and the current audit are in
 [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](docs/features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md#developer-lifecycle--every-card-graduates).
 
 ## Rust compile loop
