@@ -629,6 +629,7 @@
         session.frozen_presentation = Some(FrozenHlsPresentation::new(
             execution_file_for_retry(),
             HlsContext {
+                codec_facts: None,
                 bandwidth: None,
                 file_id: 91,
                 start_seconds: 6275.560,
@@ -2339,9 +2340,42 @@
     }
 
     #[test]
+    fn frozen_codec_evidence_changes_identity_without_rewriting_the_legacy_shape() {
+        let file = profile5_file();
+        let context = HlsContext {
+            bandwidth: None,
+            codec_facts: None,
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.64001F".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let kind = SessionKind::Copy { aac: false, preserve_dolby_vision: false, convert_dolby_vision: false };
+        let legacy_identity = serde_json::json!({
+            "version": 2, "file": &file, "kind": &kind,
+            "start_seconds": context.start_seconds,
+            "media_origin_seconds": context.media_origin_seconds,
+            "codecs": &context.codecs,
+            "supplemental_codecs": &context.supplemental_codecs,
+            "frame_rate": context.frame_rate,
+        });
+        let legacy = FrozenHlsPresentation::new(file.clone(), context.clone(), &kind);
+        assert_eq!(legacy.contract_fingerprint, hex::encode(Sha256::digest(legacy_identity.to_string().as_bytes())));
+        let mut facts = FrozenHlsCodecFacts::audio(None, false, false);
+        facts.bind_output_avc_init("avc1.64001F".to_owned());
+        let proven = FrozenHlsPresentation::new(file, HlsContext { codec_facts: Some(facts), ..context }, &kind);
+        assert_ne!(legacy.contract_fingerprint, proven.contract_fingerprint);
+        assert!(legacy.context.codec_facts.is_none());
+        assert!(proven.sealed_stable_master_contract.is_none(), "copy facts remain attempt media");
+    }
+
+    #[test]
     fn frozen_hls_presentation_fingerprint_covers_master_affecting_facts() {
         let file = profile5_file();
         let context = HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: file.id,
             start_seconds: 12.5,
@@ -2377,6 +2411,7 @@
     fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
         let file = profile5_file();
         let context = HlsContext {
+            codec_facts: None,
             bandwidth: None,
             file_id: file.id,
             start_seconds: 0.0,
@@ -2407,6 +2442,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                codec_facts: None,
                 bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
@@ -2430,6 +2466,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                codec_facts: None,
                 bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
@@ -2453,6 +2490,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                codec_facts: None,
                 bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
@@ -2522,6 +2560,7 @@
         .expect("normalized fixture plan");
         let context = HlsContext {
             bandwidth: None,
+            codec_facts: None,
             file_id: file.id,
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
@@ -2585,6 +2624,7 @@
         let presentation = FrozenHlsPresentation::new(
             file,
             HlsContext {
+                codec_facts: None,
                 bandwidth: None,
                 file_id: 5,
                 start_seconds: 0.0,
@@ -3072,7 +3112,7 @@
     fn a_transcode_advertises_the_codec_its_grade_produces() {
         assert_eq!(
             transcoded_hls_codecs(OutputGrade::Sdr, 2160),
-            "avc1.640034,mp4a.40.2"
+            "avc1,mp4a.40.2"
         );
         let hdr10 = transcoded_hls_codecs(OutputGrade::Hdr10, HDR10_HEIGHT);
         assert_eq!(hdr10, "hvc1.2.4.H120.90,mp4a.40.2");

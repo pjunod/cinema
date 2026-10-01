@@ -1969,7 +1969,9 @@ async fn create_with_purpose(
                 .is_none_or(|owner| quality_owners.contains(owner)));
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
-    let remote_request = RemoteStartRequest {
+    let mut remote_request = RemoteStartRequest {
+        retained_output: None,
+        retained_output_receiver: Some(1),
         candidate_id: request
             .candidate_context
             .as_ref()
@@ -1996,7 +1998,7 @@ async fn create_with_purpose(
         }),
         request: worker_request,
     };
-    let recipe_json = serde_json::to_string(&remote_request)?;
+    let mut recipe_json = serde_json::to_string(&remote_request)?;
     if library_channel.is_some()
         && !state
             .store
@@ -2273,6 +2275,11 @@ async fn create_with_purpose(
                 }
             }
         } else {
+            remote_request.retained_output_receiver = state
+                .media_pool
+                .retained_output_receiver(&candidate)
+                .await
+                .then_some(1);
             match state
                 .media_sessions
                 .start_remote(&candidate, &remote_request, placement_deadline)
@@ -2446,6 +2453,8 @@ async fn create_with_purpose(
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1");
+    remote_request.retained_output = info.retained_output.clone();
+    recipe_json = serde_json::to_string(&remote_request)?;
     let response = StartResponse {
         delivered_audio: info.audio_delivery.clone(),
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),

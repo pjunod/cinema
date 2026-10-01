@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** implementation blocked on fleet and device evidence · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** M1–M2 landed; M3 implementation in progress, fleet/device acceptance open · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -431,13 +431,14 @@ about `constraint_set*_flag` nobody has read.
 `bitrate_for_height` (`transcode.rs:27519-27526`) is the only other place
 the rung's identity turns into numbers; nothing in this plan changes it.
 
-**This changes recipe identity.** `encode_args_for`'s output is part of the
-argument list a recipe hashes, so adding `-profile:v` / `-level` to the
-hardware families invalidates every cached SDR transcode produced by those
-families. That is correct — the bytes genuinely differ — and it must be in
-the PR body, with the note that software-encoded entries are unaffected
-because `-profile:v high` was already there. The rung-derived `CODECS`
-string is playlist metadata and does not itself invalidate anything.
+**This changes recipe identity for measured cells only.** The resolved plan's
+digest conditionally includes the measured codec and rational output grid
+when a successful exact-family experiment admits profile/level flags.
+Qualified hardware entries change, and qualified software entries also change
+because their explicit level is new even though High profile was already
+present. Untested/refused cells keep the incumbent arguments and digest.
+Frozen codec metadata follows that same immutable plan; no universal triplet
+is inferred from a height.
 
 ### 3.4 Peak and average, separately, with the overhead named
 
@@ -491,14 +492,16 @@ of every corpus fixture at every rung; if a 2 s segment bursts past
 `maxrate + audio + overhead`, the declared peak rises to the measurement and
 the plan says so in the PR body rather than quietly clamping.
 
-Copy/remux sessions do not use `file.bitrate` or ffprobe `max_bit_rate` as a
-peak. M5 reads the output fragment index's exact segment byte ranges and
-durations and computes both attributes from the same bytes the playlist names;
-that naturally includes remux/container overhead. A prepared copy successor
-uses its own frozen index facts. There is no scaled-average fallback: if the
-index cannot provide a complete bound before master publication, M5 remains
-blocked and the path is not claimed honest. This is the concrete decision for
-§7's former open question 2.
+Copy/remux sessions must not call `file.bitrate` or ffprobe `max_bit_rate` a
+measured peak. **2026-10-01 source correction:** the existing fragment index
+contains video-only pipe lengths, not full selected audio/container output.
+It cannot provide the formerly proposed exact full-wire bound. The phased
+M5 implementation therefore observes successful full-mux VOD materialization
+and complete retained coverage (§5.5). A prepared successor captures its own
+compatible complete artifact receipt; a shared source or video rung is not
+enough. Arbitrary cold-copy first-publication remains open rather than using
+a prefix maximum, scaled average or guessed overhead. Legacy publication is
+not thereby claimed honest.
 
 ### 3.5 Where the numbers live
 
@@ -666,7 +669,7 @@ answer and never waits for an init object it cannot produce. AVC fMP4 masters
 are attempt media, and the frozen-presentation fingerprint is version 2 so
 the changed publication contract cannot collide with the older shape.
 
-### 5.3 M3 — forced profile/level on hardware, and a rung-derived string
+### 5.3 M3 — qualified profile/level/cadence, and a frozen output string
 
 Code: §3.3, both halves. This is the recipe-identity PR; the body states
 which cached entries invalidate and why.
@@ -685,10 +688,10 @@ Tests:
 
 | Test | Asserts |
 |---|---|
-| `every_sdr_family_forces_a_profile` | `encode_args_for(Sdr, ..)` contains `-profile:v high` for all five families |
+| `only_exact_qualified_plans_change_encoder_flags_and_recipe_identity` | Only measured family/raster/cadence/rate-control cells gain High/level flags; unsupported or refused cells retain their original argv |
 | `the_declared_level_covers_the_resolved_grid` | 360/480/720/1080/2160 at 59.94/60 map to §3.3; >60 stays unqualified |
 | `a_family_that_refused_the_probe_keeps_its_old_arguments` | caps with the new verdict false -> argv identical to `0f02b7ea`'s |
-| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | two hashes differ; a software recipe's hash does not |
+| `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | qualified flags change the digest, including software when it gains an explicit level; unqualified argv and digest remain unchanged |
 
 Bitstream acceptance — the level in the argv must equal the level in the
 SPS. Per enabled family on a node that has it, for every rung at 23.976,
@@ -713,7 +716,21 @@ the GPT prompt in §6).
 
 ### 5.4 M4 — re-qualify the SDR ruling on the named devices, then print `CODECS`
 
-No code lands until the device run reports. The run uses
+**2026-10-01 ordering ruling:** implementation may be prepared and integrated
+on the effort branch before physical-device qualification. This does not
+waive the device acceptance below or qualify a release. The bounded M4
+implementation freezes explicit video and audio component provenance;
+unknown components do not gain a fabricated AAC or universal AVC label.
+Qualified encoder output or the actual M2 AVC init supplies video identity;
+the resolved output-audio decision supplies audio identity, including proven
+absence. SDR `CODECS` is emitted only when both components are complete.
+The copied codec name `aac` alone does not prove AAC-LC rather than HE-AAC;
+without a frozen output AudioSpecificConfig it remains incomplete. Resolved
+AAC encoding retains the native encoder's established output contract.
+HDR declarations, variant topology and prepared-owner identity are retained.
+There is no runtime gate or temporary diagnostic switch.
+
+The required qualification run uses
 `master_playlist_diagnostic`'s existing shapes
 (`?diagnostic=video-only`, `video-only-codecs`) so one attribute changes at
 a time, against a build carrying M2 and M3 but with §3.6 not yet applied
@@ -749,6 +766,54 @@ and one HDR master.
 ### 5.5 M5 — peak and average, measured
 
 Code: §3.4 and §3.5.
+
+**2026-10-01 phased implementation ruling and arithmetic correction:** start
+with one bounded metadata reducer and the existing VOD sink's successfully
+materialized full mux bytes. Complete coverage means every immutable entry,
+including audio tails, with the exact output identity. A complete retained
+artifact receipt can supply a compatible **new** frozen presentation; later
+observations must never rewrite an issued master or update a successor from
+its predecessor. Partial coverage, conflicting duplicates, invalid durations,
+gaps or checked-arithmetic overflow remain unknown, not a measured bound.
+No duplicate payload buffers or new scheduler are needed.
+
+**2026-10-01 actual-source retention boundary:** the bounded reducer and
+successful full-mux VOD observer are implemented; their completed-output
+notification comes only after a real trailer and successful final/tail writes,
+not `Outcome::Ran` (which also describes a killed pipe). Observations use the
+exact six-decimal playlist durations and source/recipe/init/execution identity.
+Metadata is capped at 8192 entries and 131072 examined RFC windows. Adopted
+unobserved objects, duplicate publication or a changed execution stay unknown;
+ordinary legacy playback is not refused because measurement is unavailable.
+
+The frozen **consumer remains open**. Failed renditions can be replaced under
+the same recipe directory, and older session GETs still open that directory's
+paths. A recipe match or collector nonce cannot make replacement bytes part
+of an older measured artifact. Before exposing a complete-retained receipt,
+bind GETs and replacement to a proven generation-distinct artifact retention
+boundary, then capture the eligible receipt once at new-session attachment.
+Earlier sessions keep None. Contradictory regeneration must be refused before
+mutation without destroying the incumbent or rewriting its master. Until that
+seam is proved, the observer does not publish measured bandwidth on the wire.
+This is a finite implementation remainder, not device evidence alone or a
+reason to reject cold titles. Existing normalized predictive classes remain
+unchanged and must not be relabelled as measured title output.
+
+RFC 8216 §4.1 defines peak over contiguous windows whose total duration is
+0.5–1.5 target durations. Average is total media bits divided by total wire
+`EXTINF` duration, not the unweighted mean of segment rates. The stronger
+original per-segment burst acceptance remains a separate measurement.
+The sample shell calculation below is a legacy burst diagnostic, not the RFC
+peak or duration-weighted average algorithm.
+
+Rolling-copy/PUT collection and arbitrary cold-copy exact first-publication
+bounds remain a finite follow-up, explicitly open. A prefix, video-only index,
+nominal encoder rate or guessed container overhead cannot prove them. Complete
+background preparation costs full-source I/O and remux work (plus an audio
+encode when selected); retaining the actual completed rendition avoids the
+separate byte-count/boundary regeneration proof. No hidden whole-film startup
+wait, forced transcode or rejection of playable titles is authorized. Device,
+corpus, fetched-wire equality and prepared-successor acceptance remain open.
 
 Measurement protocol, on media1 against the `scripts/bench` corpus
 (`scripts/bench fixtures` builds it; the fixtures are `1080p-h264`,
@@ -900,7 +965,8 @@ new `HlsContext` fields plus the `"version"` bump), which is per-session
 and invalidates nothing on disk; M2 moves fMP4 AVC masters from generation
 metadata to attempt media; **M3 changes recipe identity for the hardware
 families that gain `-profile:v`/`-level`, invalidating their cached SDR
-transcodes** — software-encoded entries are unaffected. No schema, no
+transcodes, including software cells that gain an explicit level**.
+Unqualified cells retain their old identity. No schema, no
 settings key and no metric changes.
 
 Rollback: each milestone reverts independently. M3's revert re-invalidates
@@ -954,6 +1020,66 @@ fleet.
 
 ## Execution log
 
+**2026-10-01 retained VOD implementation boundary:** the candidate now retains
+complete successful full-mux output under generation-distinct private hardlink
+names, including init and tail. A session captures its receipt once; earlier
+`None` stays `None`. Init/media GETs and streamed bodies hold the artifact,
+not mutable recipe paths. Missing names may be repaired only from exact
+source/execution/init identity and byte digests; a conflicting repair refuses
+that artifact without poisoning an ordinary producer or rebinding an old
+master. A new presentation may use a separately completed receipt.
+
+Retention has one pre-clone assembly reservation, at most 64 artifacts,
+8,192 entry metadata records and the reducer's 131,072 examined-window cap.
+An OS file lease owns the private namespace. Bounded orphan/GC batches keep
+unknown or failed cleanup charged; unowned, symlinked or unresolved namespaces
+make measurement unavailable, not ordinary playback unavailable. No second
+scheduler, payload copy, whole-title cold wait or startup media scan is added.
+The private lease coordinates cooperating builds; it does not establish that
+an older daemon respects a shared-cache rollout or certify deployed images.
+Fresh bounded node advertisements negotiate receipt metadata in both
+directions; old/unknown peers receive the old strict envelope. Durable restore
+requires the exact issued artifact; legacy absence cannot acquire later facts.
+
+Actual candidate cost is a private retained proof, bound to accepted full
+candidate/digest, source version, selected audio, grade, actual recipe and
+complete output incarnation. Reader and dispatch reacquire this identity.
+Planned ladder budgets and `complete_cache` alone are not measured cost. A
+bounded optional public HTTP sidecar carries advisory complete-full-mux RFC
+cost provenance; core candidate identity and strict worker wire stay unchanged.
+Its public response/client integration belongs to the coordinated A05
+continuation. This implementation candidate still needs its remaining focused
+consumer/compatibility checks and independent review. Rolling-copy/PUT,
+persisted arbitrary cold-copy preparation and original fleet/device/corpus
+acceptance remain open; this is not complete M5 qualification.
+
+**2026-10-01 M3 continuation:** the earlier M3–M6 evidence-only classification
+did not establish the encoder qualification code. This continuation owns
+bounded node-local profile/level/cadence experiments and frozen SDR identity,
+not SDR master emission (M4), bandwidth measurements (M5), or device/fleet
+acceptance. The selected node FFmpeg must complete a real encode whose SPS,
+`avcC` and every fMP4 sample duration agree. A proposed table cell is not a
+codec identity; untested/refused cells retain the incumbent arguments.
+
+The local matrix has a 30-second budget, with a three-second child deadline
+and bounded cleanup, 8 MiB encoded-output and 1 MiB trace ceilings. It covers
+the five proposed rung heights and four named cadences, with both 852- and
+854-wide 480p experiments because the shipping even-rounded raster is 852.
+Family, exact raster, rational cadence, target bitrate, effective rate-control
+value and forced-IDR mode must match a completed experiment. Non-matching
+cells, including rates above 60 fps, do not inherit another cell's evidence.
+The final VOD fps grid is bound before its recipe and presentation freeze.
+Legacy-rung qualification is restricted to `PreserveAspectEven` contracts;
+the newer upright/square candidate route retains its separately explicit
+profile/level and full candidate/recipe identity instead of inheriting this
+matrix's flags or triplet.
+
+Qualified software also gains a level flag: its recipe identity must change.
+The older software-cache-unchanged claim applied only to the profile flag and
+does not cover this implementation. Unqualified plans keep their old recipe
+digest and encoder arguments. Local Homebrew FFmpeg 9 development observations
+are not shipped FFmpeg 8 or fleet qualification evidence.
+
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -962,6 +1088,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |

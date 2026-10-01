@@ -193,8 +193,12 @@ pub(crate) async fn start(
         let _restart_admission = restart_admission;
         let started = start_state
             .transcode
-            .create_cluster_session(
-                &request.request,
+            .create_cluster_session_for_receiver(
+                (
+                    &request.request,
+                    request.retained_output_receiver,
+                    request.retained_output.as_ref(),
+                ),
                 // A relayed worker start carries no epoch: `RemoteStartRequest`
                 // is the recipe the owning node sends, and the epoch is not on
                 // it. Adding one is a change to a relayed type and therefore a
