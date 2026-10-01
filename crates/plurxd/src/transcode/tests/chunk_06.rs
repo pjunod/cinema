@@ -375,6 +375,7 @@
         producer_attempt: u64,
     ) -> Arc<Session> {
         Arc::new(Session {
+            audio_delivery: None,
             dir: dir.to_path_buf(),
             recovery: None,
             response_incarnation: uuid::Uuid::new_v4(),

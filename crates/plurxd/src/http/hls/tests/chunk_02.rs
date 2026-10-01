@@ -2411,7 +2411,7 @@
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto { height: None, candidate_id: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -2422,6 +2422,8 @@
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -2489,6 +2491,8 @@
             },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -2497,6 +2501,9 @@
             transport: None,
         };
         let predecessor_recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: user.id,
@@ -2507,6 +2514,7 @@
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),

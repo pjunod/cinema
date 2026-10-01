@@ -695,7 +695,7 @@ async fn retire_upload_lane(session: &Session) {
 pub(super) fn transcode_output_bitrate(opts: &TranscodeOptions) -> Option<f64> {
     let kbps = opts
         .video_bitrate_kbps
-        .saturating_add(opts.audio_bitrate_kbps);
+        .saturating_add(opts.audio_budget_kbps());
     (kbps > 0).then(|| f64::from(kbps) * 1_000.0)
 }
 

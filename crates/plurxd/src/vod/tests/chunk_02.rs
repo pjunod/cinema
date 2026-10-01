@@ -157,8 +157,9 @@
         let recipe = Recipe {
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,
@@ -251,8 +252,9 @@
         let recipe = Recipe {
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
-            aac: true,
-            video: CopyVideoOptions::new(false, false),
+           aac: true,
+            audio_delivery: None,
+           video: CopyVideoOptions::new(false, false),
             source_object_version: None,
             cluster_cache_key: None,
             encoding: None,

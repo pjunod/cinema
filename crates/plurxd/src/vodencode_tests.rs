@@ -521,8 +521,9 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             Recipe {
                 file,
                 audio_index: None,
-                aac: true,
-                video: CopyVideoOptions::new(false, false),
+               aac: true,
+                audio_delivery: None,
+               video: CopyVideoOptions::new(false, false),
                 source_object_version: Some(encoding.source_object_version.clone()),
                 cluster_cache_key: None,
                 encoding: Some(Arc::clone(&encoding)),

@@ -1691,6 +1691,7 @@ use crate::queue_fixture::QueueFixture;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let package_id = "offline-preemption";
         let requested = NewOfflinePackage {
+            audio_recipe: None,
             id: package_id.to_owned(),
             request_id: "offline-preemption-request".to_owned(),
             user_id: user.id,
@@ -1750,6 +1751,7 @@ use crate::queue_fixture::QueueFixture;
                 &claimed,
                 &file,
                 &OfflineSpec {
+                    audio_delivery: None,
                     target_height: 240,
                     audio_index: None,
                     subtitle: OfflineSubtitle::None,
