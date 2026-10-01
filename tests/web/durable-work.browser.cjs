@@ -23,7 +23,8 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
    if(url.includes('?')){
     const query=new URL(url,'http://fixture').searchParams;
     const rows=window.jobs.filter(j=>j.state===query.get('state')&&j.id>(query.get('cursor')||''));
-    return {jobs:rows.slice(0,100),next_cursor:rows.length>100?rows[99].id:null,counts:[{state:'queued',count:window.jobs.length}],observed_at_ms:Date.now(),repairs:[{id:'repair1',job_id:window.jobs[1].id,kind:'subtitle',target_node_id:'node',phase:'copying',age_ms:1000}]};
+    const limit=Number(query.get('limit'));
+    return {jobs:rows.slice(0,limit),next_cursor:rows.length>limit?rows[limit-1].id:null,counts:[{kind:'fragment_index_build',state:'queued',count:window.jobs.length}],observed_at_ms:Date.now(),repairs:[{id:'repair1',job_id:window.jobs[1].id,kind:'subtitle',target_node_id:'node',phase:'copying',age_ms:1000}]};
    }
    if(window.hold)await new Promise(resolve=>window.release=resolve);
    return {job:window.jobs.find(j=>url.endsWith(j.id)),attempts:[],waiters:[]};
@@ -62,42 +63,42 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
  await page.getByLabel('Durable jobs per page').selectOption('10');
  await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
  assert.equal(await page.locator('.durable-title').count(),10);
- // A detail must load inside the selected item's next row, with immediate feedback.
+ // Details open in a bounded dialog and polling preserves its selected section.
  await page.evaluate(()=>window.hold=true);
  await page.locator('.durable-title').first().click();
- assert.match(await page.locator('.durable-title').first().locator('xpath=ancestor::tr/following-sibling::tr[1]').innerText(),/Loading job details/);
+ const dialog=page.getByRole('dialog',{name:'Cluster work details'});
+ assert.match(await dialog.innerText(),/Loading job details/);
  await page.evaluate(()=>{window.hold=false;window.release()});
- await page.waitForSelector('.durable-detail button');
- assert.match(await page.locator('.durable-title').first().locator('xpath=ancestor::tr/following-sibling::tr[1]').innerText(),/charged failures/);
+ await dialog.getByRole('button',{name:'History',exact:true}).click();
+ assert.match(await dialog.innerText(),/charged failures/);
  await page.evaluate(()=>refreshDurableActivity(true));
- assert.equal(await page.locator('.durable-title').first().getAttribute('aria-expanded'),'true');
- await page.getByRole('button',{name:'Close details'}).click();
- assert.equal(await page.locator('.durable-detail').count(),0);
+ assert.equal(await dialog.getByRole('button',{name:'History',exact:true}).getAttribute('aria-pressed'),'true');
+ await dialog.getByRole('button',{name:'Close ×'}).click();
+ assert.equal(await dialog.isVisible(),false);
  assert.equal(await page.evaluate(()=>document.activeElement.classList.contains('durable-title')),true);
  // Closing an in-flight detail must not reopen it when the response arrives.
  await page.evaluate(()=>window.hold=true);
  await page.locator('.durable-title').first().click();
- await page.locator('.durable-title').first().click();
+ await page.keyboard.press('Escape');
  await page.evaluate(()=>{window.hold=false;window.release()});
  await page.evaluate(()=>new Promise(resolve=>setTimeout(resolve,0)));
- assert.equal(await page.locator('.durable-detail').count(),0);
- // Failed detail reads stay beside the item and can be retried there.
+ assert.equal(await dialog.isVisible(),false);
+ // Failed detail reads can be retried without leaving the dialog.
  await page.evaluate(()=>window.fail=true);
  await page.locator('.durable-title').first().click();
- assert.match(await page.locator('.durable-title').first().locator('xpath=ancestor::tr/following-sibling::tr[1]').innerText(),/Could not load details: <offline>/);
+ assert.match(await dialog.innerText(),/Could not load details: <offline>/);
  await page.evaluate(()=>window.fail=false);
- await page.getByRole('button',{name:'Try again'}).click();
- await page.getByRole('button',{name:'Close details'}).click();
- // Collapse, repair disclosure, selected page, and focus survive replacement markup.
+ await dialog.getByRole('button',{name:'Try again'}).click();
+ await dialog.getByRole('button',{name:'Stages',exact:true}).click();
+ assert.match(await dialog.innerText(),/No fresh execution-stage observation/);
+ await dialog.getByRole('button',{name:'Close ×'}).click();
+ // Repair disclosure survives polling; repair details use the same inspector.
  await page.locator('[data-durable-focus="repairs"]').click();
  await page.getByRole('button',{name:'Inspect work'}).click();
- assert.match(await page.locator('.durable-repairs tbody tr').nth(1).innerText(),/charged failures/);
- await page.locator('[data-durable-focus="section"]').click();
- await page.waitForFunction(()=>DURABLE_ACTIVITY.open===false);
+ await dialog.getByRole('button',{name:'History',exact:true}).click();
+ assert.match(await dialog.innerText(),/charged failures/);
+ await dialog.getByRole('button',{name:'Close ×'}).click();
  await page.evaluate(()=>refreshDurableActivity(true));
- assert.equal(await page.locator('.durable-queue').getAttribute('open'),null);
- await page.locator('[data-durable-focus="section"]').press('Enter');
- await page.waitForFunction(()=>DURABLE_ACTIVITY.open===true);
  assert.equal(await page.locator('.durable-repairs').getAttribute('open'),'');
  await page.getByLabel('Durable job state').selectOption('failed');
  await page.waitForFunction(()=>!DURABLE_ACTIVITY.busy);
@@ -115,6 +116,6 @@ const root=path.resolve(__dirname,"../../crates/plurxd/src/web");
   if(process.env.DURABLE_SCREENSHOTS)await page.screenshot({path:path.join(process.env.DURABLE_SCREENSHOTS,`durable-${width}.png`),fullPage:true});
  }
  assert.deepEqual(errors,[]);
- console.log('PASS durable work pagination, inline details, folds, refresh, errors and responsive layout');
+ console.log('PASS durable work pagination, inspector, repair disclosure, refresh, errors and responsive layout');
  }finally{await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

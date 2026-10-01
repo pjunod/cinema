@@ -27,6 +27,7 @@ pub(crate) mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
+pub(crate) mod internal_clock;
 pub(crate) mod internal_live_tv;
 pub(crate) mod internal_media;
 pub(crate) mod internal_media_sessions;
@@ -460,6 +461,7 @@ fn http_route_group(path: &str) -> usize {
         | "/internal/media/fragment-index/{cache_key}"
         | "/internal/media/subtitle-source/{file_id}/{ordinal}/{format}" => 7,
         internal_activity::PATH
+        | internal_clock::PATH
         | cluster_operations::INTERNAL_PATH
         | internal_auth_revocation::PATH
         | crate::subtitle_ranges::PATH
@@ -1796,6 +1798,7 @@ pub fn router(state: AppState) -> Router {
     let public_media = Router::new()
         .route("/download/plurx-android.apk", get(web::download_android))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(internal_clock::PATH, get(internal_clock::snapshot))
         .route(
             cluster_operations::INTERNAL_PATH,
             get(cluster_operations::local),
@@ -2015,6 +2018,7 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/media"
                 | "/api/v1/cluster/ingress"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2120,6 +2124,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 | "/api/v1/cluster/status"
                 | "/api/v1/cluster/support-bundle"
                 | cluster_operations::INTERNAL_PATH
+                | internal_clock::PATH
         )
     {
         return true;
@@ -2503,6 +2508,50 @@ mod tests {
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
+    }
+
+    #[tokio::test]
+    async fn clock_route_refuses_household_and_forged_proofs_without_timing() {
+        let (app, _) = test_app_with_state();
+        for bearer in [None, Some("household-session")] {
+            let mut request = Request::builder().uri(internal_clock::PATH);
+            if let Some(bearer) = bearer {
+                request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).expect("clock request"))
+                .await
+                .expect("clock route");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            assert!(!response
+                .headers()
+                .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("refusal body")
+                .to_bytes();
+            assert!(!String::from_utf8_lossy(&body).contains("received_unix_ms"));
+        }
+        let request = Request::builder()
+            .uri(internal_clock::PATH)
+            .header(peer_transport::NODE_HEADER, "peer")
+            .header(peer_transport::TARGET_HEADER, "test-node")
+            .header(peer_transport::TIMESTAMP_HEADER, "1")
+            .header(
+                peer_transport::NONCE_HEADER,
+                "123e4567-e89b-42d3-a456-426614174000",
+            )
+            .header(peer_transport::SIGNATURE_HEADER, "a".repeat(128))
+            .body(Body::empty())
+            .expect("forged clock request");
+        let response = app.oneshot(request).await.expect("forged clock route");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!response
+            .headers()
+            .contains_key(peer_transport::RESPONSE_SIGNATURE_HEADER));
     }
 
     async fn watch_write_handler(
@@ -3860,6 +3909,7 @@ mod tests {
             "/api/v1/files/8/hls/start",
             "/api/v1/hls/session/index.m3u8",
             crate::media_pool::SNAPSHOT_PATH,
+            internal_clock::PATH,
         ] {
             assert!(learner_route_eligible(&Method::GET, path), "{path}");
         }
@@ -10636,11 +10686,13 @@ mod tests {
                 "scans",
                 "sessions",
                 "trakt",
+                // Local worker observations are useful on SQLite too.
+                "workers",
             ]
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            "SQLite gains analysis health but no clustered-only field"
+            "SQLite includes local analysis and worker health"
         );
         assert_eq!(detail["analysis"]["enabled"], false);
         assert_eq!(detail["analysis"]["total"], 0);
@@ -10672,6 +10724,10 @@ mod tests {
         assert!(
             viewer_detail.get("analysis").is_none(),
             "operator queue health stays out of ordinary household responses"
+        );
+        assert!(
+            viewer_detail.get("workers").is_none(),
+            "worker capacity and process observations remain admin-only"
         );
     }
 
@@ -11642,6 +11698,7 @@ mod tests {
         let page = state
             .store
             .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
                 state: None,
                 kind: Some(plurx_core::store::background_jobs::JobKind::LibraryScan),
                 after_id: None,

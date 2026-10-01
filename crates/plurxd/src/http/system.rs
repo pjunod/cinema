@@ -3980,6 +3980,24 @@ fn activity_nodes(local_node_id: &str, peers: &PeerActivityRead) -> Vec<Activity
     nodes
 }
 
+fn clustered_workers(
+    local_node_id: &str,
+    local: super::internal_activity::ActivityWorkers,
+    peers: &PeerActivityRead,
+) -> BTreeMap<String, super::internal_activity::ActivityWorkers> {
+    let mut workers = BTreeMap::from([(local_node_id.to_owned(), local)]);
+    if let PeerActivityRead::Peers(outcomes) = peers {
+        for (node_id, outcome) in outcomes.iter() {
+            if let PeerActivityOutcome::Answered(snapshot) = outcome {
+                if let Some(observation) = &snapshot.workers {
+                    workers.insert(node_id.clone(), observation.as_ref().clone());
+                }
+            }
+        }
+    }
+    workers
+}
+
 fn clustered_deliveries(
     local_node_id: &str,
     local: Vec<Delivery>,
@@ -4755,6 +4773,12 @@ pub async fn activity_detail(
     if user.0.is_admin {
         response["processes"] = serde_json::to_value(plurx_core::process::priority::running())
             .map_err(|error| ApiError::Internal(error.to_string()))?;
+        response["workers"] = serde_json::to_value(clustered_workers(
+            &state.node_id,
+            super::internal_activity::local_workers(&state).await,
+            &peers,
+        ))
+        .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     Ok(Json(response))
 }
@@ -4869,6 +4893,7 @@ pub async fn stop_offline_package(
 /// the handler cannot reach `AppState::store` through this type.
 #[derive(Clone)]
 pub(crate) struct MetricsState {
+    clock: Arc<plurx_core::cluster::clock::ClusterClockGuard>,
     started_at: Instant,
     transcode: crate::transcode::TranscodeMetrics,
     integration: Arc<IntegrationMetrics>,
@@ -4890,6 +4915,7 @@ pub(crate) struct MetricsState {
 impl FromRef<AppState> for MetricsState {
     fn from_ref(state: &AppState) -> Self {
         Self {
+            clock: state.membership.clock_guard(),
             started_at: state.started_at,
             transcode: state.transcode.metrics_handle(),
             integration: state.jobs.metrics_handle(),
@@ -5365,8 +5391,8 @@ pub(crate) async fn metrics(
         state.plex_census.prometheus(),
         super::prometheus_http_request_metrics(),
         crate::panics::prometheus_panics(),
-        crate::state::fragment_index_validation_prometheus(),
-        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus(),
+        crate::state::fragment_index_validation_prometheus() + &super::browse::detail_projection_prometheus(),
+        crate::subtitle_source::prometheus() + &crate::background_jobs::prometheus() + &state.clock.prometheus(),
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus() + &state.live_tv_peers.prometheus();
@@ -5624,6 +5650,7 @@ mod tests {
                     "node-b".to_owned(),
                     PeerActivityOutcome::Answered(
                         crate::http::internal_activity::ActivitySnapshot {
+                            workers: None,
                             node_id: "node-b".to_owned(),
                             deliveries: vec![ActivityDelivery {
                                 method: "direct".to_owned(),
