@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>tv.plurx.apple-standby</string>
+  <key>UserName</key><string>pjunod</string>
+  <key>GroupName</key><string>staff</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/python3</string>
+    <string>/usr/local/bin/plurx-apple-standby</string>
+    <string>--config</string>
+    <string>/usr/local/etc/plurx-apple-standby.json</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>HOME</key><string>/Users/pjunod</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key><string>1</string>
+  </dict>
+  <key>WorkingDirectory</key><string>/opt/homebrew/var/lib/forgejo-runner</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ExitTimeOut</key><integer>10860</integer>
+  <key>StandardOutPath</key><string>/opt/homebrew/var/log/plurx-apple-standby.log</string>
+  <key>StandardErrorPath</key><string>/opt/homebrew/var/log/plurx-apple-standby.err</string>
+</dict></plist>
