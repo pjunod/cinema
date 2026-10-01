@@ -1020,6 +1020,39 @@ fleet.
 
 ## Execution log
 
+**2026-10-01 durable completed-output continuation:** PR #680 landed as
+`35275de3d86c48bcb6787033911ba5e68626bfa7`; its retained-artifact implementation
+is the starting point, not repeated work. The next owned branch adds a private
+versioned, bounded atomic completion manifest and lazy exact byte/provenance
+validation to the real typed Restore consumer. Startup examines only bounded
+metadata; it does not hash a film or create a second preparation scheduler.
+Original execution nonce, epoch, process-salted recipe, playlist and init stay
+immutable. An explicit resolved logical delivery tuple is checked against the
+current source/request separately; old bodies never authorize a new producer
+or a post-restart repair. Restart-loaded artifacts do not become candidate
+proposal cost authority. Absent, invalid, timed-out or incompatible provenance
+is unavailable proof: issued Restore refuses before replacing a session,
+while ordinary uncaptured playback remains available and captured None remains
+None. Registry reservations and init/media leases retain existing bounded GC.
+The issued identity seals the ordered actual member hashes/lengths, logical
+tuple, original production origin and artifact UUID; Restore compares against
+the caller's independently retained seal, never self-declared manifest facts.
+Only the verified normal trailer completes the original Sink epoch. Retiring
+an all-done child does not revoke its published bytes; mixed-epoch or repeated
+publication still poisons measurement. Seven new focused IDs have individually
+passed once (four before seal hardening, plus the repaired real consumer and
+two new seal/trailer negative controls); earlier failures remain recorded.
+Sole review45 identified that healthy rendition sharing discarded the incoming
+logical tuple. The repair preserves that tuple outside the moved Recipe and
+checks it during lazy reacquisition and final attachment; ordinary differing
+requests receive no borrowed proof rather than losing playback. The shared
+process-salted production key remains unchanged. One additional real-consumer
+regression checks same-key reuse, exact-tuple success, differing-tuple issued
+refusal/incumbent preservation and ordinary uncaptured playback.
+The new branch requires its own focused once-per-PR receipts and independent
+review; no earlier unit pass is claimed as its evidence. Rolling-copy/PUT,
+arbitrary cold-copy preparation and physical/corpus acceptance remain open.
+
 **2026-10-01 retained VOD implementation boundary:** the candidate now retains
 complete successful full-mux output under generation-distinct private hardlink
 names, including init and tail. A session captures its receipt once; earlier

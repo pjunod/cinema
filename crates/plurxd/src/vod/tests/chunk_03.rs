@@ -1687,6 +1687,7 @@
                 "shipped-shape",
                 None,
                 Recipe {
+                    retained_logical: None,
                     measured_candidate: None,
                     file,
                     audio_index: None,
@@ -2952,6 +2953,7 @@
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
+            retained_logical: None,
             measured_candidate: None,
             file: media_file_at(PathBuf::from("unused.mkv"), 0),
             audio_index: None,
