@@ -1056,7 +1056,16 @@ playlist, logical/audio/source facts and issued identity; no worker/public
 field or durable recipe alias grants this authority. Ordinary cold playback
 remains uncaptured and playable without a whole-film wait.
 
-Ten new focused IDs have passed individually once so far; failed-only
+The actual rolling producer emits MPEG-TS `seg%05d.ts`, not always fMP4.
+Metadata collection therefore supports self-initializing TS without inventing
+an init or codec fact. Complete measurement requires segment zero, media
+sequence zero (or its standard absent default), every committed media member
+exactly once and no omitted known tail. fMP4 requires its actual MAP/init;
+TS with a MAP or ambiguous mixed container remains unknown. An ENDLIST seek
+suffix cannot qualify a title cost. These guards never reject playback or
+promote collector numbers to retained-body authority.
+
+Twelve new focused IDs have passed individually once so far; failed-only
 retries and precursor source attribution remain in the development receipt.
 Current-base composition, normal hook/compiler and independent review are
 still required. **Still open:** manual-copy preparation and its original

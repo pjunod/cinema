@@ -61,12 +61,16 @@ impl RollingOutputMeasurement {
             return None;
         }
         let mut target = None;
+        let mut sequence = None;
         let mut pending = None;
         let mut durations = Vec::new();
         let mut objects = Vec::new();
+        let mut transport_stream = true;
+        let mut fragmented_mp4 = true;
         let mut init = None;
         let mut ended = false;
-        let mut next = None;
+        // A seek suffix is an output observation, never a complete-title cost.
+        let mut next = Some(0);
         for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
             if ended {
                 return None;
@@ -78,6 +82,10 @@ impl RollingOutputMeasurement {
                 ended = true;
             } else if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
                 if target.replace(value.parse::<u64>().ok()?).is_some() {
+                    return None;
+                }
+            } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+                if sequence.replace(value.parse::<u64>().ok()?).is_some() || sequence != Some(0) {
                     return None;
                 }
             } else if let Some(value) = line.strip_prefix("#EXTINF:") {
@@ -103,6 +111,8 @@ impl RollingOutputMeasurement {
                     return None;
                 }
                 let stem = line.strip_prefix("seg")?.split_once('.')?.0;
+                transport_stream &= line.ends_with(".ts");
+                fragmented_mp4 &= line.ends_with(".m4s") || line.ends_with(".mp4");
                 let index = stem.parse::<u64>().ok()?;
                 if next.is_some_and(|expected| expected != index) {
                     return None;
@@ -112,7 +122,15 @@ impl RollingOutputMeasurement {
                 objects.push(self.objects.get(line)?);
             }
         }
-        if !ended || pending.is_some() || objects.is_empty() || init.is_none() {
+        if !ended
+            || pending.is_some()
+            || objects.is_empty()
+            || match init {
+                Some(_) => !fragmented_mp4,
+                None => !transport_stream,
+            }
+            || self.objects.len() != objects.len().checked_add(usize::from(init.is_some()))?
+        {
             return None;
         }
         let mut hash = Sha256::new();
@@ -146,6 +164,102 @@ fn flat_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rolling_actual_transport_stream_cost_requires_complete_unambiguous_container() {
+        let playlist = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:4.000000,\nseg00000.ts\n#EXTINF:2.000000,\nseg00001.ts\n#EXT-X-ENDLIST\n";
+        let mut observed = RollingOutputMeasurement::default();
+        observed.committed(
+            "seg00000.ts",
+            CommittedObject {
+                bytes: 1880,
+                digest: [1; 32],
+            },
+        );
+        assert!(
+            observed.complete(playlist.as_bytes()).is_none(),
+            "actual tail must commit"
+        );
+        observed.committed(
+            "seg00001.ts",
+            CommittedObject {
+                bytes: 940,
+                digest: [2; 32],
+            },
+        );
+        let rates = observed
+            .complete(playlist.as_bytes())
+            .expect("self-initializing MPEG-TS needs no fake init");
+        assert_eq!(rates.wire_bytes, 2820);
+        assert_eq!(rates.average_bps, 3760);
+        assert_eq!(rates.rfc_peak_bps, 3760);
+        let ambiguous = playlist.replace("#EXTINF:4", "#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4");
+        observed.committed(
+            "init.mp4",
+            CommittedObject {
+                bytes: 100,
+                digest: [3; 32],
+            },
+        );
+        assert!(
+            observed.complete(ambiguous.as_bytes()).is_none(),
+            "TS plus fMP4 MAP cannot establish full mux container"
+        );
+        let mut mixed = RollingOutputMeasurement::default();
+        mixed.committed(
+            "seg00000.ts",
+            CommittedObject {
+                bytes: 1880,
+                digest: [1; 32],
+            },
+        );
+        mixed.committed(
+            "seg00001.m4s",
+            CommittedObject {
+                bytes: 940,
+                digest: [2; 32],
+            },
+        );
+        assert!(mixed
+            .complete(playlist.replace("seg00001.ts", "seg00001.m4s").as_bytes())
+            .is_none());
+    }
+
+    #[test]
+    fn rolling_complete_cost_refuses_seek_suffix_and_omitted_committed_tail() {
+        let full = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000000,\nseg000000.m4s\n#EXT-X-ENDLIST\n";
+        let object = |value| CommittedObject {
+            bytes: 100,
+            digest: [value; 32],
+        };
+        let mut observed = RollingOutputMeasurement::default();
+        observed.committed("init.mp4", object(1));
+        observed.committed("seg000000.m4s", object(2));
+        assert!(
+            observed.complete(full.as_bytes()).is_some(),
+            "zero-origin complete control"
+        );
+        assert!(observed
+            .complete(
+                full.replace("MEDIA-SEQUENCE:0", "MEDIA-SEQUENCE:7")
+                    .as_bytes()
+            )
+            .is_none());
+        let mut suffix = RollingOutputMeasurement::default();
+        suffix.committed("init.mp4", object(1));
+        suffix.committed("seg000007.m4s", object(2));
+        assert!(
+            suffix
+                .complete(full.replace("seg000000", "seg000007").as_bytes())
+                .is_none(),
+            "suffix cannot masquerade as title"
+        );
+        observed.committed("seg000001.m4s", object(3));
+        assert!(
+            observed.complete(full.as_bytes()).is_none(),
+            "known committed tail cannot be omitted"
+        );
+    }
 
     #[test]
     fn rolling_committed_mux_observation_requires_complete_unchanged_incarnation() {
