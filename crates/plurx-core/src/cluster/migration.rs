@@ -10060,6 +10060,13 @@ pub mod status {
                 .split_once("fn record_watermark_error")
                 .expect("end watermark publication path")
                 .0;
+            let request_start_path = source
+                .split_once("fn begin_quorum_attempt(&self")
+                .expect("request-start clock path")
+                .1
+                .split_once("fn finish_quorum_attempt")
+                .expect("end request-start clock path")
+                .0;
             let sampler_path = source
                 .split_once("async fn run_quorum_watermark_loop")
                 .expect("watermark sampler path")
@@ -10071,6 +10078,7 @@ pub mod status {
             for (name, path) in [
                 ("snapshot", snapshot_path),
                 ("publication", publication_path),
+                ("request start", request_start_path),
                 ("sampler", sampler_path),
             ] {
                 for forbidden in ["SystemTime", "UNIX_EPOCH", "Utc::", "unix_"] {
@@ -10082,7 +10090,9 @@ pub mod status {
             }
             assert!(snapshot_path.contains("started_at.elapsed()"));
             assert!(publication_path.contains("started_at.elapsed()"));
-            assert!(sampler_path.contains("metrics.elapsed_nanos()"));
+            assert!(request_start_path.contains("started_nanos: self.elapsed_nanos()"));
+            assert!(sampler_path.contains("metrics.begin_quorum_attempt("));
+            assert!(sampler_path.contains("metrics.quorum_attempt().started_nanos"));
         }
 
         #[test]
