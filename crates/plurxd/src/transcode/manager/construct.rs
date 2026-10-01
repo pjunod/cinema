@@ -791,7 +791,7 @@ impl TranscodeManager {
                     target: "plurxd::transcode",
                     %error, "speculative publication could not verify transcode policy"
                 );
-                Some(OfflineProduceOutcome::Yielded)
+                Some(OfflineProduceOutcome::Yielded("policy_unavailable"))
             }
         }
     }
@@ -964,6 +964,21 @@ impl TranscodeManager {
 
     pub(crate) fn background_worker_in_use(&self) -> bool {
         self.background_heavy.available_permits() == 0
+    }
+
+    /// Continuation check after admission: keep yielding to viewers and downloads,
+    /// but do not mistake the reservation held by this job for another worker.
+    pub(super) fn pretranscode_publication_yield_reason(&self) -> Option<&'static str> {
+        if self.admissions.background_must_yield() {
+            Some("foreground_demand")
+        } else if self
+            .offline_waiting
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            Some("offline_waiting")
+        } else {
+            None
+        }
     }
 
     pub fn pretranscode_worker_idle(&self) -> bool {

@@ -974,6 +974,7 @@ impl JobFence {
             JobSettlement::Cancel
         } else {
             JobSettlement::Yield {
+                error_code: Some("worker_retired".into()),
                 checkpoint: None,
                 not_before_ms: now_ms,
             }
@@ -1013,6 +1014,7 @@ impl JobFence {
             ClaimResolution::Running { token } => Some(SettleJob {
                 token,
                 settlement: JobSettlement::Yield {
+                    error_code: Some("worker_retired".into()),
                     checkpoint: None,
                     not_before_ms: now_ms,
                 },
