@@ -711,6 +711,29 @@ predicate or expected identity count was relaxed. Exact-head compiler, normal
 hook and final focused receipts belong in the task PR, not this earlier
 source-stage row.
 
+**PR655 review25 correction, 2026-09-30:** The first decoder proof used a
+process-global counter. Ordinary parallel fragment-index tests reproduced
+24 passes and one failure because another database's full read changed that
+counter. Each proof now registers a strong counter handle for its canonical
+owned database path; the decoder's weak registry isolates other databases
+without changing shipping code or serializing the test harness. The new
+`decoder_counter_is_scoped_to_the_owned_database` regression runs another
+database's 64 full reads concurrently with 64 metadata projections, then
+checks a real full-reader positive control on the owned database. Core 26,
+sidecar 19 and authenticated browse 13 tests passed with default parallelism.
+An initial correction failed its positive control (zero instead of one);
+canonicalizing both registration and connection paths corrected that setup.
+
+Before publication, newest main
+`28964229cdb4a70aa0872a49e78fdb096ecf4083` and effort
+`8a7dbf5337584b2bb0556d0b617fef48122def2e` were compared from merge base
+`58ed08bb2e2a8e2549f9142acf61123d56e9131a`. Main has no new hunks in this
+task's eight owned files. Open PR651's DVR/worker additions, PR648's clock
+metrics, PR653's snapshot metrics and PR403's optical schema/delivery work
+overlap file names but not this narrow counter correction. Those changes
+must compose during integration; none was restored from the older workboard
+or removed here. This receipt does not qualify a future rebased tree.
+
 This is source implementation, not rollout acceptance. M1's exact-boundary
 deployment and active legacy backfill-convergence receipt remain required
 before M2 promotion, as do the named before/after detail timings and the M3

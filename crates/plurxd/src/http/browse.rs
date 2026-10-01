@@ -1100,7 +1100,10 @@ mod tests {
             crate::ffmpeg::has_dovi_rpu().await,
             true,
         )[0];
-        let control = plurx_core::store::fragment_index_unpack_calls();
+        let counter = plurx_core::store::fragment_index_unpack_counter(
+            &page.root.path().join("catalogue.db"),
+        );
+        let control = counter.load(std::sync::atomic::Ordering::Relaxed);
         assert!(page
             .state
             .store
@@ -1112,10 +1115,10 @@ mod tests {
             .expect("full control read")
             .is_some());
         assert_eq!(
-            plurx_core::store::fragment_index_unpack_calls(),
+            counter.load(std::sync::atomic::Ordering::Relaxed),
             control + 1
         );
-        let before = plurx_core::store::fragment_index_unpack_calls();
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
         let response = crate::http::router(page.state.clone())
             .oneshot(
                 Request::builder()
@@ -1137,7 +1140,7 @@ mod tests {
         )
         .expect("JSON");
         assert_eq!(body["files"][0]["vod_index_status"], "indexed");
-        assert_eq!(plurx_core::store::fragment_index_unpack_calls(), before);
+        assert_eq!(counter.load(std::sync::atomic::Ordering::Relaxed), before);
     }
 
     #[tokio::test]

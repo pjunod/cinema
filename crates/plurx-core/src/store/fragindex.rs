@@ -216,11 +216,28 @@ const ROW_BYTES: usize = 24;
 // `cfg(test)` alone does not compile into a dependency of plurxd's test binary.
 // The existing dev-only fixtures feature keeps this out of shipping builds.
 #[cfg(any(test, feature = "fixtures"))]
-static UNPACK_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+type UnpackCounters =
+    std::collections::HashMap<std::path::PathBuf, std::sync::Weak<std::sync::atomic::AtomicUsize>>;
 
 #[cfg(any(test, feature = "fixtures"))]
-pub(super) fn unpack_calls() -> usize {
-    UNPACK_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+static UNPACK_COUNTERS: std::sync::LazyLock<std::sync::Mutex<UnpackCounters>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(UnpackCounters::new()));
+
+#[cfg(any(test, feature = "fixtures"))]
+pub(super) fn unpack_counter(
+    database: &std::path::Path,
+) -> std::sync::Arc<std::sync::atomic::AtomicUsize> {
+    let database = database
+        .canonicalize()
+        .expect("owned counter database exists");
+    let mut counters = UNPACK_COUNTERS.lock().expect("unpack-counter registry");
+    counters.retain(|_, counter| counter.strong_count() > 0);
+    if let Some(counter) = counters.get(&database).and_then(std::sync::Weak::upgrade) {
+        return counter;
+    }
+    let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    counters.insert(database, std::sync::Arc::downgrade(&counter));
+    counter
 }
 
 #[cfg(test)]
@@ -245,9 +262,18 @@ fn pack(rows: &[IndexRow]) -> Vec<u8> {
     out
 }
 
-fn unpack(blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> {
+fn unpack(_conn: &Connection, blob: &[u8]) -> Result<Vec<IndexRow>, StoreError> {
     #[cfg(any(test, feature = "fixtures"))]
-    UNPACK_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if let Some(counter) = _conn.path().and_then(|path| {
+        let database = std::path::Path::new(path).canonicalize().ok()?;
+        UNPACK_COUNTERS
+            .lock()
+            .expect("unpack-counter registry")
+            .get(&database)
+            .and_then(std::sync::Weak::upgrade)
+    }) {
+        counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if !blob.len().is_multiple_of(ROW_BYTES) {
         return Err(StoreError::Migration(format!(
             "a stored fragment index is {} bytes, not a whole number of \
@@ -323,7 +349,7 @@ pub(crate) fn put(
     // bytes decode to the rows being published, and the promotion payload
     // round-trips through the type `get` later expects.
     let validated = !index.rows.is_empty()
-        && unpack(&packed)? == index.rows
+        && unpack(conn, &packed)? == index.rows
         && serde_json::from_str::<crate::fmp4::PromotionInputs>(&promotion)
             .is_ok_and(|decoded| decoded == index.promotion);
     let validated_revision = if validated {
@@ -466,7 +492,7 @@ pub(crate) fn get(
     if !stored.matches(identity) {
         return Ok(None);
     }
-    let rows = unpack(&packed)?;
+    let rows = unpack(conn, &packed)?;
     if rows.is_empty() {
         return Ok(None);
     }
@@ -933,13 +959,26 @@ mod tests {
 
     #[test]
     fn metadata_projection_preserves_identity_order_and_never_unpacks() {
-        let conn = typed_conn();
+        let directory = tempfile::tempdir().expect("owned projection database");
+        let database = directory.path().join("projection.db");
+        let conn = schema(Connection::open(&database).expect("projection database"));
+        conn.execute_batch(FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA)
+            .expect("typed outcomes");
+        let counter = unpack_counter(&database);
         let mut built = index();
         built.rows = vec![built.rows[0].clone(); 4_100];
         put(&conn, 7, &built, 1).expect("publish");
         let changed =
             SourceIdentity::new(built.source.size + 1, built.source.mtime_ms, "fingerprint");
-        let before = unpack_calls();
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(get(&conn, 7, &built.source)
+            .expect("full-reader control")
+            .is_some());
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            before + 1
+        );
+        let before = counter.load(std::sync::atomic::Ordering::Relaxed);
         let answers = status(
             &conn,
             &[
@@ -951,7 +990,7 @@ mod tests {
         )
         .expect("projection");
         assert_eq!(
-            unpack_calls(),
+            counter.load(std::sync::atomic::Ordering::Relaxed),
             before,
             "metadata must not decode the 4100-row payload"
         );
@@ -971,6 +1010,46 @@ mod tests {
         assert_eq!(answers[0].fragments, 4_100);
         assert_eq!(answers[2].fragments, 0);
         assert!(status(&conn, &vec![(7, built.source.clone()); 257]).is_err());
+    }
+
+    #[test]
+    fn decoder_counter_is_scoped_to_the_owned_database() {
+        let directory = tempfile::tempdir().expect("owned counter databases");
+        let first_path = directory.path().join("first.db");
+        let second_path = directory.path().join("second.db");
+        let first = schema(Connection::open(&first_path).expect("first database"));
+        let second = schema(Connection::open(&second_path).expect("second database"));
+        let built = index();
+        put(&first, 7, &built, 1).expect("publish first");
+        put(&second, 7, &built, 1).expect("publish second");
+        let first_counter = unpack_counter(&first_path);
+        let second_counter = unpack_counter(&second_path);
+        let source = built.source;
+        let second_source = source.clone();
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                for _ in 0..64 {
+                    assert!(get(&second, 7, &second_source)
+                        .expect("other database full read")
+                        .is_some());
+                }
+            });
+            for _ in 0..64 {
+                assert_eq!(
+                    status(&first, &[(7, source.clone())]).expect("owned projection")[0].presence,
+                    super::super::IndexPresence::Ready
+                );
+            }
+        });
+        assert_eq!(first_counter.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            second_counter.load(std::sync::atomic::Ordering::Relaxed),
+            64
+        );
+        assert!(get(&first, 7, &source)
+            .expect("owned full-reader control")
+            .is_some());
+        assert_eq!(first_counter.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
@@ -1079,7 +1158,10 @@ mod tests {
     }
 
     fn conn() -> Connection {
-        let conn = Connection::open_in_memory().expect("in-memory sidecar");
+        schema(Connection::open_in_memory().expect("in-memory sidecar"))
+    }
+
+    fn schema(conn: Connection) -> Connection {
         // Create then migrate, exactly as both real backends do -- the create
         // constant is frozen at its v27 shape on purpose.
         conn.execute_batch(FRAGMENT_INDEXES_SCHEMA).expect("schema");
@@ -1239,7 +1321,7 @@ mod tests {
     fn the_packed_form_is_twenty_bytes_a_row() {
         let packed = pack(&index().rows);
         assert_eq!(packed.len(), 3 * ROW_BYTES);
-        assert_eq!(unpack(&packed).expect("unpack"), index().rows);
+        assert_eq!(unpack(&conn(), &packed).expect("unpack"), index().rows);
     }
 
     #[test]
@@ -1553,9 +1635,9 @@ mod tests {
 
     #[test]
     fn a_torn_blob_is_refused_rather_than_half_read() {
-        assert!(unpack(&[0u8; ROW_BYTES + 3]).is_err());
+        assert!(unpack(&conn(), &[0u8; ROW_BYTES + 3]).is_err());
         assert!(
-            unpack(&[0u8; ROW_BYTES]).is_err(),
+            unpack(&conn(), &[0u8; ROW_BYTES]).is_err(),
             "cut class 0 is not a class"
         );
     }
