@@ -37,6 +37,20 @@ seven-day acceptance. S-11 still owes an exact-build uninterrupted window,
 its gap/uptime/counter/source audits and the named controlled sessions;
 controlled test playback is not normal-use evidence.
 
+**S-11 current prerequisite supersession, 2026-10-01:** the historical failed
+window above remains invalid; it is not replaced by a new duration claim.
+The canonical [codec plan](../streaming/CODEC-AND-GPU-QUALIFICATION.md)'s
+September 30 amendment makes a reset-aware organic-use week supplementary,
+not eligibility for M1/M2. Current scoped hardware/probe/selected-graph facts
+permit that work now. Exact graph, content, throughput, metadata and physical
+acceptance bars are unchanged. Three actual generated fixtures and a small
+genuine P5/RPU acquisition are partial corpus evidence, not the full corpus
+or a qualified GPU. The gradient VUI correction retains its refusal check;
+independent HDR references, production burn/session and client acceptance
+remain open. This dated forward correction supersedes the earlier phrase
+that an uninterrupted week is owed as a prerequisite; it does not rewrite
+the original failed-observation record or close S-11.
+
 **Integration override, 2026-09-30 (user instruction):** remaining plan PRs
 branch from the current `effort/architecture-review-2026-09-20` and target
 that effort. Existing merged history is preserved. Each task needs one formal

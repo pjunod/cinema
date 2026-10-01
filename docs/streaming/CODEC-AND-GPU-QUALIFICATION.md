@@ -679,6 +679,40 @@ refusal or score PQ/HLG against SDR as if the result meant quality. A versioned
 all-class corpus receipt requires genuine inputs and appropriate HDR-reference
 scoring, plus §3.6's independent fidelity checks. No manifest alone closes it.
 
+**2026-10-01 actual acquisition continuation:** unchanged 45-second animation,
+sport and PGS-track fixtures were generated in an owned CPU-only container on
+the frozen `4f243a01` tool image, using the current `b65be8773` harness. A
+small genuine P5 packet copy also yielded 50 actual Profile 5 RPUs; it is not
+a 45-second corpus input, decoded reshape or independently graded reference.
+The ten-bit gradient encoded but its unchanged checker refused it: the HEVC
+VUI contains unspecified primaries/transfer (2/2), with BT.709 matrix (1).
+An actual two-frame experiment showed explicit x265 `colorprim`, `transfer`,
+`colormatrix` and limited `range` alone still emitted unspecified transfer
+and primaries. The final narrow candidate also binds these properties on
+the frames with `setparams` after the existing GEQ expression: metadata only,
+not a pixel transform. Existing generic flags and the refusal remain; every
+other fixture argv is unchanged. The corrected committed `5ec437ea7` bench
+archive then passed a distinct two-frame probe and actual SPS check
+(primaries/transfer/matrix 1/1/1, limited range 0), followed by the unchanged
+45-second 1920×1080/24 fps gradient and its strict metadata checker. The
+626,292-byte corrected fixture SHA-256 is
+`853c3087e1fd650df536196123b6b0d8430526935b6c973bb2b545b5130c7249`;
+video is 45.000 s (AAC/container 45.023 s). Original refused bytes remain
+retained. This proves this fixture's metadata, not perceptual fidelity.
+No GPU, production bitmap-burn or physical HDR acceptance follows.
+
+A separate requested-45-second genuine P5 stream-copy then acquired 1,082
+packets and 1,082 actual Profile 5/CM v4.0 RPUs in a bounded owned CPU-only
+window. Packet PTS spans 0–45.167 s; GOP/container extent is 45.208 s, not
+exactly 45 s. The 104,533,274-byte acquired fixture SHA-256 is
+`7b8b1efbe6172783824b9dd3fff542473db7c9fe46faceff1c10e9f4b46fdbed`;
+the extracted 310,279-byte RPU SHA-256 is
+`d9c3f67b4d85196228b06ef8fa0b6784ce6bfe2c898ced4d5005d71166fbf780`.
+The private source's size/mtime/inode were unchanged before/after; this is
+not a full-source hash. This longer fixture supersedes no earlier limited
+sample receipt and has not been decoded, independently reshaped/graded or
+physically compared. M1's all-class corpus and fidelity acceptance stay open.
+
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
 `identity`/`class`/`dynamic_range`/`trim`/`rung` rows matching the existing
@@ -987,3 +1021,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |
+| 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M1 bench metadata/acquisition continuation, incomplete | candidate | Two new focused guards passed once after negative controls; first is argument-only. Actual x265-parameter-only counterexample retained; final metadata-only frame tail proves tiny SPS and full unchanged 45-second ten-bit gradient metadata. Three other generated fixtures plus a distinct requested-45-second genuine P5/RPU fixture acquired; GOP extent and source-stat limits recorded above. Organic week is supplementary, not M1/M2 eligibility. No production encoder/default, GPU, independent HDR grade or whole-corpus qualification. |
