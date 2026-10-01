@@ -823,7 +823,7 @@ impl OfflineManager {
                 self.publish_ready(&package, &file, produced, work_started)
                     .await
             }
-            Ok(OfflineProduceOutcome::Yielded)
+            Ok(OfflineProduceOutcome::Yielded(_))
             | Ok(OfflineProduceOutcome::ClaimedElsewhere)
             | Ok(OfflineProduceOutcome::StoreUnavailable)
             | Ok(OfflineProduceOutcome::PolicyChanged)
@@ -1683,7 +1683,7 @@ mod tests {
         let fixture = seeded_recovery_fixture().await;
         fixture.manager.transcode.test_script_offline_production([
             OfflineProduceOutcome::HealthRefused,
-            OfflineProduceOutcome::Yielded,
+            OfflineProduceOutcome::Yielded("production_interrupted"),
             OfflineProduceOutcome::HealthRefused,
         ]);
         let package = claimed_package(&fixture, "manager-recovery", "none", None).await;

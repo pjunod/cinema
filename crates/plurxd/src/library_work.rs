@@ -240,6 +240,7 @@ impl JobManager {
                 settle_library(
                     &fence,
                     JobSettlement::Yield {
+                        error_code: None,
                         checkpoint: None,
                         not_before_ms: clock_ms().saturating_add(5_000),
                     },
@@ -261,6 +262,7 @@ impl JobManager {
                 settle_library(
                     &fence,
                     JobSettlement::Yield {
+                        error_code: None,
                         checkpoint: None,
                         not_before_ms: clock_ms().saturating_add(5_000),
                     },
@@ -311,6 +313,7 @@ impl JobManager {
             settle_library(
                 &fence,
                 JobSettlement::Yield {
+                    error_code: None,
                     checkpoint: None,
                     not_before_ms: clock_ms().saturating_add(1_000),
                 },
@@ -467,6 +470,7 @@ impl JobManager {
         settle_library(
             fence,
             JobSettlement::Yield {
+                error_code: None,
                 checkpoint: None,
                 not_before_ms: clock_ms(),
             },

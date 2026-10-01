@@ -293,6 +293,7 @@ pub(crate) async fn run(state: AppState, shutdown: CancellationToken) {
                     };
                     match inspect(root, &location, allowed).await {
                         None => Some(JobSettlement::Yield {
+                            error_code: Some("worker_interrupted".into()),
                             not_before_ms: now_ms().saturating_add(5000),
                             checkpoint: None,
                         }),

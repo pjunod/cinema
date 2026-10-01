@@ -241,7 +241,10 @@ also_in = ["crates/plurxd/src/transcode"]
 # unchanged. All six reap a fixture child the same regressions created, through
 # the supervised kill path that waits for the reap. They own those fixture
 # processes only; no production termination site moved or was added.
-expected_occurrences = 10
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 11
 kind = "process_action"
 replacement = "the awaited compatibility supervisor command path; prepublication replyless termination is inventoried separately"
 
@@ -2521,7 +2524,10 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # `.spawn()` of the piped stand-in producer (`sleep 60`, `kill_on_drop`) in
 # `install_stand_in_producer`, test-only; the production install path puts it under
 # `AttemptChild` supervision or its refusal cleanup reaps it.
-expected_occurrences = 51
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 52
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3800,7 +3806,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 cluster probe-batch regression in source_probe.rs: test-only /bin/kill
 # -0 checks that the already-cancelled child PID is gone. The finite liveness
 # command is synchronously waited; bounded::output owns/reaps probe children.
-expected_occurrences = 200
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 201
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4253,11 +4262,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # owns nothing.
 # +1 cluster probe-batch regression: the synchronous .status() on the
 # test-only /bin/kill -0 liveness command described above. No new producer.
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
 # +2 B-R1: Axum Response::status() reads in the authenticated local-refusal
 # and public-ingress remote-owner fixtures. Both assert HTTP response codes;
 # neither creates a process/task or changes producer lifecycle ownership.
-# Combined current-main407 plus these two independent response reads =409.
-expected_occurrences = 409
+# Combined current-main 409 plus the queued-publication test child = 410.
+expected_occurrences = 410
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -4481,7 +4493,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # process changed.
 # Merge of main @ c7635af5e (#581; 248) into `plan/S-14-9` (317): 240 measured by zeroing this row
 # (248 + this branch's 317 - 325 = -8). Both reviews kept; the merge adds no new site.
-expected_occurrences = 240
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 242
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -4646,7 +4661,10 @@ pattern = "kill_on_drop\\s*\\("
 # the same test-only fake producer is `kill_on_drop(true)`.
 # 91 -> 92 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only stand-in producer is `kill_on_drop(true)`.
-expected_occurrences = 92
+# Queued-publication regression: the test owns one finite sleep child,
+# uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
+# terminated and reaped it for foreground, download, ownership and deadline yields.
+expected_occurrences = 93
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
