@@ -349,7 +349,7 @@ function preparedSelectionText(selection){
 }
 function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
   const hls=new Hls({
     maxBufferLength:voluntary?Math.min(12,tgt.fwd):tgt.fwd,
@@ -608,8 +608,8 @@ async function pollPreparedQualityHealth(p){
 function notePreparedBuffer(p,state){
   const v=/** @type {HTMLVideoElement|null} */ (document.getElementById("video")), spare=preparedVideoElement();
   if(!v||!spare) return;
-  if(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent
-    &&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10)){
+  if(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent)
+    &&(p.waitAt||v.seeking||(!v.paused&&bufferRunway(v)<10))){
     failPreparedReplacement(p,state,"incumbent pressure during voluntary trial");
     return;
   }
@@ -748,7 +748,7 @@ function preparedAlignedBuffered(spare){
 // a queued pre-seek frame can otherwise step the visible picture backward.
 // Keep the incumbent's audio with its visible picture through this proof.
 function exposePreparedReplacementAtFrame(p,state,v,spare){
-  const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
+  const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   if(voluntary&&streamHasVideo(p,spare)&&typeof spare.requestVideoFrameCallback!=="function"){
     failPreparedReplacement(p,state,"no parallel video presentation proof");
     return false;
@@ -778,7 +778,8 @@ function exposePreparedReplacementAtFrame(p,state,v,spare){
       try{ v.cancelVideoFrameCallback(state.handoffFrameCallbackId); }catch(e){}
     state.handoffFrameCallbackId=null;
     if(!live()) return;
-    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10||!preparedQualityProofReady(p,state))){
+    if(voluntary&&(p.waitAt||v.paused||v.seeking||bufferRunway(v)<10
+      ||(p.directedChange?.autoMove?.retainIncumbent&&!preparedQualityProofReady(p,state)))){
       failPreparedReplacement(p,state,"quality proof expired or incumbent pressure before voluntary commit");
       return;
     }

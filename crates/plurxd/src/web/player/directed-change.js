@@ -164,26 +164,30 @@ function settlePreparedOfferWaiter(p,waiter,mine,response,error){
     },PREPARED_OFFER_CADENCE_MS);
   }
 }
-// One owner per directed change, from the tap to a commit or ONE reopen.
-//
-// Every way this can fail converges on the same single answer -- reopen the
-// stream where the viewer actually is -- and `change.settled` is what keeps it
-// single. Without it a decline racing the bound, or a failed commit racing a
-// supersede, reopens twice.
+// One owner per directed change. Optional manual and Auto targets retain the
+// incumbent on failure; a recovery target keeps its existing single reopen.
+// `change.settled` prevents a decline, timeout and supersession from settling
+// the same request twice.
 //
 // `fallback` is optional and is how Auto keeps its own reopen: the automatic
 // controller goes through `requestPlaybackMediaChange` so the create carries
 // the rung, where the menu goes through `play()`.
-async function requestQualityChange(p,reason,fallback,autoMove){
+async function requestQualityChange(p,reason,fallback,autoMove,standingSelection){
   if(!p) return "superseded";
+  const retained=p.qualityRetainedSelection;
+  const previous=standingSelection||(retained&&retained.selection)||(p.controlLastRequest&&p.controlLastRequest.selection);
+  if(retained?.change?.noticeIntent) playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  supersedeDirectedChange(p);
+  p.qualityRetainedSelection=null;
   const change={intentGeneration:p.controlIntentGeneration||0,
+    incumbentSessionId:p.sessionId,standingSelection:previous||null,
+    retainIncumbent:reason==="manual"&&!!p.started&&playbackOwnsAttachedMedia(p),
     tappedAt:performance.now(),settled:false,reason:reason||"manual",
     fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
     outcome:null,outcomeAt:null};
   p.directedChange=change;
   // Keep transport reports live while learning the owner's strict-reader
   // floor. Publish the new recipe only after this negotiation turn settles.
-  const previous=p.controlLastRequest&&p.controlLastRequest.selection;
   if(previous) p.qualityNegotiatingSelection={change,selection:previous};
   try{ await discoverQualityControl(p); }
   finally{ if(p.qualityNegotiatingSelection&&p.qualityNegotiatingSelection.change===change) p.qualityNegotiatingSelection=null; }
@@ -213,13 +217,38 @@ function fallBackDirectedChange(p,change,why){
   if(change.commitTimer!=null){ clearTimeout(change.commitTimer); change.commitTimer=null; }
   change.outcome=why;
   change.outcomeAt=performance.now();
+  if(change.retainIncumbent&&p.sessionId!==change.incumbentSessionId){
+    // Exposure already changed the authoritative session. Its presentation
+    // and recovery owner settle that state; this older optional ask cannot
+    // declare retention or reopen over it after an acknowledgement is lost.
+    change.cancellationOutcome="observation_unknown";
+    return true;
+  }
+  // Manual preferences survive a declined optional target. The wire follows
+  // the attached incumbent until Retry or an explicit restart owns a new ask.
+  if(change.retainIncumbent&&p.sessionId===change.incumbentSessionId
+    &&playbackOwnsAttachedMedia(p)&&change.standingSelection){
+    const staged=preparedState(p);
+    if(staged) abandonPreparedReplacement(p,"aborted","manual_quality_target_failed");
+    p.qualityRetainedSelection={selection:change.standingSelection,
+      intentGeneration:change.intentGeneration,sessionId:p.sessionId,change};
+    settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+    change.noticeIntent="quality:"+change.intentGeneration+":"+change.tappedAt;
+    raisePlaybackSurface("change_failed",{context:"change",intent:change.noticeIntent,
+      title:"Quality change did not complete. Keeping the current stream.",
+      detail:"Your preference is saved. Retry, or choose Apply with restart in Quality.",actions:["retry"]});
+    notifyPlaybackControl();
+    clientLog(Object.assign({level:"info",event:"quality_switch",detail:why,reason:"manual",
+      message:"Optional manual quality target failed; keeping the current stream"},playbackContext()));
+    return true;
+  }
   // A voluntary trial may fail without interrupting a healthy incumbent.
   // Abort its one successor, restore the standing selection and back off.
   if(change.autoMove&&change.autoMove.retainIncumbent){
     const move=change.autoMove, now=performance.now();
     const staged=preparedState(p);
     if(staged) abandonPreparedReplacement(p,"aborted","auto_trial_failed");
-    const cancellation=cancelUnappendedQualityIntent(p,change);
+    const cancellation=settleQualityCancellation(p,change);
     if(cancellation&&cancellation.then) cancellation.then(outcome=>{
       change.cancellationOutcome=outcome;
       clientLog(Object.assign({level:"info",event:"quality_cancellation",detail:outcome,
@@ -267,6 +296,32 @@ function fallBackDirectedChange(p,change,why){
 }
 // A directed change that ended without a reopen: the successor took the
 // picture, or something newer replaced the whole ask.
+function retainedQualityChange(p){
+  const retained=p&&p.qualityRetainedSelection;
+  return retained&&retained.sessionId===p.sessionId
+    &&retained.intentGeneration===(p.controlIntentGeneration||0)?retained:null;
+}
+function retryQualityChange(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained) return false;
+  closeMenu();
+  // Retry is a new media intent even when the saved preference is identical.
+  const holder=p.abr||p;
+  if(holder.mediaIntent) holder.mediaIntent.recipeKey=null;
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  return requestQualityChange(p,"manual",null,null,retained.selection);
+}
+function applyQualityWithRestart(){
+  const p=PLAYER, retained=retainedQualityChange(p);
+  if(!retained||!p.fileId) return false;
+  closeMenu();
+  playbackSurfaceStep({intent_superseded:retained.change.noticeIntent});
+  p.qualityRetainedSelection=null;
+  const pos=positionForPlaybackIntent(document.getElementById("video"),p);
+  PENDING_ATTEMPT_REASON="quality";
+  beginPlaybackControlSeek(p,pos);
+  return play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+}
 function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);
   if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
@@ -310,7 +365,7 @@ function settleDirectedChange(p,change,why,detail){
 function supersedeDirectedChange(p){
   const change=p&&p.directedChange;
   const settled=settleDirectedChange(p,change,"superseded");
-  if(settled&&change.qualityIntent) cancelUnappendedQualityIntent(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
+  if(settled&&change.qualityIntent) settleQualityCancellation(p,change).then(outcome=>{change.cancellationOutcome=outcome;});
   return settled;
 }
 // The server cancels a preparation the moment the incumbent reports `waiting`

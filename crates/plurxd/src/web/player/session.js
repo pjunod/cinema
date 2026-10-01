@@ -126,6 +126,9 @@ function qualityCatalogSelectionCurrent(p){
   return !!p?.abr&&p.abr.catalogSelectionKey===qualityCatalogSelectionKey(p);
 }
 function playbackControlSelection(p,ownerBound=false){
+  const retained=p&&p.qualityRetainedSelection;
+  if(retained&&(p.controlIntentGeneration||0)===retained.intentGeneration
+    &&p.sessionId===retained.sessionId) return retained.selection;
   const negotiating=p&&p.qualityNegotiatingSelection;
   if(negotiating&&p.directedChange===negotiating.change
     &&(p.controlIntentGeneration||0)===negotiating.change.intentGeneration) return negotiating.selection;
@@ -375,15 +378,47 @@ async function discoverQualityControl(p,fresh=false){
 async function cancelUnappendedQualityIntent(p,change){
   const intent=change&&change.qualityIntent;
   if(!p||!intent) return "unsupported";
-  const response=await discoverQualityControl(p,true), identity=response&&response.pending_identity;
-  if(!response||!response.features.includes("quality_cancel_v1")) return "unsupported";
-  // A fresh discovery can already name a newer choice. It is never authority
-  // to cancel that choice on behalf of this older one.
-  if(!identity||identity.client_instance_id!==CONTROL_CLIENT_ID
-    ||identity.lifetime_id!==intent.lifetime_id||identity.recipe_revision!==intent.recipe_revision)
-    return "observation_unknown";
+  const ownerKey=qualityControlOwnerKey(p);
+  let identity=change.cancellationOwnerKey===ownerKey?change.cancellationIdentity:null;
+  if(!identity){
+    const response=await discoverQualityControl(p,true);
+    if(qualityControlOwnerKey(p)!==ownerKey) return "observation_unknown";
+    if(!response||!response.features.includes("quality_cancel_v1")) return "unsupported";
+    identity=response.pending_identity;
+    // A discovery for a newer choice cannot cancel it for this older one.
+    if(!identity||identity.client_instance_id!==CONTROL_CLIENT_ID
+      ||identity.lifetime_id!==intent.lifetime_id||identity.recipe_revision!==intent.recipe_revision)
+      return "observation_unknown";
+    change.cancellationIdentity=identity;
+    change.cancellationOwnerKey=ownerKey;
+  }
   const request={version:1,generation:identity.generation,control_epoch:identity.control_epoch,
     operation:"cancel_unappended",identity};
   const result=await exchangeQualityControl(p,request);
-  return result&&result.outcome||"observation_unknown";
+  if(qualityControlOwnerKey(p)!==ownerKey) return "observation_unknown";
+  // Only the exact receipt settles cleanup. A missing or different identity
+  // cannot promote an initiation response to completed cancellation.
+  if(result?.outcome==="unsupported") return "unsupported";
+  if(!result||!result.pending_identity||Object.keys(identity).some(key=>result.pending_identity[key]!==identity[key]))
+    return "observation_unknown";
+  change.cancellationOutcome=result.outcome;
+  return result.outcome;
+}
+async function settleQualityCancellation(p,change){
+  if(change.cancellationPromise) return change.cancellationPromise;
+  const ownerKey=qualityControlOwnerKey(p);
+  const promise=(async()=>{
+    let outcome=await cancelUnappendedQualityIntent(p,change);
+    // Three exact, idempotent attempts bound receipt recovery. Keep the
+    // identity after request loss; discovery may no longer name a cleaned job.
+    for(const delay of [500,1000]){
+      if(!change.cancellationIdentity||["cancelled","unsupported"].includes(outcome)) break;
+      await new Promise(resolve=>setTimeout(resolve,delay));
+      if(qualityControlOwnerKey(p)!==ownerKey||p.controlReporter?.stopped) return "observation_unknown";
+      outcome=await cancelUnappendedQualityIntent(p,change);
+    }
+    return outcome;
+  })().finally(()=>{if(change.cancellationPromise===promise) change.cancellationPromise=null;});
+  change.cancellationPromise=promise;
+  return promise;
 }

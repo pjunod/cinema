@@ -89,3 +89,91 @@ test("discovery deduplicates requests for the same owner",async()=>{
   assert.equal(h.scope.qualityControlSupported(h.player),true);
   assert.equal(h.timers.size,0);
 });
+
+
+test("lost cancellation acknowledgement replays the exact identity after planning disappears",async()=>{
+  const h=harness(), exact=identity(), change={qualityIntent:{lifetime_id:"movie",recipe_revision:3}};
+  h.replies.push(h.reply("supported",exact),()=>{throw Error("lost acknowledgement");});
+  assert.equal(await h.scope.cancelUnappendedQualityIntent(h.player,change),"observation_unknown");
+  h.replies.push(h.reply("cancelled",exact));
+  assert.equal(await h.scope.cancelUnappendedQualityIntent(h.player,change),"cancelled");
+  assert.equal(h.calls.length,3,"replay must not rediscover an absent planning owner");
+  assert.deepEqual(h.calls[1].body.identity,h.calls[2].body.identity);
+  assert.equal(h.timers.size,0);
+});
+
+test("a different cancellation receipt cannot acknowledge this intent",async()=>{
+  const h=harness(), exact=identity(), other={...exact,accepted_sequence:8};
+  h.replies.push(h.reply("supported",exact),h.reply("cancelled",other));
+  assert.equal(await h.scope.cancelUnappendedQualityIntent(h.player,{qualityIntent:{lifetime_id:"movie",recipe_revision:3}}),
+    "observation_unknown");
+});
+
+
+function manualHarness(){
+  const notices=[], opens=[], seeks=[], cancelled=[], notifications=[];
+  const baseline={quality:{mode:"auto"},audio_track:0,subtitle:{mode:"off",track:null},audio_offset_ms:0,codec:"auto",dynamic_range:"auto"};
+  const player={sessionId:"incumbent",fileId:"film",title:"Film",started:true,controlIntentGeneration:2,mediaAttachment:{},abr:{}};
+  const change={intentGeneration:2,incumbentSessionId:"incumbent",standingSelection:baseline,
+    retainIncumbent:true,tappedAt:1,settled:false,reason:"manual",qualityIntent:{lifetime_id:"movie",recipe_revision:3}};
+  player.directedChange=change;
+  const scope={PLAYER:player,performance:{now:()=>100},clearTimeout(){},
+    document:{getElementById:()=>({currentTime:27,paused:false})},
+    playQuality:()=>"1080",selectedAudioIndex:()=>0,SERVER:{},
+    playbackOwnsAttachedMedia:p=>!!p.mediaAttachment,preparedState:()=>null,
+    abandonPreparedReplacement(){throw Error("unexpected prepared owner");},
+    settleQualityCancellation:async(p,c)=>{cancelled.push(c);return "cancel_requested";},
+    raisePlaybackSurface:(source,fault)=>notices.push({source,fault}),
+    notifyPlaybackControl:()=>notifications.push(true),clientLog(){},playbackContext:()=>({}),
+    closeMenu(){},playbackSurfaceStep(){},positionForPlaybackIntent:()=>27,
+    beginPlaybackControlSeek:(p,pos)=>seeks.push(pos),play:(...args)=>opens.push(args),
+    requestQualityChange:(...args)=>{scope.retried=args;return "retry_requested";},
+    PENDING_ATTEMPT_REASON:null};
+  vm.createContext(scope);
+  vm.runInContext(["fallBackDirectedChange","retainedQualityChange","retryQualityChange","applyQualityWithRestart",
+    "playbackControlSelection","qualityCatalogSelectionKey","qualityCatalogSelectionCurrent"].map(declaration).join("\n"),scope);
+  return {scope,player,change,baseline,notices,opens,seeks,cancelled,notifications};
+}
+
+test("a failed manual target retains playback and the standing wire selection",async()=>{
+  const h=manualHarness();
+  assert.equal(h.scope.fallBackDirectedChange(h.player,h.change,"declined"),true);
+  assert.equal(h.opens.length,0);assert.equal(h.seeks.length,0);
+  assert.equal(h.player.sessionId,"incumbent");
+  assert.equal(h.scope.playbackControlSelection(h.player),h.baseline);
+  assert.equal(h.scope.playQuality(),"1080","saved preference must survive retention");
+  assert.equal(h.notices[0].source,"change_failed");
+  assert.deepEqual([...h.notices[0].fault.actions],["retry"]);
+  assert.equal(h.cancelled[0],h.change);
+  assert.equal(h.scope.fallBackDirectedChange(h.player,h.change,"timed_out"),false,"one settlement");
+});
+
+test("manual Retry creates a fresh media intent without seeking or opening",()=>{
+  const h=manualHarness();h.scope.fallBackDirectedChange(h.player,h.change,"declined");
+  h.player.abr.mediaIntent={recipeKey:"same preference",recipeRevision:3};
+  assert.equal(h.scope.retryQualityChange(),"retry_requested");
+  assert.equal(h.player.abr.mediaIntent.recipeKey,null);
+  assert.equal(h.scope.retried[1],"manual");assert.equal(h.scope.retried[4],h.baseline);
+  assert.equal(h.opens.length,0);assert.equal(h.seeks.length,0);
+});
+
+test("Apply with restart is the explicit replacement action at the current position",()=>{
+  const h=manualHarness();h.scope.fallBackDirectedChange(h.player,h.change,"declined");
+  h.scope.applyQualityWithRestart();
+  assert.deepEqual(h.seeks,[27]);assert.equal(h.opens.length,1);assert.equal(h.opens[0][2],27000);
+  assert.equal(h.player.qualityRetainedSelection,null);
+});
+
+test("a late optional failure cannot reopen or claim retention over an exposed successor",()=>{
+  const h=manualHarness();h.player.sessionId="successor";
+  h.scope.fallBackDirectedChange(h.player,h.change,"lost_commit_acknowledgement");
+  assert.equal(h.opens.length,0);assert.equal(h.notices.length,0);
+  assert.equal(h.change.cancellationOutcome,"observation_unknown");
+});
+
+test("a later viewer command retires the standing selection override",()=>{
+  const h=manualHarness();h.scope.fallBackDirectedChange(h.player,h.change,"declined");
+  h.player.controlIntentGeneration++;
+  assert.equal(h.scope.retainedQualityChange(h.player),null);
+  assert.equal(h.scope.playbackControlSelection(h.player).quality.height,1080);
+});

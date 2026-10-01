@@ -651,6 +651,7 @@ async function candidateAutoControllerTick(p,v,causeEvidence,now){
 }
 async function switchAutoCandidate(p,v,current,decision){
   if(PLAYER!==p||!decision.candidate||!claimAutoFallback(p)) return false;
+  const standingSelection=playbackControlSelection(p);
   const chosen=decision.candidate, previousCandidateId=p.abr.requestedCandidateId||current.id;
   const copy=chosen.route!=='encode';
   const recovery=decision.emergency||decision.transition==='recover';
@@ -675,7 +676,7 @@ async function switchAutoCandidate(p,v,current,decision){
     p.abr.requestedCandidateId=chosen.id;
     p.autoRequestedHeight=null;
     p.abr.switching=true;
-    const outcome=await requestQualityChange(p,'auto-quality',reopen,move);
+    const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
     if(outcome==='prepared'&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,'commit_timeout'),

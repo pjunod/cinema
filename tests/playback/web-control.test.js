@@ -44,7 +44,9 @@ function shippedConst(name) {
 // protocol itself is exercised by quality-cancellation.test.js.
 function qualityCancellationSources(){
   return ["qualityControlOwnerKey","qualityControlSupported","validQualityControlIdentity",
-    "exchangeQualityControl","discoverQualityControl","cancelUnappendedQualityIntent"]
+    "exchangeQualityControl","discoverQualityControl","cancelUnappendedQualityIntent","settleQualityCancellation",
+    "retainedQualityChange","retryQualityChange","applyQualityWithRestart","supersedeDirectedChange",
+    "qualityCatalogSelectionKey","qualityCatalogSelectionCurrent","playbackControlSelection"]
     .map(shippedSource).join("\n");
 }
 
@@ -209,7 +211,7 @@ function fullOpenHarness() {
     shippedSource("closePlayer"),
     // The paused-repeat floor is shipped beside `reportProgress` and read by it.
     shippedConst("PAUSED_BEAT_FLOOR_MS"), shippedSource("reportProgress"),
-    "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
+    "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();if(retainedQualityChange(PLAYER))applyQualityWithRestart();}",
     "const ttff=[];function reportTtff(){ttff.push(PLAYER.fileId);}function esc(x){return x;}function finishPlayback(){throw Error('unattached autoplay');}function clearStall(){}function bufferRunway(){return 0;}const PERSISTENT_STALL_MS=8000;",
     shippedSource("playbackMarkersUsable"),shippedSource("markerNowMs"),
     shippedSource("markerIsEstimated"),shippedSource("markerAutoSkipEligible"),
@@ -1067,7 +1069,7 @@ async function main() {
       surfaceSeam(),
       "const video={currentTime:10,querySelectorAll:()=>[],pause(){},play:()=>Promise.resolve()};",
       "const document={getElementById:id=>id==='video'?video:null};",
-      "const localStorage={getItem:()=> 'auto',setItem:()=>{}};",
+      "const localStorage={getItem:()=> 'auto',setItem:()=>{}};function playQuality(){return localStorage.getItem('plurx_quality');}",
       "const PlaybackPolicy={subtitleBurnAction:()=> 'burn',hlsTransport:()=> 'mse',copyAudioNeedsTranscode:()=>false,indexPendingFallback:()=> 'progressive_remux',stallReopenSessionOptions:({options})=>options,"+
         "CREATE_RETRY:{deadline_ms:60000,backoff_ms:[1000,2000,4000]},createRetryStep:()=>({action:'fail'}),classifyStreamFailure:()=>null,streamFailureOverlay:()=>null}; const PLAY_CAPS={acodec:'aac'};",
       "function newRequestId(){return 'rq';}",
@@ -1130,7 +1132,7 @@ async function main() {
       shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
       // A directed change settles a promise chain rather than reopening
       // inline, so the harness hands back a form the cases can await.
-      "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
+      "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();if(retainedQualityChange(PLAYER))applyQualityWithRestart();}",
       "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality:qualityMenuPick,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
     ].join("\n"))();
   }
@@ -3982,7 +3984,7 @@ async function main() {
       "armHitchDetector", "setupAirplay", "playbackProgressTick", "probeDecode",
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon",
       [
-        "let PLAYER=null; let quality='auto';",
+        "let PLAYER=null; let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}};",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
         // The sampling tick refreshes the wait sentence before each presenter
@@ -4115,7 +4117,8 @@ async function main() {
         " fallback(why){return fallBackDirectedChange(PLAYER,PLAYER.directedChange,why||'failed');},",
         // `setQuality` fires the owner and returns; the owner settles a promise
         // chain of its own. The harness hands back a form the cases can await.
-        " async menu(q){quality=q;setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();},",
+        " async menu(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();},",
+        " restartQuality(){return applyQualityWithRestart();},",
         " autoRung(from,decision){return switchAutoRung(from,decision);},",
         " supersede(){return supersedePlaybackControlIntent(PLAYER);},",
         " waiters(){return (PLAYER&&PLAYER.controlWaiters)||[];},",
@@ -5490,8 +5493,8 @@ async function main() {
     assert.equal(h.plays.length, 0, "a switch that committed owes the viewer nothing");
   }
   {
-    // Menu → offer → the preparation fails → exactly ONE reopen, at the
-    // position the viewer is at NOW rather than where they were at the tap.
+    // A failed optional target keeps playback; an explicit restart uses the
+    // position the viewer is at when they choose that action.
     const h = preparedHarness();
     const p = directedPlayer(h, { offset: 0 });
     offerReporter(h);
@@ -5503,7 +5506,10 @@ async function main() {
     await outcomeOf(pending);
     h.live.currentTime = 312;          // twelve seconds of wait, still playing
     h.failPrepared("the successor never primed");
-    assert.equal(h.plays.length, 1, "one reopen, and exactly one");
+    assert.equal(h.plays.length, 0, "optional target failure keeps the incumbent");
+    assert.deepEqual(h.selection().quality,{mode:"auto"},"standing selection follows attached media");
+    h.restartQuality();
+    assert.equal(h.plays.length, 1, "explicit restart opens exactly once");
     assert.equal(h.plays[0].position, 312_000,
       "the reopen lands where the viewer is, not where they were at the tap");
     assert.equal(h.plays[0].reason, "quality");
@@ -5515,7 +5521,7 @@ async function main() {
     assert.equal(h.plays.length, 1, "one tap, one reopen");
   }
   {
-    // Menu → `none` → one reopen.
+    // An explicit decline retains current until Apply with restart.
     const h = preparedHarness();
     directedPlayer(h, { offset: 0 });
     offerReporter(h);
@@ -5524,11 +5530,13 @@ async function main() {
     await flush();
     h.exchange(offerRequest(6), offerResponse({ delivery: { preparation: "none" } }));
     await outcomeOf(pending);
+    assert.equal(h.plays.length, 0);
+    h.restartQuality();
     assert.equal(h.plays.length, 1);
     assert.equal(h.plays[0].position, 90_000);
   }
   {
-    // Menu → the bound → one reopen.
+    // An unanswered optional target retains the incumbent at the bound.
     const h = preparedHarness();
     directedPlayer(h, { offset: 0 });
     offerReporter(h);
@@ -5537,7 +5545,7 @@ async function main() {
     await flush();
     h.fireAll();
     await outcomeOf(pending);
-    assert.equal(h.plays.length, 1);
+    assert.equal(h.plays.length, 0);
   }
   {
     // Menu → a seek during the wait → NO reopen from this path. The seek owns
@@ -5762,7 +5770,7 @@ async function main() {
     assert.equal(h.live.muted, false, "…and the incumbent is untouched, picture and sound");
     assert.equal(h.spare.style.display, "none");
     assert.equal(p.prepared, null, "the staging is settled rather than left to the deadline");
-    assert.equal(h.plays.length, 1, "…and the change the viewer asked for takes its one reopen");
+    assert.equal(h.plays.length, 0, "failed optional alignment retains the incumbent");
   }
   {
     // A seek that completes into a HOLE. `readyState` answers for the element,

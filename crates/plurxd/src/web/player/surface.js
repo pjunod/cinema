@@ -159,9 +159,12 @@ function retireHlsTerminalAttempt(p){
 // to; the EFFECT is the recovery owner’s, which is why it happens here and not
 // inside the render (§3.2).
 function playbackSurfaceAction(action){
-  const p=PLAYER;
+  const p=PLAYER, fault=PLAYBACK_SURFACE.surface&&PLAYBACK_SURFACE.surface.fault;
   playbackSurfaceStep({user_action:action});
-  if(action==="retry") return retryPlayback();
+  if(action==="retry"){
+    if(retainedQualityChange(p)&&fault&&fault.source==="change_failed") return retryQualityChange();
+    return retryPlayback();
+  }
   if(action==="close") return closePlayer();
   if(action==="force_transcode")
     return startTranscodeFallback((p&&p.surfaceTranscodeReason)||"stall-manual");
