@@ -1187,6 +1187,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;",
     // v89: independently attributed completed-transfer Link negatives.
     super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
+    // v90: exact candidate-bound node-local Link samples, never legacy inference.
+    super::candidate_link::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
