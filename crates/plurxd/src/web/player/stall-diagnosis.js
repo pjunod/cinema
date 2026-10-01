@@ -303,10 +303,13 @@ function autoDecodeMediaError(p,v){
     ||hasPendingPlaybackOpen(p)) return false;
   const currentHeight=Number(p.health?.target_height||p.autoHeight||v.videoHeight);
   if(!(currentHeight>0)) return false;
+  const now=performance.now();
   const result=PlaybackPolicy.decideRung({ladder:p.ladder,currentHeight,
     decodeStalls:1,decodeStepConsumed:!!p.abr.decodeStepConsumed,
     blockedHeights:p.abr.failedHeights,
-    causeEvidence:{kind:"decode-failed",ageMs:0},nowMs:performance.now()});
+    switchesThisPlaybackHour:(p.abr.switchBudgetTimes||[])
+      .filter(at=>now-at<3600000).length,
+    causeEvidence:{kind:"decode-failed",ageMs:0},nowMs:now});
   if(!result.blockedHeights||result.height===currentHeight) return false;
   p.abr.decodeStepConsumed=true;
   p.abr.failedHeights=p.abr.failedHeights||new Set();

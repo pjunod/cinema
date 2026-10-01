@@ -1862,6 +1862,8 @@ async fn candidate_snapshot_current(
         .quality_candidates(
             state,
             crate::media_pool::QualityCatalogRequest {
+                audio_claim: recipe.request.audio_claim.clone(),
+                audio_delivery: recipe.request.audio_delivery.clone(),
                 copy_contract: recipe.request.kind.copy_contract(),
                 file_id: file.id,
                 source_size: file.size,

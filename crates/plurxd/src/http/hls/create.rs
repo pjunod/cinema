@@ -1161,6 +1161,10 @@ pub(crate) async fn resolve_plan(
                 .quality_candidates(
                     state,
                     crate::media_pool::QualityCatalogRequest {
+                        audio_claim: plurx_core::playback::audio::AudioClaim::from_caps(caps)
+                            .ok()
+                            .flatten(),
+                        audio_delivery: None,
                         copy_contract: None,
                         file_id: source.id,
                         source_size: source.size,
@@ -1862,6 +1866,8 @@ async fn create_with_purpose(
                     .quality_candidates(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
+                            audio_claim: request.audio_claim.clone(),
+                            audio_delivery: request.audio_delivery.clone(),
                             copy_contract: request.kind.copy_contract(),
                             file_id: source.id,
                             source_size: source.size,
@@ -2401,6 +2407,8 @@ async fn create_with_purpose(
                     .quality_candidates(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
+                            audio_claim: request.audio_claim.clone(),
+                            audio_delivery: request.audio_delivery.clone(),
                             copy_contract: request.kind.copy_contract(),
                             file_id: source.id,
                             source_size: source.size,

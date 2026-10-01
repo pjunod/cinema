@@ -15,11 +15,17 @@ impl TranscodeManager {
         subtitle: Option<i64>,
         presentation: Presentation,
         retained_copy: Option<(bool, bool, bool)>,
+        retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
     ) -> Vec<QualityCandidate> {
         let mut catalog_file = file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
         let audio = self.candidate_audio_index(file, audio).await;
+        let Ok(audio_claim) = plurx_core::playback::audio::AudioClaim::from_caps(caps) else {
+            return Vec::new();
+        };
+        let audio_claim = retained_claim.cloned().or(audio_claim);
         let source_facts = self.quality_source_facts(file).await;
         let coded_rate = source_facts
             .as_ref()
@@ -185,6 +191,16 @@ impl TranscodeManager {
                 grade,
             );
             options.normalized_geometry = normalized_geometry;
+            options = match self.candidate_audio_options(
+                file,
+                audio_claim.as_ref(),
+                retained_audio,
+                presentation,
+                options,
+            ) {
+                Ok(options) => options,
+                Err(_) => continue,
+            };
             if normalized_geometry && grade == OutputGrade::Sdr && height == 1440 {
                 let profile = transcode::AutoQualityRateProfile::H264Sdr1440P30V1;
                 options.auto_quality_rate_profile = Some(profile);
@@ -362,6 +378,8 @@ impl TranscodeManager {
                 envelope.request.subtitle_burn,
                 envelope.request.presentation,
                 retained_copy,
+                envelope.request.audio_delivery.as_ref(),
+                envelope.request.audio_claim.as_ref(),
             )
             .await;
         let candidate = candidates
@@ -378,6 +396,21 @@ impl TranscodeManager {
         }
         envelope.request.candidate_context = Some(Self::candidate_context(candidate));
         Ok(())
+    }
+
+    pub(super) fn candidate_audio_options(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
+        presentation: Presentation,
+        options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        if presentation == Presentation::Vod {
+            Self::encoded_audio_options(file, options.audio_index, claim, retained, options)
+        } else {
+            Ok(self.rolling_start_audio_options(file, options, claim, retained))
+        }
     }
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
