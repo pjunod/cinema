@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** implementation complete through M3; M0/M4/M5 pending physical-device evidence · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** M1–M3 built; M4 actual-heap containment implemented, larger role allocation and M0/M5 physical matrix open · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -263,6 +263,34 @@ preference in this plan (§7 Q1).
 
 ### 3.2 Buffer budget
 
+**Execution clarification, 2026-09-30:** the original larger incumbent
+allocation below still requires M0's three-device idle/playing/primed
+measurements. A side-by-side instrumented process cannot qualify the
+installed production process or supply that matrix. While collecting honest
+supplemental evidence, the continuation implements the independently sound
+containment: `min(existing memoryClass/8 ceiling, Runtime.maxMemory()/8)`
+for every explicit `BufferRole`. No role's target increases, no `largeHeap`
+request is added, and no unmeasured incumbent share, image-cache allowance or
+successor reserve is chosen. A lower actual grant reduces the legacy target;
+the historical floor is not allowed to defeat the real process grant.
+
+`PlaybackBufferBudget.kt` owns the pure policy. `PlurxPlayerBuilder` maps
+staged successors to `Successor`, Live TV to `Live`, and other roles to
+`Incumbent`; a committed successor retains its original load control.
+`PlaybackLoadControl` records the actual class, hypothetical large class,
+granted heap, configured Coil cache bound and chosen target locally. Cache
+bytes are observations, not a new guessed reserve. This target remains an
+allocator threshold, not a decoder/native-memory cap. Byte priority for local
+and network media, full-buffer startup and all Live TV durations are unchanged.
+
+`PlaybackBufferBudgetTest` rejects a declared 512 MiB class being treated as
+a granted 128 MiB heap and proves every role stays within its existing
+ceiling and the existing two-buffer quarter-heap containment. The real
+`PlaybackLoadControlTest` retains every startup/loading assertion and loops
+over all roles. Its provenance sample names package, version, SDK, ABI,
+debuggable/largeHeap flags, actual grant, cache bound and targets. Physical
+receipts below must distinguish a test process from production playback.
+
 Two budgets instead of one:
 
 ```kotlin
@@ -346,7 +374,15 @@ starts playback).
 
 ## 5. Milestones
 
-One draft PR per milestone into `main` under the fast lane. Every Kotlin
+**Integration amendment, 2026-09-30:** the remaining continuation branches
+from current `effort/architecture-review-2026-09-20` and targets that effort,
+with one independent review, the tracked hook and the smallest focused
+Android regressions. `Effort development gate` blocks integration; full
+exact-tree qualification and `Main promotion gate` separately block final
+promotion. The original `main` fast-lane instruction is retained as history,
+not the continuation's rollout path.
+
+Originally, one draft PR per milestone into `main` under the fast lane. Every Kotlin
 change needs the Android build-counter bump (`validation/mobile_versions.py`,
 `versionCode` in `clients/android/app/build.gradle.kts:48`).
 
@@ -425,6 +461,17 @@ shows `outcome=matched` for a 23.976 title and `outcome=unchanged` for a
 second play of the same title; with the setting off, `outcome=disabled`.
 
 ### 5.5 M4 — role-based budget from M0's numbers
+
+The September 30 actual-heap clamp is complete containment, not acceptance
+of this milestone's proposed larger incumbent budget. The remaining share,
+cache headroom and prepared-successor PSS still require the original M0
+matrix. Supplementary no-activity instrumentation uses the existing isolated
+`capabilityProbe` identity by passing `-PplurxIsolatedBudgetProbe=true`; it
+must verify the generated target package before installing and cannot replace
+`tv.plurx.app`. Run only `PlaybackLoadControlTest`, without launching an
+Activity, waking a display, signing in, starting playback or changing settings.
+Never run the generic instrumentation install target against physical
+production hardware: that target uninstalls `tv.plurx.app`.
 
 `playbackBufferTargetBytes(memoryClassMb, largeMemoryClassMb, role)`, the
 constants filled from M0 with their readings in comments, `Runtime.
@@ -509,6 +556,36 @@ the mobile release role.
 
 ## Execution log
 
+**2026-09-30 continuation:** original M0/M4/M5 gaps remain explicit. The
+Google TV Streamer's passive observation found production build 139 without
+a running process and display OFF; heap properties 384m/512m were not
+relabeled granted heap. Supplemental isolated instrumentation and source
+checks are attributed to their exact build and package, not to production 139.
+
+**Supplemental Google TV Streamer run, 2026-09-30 23:52–23:56 UTC:** wireless
+serial `61171HFAG1GG00`, API 34; isolated debug package
+`tv.plurx.app.capabilityprobe`, version 141, instrumented target verified as
+that package. Both `PlaybackLoadControlTest` cases passed in 1.027 s without
+an Activity, player start, media request, display wake or setting change.
+The process reported `Runtime.maxMemory() = 402653184` bytes (384 MiB),
+`memoryClass = 384`, hypothetical `largeMemoryClass = 512`, no largeHeap
+request, configured Coil bound 80530636 bytes (about 76.8 MiB), and target
+50331648 bytes (48 MiB) for each role. Reported device ABI list was
+`armeabi-v7a,armeabi`; it is not a claim about a production process.
+
+App APK SHA256
+`8832de19a95a2267794bb9969e56c411aae95ee689a595078441ec38f2d45026`;
+test APK SHA256
+`56d8a01fffba601d27e0f1c90ca5b6357e38b70c7311e54e3a4b715510c6192b`.
+Both debug signatures were verified, certificate SHA256
+`5cefd0c7db3f0a8d6fd818937425b7647b3222f9ed1419d79883a12c3e168bce`.
+The build used verified Temurin 25.0.4.1+1 / AGP 9.3.2 / SDK 37.0, not the
+earlier JBR 21 baseline. Both previously absent probe packages were uninstalled;
+production 139 APK hash, install/update times and absence of a running
+production process were unchanged. Display stayed OFF with no app mode
+request. No Java/native/graphics PSS under playback, primed successor, OOM
+threshold, delivered bitrate or HDMI matrix is established by these tests.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
@@ -524,3 +601,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 review fix | [#409 comment #3199](http://192.168.4.7:3000/noirr/plurx/pulls/409#issuecomment-3199) | A post-wait channel/window ownership fence and exact-session cleanup prevent delayed Live TV display matching from resurrecting or releasing the wrong tune. The advisory display-mode checkbox now uses the server's ordinary one-key settings shape rather than the unrelated Live TV generation CAS. Deterministic coroutine/lease regressions and the real server save regression pass. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | blocked by M0: no role-based allocation or `largeHeap` request was guessed; current sizing and instrumented behavior remain intact. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#409](http://192.168.4.7:3000/noirr/plurx/pulls/409) | needs: run both §6 physical-device prompts after M0/M4; no display, HDR, black-frame, PSS, or OOM result is claimed. |
+| 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M4 containment and supplementary measurement | `codex/d01-android-buffer-budget` into the architecture effort | Actual-granted-heap no-increase policy and role wiring; focused JVM4, Android lint/application/test compile, and isolated wireless Google TV allocator/provenance2 pass. Original larger incumbent allocation and three-TV M0/M5 remain open. |
