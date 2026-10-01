@@ -231,7 +231,10 @@ pub(super) async fn reopen_encoded_audio(
     source: Option<&crate::fragment_index_cluster::SourceFence>,
     recipe: &Recipe,
 ) -> Result<Option<crate::fragment_index_cluster::SourceFence>, String> {
-    if recipe.encoding.is_some() && !recipe.file.audio_streams.is_empty() {
+    if recipe.encoding.as_ref().is_some_and(|encoding| {
+        encoding.shared_audio.is_none() && encoding.plan.options().input_has_audio
+    }) && !recipe.file.audio_streams.is_empty()
+    {
         if let Some(source) = source {
             return source.reopen(&recipe.file).await.map(Some);
         }

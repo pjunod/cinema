@@ -151,6 +151,8 @@ pub struct VodVideoRung {
     rendition_id: String,
     init_id: String,
     compatibility_id: String,
+    source_object_version: String,
+    shared_audio_recipe_id: Option<String>,
     facts: crate::fmp4::AvcSampleEntryFacts,
     grid: VodFrameGrid,
     video_bitrate_kbps: u32,
@@ -250,6 +252,8 @@ impl VodVideoRung {
             rendition_id: rendition_id.to_owned(),
             init_id: hex::encode(Sha256::digest(&init.bytes)),
             compatibility_id: hex::encode(family.finalize()),
+            source_object_version: source_object_version.to_owned(),
+            shared_audio_recipe_id: shared_audio_recipe_id.map(str::to_owned),
             facts,
             grid,
             video_bitrate_kbps: plan.options().video_bitrate_kbps,
@@ -261,6 +265,9 @@ impl VodVideoRung {
     }
     pub fn init_id(&self) -> &str {
         &self.init_id
+    }
+    pub fn source_object_version(&self) -> &str {
+        &self.source_object_version
     }
     pub fn compatibility_id(&self) -> &str {
         &self.compatibility_id
@@ -315,6 +322,105 @@ impl VodVideoFamily {
     }
     pub fn rungs(&self) -> &[VodVideoRung] {
         &self.rungs
+    }
+}
+
+/// A materialized soundtrack whose actual init matches its frozen recipe.
+/// Its immutable rendition identity is independent of every video rung.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodSharedAudioRendition {
+    rendition_id: String,
+    init_id: String,
+    recipe_id: String,
+    source_object_version: String,
+    facts: crate::fmp4::AacSampleEntryFacts,
+    bitrate_kbps: u32,
+}
+
+impl VodSharedAudioRendition {
+    pub fn from_verified_init(
+        plan: &ResolvedTranscode,
+        recipe: &VodSharedAudioRecipe,
+        init: &crate::fmp4::Init,
+        rendition_id: &str,
+        source_object_version: &str,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        use sha2::{Digest, Sha256};
+        if rendition_id.len() != 64
+            || !rendition_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            || source_object_version.is_empty()
+            || source_object_version.len() > 512
+            || source_object_version
+                .bytes()
+                .any(|byte| byte.is_ascii_control())
+            || VodSharedAudioRecipe::from_plan(plan).as_ref() != Some(recipe)
+        {
+            return Err(crate::fmp4::Fmp4Error::Unsupported(
+                "soundtrack does not match its source-bound recipe".into(),
+            ));
+        }
+        Ok(Self {
+            rendition_id: rendition_id.to_owned(),
+            init_id: hex::encode(Sha256::digest(&init.bytes)),
+            recipe_id: recipe.digest.clone(),
+            source_object_version: source_object_version.to_owned(),
+            facts: recipe.verify_init(init)?,
+            bitrate_kbps: recipe.audio_bitrate_kbps,
+        })
+    }
+    pub fn rendition_id(&self) -> &str {
+        &self.rendition_id
+    }
+    pub fn init_id(&self) -> &str {
+        &self.init_id
+    }
+    pub fn recipe_id(&self) -> &str {
+        &self.recipe_id
+    }
+    pub fn facts(&self) -> &crate::fmp4::AacSampleEntryFacts {
+        &self.facts
+    }
+    pub fn bitrate_kbps(&self) -> u32 {
+        self.bitrate_kbps
+    }
+}
+
+/// Pair video with exactly the soundtrack included in its family identity.
+/// A silent source has no soundtrack; an audio-bearing family never silently
+/// drops audio or substitutes a soundtrack from another source object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VodPresentationFamily {
+    video: VodVideoFamily,
+    audio: Option<VodSharedAudioRendition>,
+}
+impl VodPresentationFamily {
+    pub fn new(
+        video: VodVideoFamily,
+        audio: Option<VodSharedAudioRendition>,
+    ) -> Result<Self, crate::fmp4::Fmp4Error> {
+        if video.rungs.iter().any(|rung| {
+            rung.shared_audio_recipe_id.as_deref()
+                != audio.as_ref().map(|audio| audio.recipe_id.as_str())
+                || audio
+                    .as_ref()
+                    .is_some_and(|audio| audio.source_object_version != rung.source_object_version)
+        }) {
+            return Err(crate::fmp4::Fmp4Error::Unsupported(
+                "video family and shared soundtrack do not name the same source and recipe".into(),
+            ));
+        }
+        Ok(Self { video, audio })
+    }
+    pub fn id(&self) -> &str {
+        self.video.id()
+    }
+    pub fn video(&self) -> &VodVideoFamily {
+        &self.video
+    }
+    pub fn audio(&self) -> Option<&VodSharedAudioRendition> {
+        self.audio.as_ref()
     }
 }
 
@@ -948,6 +1054,8 @@ mod tests {
             rendition_id: id.repeat(64),
             init_id: "c".repeat(64),
             compatibility_id: "d".repeat(64),
+            source_object_version: "source-one".into(),
+            shared_audio_recipe_id: None,
             facts: crate::fmp4::AvcSampleEntryFacts {
                 codec: "avc1.640032".into(),
                 width,
@@ -971,7 +1079,34 @@ mod tests {
         assert!(VodVideoFamily::new(vec![low.clone(), low.clone()]).is_err());
         let mut same_shape = low.clone();
         same_shape.rendition_id = "f".repeat(64);
-        assert!(VodVideoFamily::new(vec![low, same_shape]).is_err());
+        assert!(VodVideoFamily::new(vec![low.clone(), same_shape]).is_err());
+        assert!(VodPresentationFamily::new(family.clone(), None).is_ok());
+        let soundtrack = VodSharedAudioRendition {
+            rendition_id: "f".repeat(64),
+            init_id: "e".repeat(64),
+            recipe_id: "c".repeat(64),
+            source_object_version: "source-one".into(),
+            facts: crate::fmp4::AacSampleEntryFacts {
+                codec: "mp4a.40.2",
+                channels: 2,
+                sample_rate: 48_000,
+                samples_per_frame: 1_024,
+            },
+            bitrate_kbps: 160,
+        };
+        assert!(VodPresentationFamily::new(family.clone(), Some(soundtrack.clone())).is_err());
+        let mut voiced = family;
+        for rung in &mut voiced.rungs {
+            rung.shared_audio_recipe_id = Some(soundtrack.recipe_id.clone());
+        }
+        assert!(VodPresentationFamily::new(voiced.clone(), None).is_err());
+        assert!(VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone())).is_ok());
+        let mut wrong_source = soundtrack.clone();
+        wrong_source.source_object_version = "source-two".into();
+        assert!(VodPresentationFamily::new(voiced.clone(), Some(wrong_source)).is_err());
+        let mut wrong_recipe = soundtrack;
+        wrong_recipe.recipe_id = "a".repeat(64);
+        assert!(VodPresentationFamily::new(voiced, Some(wrong_recipe)).is_err());
     }
 
     #[test]

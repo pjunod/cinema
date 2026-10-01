@@ -72,6 +72,7 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
                         .is_none_or(|source| !source.unchanged())
                     || rendition.recipe.encoding.as_ref().is_none_or(|encoding| {
                         encoding.shared_audio.is_some()
+                            || encoding.source_object_version != rung.source_object_version()
                             || encoding.grid != rung.grid()
                             || encoding.plan.options().input_has_audio
                             || encoding.plan.options().video_sample_envelope

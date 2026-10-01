@@ -1448,3 +1448,22 @@ requested AAC interval; mixed video/audio plans retain their final-video
 boundary behavior. The authored regression checks both paths.
 
 Rust 1.97.1 workspace/all-target compilation passed for the exact tree.
+
+### 10.18 Source-bound audio/video pairing
+
+Verified presentation families now pair actual video init facts with an actual
+shared-AAC rendition. The soundtrack records its immutable rendition/init
+identities and frozen recipe. Pairing requires that every video rung names
+that exact soundtrack recipe and source object. Missing audio, extra audio on
+a silent family, another source object or another selected-track recipe is
+refused. The authored family regression covers these substitutions.
+
+Standalone video and shared-audio workers no longer reopen an unused second
+source reader: only legacy muxed encoded media needs that separate audio
+input. This retains the existing attested descriptor path for each producer.
+
+Pairing is media validation, not actor activation or advertised availability.
+Parent ownership, bounded child attachment and playlist routing remain.
+
+Pinned workspace/all-target compilation passed. Physical reservation preflight
+also checks the source object retained by the verified rung directly.
