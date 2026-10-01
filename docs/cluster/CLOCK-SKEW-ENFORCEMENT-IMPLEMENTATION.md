@@ -1,7 +1,7 @@
 # Clock enforcement — consume proved observations before acquiring authority
 
 **Status:** open — owner unclaimed; runtime not started; measurement evidence
-and enablement ruling pending · **Executes:** K-06 enforcement handoff ·
+pending · **Executes:** K-06 enforcement handoff ·
 **Written:** 2026-09-30 · **Source baseline:** effort `f319fa779`.
 
 Companion to [the accepted design](CLOCK-SKEW-GUARD-DESIGN.md) and the
@@ -11,20 +11,19 @@ remains open on the [workboard](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBO
 until runtime and acceptance are complete; a Python design model is not an
 enforcing binary.
 
-## 1. Claim boundary — evidence and a human ruling first
+## 1. Claim boundary — identified measurement evidence first
 
 **Future owner/session:** unclaimed. **Implementation PR:** none. The owner
 must identify the merged measurement release and its accepted design §5.5
 fleet receipt before claiming enforcement. An unmerged combined branch cannot
 supply the required release separation.
 
-The accepted design forbids an enablement switch; Paul's current instruction
-requires explicit Developer switches for unfinished features with unrestricted
-saved choices and advisory readiness. The ruling recorded in measurement §1
-is still pending. This plan preserves that conflict rather than selecting a
-policy; production implementation waits for its recorded resolution. Do not
-claim the original design itself authorizes runtime, change its no-switch
-contract here, or turn readiness into a control gate.
+Paul's 2026-09-30 clarification, recorded in measurement §1, requires a switch
+only where manual on/off is meaningful. K-06 retains its accepted no-switch
+contract, automatic observation, and separate enforcement release. Developer
+facts remain read-only and advisory. Enforcement still waits for the merged
+measurement release and its identified fleet receipt; that substantive evidence
+dependency is unchanged. No rollout or clock-step authorization is implied.
 
 ## 2. Current entry points — inspect all irreversible boundaries again
 
