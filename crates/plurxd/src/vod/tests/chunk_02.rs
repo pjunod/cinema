@@ -155,6 +155,7 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            retained_logical: None,
             measured_candidate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
@@ -251,6 +252,7 @@
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
+            retained_logical: None,
             measured_candidate: None,
             file: media_file_at(source_path, duration_ms),
             audio_index: None,
