@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS offline_packages (
         CHECK (decoder_recovery_state IN
             ('primary', 'recovery_pending', 'rehome_pending', 'alternate')),
     alternate_recipe_hash TEXT,
+    audio_recipe      TEXT,
     effective_rate_control TEXT NOT NULL DEFAULT 'vbr'
         CHECK (effective_rate_control = 'vbr'
                OR (effective_rate_control GLOB 'qvbr:[0-9]*'
@@ -1476,6 +1477,7 @@ struct OfflinePackageRow {
     decoder_recovery_state: String,
     alternate_recipe_hash: Option<String>,
     effective_rate_control: String,
+    audio_recipe: Option<String>,
     target_height: i64,
     audio_index: Option<i64>,
     audio_offset_ms: i64,
@@ -1515,6 +1517,7 @@ impl From<&mut Row<'_>> for OfflinePackageRow {
             decoder_recovery_state: row.get("decoder_recovery_state"),
             alternate_recipe_hash: row.get("alternate_recipe_hash"),
             effective_rate_control: row.get("effective_rate_control"),
+            audio_recipe: row.get("audio_recipe"),
             target_height: row.get("target_height"),
             audio_index: row.get("audio_index"),
             audio_offset_ms: row.get("audio_offset_ms"),
@@ -1556,6 +1559,7 @@ impl From<OfflinePackageRow> for OfflinePackage {
             decoder_recovery_state: row.decoder_recovery_state,
             alternate_recipe_hash: row.alternate_recipe_hash,
             effective_rate_control: row.effective_rate_control,
+            audio_recipe: row.audio_recipe,
             target_height: row.target_height,
             audio_index: row.audio_index,
             audio_offset_ms: row.audio_offset_ms,
@@ -1586,7 +1590,7 @@ const PACKAGE_COLS: &str = "id, request_id, user_id, file_id, node_id, source_pa
     effective_rate_control, target_height, audio_index, audio_offset_ms, \
     output_width, output_height, subtitle_index, subtitle_language, subtitle_mode, state, \
     phase, progress_millis, estimated_bytes, reserved_bytes, actual_bytes, duration_ms, \
-    error_code, error_message, created_at, updated_at, last_access_at, expires_at";
+    error_code, error_message, created_at, updated_at, last_access_at, expires_at, audio_recipe";
 
 fn package_cols(alias: &str) -> String {
     PACKAGE_COLS
@@ -1730,6 +1734,13 @@ impl OfflinePackageStore for HiqliteAuthStore {
         max_bytes_per_user: i64,
         max_bytes_global: i64,
     ) -> Result<OfflineCreateOutcome, StoreError> {
+        if package.audio_recipe.as_deref().is_some_and(|snapshot| {
+            crate::playback::audio::AudioDelivery::parse_encoded_snapshot(snapshot).is_none()
+        }) {
+            return Err(StoreError::Database(
+                "invalid offline audio recipe".to_owned(),
+            ));
+        }
         if crate::transcode::EffectiveRateControl::parse_snapshot(&package.effective_rate_control)
             .is_none()
         {
@@ -1778,21 +1789,21 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     audio_offset_ms, output_width, output_height, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
                     estimated_bytes, reserved_bytes, created_at, updated_at, last_access_at, \
-                    expires_at) \
+                    expires_at, audio_recipe) \
                  SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, \
-                    $15, $16, $17, 'queued', 'waiting_for_encoder', 0, $18, $19, $20, $20, $20, $21 \
+                    $15, $16, $17, 'queued', 'waiting_for_encoder', 0, $18, $19, $20, $20, $20, $21, $22 \
                  WHERE NOT EXISTS (SELECT 1 FROM offline_packages \
                      WHERE user_id = $3 AND request_id = $2) \
-                   AND $22 > 0 \
-                   AND (SELECT COUNT(*) FROM offline_packages WHERE user_id = $3) < $22 \
-                   AND $19 >= 0 AND $23 >= $19 \
+                   AND $23 > 0 \
+                   AND (SELECT COUNT(*) FROM offline_packages WHERE user_id = $3) < $23 \
+                   AND $19 >= 0 AND $24 >= $19 \
                    AND (SELECT COALESCE(SUM(COALESCE(actual_bytes, reserved_bytes)), 0) \
                      FROM offline_packages WHERE user_id = $3 \
-                       AND state IN ('queued', 'preparing', 'ready')) <= $23 - $19 \
-                   AND $24 >= $19 \
+                       AND state IN ('queued', 'preparing', 'ready')) <= $24 - $19 \
+                   AND $25 >= $19 \
                    AND (SELECT COALESCE(SUM(COALESCE(actual_bytes, reserved_bytes)), 0) \
                      FROM offline_packages WHERE node_id = $5 \
-                       AND state IN ('queued', 'preparing', 'ready')) <= $24 - $19 \
+                       AND state IN ('queued', 'preparing', 'ready')) <= $25 - $19 \
                    {tombstone_clause} \
                  RETURNING id, request_id, user_id, file_id, node_id, source_path, \
                     source_size, source_mtime, recipe_hash, claim_generation, \
@@ -1801,7 +1812,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     audio_offset_ms, output_width, output_height, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
                     estimated_bytes, reserved_bytes, actual_bytes, duration_ms, error_code, \
-                    error_message, created_at, updated_at, last_access_at, expires_at"
+                    error_message, created_at, updated_at, last_access_at, expires_at, audio_recipe"
         );
         validate_sql(&sql)?;
         for attempt in 0..2 {
@@ -1831,6 +1842,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
                         package.reserved_bytes,
                         now,
                         package.expires_at,
+                        package.audio_recipe.as_deref(),
                         max_rows_per_user,
                         max_bytes_per_user,
                         max_bytes_global
@@ -2162,7 +2174,7 @@ impl OfflinePackageStore for HiqliteAuthStore {
                     audio_offset_ms, output_width, output_height, subtitle_index, \
                     subtitle_language, subtitle_mode, state, phase, progress_millis, \
                     estimated_bytes, reserved_bytes, actual_bytes, duration_ms, error_code, \
-                    error_message, created_at, updated_at, last_access_at, expires_at";
+                    error_message, created_at, updated_at, last_access_at, expires_at, audio_recipe";
         validate_sql(sql)?;
         let rows = self
             .client()

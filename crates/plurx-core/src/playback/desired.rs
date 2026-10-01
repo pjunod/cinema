@@ -40,7 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// The video quality policy a viewer asked for.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DesiredQuality {
     /// The server picks the rung, and may change it.
@@ -57,6 +57,10 @@ pub enum DesiredQuality {
     Auto {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         height: Option<i64>,
+        /// Negotiated route lookup key. Parser compatibility does not grant
+        /// semantic support; owners must refuse this until route support exists.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        candidate_id: Option<super::candidate::CandidateId>,
     },
     /// Preserve the source representation and never grant the server automatic
     /// rung authority.
@@ -69,6 +73,38 @@ pub enum DesiredQuality {
     Original,
     /// A rung the viewer named.
     Manual { height: i64 },
+}
+
+// A unit variant of an internally tagged enum does not reject extra keys
+// under serde's derive. A braced wire variant keeps Original strict too.
+impl<'de> serde::Deserialize<'de> for DesiredQuality {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+        enum Wire {
+            Auto {
+                #[serde(default)]
+                height: Option<i64>,
+                #[serde(default)]
+                candidate_id: Option<super::candidate::CandidateId>,
+            },
+            Original {},
+            Manual {
+                height: i64,
+            },
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Auto {
+                height,
+                candidate_id,
+            } => Self::Auto {
+                height,
+                candidate_id,
+            },
+            Wire::Original {} => Self::Original,
+            Wire::Manual { height } => Self::Manual { height },
+        })
+    }
 }
 
 /// The video codec policy a viewer asked for.
@@ -156,10 +192,21 @@ impl DesiredSelection {
             // every one of them record a selection change on its first
             // exchange after the upgrade and stage a successor nobody asked
             // for. The test below pins the literal.
-            DesiredQuality::Auto { height: None } => "auto".to_owned(),
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            } => "auto".to_owned(),
             DesiredQuality::Auto {
                 height: Some(height),
+                candidate_id: None,
             } => format!("auto:{height}"),
+            DesiredQuality::Auto {
+                height,
+                candidate_id: Some(id),
+            } => {
+                let height = height.map(|value| format!(":{value}")).unwrap_or_default();
+                format!("auto{height}:candidate:{}", id.to_hex())
+            }
             DesiredQuality::Original => "original".to_owned(),
             DesiredQuality::Manual { height } => format!("manual:{height}"),
         };
@@ -206,9 +253,59 @@ impl DesiredSelection {
 mod tests {
     use super::*;
 
+    #[test]
+    fn desired_quality_candidate_parser_keeps_non_auto_modes_strict() {
+        for json in [
+            r#"{"mode":"original","candidate_id":"12121212121212121212121212121212"}"#,
+            r#"{"mode":"manual","height":1080,"candidate_id":"12121212121212121212121212121212"}"#,
+            r#"{"mode":"auto","candidate_id":"bad"}"#,
+            r#"{"mode":"auto","unexpected":true}"#,
+            r#"{"mode":"original","unexpected":true}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<DesiredQuality>(json).is_err(),
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_candidate_identity_reaches_digest_without_changing_legacy_bytes() {
+        let plain = baseline();
+        let mut candidate = plain;
+        candidate.quality = DesiredQuality::Auto {
+            height: None,
+            candidate_id: Some(super::super::candidate::CandidateId([0x12; 16])),
+        };
+        assert_ne!(candidate.digest(), plain.digest());
+        assert!(candidate
+            .canonical_form()
+            .contains("quality=auto:candidate:12121212121212121212121212121212;"));
+        let json = serde_json::to_value(candidate).expect("valid parser-floor test fixture");
+        assert_eq!(
+            serde_json::from_value::<DesiredSelection>(json)
+                .expect("valid parser-floor test fixture"),
+            candidate
+        );
+        assert!(
+            serde_json::to_value(plain).expect("valid parser-floor test fixture")["quality"]
+                .get("candidate_id")
+                .is_none()
+        );
+        let mut other = candidate;
+        other.quality = DesiredQuality::Auto {
+            height: None,
+            candidate_id: Some(super::super::candidate::CandidateId([0x13; 16])),
+        };
+        assert_ne!(candidate.digest(), other.digest());
+    }
+
     fn baseline() -> DesiredSelection {
         DesiredSelection {
-            quality: DesiredQuality::Auto { height: None },
+            quality: DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
             codec: DesiredCodec::Auto,
             dynamic_range: DesiredDynamicRange::Auto,
             audio_track: None,
@@ -229,7 +326,13 @@ mod tests {
     #[test]
     fn plain_auto_still_canonicalizes_to_the_string_every_stored_digest_holds() {
         let plain = baseline();
-        assert_eq!(plain.quality, DesiredQuality::Auto { height: None });
+        assert_eq!(
+            plain.quality,
+            DesiredQuality::Auto {
+                height: None,
+                candidate_id: None
+            }
+        );
         assert_eq!(
             plain.canonical_form(),
             "v1;quality=auto;codec=auto;dynamic_range=auto;\
@@ -244,11 +347,17 @@ mod tests {
     fn a_named_auto_rung_changes_the_digest_without_becoming_a_manual_ask() {
         let plain = baseline();
         let named = DesiredSelection {
-            quality: DesiredQuality::Auto { height: Some(1080) },
+            quality: DesiredQuality::Auto {
+                height: Some(1080),
+                candidate_id: None,
+            },
             ..baseline()
         };
         let other = DesiredSelection {
-            quality: DesiredQuality::Auto { height: Some(720) },
+            quality: DesiredQuality::Auto {
+                height: Some(720),
+                candidate_id: None,
+            },
             ..baseline()
         };
         let manual = DesiredSelection {
@@ -278,7 +387,10 @@ mod tests {
     fn auto_original_and_a_matching_manual_height_are_three_different_asks() {
         let source_height = 1080;
         let auto = DesiredSelection {
-            quality: DesiredQuality::Auto { height: None },
+            quality: DesiredQuality::Auto {
+                height: None,
+                candidate_id: None,
+            },
             ..baseline()
         };
         let original = DesiredSelection {
@@ -438,7 +550,10 @@ mod tests {
         );
         assert_eq!(
             DesiredSelection {
-                quality: DesiredQuality::Auto { height: None },
+                quality: DesiredQuality::Auto {
+                    height: None,
+                    candidate_id: None
+                },
                 codec: DesiredCodec::Auto,
                 dynamic_range: DesiredDynamicRange::Auto,
                 audio_track: None,

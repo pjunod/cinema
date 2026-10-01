@@ -1879,6 +1879,7 @@ pub struct TranscodeMediaOptions {
     pub effective_rate_control: EffectiveRateControl,
     pub audio_channels: u32,
     pub audio_bitrate_kbps: u32,
+    pub audio: Option<crate::playback::audio::AudioDelivery>,
     pub audio_index: Option<i64>,
     pub audio_offset_ms: i64,
     pub input_has_audio: bool,
@@ -1912,6 +1913,7 @@ impl TranscodeMediaOptions {
             effective_rate_control: options.effective_rate_control,
             audio_channels: options.audio_channels,
             audio_bitrate_kbps: options.audio_bitrate_kbps,
+            audio: options.audio.clone(),
             audio_index: options.audio_index,
             audio_offset_ms: source.audio_offset_ms,
             input_has_audio: !source.audio_streams.is_empty(),
@@ -2017,6 +2019,8 @@ pub struct PresentationContract {
     effective_height: Option<u32>,
     audio_channels: u32,
     audio_bitrate_kbps: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio: Option<crate::playback::audio::AudioDelivery>,
     audio_index: Option<i64>,
     subtitle_index: Option<i64>,
     subtitle_rendering: SubtitleRendering,
@@ -2345,6 +2349,38 @@ impl ResolvedTranscode {
             "audio_index",
             options.audio_index.unwrap_or(-1).to_string().as_bytes(),
         );
+        if let Some(audio) = &options.audio {
+            use crate::playback::audio::AudioAction;
+            feed(
+                "audio_action",
+                match audio.action {
+                    AudioAction::None => b"none",
+                    AudioAction::Copy { .. } => b"copy",
+                    AudioAction::Encode { .. } => b"encode",
+                },
+            );
+            feed("audio_codec", audio.codec().unwrap_or("none").as_bytes());
+            match &audio.action {
+                AudioAction::Encode {
+                    layout,
+                    sample_rate,
+                    ..
+                } => {
+                    feed(
+                        "audio_layout",
+                        layout.as_deref().unwrap_or("default").as_bytes(),
+                    );
+                    feed("audio_sample_rate", sample_rate.to_string().as_bytes());
+                }
+                AudioAction::Copy { .. } | AudioAction::None => {
+                    feed("audio_layout", b"source");
+                    feed("audio_sample_rate", b"source");
+                }
+            }
+            // No concrete pan was emitted: the measurement requirement is
+            // advisory metadata, not invented byte-changing filter semantics.
+            feed("audio_downmix", b"default");
+        }
         feed(
             "audio_offset_ms",
             options.audio_offset_ms.to_string().as_bytes(),
@@ -2726,6 +2762,7 @@ pub fn resolve_transcode(
         effective_height: effective_geometry.map(|geometry| geometry.1),
         audio_channels: options.audio_channels,
         audio_bitrate_kbps: options.audio_bitrate_kbps,
+        audio: options.audio.clone(),
         audio_index: options.audio_index,
         subtitle_index: options
             .subtitle_burn
@@ -2772,6 +2809,26 @@ fn effective_output_geometry(facts: &DecodeFacts, requested_max_height: u32) -> 
 }
 
 fn validate_media_options(options: &TranscodeMediaOptions) -> Result<(), PlanError> {
+    if let Some(audio) = &options.audio {
+        if !audio.valid_snapshot() {
+            return Err(PlanError::InvalidMediaOption("audio_delivery"));
+        }
+        match &audio.action {
+            crate::playback::audio::AudioAction::Encode {
+                channels,
+                bitrate_kbps,
+                ..
+            } if options.audio_channels != u32::from(*channels)
+                || options.audio_bitrate_kbps != *bitrate_kbps =>
+            {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            crate::playback::audio::AudioAction::Copy { .. } if options.audio_offset_ms != 0 => {
+                return Err(PlanError::InvalidMediaOption("audio_delivery"));
+            }
+            _ => {}
+        }
+    }
     if options.target_height < 2 {
         return Err(PlanError::InvalidMediaOption("target_height"));
     }

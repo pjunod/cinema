@@ -1079,6 +1079,8 @@
             kind: SessionKind::Transcode { height: 1080 },
             start_seconds: 12.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,

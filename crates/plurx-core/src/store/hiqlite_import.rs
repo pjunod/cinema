@@ -1285,6 +1285,7 @@ const TABLES: &[TablePlan] = &[
             "updated_at",
             "last_access_at",
             "expires_at",
+            "audio_recipe",
         ],
         order_by: "id",
         minimum_schema: 14,
@@ -2912,6 +2913,7 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                         "author" | "book_work_id" | "book_edition_id" | "book_metadata_source"
                     )
                     && schema_version < 21)
+                || (table.name == "offline_packages" && *column == "audio_recipe" && schema_version < 88)
             {
                 "NULL".to_owned()
             } else if table.name == "offline_packages"
@@ -3192,6 +3194,21 @@ mod tests {
         assert!(current.contains(
             "recipe_hash, claim_generation, decoder_recovery_state, alternate_recipe_hash, effective_rate_control, target_height"
         ));
+    }
+
+    #[test]
+    fn pre_v88_offline_projection_preserves_legacy_audio_and_current_snapshot() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "offline_packages")
+            .copied()
+            .expect("offline table import contract");
+        assert!(value_projection(table, 87, false).ends_with("expires_at, NULL"));
+        assert!(value_projection(table, 88, false).ends_with("expires_at, audio_recipe"));
+        assert_eq!(
+            crate::store::sqlite::MIGRATIONS[87],
+            "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;"
+        );
     }
 
     #[test]

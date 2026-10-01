@@ -38,6 +38,10 @@ pub(super) fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> Strin
         u8::from(recipe.video.promotes_parameter_sets()),
     ]);
     hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
+    if let Some(audio) = &recipe.audio_delivery {
+        hasher.update(b"audio-delivery-v1\0");
+        hasher.update(audio.byte_identity().as_bytes());
+    }
     match recipe.cluster_cache_key.as_deref() {
         Some(cache_key) => {
             hasher.update(b"cluster-v2\0");
@@ -89,6 +93,13 @@ pub(super) fn ticks_to_ms(ticks: u64, timescale: u32) -> i64 {
 /// is copied — `MediaFile` carries no per-stream audio rate, and `est_bytes`
 /// feeds admission, never a refusal.
 fn audio_rate(recipe: &Recipe) -> u32 {
+    if let Some(rate) = recipe
+        .audio_delivery
+        .as_ref()
+        .and_then(|audio| audio.bitrate_kbps())
+    {
+        return rate.saturating_mul(1000);
+    }
     if recipe.aac {
         let channels = match recipe.audio_index {
             Some(index) => recipe

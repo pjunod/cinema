@@ -118,10 +118,33 @@ impl Recipe<'_> {
         // the encode and the caller's word for the source. There is now no
         // second source to disagree with the first.
         field(&mut h, "plan", self.plan.plan_digest().as_bytes());
+        // A typed decision is the producer's authority. The compatibility
+        // bool remains authoritative only for old plans without a snapshot.
+        let audio_copied = self
+            .plan
+            .options()
+            .audio
+            .as_ref()
+            .map_or(self.audio_copied, |audio| {
+                matches!(
+                    audio.action,
+                    crate::playback::audio::AudioAction::Copy { .. }
+                )
+            });
         field(
             &mut h,
             "aaction",
-            if self.audio_copied { b"copy" } else { b"aac" },
+            if audio_copied {
+                b"copy"
+            } else {
+                self.plan
+                    .options()
+                    .audio
+                    .as_ref()
+                    .and_then(|audio| audio.codec())
+                    .unwrap_or("aac")
+                    .as_bytes()
+            },
         );
         // Every lossy audio path is now explicitly pinned to 48 kHz. Keep
         // that byte-changing decision visible in the identity, rather than
@@ -129,11 +152,7 @@ impl Recipe<'_> {
         field(
             &mut h,
             "arate",
-            if self.audio_copied {
-                b"source"
-            } else {
-                b"48000"
-            },
+            if audio_copied { b"source" } else { b"48000" },
         );
 
         // Deliberately NOT in the key: `start_seconds`. A cached asset is the
@@ -684,5 +703,72 @@ mod tests {
             Recipe::new(&d, &hevc, false).hash(),
             Recipe::new(&d, &libdav1d, false).hash()
         );
+    }
+
+    #[test]
+    fn typed_audio_recipe_changes_codec_and_layout_but_not_explanation() {
+        use crate::playback::audio::{AudioAction, AudioDelivery};
+        let (d, mut f) = (digest(), media());
+        f.audio_streams = vec![crate::domain::AudioStream {
+            codec: "aac".into(),
+            channels: Some(6),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        }];
+        let mut o = TranscodeOptions::default();
+        let audio = AudioDelivery {
+            action: AudioAction::Encode {
+                codec: "aac".into(),
+                channels: 6,
+                layout: Some("5.1".into()),
+                bitrate_kbps: 320,
+                sample_rate: 48_000,
+            },
+            downmix: None,
+            reason: "first reason".into(),
+        };
+        o.set_audio_delivery(audio.clone());
+        let first = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        let first_hash = Recipe::new(&d, &first, false).hash();
+        assert_eq!(
+            first_hash,
+            Recipe::new(&d, &first, true).hash(),
+            "typed encode overrides an obsolete copied-audio bool"
+        );
+        o.audio.as_mut().expect("audio snapshot").reason = "second reason".into();
+        let same = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        assert_eq!(first_hash, Recipe::new(&d, &same, false).hash());
+        if let AudioAction::Encode { codec, .. } =
+            &mut o.audio.as_mut().expect("audio snapshot").action
+        {
+            *codec = "eac3".into();
+        }
+        let changed = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        assert_ne!(first_hash, Recipe::new(&d, &changed, false).hash());
+        if let AudioAction::Encode { layout, .. } =
+            &mut o.audio.as_mut().expect("audio snapshot").action
+        {
+            *layout = None;
+        }
+        let layout = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        assert_ne!(
+            Recipe::new(&d, &changed, false).hash(),
+            Recipe::new(&d, &layout, false).hash()
+        );
+        o.set_audio_delivery(AudioDelivery {
+            action: AudioAction::Copy {
+                codec: "aac".into(),
+                channels: 6,
+            },
+            downmix: None,
+            reason: "actual copy".into(),
+        });
+        let copy = plan_with_decoder(&f, &o, Encoder::Software, "hevc");
+        assert_eq!(
+            Recipe::new(&d, &copy, false).hash(),
+            Recipe::new(&d, &copy, true).hash(),
+            "typed copy identifies source-rate bytes even when the video encodes"
+        );
+        assert_ne!(first_hash, Recipe::new(&d, &copy, false).hash());
     }
 }

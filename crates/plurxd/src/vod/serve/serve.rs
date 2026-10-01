@@ -41,6 +41,7 @@ impl VodServe {
             file: rendition.recipe.file.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
+            audio_delivery: rendition.recipe.audio_delivery.clone(),
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
             convert_dolby_vision: rendition.recipe.video.converts_dolby_vision(),
             encoding: rendition.recipe.encoding.clone(),

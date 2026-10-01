@@ -342,6 +342,7 @@
             ..staged_candidate_request()
         };
         let response = StartResponse {
+            delivered_audio: None,
             session_id: staged_session_id.clone(),
             playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -375,6 +376,9 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                candidate_id: None,
+                presentation_target: None,
+                decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: staged_incarnation_id.to_owned(),
                 user_id: route.user_id,
@@ -447,6 +451,9 @@
             ..staged_candidate_request()
         };
         let recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: predecessor.user_id,
@@ -457,6 +464,7 @@
             request: request.clone(),
         };
         let start = StartResponse {
+            delivered_audio: None,
             session_id: session_id.clone(),
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
             duration_ms: Some(6_000_000),
@@ -1627,6 +1635,8 @@
         request.supported_actions = Some(vec!["prepare_replacement".to_owned()]);
         request.observed_download_bps = Some(100_000_000);
         request.capabilities = Some(crate::playback_control::DynamicCapabilities {
+            presentation_target: None,
+            decoder_caps: None,
             platform: crate::playback_control::ClientPlatform::Apple,
             max_height: 2160,
             codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1726,6 +1736,9 @@
 
     fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
         RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: route.incarnation_id.clone(),
             user_id: route.user_id,
@@ -1785,6 +1798,8 @@
             kind: crate::transcode::SessionKind::Transcode { height: 1080 },
             start_seconds: 0.0,
             audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
             subtitle_burn: None,
             audio_offset_ms: 0,
             hdr10: false,
@@ -1940,6 +1955,39 @@
         assert_eq!(rolling.presentation, crate::transcode::Presentation::Live);
     }
 
+    #[test]
+    fn prepared_audio_inherits_the_snapshot_and_refuses_channel_changes() {
+        use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
+        let mut source = staged_source_file();
+        source.audio_streams = vec![
+            plurx_core::domain::AudioStream { index: 0, codec: "aac".into(), channels: Some(6), sample_rate: Some(48_000), ..Default::default() },
+            plurx_core::domain::AudioStream { index: 1, codec: "aac".into(), channels: Some(2), sample_rate: Some(48_000), ..Default::default() },
+        ];
+        let mut predecessor = staged_candidate_request();
+        predecessor.audio_index = Some(0);
+        predecessor.audio_claim = Some(AudioClaim { decoders: vec!["aac".into()], sinks: vec![AudioSink { codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] });
+        predecessor.audio_delivery = Some(AudioDelivery { action: AudioAction::Encode { codec: "aac".into(), channels: 6, layout: Some("5.1".into()), bitrate_kbps: 320, sample_rate: 48_000 }, downmix: None, reason: "accepted route".into() });
+        let mut candidate = predecessor.clone();
+        candidate.kind = crate::transcode::SessionKind::Transcode { height: 720 };
+        preserve_prepared_audio(&predecessor, &mut candidate, &source).expect("same audio at another video rung");
+        assert_eq!(candidate.audio_delivery.as_ref().expect("candidate audio").byte_identity(), predecessor.audio_delivery.as_ref().expect("incumbent audio").byte_identity());
+        candidate.kind = crate::transcode::SessionKind::Copy { aac: false, preserve_dolby_vision: false, convert_dolby_vision: false };
+        preserve_prepared_audio(&predecessor, &mut candidate, &source).expect("copy video retains encoded audio");
+        assert!(matches!(candidate.kind, crate::transcode::SessionKind::Copy { aac: true, .. }));
+        candidate.audio_index = Some(1);
+        assert!(preserve_prepared_audio(&predecessor, &mut candidate, &source).is_err());
+        candidate = predecessor.clone();
+        candidate.audio_claim.as_mut().expect("sink claim").sinks[0].max_channels = 2;
+        assert!(preserve_prepared_audio(&predecessor, &mut candidate, &source).is_err());
+    }
+
+    #[test]
+    fn create_cannot_accept_a_client_authored_audio_delivery() {
+        let body: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"audio-authority", "audio_delivery":{"action":{"kind":"copy","codec":"eac3","channels":6},"reason":"forged"}})).expect("legacy-compatible unknown field handling");
+        let request = body.into_request(1, 720);
+        assert!(request.audio_delivery.is_none() && request.audio_claim.is_none());
+    }
+
     /// Drive the **ingress** control gate, not the helper behind it.
     ///
     /// That gate returns before `verify_authority` ever runs, so a version of
@@ -1986,6 +2034,7 @@
                 .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
                 .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
                 response_json: serde_json::to_string(&StartResponse {
+                    delivered_audio: None,
                     session_id: session_id.clone(),
                     playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
                     duration_ms: Some(60_000),

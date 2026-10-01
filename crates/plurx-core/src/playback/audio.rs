@@ -13,6 +13,69 @@ use super::DeviceProfile;
 
 pub const AUDIO_SAMPLE_RATE: u32 = 48_000;
 
+/// Only the client's audio authority needed to re-resolve a selected track.
+/// Persisted independently of a server-authored output decision so a retry's
+/// intent cannot change merely because the source or server was refreshed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct AudioClaim {
+    pub decoders: Vec<String>,
+    pub sinks: Vec<AudioSink>,
+}
+
+impl AudioClaim {
+    pub fn from_caps(caps: &super::DeviceCaps) -> Result<Option<Self>, &'static str> {
+        if caps.v != super::DeviceCaps::VERSION || caps.audio_sinks.is_empty() {
+            return Ok(None);
+        }
+        caps.validate_audio_sinks()?;
+        let mut decoders: Vec<_> = caps
+            .audio
+            .iter()
+            .map(|codec| codec.trim().to_ascii_lowercase())
+            .filter(|codec| {
+                matches!(
+                    codec.as_str(),
+                    "aac" | "ac3" | "eac3" | "mp3" | "flac" | "alac"
+                )
+            })
+            .collect();
+        decoders.sort();
+        decoders.dedup();
+        let mut sinks = caps.audio_sinks.clone();
+        for sink in &mut sinks {
+            sink.codec = sink.codec.trim().to_ascii_lowercase();
+            sink.sample_rates_hz.sort_unstable();
+        }
+        sinks.sort_by(|a, b| a.codec.cmp(&b.codec));
+        Ok(Some(Self { decoders, sinks }))
+    }
+
+    pub fn profile(&self) -> DeviceProfile {
+        DeviceProfile::from_caps_v2(&super::DeviceCaps {
+            v: super::DeviceCaps::VERSION,
+            audio: self.decoders.clone(),
+            audio_sinks: self.sinks.clone(),
+            ..super::DeviceCaps::default()
+        })
+    }
+
+    pub fn valid_snapshot(&self) -> bool {
+        self.decoders.len() <= 6
+            && self.decoders.iter().all(|codec| {
+                matches!(
+                    codec.as_str(),
+                    "aac" | "ac3" | "eac3" | "mp3" | "flac" | "alac"
+                )
+            })
+            && super::DeviceCaps {
+                audio_sinks: self.sinks.clone(),
+                ..super::DeviceCaps::default()
+            }
+            .validate_audio_sinks()
+            .is_ok()
+    }
+}
+
 /// One codec/layout claim for the client's current output route.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AudioSink {
@@ -36,13 +99,13 @@ pub enum AudioRoute {
 
 /// A measured matrix is not available yet. This identity records what must
 /// be measured without inventing gains or assuming channel order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DownmixMatrix {
     RequiresLayoutMeasurement { source_channels: u8 },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AudioAction {
     None,
@@ -54,24 +117,96 @@ pub enum AudioAction {
         codec: String,
         channels: u8,
         #[serde(skip_serializing_if = "Option::is_none")]
-        layout: Option<&'static str>,
+        layout: Option<String>,
         bitrate_kbps: u32,
         sample_rate: u32,
     },
 }
 
 /// The audio bytes a playback decision intends to deliver.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct AudioDelivery {
     pub action: AudioAction,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub downmix: Option<DownmixMatrix>,
-    pub reason: &'static str,
+    pub reason: String,
 }
 
 impl AudioDelivery {
+    pub fn parse_encoded_snapshot(snapshot: &str) -> Option<Self> {
+        let audio: Self = serde_json::from_str(snapshot).ok()?;
+        audio.is_encoded_vod_compatible().then_some(audio)
+    }
+
+    pub fn is_encoded_vod_compatible(&self) -> bool {
+        self.valid_snapshot()
+            && (matches!(&self.action, AudioAction::None)
+                || matches!(&self.action, AudioAction::Encode { codec, .. } if codec == "aac"))
+    }
     pub fn transcodes(&self) -> bool {
         matches!(self.action, AudioAction::Encode { .. })
+    }
+
+    /// Canonical byte semantics, excluding the explanatory reason. This is
+    /// shared by cache identity, durable snapshots and handoff comparison.
+    pub fn byte_identity(&self) -> String {
+        serde_json::to_string(&(&self.action, self.downmix))
+            .expect("audio delivery contains only serializable values")
+    }
+
+    pub fn bitrate_kbps(&self) -> Option<u32> {
+        match self.action {
+            AudioAction::None => Some(0),
+            AudioAction::Encode { bitrate_kbps, .. } => Some(bitrate_kbps),
+            AudioAction::Copy { .. } => None,
+        }
+    }
+
+    /// Copied source bitrate is not probed per track. Use the established
+    /// copy-plan headroom estimate, never label it a measured source bitrate.
+    pub fn budget_kbps(&self) -> u32 {
+        self.bitrate_kbps().unwrap_or(640)
+    }
+
+    pub fn codec(&self) -> Option<&str> {
+        match &self.action {
+            AudioAction::None => None,
+            AudioAction::Copy { codec, .. } | AudioAction::Encode { codec, .. } => Some(codec),
+        }
+    }
+
+    /// A durable snapshot is server-authored, but storage corruption must not
+    /// become arbitrary FFmpeg argv on a later owner. Unmeasured matrices
+    /// deliberately remain a requirement; they supply no filter expression.
+    pub fn valid_snapshot(&self) -> bool {
+        let valid = match &self.action {
+            AudioAction::None => self.downmix.is_none(),
+            AudioAction::Copy { codec, channels } => {
+                !codec.is_empty()
+                    && codec.len() <= 64
+                    && !codec.chars().any(char::is_control)
+                    && *channels > 0
+                    && self.downmix.is_none()
+            }
+            AudioAction::Encode {
+                codec,
+                channels,
+                layout,
+                bitrate_kbps,
+                sample_rate,
+            } => {
+                matches!(codec.as_str(), "aac" | "ac3" | "eac3")
+                    && *channels > 0
+                    && (1..=1536).contains(bitrate_kbps)
+                    && *sample_rate == AUDIO_SAMPLE_RATE
+                    && (layout.is_none() || (*channels == 6 && layout.as_deref() == Some("5.1")))
+            }
+        };
+        valid
+            && self.reason.len() <= 256
+            && self.downmix.is_none_or(|matrix| match matrix {
+                DownmixMatrix::RequiresLayoutMeasurement { source_channels } => source_channels > 0,
+            })
     }
 }
 
@@ -106,13 +241,13 @@ fn encoded(
         action: AudioAction::Encode {
             codec: codec.to_owned(),
             channels,
-            layout: (channels == 6).then_some("5.1"),
+            layout: (channels == 6).then(|| "5.1".to_owned()),
             bitrate_kbps,
             sample_rate: AUDIO_SAMPLE_RATE,
         },
         downmix: (channels < source_channels)
             .then_some(DownmixMatrix::RequiresLayoutMeasurement { source_channels }),
-        reason,
+        reason: reason.to_owned(),
     }
 }
 
@@ -133,7 +268,7 @@ pub fn resolve_audio(
         return AudioDelivery {
             action: AudioAction::None,
             downmix: None,
-            reason: "source has no audio stream",
+            reason: "source has no audio stream".to_owned(),
         };
     };
     let codec = source.codec.trim().to_ascii_lowercase();
@@ -165,7 +300,7 @@ pub fn resolve_audio(
                 channels: source_channels,
             },
             downmix: None,
-            reason: "selected audio is compatible with the current sink and route",
+            reason: "selected audio is compatible with the current sink and route".to_owned(),
         };
     }
 
@@ -261,6 +396,79 @@ mod tests {
     use super::*;
     use crate::playback::{default_profile, DeviceCaps};
 
+    #[test]
+    fn audio_claim_canonicalizes_order_without_inventing_sink_authority() {
+        let mut caps = DeviceCaps {
+            v: DeviceCaps::VERSION,
+            audio: vec!["EAC3".into(), "aac".into(), "AAC".into()],
+            audio_sinks: vec![
+                AudioSink {
+                    codec: "EAC3".into(),
+                    max_channels: 6,
+                    passthrough: true,
+                    sample_rates_hz: vec![48_000, 44_100],
+                },
+                AudioSink {
+                    codec: "aac".into(),
+                    max_channels: 2,
+                    passthrough: false,
+                    sample_rates_hz: vec![48_000],
+                },
+            ],
+            ..DeviceCaps::default()
+        };
+        let claim = AudioClaim::from_caps(&caps)
+            .expect("valid sinks")
+            .expect("explicit claim");
+        caps.audio.reverse();
+        caps.audio_sinks.reverse();
+        caps.audio_sinks[1].sample_rates_hz.reverse();
+        assert_eq!(
+            AudioClaim::from_caps(&caps).expect("valid reordered sinks"),
+            Some(claim.clone())
+        );
+        assert!(claim.valid_snapshot());
+        caps.audio_sinks.clear();
+        assert_eq!(
+            AudioClaim::from_caps(&caps).expect("empty sinks"),
+            None,
+            "decoder names alone do not prove a sink"
+        );
+    }
+
+    #[test]
+    fn audio_snapshot_preserves_semantics_without_trusting_filter_text() {
+        let mut audio = resolve_audio(
+            Some(&source("dts", 6)),
+            &claimed(&[("aac", 6)]),
+            AudioRoute::EncodedVod,
+            0,
+        );
+        let identity = audio.byte_identity();
+        let value = serde_json::to_string(&audio).expect("snapshot");
+        assert_eq!(
+            AudioDelivery::parse_encoded_snapshot(&value),
+            Some(audio.clone())
+        );
+        audio.reason = "a different explanation".to_owned();
+        assert_eq!(identity, audio.byte_identity());
+        if let AudioAction::Encode { codec, .. } = &mut audio.action {
+            *codec = "eac3".to_owned();
+        }
+        assert_ne!(identity, audio.byte_identity());
+        assert!(
+            AudioDelivery::parse_encoded_snapshot(
+                &serde_json::to_string(&audio).expect("snapshot")
+            )
+            .is_none(),
+            "encoded VOD retains the AAC lattice"
+        );
+        if let AudioAction::Encode { layout, .. } = &mut audio.action {
+            *layout = Some("5.1,volume=100".to_owned());
+        }
+        assert!(!audio.valid_snapshot());
+    }
+
     fn source(codec: &str, channels: i64) -> AudioStream {
         AudioStream {
             codec: codec.to_owned(),
@@ -330,8 +538,8 @@ mod tests {
                 channels: 6,
                 bitrate_kbps: 320,
                 sample_rate: AUDIO_SAMPLE_RATE,
-                layout: Some("5.1"),
-            } if codec == "aac"
+                ref layout,
+            } if codec == "aac" && layout.as_deref() == Some("5.1")
         ));
     }
 
