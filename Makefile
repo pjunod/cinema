@@ -1465,6 +1465,16 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
+.PHONY: effort-web-static-check
+effort-web-static-check: ## Lint current web source without behavior or browser fixtures
+	@scripts/js-check
+	@node scripts/web-jsconfig --check
+	@scripts/web-types
+	@node scripts/web-shape-check
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
+		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
+		--allow scripts/contrast-allow.txt
+
 .PHONY: web-check
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
