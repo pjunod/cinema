@@ -833,6 +833,20 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
 
     /// A successor that *did* produce media and then failed says nothing about
     /// the next one, so the asking continues.
+    func testFailedVoluntaryExposureRestoresIncumbentWithoutFallbackReopen() async {
+        let host = RecordingHost()
+        host.outcome = .failedWithoutReopen
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        coordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        coordinator.successorIsMetadataReady()
+        coordinator.successorIsBuffered(throughMs: 40_000)
+        await coordinator.commit()
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .failed)
+        XCTAssertTrue(host.fallbacks.isEmpty)
+        XCTAssertTrue(coordinator.shouldAskForPreparation)
+        XCTAssertEqual(host.alive, 0)
+    }
+
     func testAFailureAfterReadinessDoesNotStopTheAsking() async {
         let host = RecordingHost()
         host.outcome = .switchedWithoutAFrame

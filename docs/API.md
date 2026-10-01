@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 240
+One binary serves everything on one port (`:32400` by default). plurx has 241
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3001,6 +3001,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/api/v1/internal/auth/cache-revocation` | 256 B | Propagates one credential-revocation phase |
 | GET | `/internal/v1/media/snapshot` | — | This node's media-pool snapshot |
 | POST | `/internal/v1/media/offers` | 64 KiB | One placement bid; starts no work |
+| POST | `/internal/v1/media/quality-candidates` | 64 KiB | Exact-request cluster authentication precedes source access. Returns this worker’s recipe-bound quality candidates for the source stamp, device capabilities, selected tracks, audio offset and presentation. Four concurrent reads and a 2 s deadline bound inspection; no encoder starts. Invalid requests return 400, exhausted read permits 429 and deadline expiry 504. The caller retains the worker identity; unavailable or older workers supply no candidate evidence. |
 | POST | `/api/v1/internal/media/shared-cache-canary` | 1 KiB | Proves shared-cache identity and generation |
 | GET | `/internal/media/cache-copy/{recipe}/{digest}/{object}` | — | A signed committed member may fetch the authenticated manifest (`object=manifest`) or one zero-based manifest object from a published local transcode. Full digest checks, bounded response permits and cache reader pins apply; this never starts an encoder. |
 | GET | `/internal/media/fragment-index/{cache_key}` | — | Streams the verified local fragment index |

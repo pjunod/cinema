@@ -194,8 +194,13 @@ fn master_playlist_with_shape(
         ));
     }
     let bandwidth = file.bitrate.unwrap_or(25_000_000).max(128_000);
+    let (peak, average) = context
+        .bandwidth
+        .map_or((bandwidth as u64, bandwidth as u64), |budget| {
+            (budget.peak_bps, budget.average_bps)
+        });
     out.push_str(&format!(
-        "#EXT-X-STREAM-INF:BANDWIDTH={bandwidth},AVERAGE-BANDWIDTH={bandwidth}"
+        "#EXT-X-STREAM-INF:BANDWIDTH={peak},AVERAGE-BANDWIDTH={average}"
     ));
     if let (Some(width), Some(height)) = (file.width, file.height) {
         if width > 0 && height > 0 {

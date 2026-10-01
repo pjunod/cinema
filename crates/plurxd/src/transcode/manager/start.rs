@@ -70,6 +70,7 @@ impl TranscodeManager {
             playback_id,
             false,
             false,
+            None,
             Priority::Live,
             None,
             None,
@@ -454,6 +455,7 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
         hdr10: bool,
+        candidate_context: Option<&super::CandidateExecutionContext>,
         priority: Priority,
         audio_claim: Option<&plurx_core::playback::audio::AudioClaim>,
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
@@ -530,6 +532,14 @@ impl TranscodeManager {
             None,
             grade,
         );
+        if let Some(context) = candidate_context {
+            opts.normalized_geometry = context.normalized_geometry;
+            if let Some(profile) = context.profile {
+                opts.auto_quality_rate_profile = Some(profile);
+                opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+                opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
+        }
         opts = self.rolling_start_audio_options(&file, opts, audio_claim, retained_audio);
         let audio_delivery = opts.audio.clone();
         if let Some(takeover) = takeover.as_ref() {
@@ -655,6 +665,14 @@ impl TranscodeManager {
         if let Some(audio) = &audio_delivery {
             opts.set_audio_delivery(audio.clone());
         }
+        if let Some(context) = candidate_context {
+            opts.normalized_geometry = context.normalized_geometry;
+            if let Some(profile) = context.profile {
+                opts.auto_quality_rate_profile = Some(profile);
+                opts.video_bitrate_kbps = profile.video_bitrate_kbps();
+                opts.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
+        }
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
         }
@@ -739,10 +757,11 @@ impl TranscodeManager {
                 return Err(format!("reading frozen presentation probe: {error}"));
             }
         };
-        let frozen_presentation = FrozenHlsPresentation::new(
+        let frozen_presentation = FrozenHlsPresentation::from_contract(
             file.clone(),
             HlsContext {
                 codec_facts: Some(FrozenHlsCodecFacts::encoded(&plan)),
+                bandwidth: None,
                 file_id,
                 start_seconds,
                 media_origin_seconds: start_seconds,
@@ -751,6 +770,7 @@ impl TranscodeManager {
                 frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
             },
             &session_kind,
+            Some(plan.output_contract()),
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
         let retry = if encoder == Encoder::Software {
@@ -1518,6 +1538,7 @@ impl TranscodeManager {
                     !file.audio_streams.is_empty(),
                     served.transcode_audio,
                 )),
+                bandwidth: None,
                 file_id,
                 start_seconds,
                 media_origin_seconds,

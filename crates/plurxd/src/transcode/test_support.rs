@@ -344,6 +344,7 @@ impl HlsDeliveryFixture {
             frozen_file,
             HlsContext {
                 codec_facts: None,
+                bandwidth: None,
                 file_id,
                 start_seconds: 0.0,
                 media_origin_seconds: 0.0,

@@ -744,6 +744,8 @@ impl Drop for SegmentDelivery {
 /// require complete frozen component facts, not a guessed codec string.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HlsContext {
+    /// A versioned resolved output budget; absence preserves legacy metadata.
+    pub bandwidth: Option<plurx_core::transcode::OutputBandwidth>,
     pub file_id: i64,
     pub start_seconds: f64,
     /// The source timestamp that this session's media calls t=0. See

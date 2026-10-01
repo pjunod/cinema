@@ -80,6 +80,7 @@ function surfaceSeam() {
 function fullOpenHarness() {
   const policy = require("../../crates/plurxd/src/web/playback-policy.js");
   return new Function("PlaybackPolicy", [
+    "const SERVER={playback_display_aware_auto:false};",
     "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false,PENDING_LIBRARY_CHANNEL_PLAYBACK=null,STATS_TIMER=null; const decisions=[],sessions=[],released=[],media=[];",
     "let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}}; const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;",
     "let modalOpen=true; const node={classList:{contains:()=>modalOpen,add(){modalOpen=true;},toggle(){},remove(...names){if(names.includes('open'))modalOpen=false;}},style:{},dataset:{},focus(){},setAttribute(){}};",
@@ -186,6 +187,7 @@ function fullOpenHarness() {
     shippedSource("playbackSeekSeekableRangesMs"),
     shippedSource("playbackSeekPublishedRangeMs"),
     shippedSource("playbackSeekBufferCovers"),
+    shippedSource("naturalBoundaryQualityCandidate"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"),
     shippedSource("playerWantsPlayback"), shippedSource("togglePlay"),
@@ -768,6 +770,7 @@ async function main() {
     "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
     "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC", "Hls", "document",
     [
+      "const SERVER={playback_display_aware_auto:false};",
       // `preparedHandoffEnabled` reads storage this scope does not have and
       // therefore uses the default-on value.
       shippedSource("streamHasVideo"),
@@ -4614,6 +4617,7 @@ async function main() {
     };
     const capabilities = new Function(
       "localStorage", "PLAY_CAPS", "screen", "window", "document", [
+      "const SERVER={playback_display_aware_auto:false};",
       shippedConst("PREPARED_HANDOFF_KEY"),
       shippedSource("streamHasVideo"),
       shippedSource("preparedHandoffEnabled"), shippedSource("preparedHandoffOffered"),
@@ -6749,7 +6753,7 @@ async function vendoredHlsStartupTests(){
       "let PLAYER={hls,mediaAttachment:attachment,controlIntentGeneration:1,abr:{recentEstimateKbps:null,recentEstimateAtMs:null}};",
       "const episode={player:PLAYER,attachment,mediaAttachment:attachment,hls,state:'presenting',loaders:new Set()};PLAYER.hlsStartup=episode;",
       "class StockLoader{constructor(){}load(context,config,callbacks){this.context=context;this.callbacks=callbacks;return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{xhr.stockProgress=(xhr.stockProgress||0)+1;};}abort(){}destroy(){}}",
-      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}getResponseHeader(){return null;}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});if(this.listeners.progress)this.listeners.progress({loaded});}}",
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("hlsStartupCurrent"),
       shippedSource("hlsStartupManifestRequest"),
@@ -6793,7 +6797,8 @@ async function vendoredHlsStartupTests(){
       "const predecessor={};const successor={};let PLAYER={hls:predecessor,sessionId:'old',abr:{recentEstimateKbps:1097,recentEstimateAtMs:-70000}};",
       "const state={hls:successor,sessionId:'new'};",
       "class StockLoader{load(context,config,callbacks){return this.openAndSendXhr(context.xhr,context,config);}openAndSendXhr(xhr){xhr.onprogress=()=>{};}}",
-      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
+      "class FakeXHR{constructor(status=200){this.status=status;this.listeners={};}getResponseHeader(){return null;}addEventListener(name,fn){this.listeners[name]=fn;}progress(loaded){this.onprogress({loaded});this.listeners.progress?.({loaded});}}",
+      shippedSource("preparedState"),
       shippedSource("attachedPreparedHls"),
       shippedSource("createPreparedHlsLoader"),
       shippedSource("notePreparedHlsFragmentLoaded"),

@@ -7,12 +7,28 @@ impl TranscodeManager {
         &self,
         req: &SessionRequest,
         file: &plurx_core::domain::MediaFile,
+        options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        Self::encoded_audio_options(
+            file,
+            req.audio_index,
+            req.audio_claim.as_ref(),
+            req.audio_delivery.as_ref(),
+            options,
+        )
+    }
+
+    pub(super) fn encoded_audio_options(
+        file: &plurx_core::domain::MediaFile,
+        audio_index: Option<i64>,
+        claim: Option<&plurx_core::playback::audio::AudioClaim>,
+        retained: Option<&plurx_core::playback::audio::AudioDelivery>,
         mut options: TranscodeOptions,
     ) -> Result<TranscodeOptions, String> {
-        if let Some(audio) = &req.audio_delivery {
+        if let Some(audio) = retained {
             options.set_audio_delivery(audio.clone());
-        } else if let Some(claim) = &req.audio_claim {
-            let selected = req.audio_index.map_or_else(
+        } else if let Some(claim) = claim {
+            let selected = audio_index.map_or_else(
                 || file.audio_streams.first(),
                 |index| {
                     file.audio_streams
@@ -462,11 +478,11 @@ impl TranscodeManager {
                         self.require_cluster_serving_authority(admission)?;
                     }
                     return Ok(SessionCreation {
-                        info,
+                        info: *info,
                         created: false,
                     });
                 }
-                Claimed::Mine(claim, normalized) => Some((claim, normalized)),
+                Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
             },
             None => None,
         };
@@ -651,6 +667,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
+                    req.candidate_context.as_ref(),
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
@@ -747,7 +764,13 @@ impl TranscodeManager {
             )
         })?;
         let target_height = match req.kind {
-            SessionKind::Transcode { height } if height > 0 => height.min(source_height),
+            SessionKind::Transcode { height } if height > 0 => {
+                if req.candidate_context.is_some() {
+                    height
+                } else {
+                    height.min(source_height)
+                }
+            }
             SessionKind::Copy { .. } => source_height,
             _ => {
                 return Err(vod_refusal_error(
@@ -869,7 +892,7 @@ impl TranscodeManager {
                 format!("{detail}; reanalyze this item before playback"),
             ));
         }
-        let grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
+        let mut grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
             vod_refusal_error(
                 "vod_frame_cadence_unknown",
                 "the source probe has no usable video cadence; rescan the file",
@@ -943,6 +966,14 @@ impl TranscodeManager {
             grade,
         );
         options = self.encoded_start_audio_options(req, file, options)?;
+        if let Some(context) = req.candidate_context.as_ref() {
+            options.normalized_geometry = context.normalized_geometry;
+            if let Some(profile) = context.profile {
+                options.auto_quality_rate_profile = Some(profile);
+                options.video_bitrate_kbps = profile.video_bitrate_kbps();
+                options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
+        }
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
@@ -972,6 +1003,22 @@ impl TranscodeManager {
         let plan = self
             .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
             .await?;
+        if let Some(frame_rate) = plan
+            .output_contract()
+            .normalized_geometry()
+            .and_then(|geometry| geometry.rate_profile.and(geometry.frame_rate))
+        {
+            grid = plurx_core::transcode::VodFrameGrid::new(
+                frame_rate.numerator(),
+                frame_rate.denominator(),
+            )
+            .ok_or_else(|| {
+                vod_refusal_error(
+                    "vod_frame_cadence_unknown",
+                    "the normalized output cadence has no valid immutable grid",
+                )
+            })?;
+        }
         // The VOD builder still derives its raster from the retained file.
         // Do not attach a held-facts experiment if these two rasters differ.
         let output = plan.output_contract();
@@ -984,6 +1031,20 @@ impl TranscodeManager {
             .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
             .flatten();
         let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
+        if let Some(context) = req.candidate_context.as_ref() {
+            let actual = self
+                .candidate_recipe_digest(&plan, req.presentation)
+                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+            if actual != context.recipe_digest
+                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                    != context.candidate_id
+            {
+                return Err(vod_refusal_error(
+                    "candidate_recipe_changed",
+                    "the resolved source/route no longer matches the selected candidate",
+                ));
+            }
+        }
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -1030,6 +1091,15 @@ impl TranscodeManager {
             engine,
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
+            nonpreemptive_trial: req.automatic && req.candidate_context.is_some(),
+            candidate_recipe: req
+                .candidate_context
+                .as_ref()
+                .map(|context| context.recipe_digest),
+            production_proofs: Arc::clone(&self.candidate_production_proofs),
+            active_production: std::sync::Mutex::new(
+                crate::vodencode::ActiveProductionWindow::default(),
+            ),
             speculative: std::sync::atomic::AtomicBool::new(false),
             queued: std::sync::Mutex::new(None),
             policy_retry: std::sync::atomic::AtomicBool::new(false),
@@ -1613,7 +1683,7 @@ impl TranscodeManager {
                         };
                         entry.target_height = target_height;
                     }
-                    return Ok(Claimed::Mine(claim, normalized));
+                    return Ok(Claimed::Mine(claim, Box::new(normalized)));
                 }
                 Step::Recover(session_id, persisted_target) => {
                     if let Some(info) = self.recover(&session_id).await {
@@ -1623,7 +1693,7 @@ impl TranscodeManager {
                             ));
                         }
                         tracing::debug!(target: "plurxd::transcode", session = %session_log_id(&session_id), request_id = key, "idempotent create: same session");
-                        return Ok(Claimed::Recovered(info));
+                        return Ok(Claimed::Recovered(Box::new(info)));
                     }
                     // Its session is gone; the entry is stale, not
                     // authoritative. Remove exactly the entry that was seen —
@@ -1718,6 +1788,14 @@ impl TranscodeManager {
             return Err(invalid_reopen_error(
                 "the previous session does not belong to this user, playback, and file",
             ));
+        }
+
+        if request.candidate_context.is_some() {
+            let height = match request.kind {
+                SessionKind::Transcode { height } => Some(height),
+                SessionKind::Copy { .. } => None,
+            };
+            return Ok((request.clone(), height));
         }
 
         // The rung step exists for a link that could not keep up. A predecessor

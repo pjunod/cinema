@@ -49,12 +49,41 @@ pub(super) struct FrozenHlsPresentation {
 
 impl FrozenHlsPresentation {
     pub(super) fn new(
-        mut file: plurx_core::domain::MediaFile,
+        file: plurx_core::domain::MediaFile,
         context: HlsContext,
         kind: &SessionKind,
     ) -> Self {
+        Self::from_contract(file, context, kind, None)
+    }
+
+    pub(super) fn from_contract(
+        mut file: plurx_core::domain::MediaFile,
+        mut context: HlsContext,
+        kind: &SessionKind,
+        contract: Option<&plurx_core::transcode::PresentationContract>,
+    ) -> Self {
+        let normalized = contract.filter(|contract| contract.normalized_geometry().is_some());
+        if let Some(contract) = normalized {
+            context.bandwidth = contract.output_bandwidth();
+            if let Some(codecs) = contract.hls_codecs() {
+                // The normalized contract owns video identity. The producer's
+                // frozen context already owns the actual delivered audio.
+                let video = codecs.split(',').next().unwrap_or(&codecs);
+                context.codecs = match context.codecs.split_once(',') {
+                    Some((_, audio)) => format!("{video},{audio}"),
+                    None => video.to_owned(),
+                };
+            }
+        }
         if let SessionKind::Transcode { height } = kind {
-            let geometry = plurx_core::transcode::output_size(&file, *height);
+            let geometry = if let Some(contract) = normalized {
+                contract
+                    .effective_width()
+                    .zip(contract.effective_height())
+                    .map(|(width, height)| (i64::from(width), i64::from(height)))
+            } else {
+                plurx_core::transcode::output_size(&file, *height)
+            };
             file.width = geometry.map(|(width, _)| width);
             file.height = geometry.map(|(_, height)| height);
         }
@@ -72,16 +101,20 @@ impl FrozenHlsPresentation {
         if let Some(facts) = &context.codec_facts {
             identity["codec_facts"] = serde_json::json!(facts);
         }
+        if let Some(bandwidth) = context.bandwidth {
+            identity["output_bandwidth"] = serde_json::json!(bandwidth);
+        }
         let contract_fingerprint = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
-        let master_requires_attempt_init = context.codecs.split(',').next().is_some_and(|video| {
-            let video = video.trim();
-            ["hvc1", "hev1", "dvh1", "dvhe"]
-                .into_iter()
-                .any(|entry| video.starts_with(entry))
-                || (matches!(kind, SessionKind::Copy { .. }) && video.starts_with("avc1"))
-        });
+        let master_requires_attempt_media = normalized.is_some()
+            || context.codecs.split(',').next().is_some_and(|video| {
+                let video = video.trim();
+                ["hvc1", "hev1", "dvh1", "dvhe"]
+                    .into_iter()
+                    .any(|entry| video.starts_with(entry))
+                    || (matches!(kind, SessionKind::Copy { .. }) && video.starts_with("avc1"))
+            });
         let sealed_stable_master_contract =
-            (!master_requires_attempt_init).then(|| contract_fingerprint.clone());
+            (!master_requires_attempt_media).then(|| contract_fingerprint.clone());
         Self {
             file,
             context,
@@ -100,8 +133,18 @@ pub(super) fn encoded_vod_presentation_file(
     mut file: plurx_core::domain::MediaFile,
     target_height: i64,
     grade: OutputGrade,
+    contract: Option<&plurx_core::transcode::PresentationContract>,
 ) -> plurx_core::domain::MediaFile {
-    let geometry = plurx_core::transcode::output_size(&file, target_height);
+    let geometry = if let Some(contract) =
+        contract.filter(|contract| contract.normalized_geometry().is_some())
+    {
+        contract
+            .effective_width()
+            .zip(contract.effective_height())
+            .map(|(width, height)| (i64::from(width), i64::from(height)))
+    } else {
+        plurx_core::transcode::output_size(&file, target_height)
+    };
     file.width = geometry.map(|(width, _)| width);
     file.height = geometry.map(|(_, height)| height);
     file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());

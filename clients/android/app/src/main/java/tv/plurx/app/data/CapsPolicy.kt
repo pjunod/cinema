@@ -52,14 +52,24 @@ data class VideoEntry(
     val codec: String,
     val profiles: List<String> = emptyList(),
     val max_height: Int? = null,
+    val max_width: Int? = null,
+    val max_frame_rate: DecoderFrameRate? = null,
     val present: List<String>,
     val dv_profiles: List<Int>? = null,
 )
 
 @Serializable
+data class DecoderFrameRate(val numerator: Int, val denominator: Int)
+
+/** Measured player-container pixels; an unmeasured or hidden surface sends none. */
+@Serializable
+data class PresentationTarget(val width_px: Int, val height_px: Int, val revision: Long)
+
+@Serializable
 data class DisplayCaps(
     val hdr: Boolean,
     val dolby_vision: Boolean,
+    val presentation_target: PresentationTarget? = null,
 )
 
 /** Native learned limits are M6 work; native documents send none today. */
@@ -112,6 +122,9 @@ internal data class VideoDecoderLimit(
     val maxHeight: Int,
     /** False for platform/software components such as `c2.android.av1-dav1d.decoder`. */
     val hardwareAccelerated: Boolean = true,
+    val profiles: List<String> = emptyList(),
+    val maxWidth: Int? = null,
+    val maxFrameRate: DecoderFrameRate? = null,
 )
 
 /**
@@ -126,6 +139,7 @@ internal const val SOFTWARE_VIDEO_MAX_HEIGHT = 1080
 internal data class VideoCodecCaps(
     val codecs: List<String>,
     val maxHeights: Map<String, Int>,
+    val decoderEntries: List<VideoDecoderLimit> = emptyList(),
 ) {
     fun queryParams(): Map<String, String> = mapOf(
         "vcodec" to codecs.joinToString(","),
@@ -133,16 +147,20 @@ internal data class VideoCodecCaps(
     )
 
     fun videoEntries(present: List<String>, dvProfiles: List<Int>): List<VideoEntry> =
-        codecs.map { codec ->
+        (decoderEntries.takeIf { it.isNotEmpty() }
+            ?: codecs.map { VideoDecoderLimit(it, maxHeights.getValue(it)) }).map { limit ->
             VideoEntry(
-                codec = codec,
-                max_height = maxHeights.getValue(codec),
+                codec = limit.codec,
+                profiles = limit.profiles,
+                max_height = limit.maxHeight,
+                max_width = limit.maxWidth,
+                max_frame_rate = limit.maxFrameRate,
                 present = present,
-                // Dolby Vision is an HEVC profile claim. A display bit alone
-                // never manufactures a decoder profile.
-                dv_profiles = dvProfiles.takeIf { codec == "hevc" && it.isNotEmpty() },
+                // Unknown profile enumeration never becomes a guessed profile.
+                dv_profiles = dvProfiles.takeIf { limit.codec == "hevc" && it.isNotEmpty() },
             )
         }
+
 }
 
 /**
@@ -217,6 +235,7 @@ internal fun shouldFallBackToLegacyDecision(statusCode: Int): Boolean =
 internal fun videoCodecCaps(limits: Iterable<VideoDecoderLimit>): VideoCodecCaps {
     val supported = setOf("h264", "hevc", "av1", "vp9", "mpeg2video")
     val maxima = mutableMapOf<String, Int>()
+    val entries = mutableListOf<VideoDecoderLimit>()
     for (limit in limits) {
         val codec = limit.codec.lowercase()
         if (codec !in supported || limit.maxHeight <= 0) continue
@@ -229,9 +248,16 @@ internal fun videoCodecCaps(limits: Iterable<VideoDecoderLimit>): VideoCodecCaps
             minOf(limit.maxHeight, SOFTWARE_VIDEO_MAX_HEIGHT)
         }
         maxima[codec] = maxOf(maxima[codec] ?: 0, effectiveHeight)
+        entries += limit.copy(
+            codec = codec,
+            maxHeight = effectiveHeight,
+            // A legacy/software-clamped ceiling has no measured rectangle/rate.
+            maxWidth = limit.maxWidth.takeIf { effectiveHeight == limit.maxHeight && limit.profiles.isNotEmpty() },
+            maxFrameRate = limit.maxFrameRate.takeIf { effectiveHeight == limit.maxHeight && limit.profiles.isNotEmpty() },
+        )
     }
     val ordered = listOf("h264", "hevc", "av1", "vp9", "mpeg2video").filter(maxima::containsKey)
-    return VideoCodecCaps(ordered, ordered.associateWith(maxima::getValue))
+    return VideoCodecCaps(ordered, ordered.associateWith(maxima::getValue), entries)
 }
 
 /** Sink facts the Live TV envelope carries beside the codec claims. */

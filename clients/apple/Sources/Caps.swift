@@ -19,7 +19,7 @@ struct DeviceCaps: Codable, Equatable {
     /// in, not a runtime capability.
     var subtitleOverlays: [String] = [PGSOverlayPolicy.protocolName]
     let dvTransport: String
-    let display: DisplayCaps
+    var display: DisplayCaps
     var learnedLimits: [LearnedLimit] = []
 }
 
@@ -33,13 +33,27 @@ struct VideoCaps: Codable, Equatable {
     let codec: String
     var profiles: [String]?
     var maxHeight: Int?
+    var maxWidth: Int? = nil
+    var maxFrameRate: DecoderFrameRate? = nil
     let present: [String]
     var dvProfiles: [Int]?
+}
+
+struct DecoderFrameRate: Codable, Equatable, Sendable {
+    let numerator: Int
+    let denominator: Int
+}
+
+struct PresentationTarget: Codable, Equatable, Sendable {
+    let widthPx: Int
+    let heightPx: Int
+    let revision: UInt64
 }
 
 struct DisplayCaps: Codable, Equatable {
     let hdr: Bool
     let dolbyVision: Bool
+    var presentationTarget: PresentationTarget? = nil
 }
 
 /// Native learned limits are M6 work. The type mirrors the accepted document
@@ -67,6 +81,10 @@ struct CapabilitySnapshot: Equatable {
 /// MKV/TS), plays AAC/AC3/E-AC3 (never DTS/TrueHD), and HEVC/AV1 ride hardware
 /// decode where present — so MKV or DTS files come back as HLS instead.
 enum Caps {
+    // Request-local geometry survives suspension without a global "latest player".
+    enum PresentationContext {
+        @TaskLocal static var target: PresentationTarget?
+    }
     private static let logger = Logger(subsystem: "tv.plurx.app", category: "capabilities")
 
     static func capsDocument() -> DeviceCaps {
