@@ -16,6 +16,7 @@ import tempfile
 import unittest
 import urllib.parse
 import urllib.request
+import urllib.error
 import zipfile
 
 VERSION = 1
@@ -28,6 +29,12 @@ JOB_PREFIX = "Python unit receipts"
 
 class ReceiptError(RuntimeError):
     """Evidence is unavailable, ambiguous, or invalid: do not execute units."""
+
+
+class ReceiptHTTPError(ReceiptError):
+    def __init__(self, status, path):
+        self.status, self.path = status, path
+        super().__init__(f"HTTP {status} at {path}; evidence unavailable")
 
 
 def require(condition, message):
@@ -89,6 +96,7 @@ class API:
                 "Invalid repository slug")
         require(token, "CI artifact authentication unavailable")
         self.root = root.rstrip("/") + "/repos/" + repository
+        self.repository = repository
         self.token = token
         self.opener = urllib.request.build_opener(NoRedirect())
         self.requests = 0
@@ -96,7 +104,8 @@ class API:
     def bytes(self, path, query=None):
         self.requests += 1
         require(self.requests <= 200, "Receipt request budget exhausted; inspect retained evidence")
-        require((path == "" or path.startswith("/")) and ".." not in path,
+        require((path == "" or path.startswith("/")) and ".." not in path
+                and len(path) <= 1024 and re.fullmatch(r"[A-Za-z0-9_./-]*", path),
                 "Unsafe API path")
         url = self.root + path
         if query:
@@ -105,8 +114,12 @@ class API:
             "Authorization": "token " + self.token,
             "Accept": "application/json",
         })
-        with self.opener.open(request, timeout=15) as response:
-            data = response.read(MAX_BYTES + 1)
+        try:
+            with self.opener.open(request, timeout=15) as response:
+                data = response.read(MAX_BYTES + 1)
+        except urllib.error.HTTPError as error:
+            # Never include URL query, response body, headers, reason or token.
+            raise ReceiptHTTPError(error.code, "/repos/" + self.repository + path) from None
         require(len(data) <= MAX_BYTES, "API response exceeds limit")
         return data
 
@@ -159,7 +172,85 @@ def key(scope):
 
 
 def job_name(scope):
-    return f"{JOB_PREFIX} · {scope['repository']} · PR {scope['pr']}"
+    # Forgejo evaluates job names before needs outputs are available.
+    return JOB_PREFIX
+
+
+def verify_attestor(api, scope, author):
+    login = author["login"]
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+", login), "Unsafe attestor identity")
+    path = "/collaborators/" + login + "/permission"
+    try:
+        permission = api.get(path)
+    except ReceiptHTTPError as error:
+        if error.status != 403:
+            raise
+        print(f"Receipt permission diagnostic: {error}; checking explicit enrollment", file=sys.stderr)
+        enrolled = Path("validation/python-unit-attestors.json")
+        require(enrolled.is_file() and not enrolled.is_symlink(), "Attestor enrollment unavailable")
+        document = bounded_json(enrolled.read_bytes())
+        require(set(document) == {"version", "verified_on", "verification", "attestors"}
+                and document["version"] == 1 and document["verified_on"] == "2026-10-01"
+                and isinstance(document["attestors"], list) and len(document["attestors"]) <= 16,
+                "Invalid attestor enrollment")
+        matches = [row for row in document["attestors"] if row == {
+            "repository": scope["repository"], "user": positive(author["id"]),
+            "login": login, "permission": "owner"}]
+        require(len(matches) == 1, "Denied permission lookup has no independently verified owner enrollment")
+        return
+    require(permission["user"]["id"] == positive(author["id"])
+            and permission["permission"] in ("owner", "admin", "write"),
+            "Receipt attestor is not an authenticated repository writer")
+
+
+def pre_unit_recovery(api, scope, prior, jobs):
+    """One source/run/job/log-bound failed prepare; never a generic skip list."""
+    proof_path = Path("validation/python-unit-preunit-failure3705.json")
+    require(proof_path.is_file() and not proof_path.is_symlink(), "Pre-unit recovery proof unavailable")
+    proof = bounded_json(proof_path.read_bytes())
+    require(set(proof) == {"version", "scope", "run", "job", "commit", "log_sha256",
+                           "source_hashes", "provenance"} and proof["version"] == 1
+            and proof["run"] == 3705 and proof["job"] == 39306
+            and proof["scope"] == {"repository": 1, "pr": 668,
+                                    "branch": "codex/python-unit-pr-receipts",
+                                    "base": "effort/architecture-review-2026-09-20"}
+            and proof["commit"] == "a3b795a37db1c796353a622028b0cf4d383f3c26"
+            and proof["log_sha256"] == "61eda0ef7be00f3fc9ae12c07f5302a75b2cbaa5d7de7b66bb48841a01c158fe",
+            "Unknown or corrupt bounded pre-unit recovery record")
+    if proof["scope"] != scope or proof["run"] != prior["id"]:
+        return False
+    require(prior["commit_sha"] == proof["commit"], "Pre-unit recovery source mismatch")
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual["repository"]["id"] == scope["repository"]
+            and actual["commit_sha"] == proof["commit"]
+            and actual["prettyref"] == scope["branch"]
+            and actual["workflow_id"] == "effort-ci.yml" and actual["status"] == "failure",
+            "Pre-unit recovery run metadata mismatch")
+    matching = [job for job in jobs if job["id"] == proof["job"]]
+    require(len(matching) == 1 and matching[0]["run_id"] == proof["run"]
+            and matching[0]["repo_id"] == scope["repository"] and matching[0]["attempt"] == 1
+            and matching[0]["name"] == "" and matching[0]["status"] == "failure",
+            "Pre-unit recovery job metadata mismatch")
+    for path, expected in proof["source_hashes"].items():
+        require(path in (".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"),
+                "Unknown pre-unit recovery source")
+        require(hashlib.sha256(api.bytes("/raw/" + path, {"ref": proof["commit"]})).hexdigest() == expected,
+                "Pre-unit recovery exact-source hash mismatch")
+    require(set(proof["source_hashes"]) == {
+        ".github/workflows/effort-ci.yml", "validation/python_unit_receipts.py"}, "Incomplete source-order proof")
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(hashlib.sha256(raw).hexdigest() == proof["log_sha256"], "Pre-unit recovery log mismatch")
+    log = raw.decode("utf-8")
+    require(proof["commit"] in log
+            and "Python receipt refusal: HTTPError: Evidence unavailable" in log
+            and "skipping post step for 'Publish Python attempt-start marker'; main step was skipped" in log
+            and "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped" in log
+            and not any(marker in log for marker in ("discovered=", "historical-passes=", "pending=", "Ran ")),
+            "Pre-unit recovery contradicts zero-unit source-order evidence")
+    require(not api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{proof['run']}"}),
+            "Pre-unit recovery unexpectedly has a started attempt")
+    print(f"Recovered failed prepare run {proof['run']}/job {proof['job']}: zero units, no successes imported")
+    return True
 
 
 def validate_journal(journal, scope, run, commit, completed=True):
@@ -226,6 +317,10 @@ def restore(api, scope, run):
         jobs = api.pages(f"/actions/runs/{rid}/jobs")
         matching = [job for job in jobs if job["name"] == job_name(scope)]
         if not matching:
+            workflow = api.bytes("/raw/.github/workflows/effort-ci.yml", {"ref": sha(prior["commit_sha"])})
+            if b"python3 -m validation.python_unit_receipts prepare" in workflow:
+                require(pre_unit_recovery(api, scope, prior, jobs),
+                        f"Unknown receipt-policy attempt in run {rid}; recover exact job evidence")
             continue  # Legacy policy has no individually attributable journal.
         require(len(matching) == 1 and matching[0]["repo_id"] == scope["repository"],
                 "Ambiguous receipt job identity")
@@ -295,10 +390,7 @@ def local_receipts(api, scope):
         author = comment["user"]
         login = author["login"]
         require(re.fullmatch(r"[A-Za-z0-9_.-]+", login), "Unsafe attestor identity")
-        permission = api.get("/collaborators/" + login + "/permission")
-        require(permission["user"]["id"] == positive(author["id"])
-                and permission["permission"] in ("owner", "admin", "write"),
-                "Receipt attestor is not an authenticated repository writer")
+        verify_attestor(api, scope, author)
         proof = documents[claim["sha256"]]
         require(proof["version"] == 1 and proof["suite"] == claim["suite"]
                 and proof["result"] == {"failed": 0, "errors": 0, "skipped": 0,

@@ -8,6 +8,35 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class EffortWebStaticCase(unittest.TestCase):
+    def test_input_shape_refuses_watch_close_control_and_acceleration_drift(self):
+        self.node('''
+const original=require("./tests/playback/player-input-contract.json");
+shape.inputExtraShape(original);
+for(const change of [
+  f=>delete f.watch.routing.browser,
+  f=>Object.values(Object.values(Object.values(Object.values(f.watch.routing)[0])[0])[0])[0].left="unknown",
+  f=>f.close_control.hidden=["exit","hide"],
+  f=>f.controls.initial_focus="unknown",
+  f=>f.controls.rows.push(structuredClone(f.controls.rows[0])),
+  f=>f.steps.preview_acceleration[1].from_repeat=0
+]) { const fixture=structuredClone(original);change(fixture);assert.throws(()=>shape.inputExtraShape(fixture)); }
+''')
+
+    def test_info_and_surface_shape_refuse_missing_diagnostics_and_stop_contracts(self):
+        self.node('''
+const info=require("./tests/playback/playback-info-fields.json");
+for(const change of [f=>f.fields=f.fields.filter(row=>row.id!=="http_wait"),f=>f.fields[0].label="Buffer ahead"]){
+  const fixture=structuredClone(info);change(fixture);assert.throws(()=>shape.infoShape(fixture));
+}
+const surface=require("./tests/playback/playback-surface-contract.json");
+shape.surfaceExtraShape(surface);
+for(const change of [
+  f=>delete f.sources.find(row=>row.class && f.classes[row.class].blocking===true).requires,
+  f=>f.actions.push("unknown"),
+  f=>Object.values(f.classes)[0].retired_by=["unknown"]
+]) { const fixture=structuredClone(surface);change(fixture);assert.throws(()=>shape.surfaceExtraShape(fixture)); }
+''')
+
     def node(self, body):
         result = subprocess.run(
             ["node", "-e", 'const assert=require("node:assert/strict");'

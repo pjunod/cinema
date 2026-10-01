@@ -34,7 +34,12 @@ links; useful descriptions and old-line provenance; no unserved shell files;
 strict prologues, duplicate globals and load-time forward references.
 
 Shared input/live routing tables retain complete declared dimensions and
-defined outcomes. Surface classes/sources retain declared severity, contexts,
+defined outcomes. Watch cells, close-step vocabulary/terminal exit, control
+placement/initial focus and increasing preview acceleration remain checked
+as data. Diagnostic fields retain required IDs and reject ambiguous labels.
+Blocking source rows explicitly require a stopped player; action coverage
+and retirement vocabulary/timing declarations remain checked without running
+the presenter. Surface classes/sources retain declared severity, contexts,
 actions, unique case/source names and case coverage. Generated documentation
 and served JSON embeds must match byte-for-byte, with exactly one ordered pair
 of markers. The markup retains the shared transport/bar ordering, single
