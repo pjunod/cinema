@@ -23,6 +23,10 @@ OPTIONAL_CARGO_IDENTITIES = frozenset(
         "crates/plurxd/src/live_tv/videotoolbox_tests.rs::"
         "live_tv::videotoolbox_tests::"
         "live_tv_videotoolbox_atsc1_publishes_decodable_segments",
+        # Explicit owned lab acquisition exists only with this test feature on
+        # Unix; default cargo --list cannot include it. No wildcard exemption.
+        "crates/plurxd/src/transcode/tests/rolling_grid_campaign.rs::"
+        "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell",
     }
 )
 

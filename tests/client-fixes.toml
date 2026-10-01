@@ -3427,3 +3427,49 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "message = \"Completed staged candidate body\""
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+# A05 native pacing and attachment-bound quiet windows: each bridge names
+# the new native method executed once against its attributed source snapshot.
+[[fixes]]
+id = "apple.auto-paced-production-upgrade-windows"
+commits = ["229939d0"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoActiveProductionPressure("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence"
+
+[[fixes]]
+id = "android.auto-paced-production-upgrade-windows"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoActiveProductionPressure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
+
+[[fixes]]
+id = "apple.auto-observed-attachment-quiet-window"
+commits = ["28674251"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let quietStart = max(observationStartMs, lastStallMs ?? observationStartMs)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade"
+
+[[fixes]]
+id = "android.auto-observed-attachment-quiet-window"
+commits = []
+supplements = "apple.auto-observed-attachment-quiet-window"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val quietStart = maxOf(start, lastStallMs ?: start)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade()"
+
+# The new exact Android regression compiles this existing test source; this
+# bridge does not claim that any old PlaybackControlAskTest method executed.
+[[fixes]]
+id = "android.receipt-callback-test-transport-binding"
+commits = ["7c99a964"]
+source = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlAskTest.kt"
+source_anchor = "transport = transport(\"hold\", reason = \"no_room\", sequence = sequence)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
