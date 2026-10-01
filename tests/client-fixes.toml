@@ -3535,3 +3535,13 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = 'class="pseek-arrows"'
 test = "tests/playback/seek-control.test.js"
 test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+# Actual caller provenance, covered once by the new source-contract method;
+# this does not claim physical AVPlayer boundary execution.
+[[fixes]]
+id = "apple.auto-viewer-relative-and-internal-marker-provenance"
+commits = ["f92e562ac"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance"
