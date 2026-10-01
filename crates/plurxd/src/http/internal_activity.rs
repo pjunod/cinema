@@ -108,6 +108,8 @@ pub(super) async fn local_workers(state: &AppState) -> ActivityWorkers {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vod_observation: Option<crate::vodserve::VodActivityObservation>,
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<String>,
@@ -142,6 +144,15 @@ fn age_dvr_observations(
 ) -> PeerActivityOutcome {
     let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
     if let PeerActivityOutcome::Answered(snapshot) = &mut outcome {
+        for delivery in &mut snapshot.deliveries {
+            if let Some(age) = delivery
+                .vod_observation
+                .as_mut()
+                .and_then(|facts| facts.control_age_ms.as_mut())
+            {
+                *age = age.saturating_add(elapsed_ms);
+            }
+        }
         if let Some(dvr) = &mut snapshot.dvr {
             for observation in &mut dvr.observations {
                 observation.observation_age_ms =
@@ -160,10 +171,16 @@ fn age_dvr_observations(
 /// to share instead of deep-cloning every peer's whole snapshot per reader.
 fn carries_dvr_observations(entry: &(String, PeerActivityOutcome)) -> bool {
     match &entry.1 {
-        PeerActivityOutcome::Answered(snapshot) => snapshot
-            .dvr
-            .as_ref()
-            .is_some_and(|dvr| !dvr.observations.is_empty()),
+        PeerActivityOutcome::Answered(snapshot) => {
+            snapshot
+                .deliveries
+                .iter()
+                .any(|delivery| delivery.vod_observation.is_some())
+                || snapshot
+                    .dvr
+                    .as_ref()
+                    .is_some_and(|dvr| !dvr.observations.is_empty())
+        }
         _ => false,
     }
 }
@@ -578,6 +595,10 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
             delivery.method.len() <= 32
                 && delivery.user.len() <= MAX_USER_BYTES
                 && delivery.title.len() <= MAX_TITLE_BYTES
+                && delivery
+                    .vod_observation
+                    .as_ref()
+                    .is_none_or(|facts| facts.bounded())
         })
         && snapshot.analysis.iter().all(|progress| {
             !progress.job_id.is_empty()
@@ -653,6 +674,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     continue;
                 };
                 deliveries.push(ActivityDelivery {
+                    vod_observation: session.vod_observation.clone(),
                     method: method.as_str().to_owned(),
                     presentation: Some(session.presentation.to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
@@ -667,6 +689,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             }
             ActivityCandidate::Vod(session) => {
                 deliveries.push(ActivityDelivery {
+                    vod_observation: session.observation.clone(),
                     method: session.method.as_str().to_owned(),
                     presentation: Some("vod".to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
@@ -681,6 +704,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             }
             ActivityCandidate::Remux(stream) => {
                 deliveries.push(ActivityDelivery {
+                    vod_observation: None,
                     method: "remux".to_owned(),
                     presentation: None,
                     user: bounded_text(stream.user_name, MAX_USER_BYTES),
@@ -698,6 +722,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             }
             ActivityCandidate::Direct(play) => {
                 deliveries.push(ActivityDelivery {
+                    vod_observation: None,
                     method: "direct".to_owned(),
                     presentation: None,
                     user: bounded_text(play.user_name, MAX_USER_BYTES),
@@ -1156,8 +1181,48 @@ mod tests {
     }
 
     #[test]
+    fn vod_activity_observations_are_additive_bounded_and_age_in_cache() {
+        let old = serde_json::json!({"method":"hls-copy","presentation":"vod","user":"viewer",
+            "file_id":1,"item_id":2,"title":"fixture","started_unix":1,"idle_seconds":0,
+            "delivered_bytes":0,"delivered_bps":null});
+        let delivery: ActivityDelivery = serde_json::from_value(old.clone()).expect("old peer");
+        assert!(delivery.vod_observation.is_none());
+        let mut new = old;
+        new["vod_observation"] = serde_json::json!({"control_demand":"hold","render_state":"rendering",
+            "position_ms":12000,"client_runway_ms":3000,"control_age_ms":5,"producer_state":"held","producer_hold":"ahead"});
+        new["future_optional_field"] = serde_json::Value::Bool(true);
+        let delivery: ActivityDelivery =
+            serde_json::from_value(new.clone()).expect("additive fields");
+        #[derive(serde::Deserialize)]
+        struct OldConsumer {
+            method: String,
+        }
+        let old_consumer: OldConsumer =
+            serde_json::from_value(new).expect("old ignores unknown fields");
+        assert_eq!(old_consumer.method, "hls-copy");
+        let snapshot = bounded_snapshot("node-b".into(), vec![delivery], Vec::new());
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+        let aged = age_dvr_observations(
+            PeerActivityOutcome::Answered(snapshot),
+            Duration::from_secs(1),
+        );
+        let PeerActivityOutcome::Answered(aged) = aged else {
+            panic!("snapshot")
+        };
+        assert_eq!(
+            aged.deliveries[0]
+                .vod_observation
+                .as_ref()
+                .expect("observations")
+                .control_age_ms,
+            Some(1005)
+        );
+    }
+
+    #[test]
     fn producer_obeys_the_exact_json_byte_budget_after_escaping() {
         let delivery = ActivityDelivery {
+            vod_observation: None,
             method: "x".repeat(32),
             presentation: Some("live-recovery".to_owned()),
             user: "\0".repeat(MAX_USER_BYTES),
@@ -1196,6 +1261,7 @@ mod tests {
             programme_title: Some("\0".repeat(256)),
         };
         let delivery = ActivityDelivery {
+            vod_observation: None,
             method: "direct".into(),
             presentation: None,
             user: "\0".repeat(MAX_USER_BYTES),
@@ -1223,6 +1289,7 @@ mod tests {
     #[test]
     fn saturated_deliveries_preserve_analysis_progress_within_the_wire_budget() {
         let delivery = ActivityDelivery {
+            vod_observation: None,
             method: "x".repeat(32),
             presentation: Some("live-recovery".to_owned()),
             user: "\0".repeat(MAX_USER_BYTES),
@@ -1290,6 +1357,7 @@ mod tests {
     #[test]
     fn vod_session_participates_in_the_bounded_peer_inventory() {
         let session = crate::vodserve::VodDeliveryInfo {
+            observation: None,
             // Non-zero on purpose: the peer snapshot hard-coded zero here, so
             // a fixture that also says zero cannot see the difference.
             delivered_bytes: 4_096,

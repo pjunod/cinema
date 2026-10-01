@@ -448,7 +448,9 @@ pub async fn item_detail(
             let mut refusals = Vec::new();
             for video in &videos {
                 let identity = crate::fragindex::identity_for(&f, *video);
-                if state.store.fragment_index(f.id, &identity).await?.is_some() {
+                if state.store.fragment_index(f.id, &identity).await?.is_some()
+                    || state.transcode.cluster_index_available(&f, *video).await
+                {
                     present += 1;
                 } else if let Some(outcome) =
                     state.store.fragment_index_outcome(f.id, &identity).await?

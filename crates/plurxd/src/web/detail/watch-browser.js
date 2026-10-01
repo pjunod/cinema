@@ -94,14 +94,22 @@ function watchTrackRow(which,tracks,selected,label,offChip){
   return `<div class="watch-trks">${current}<button type="button" class="watch-trkmore" data-watch-fold="${which}">${summary}</button>${watchFoldButton(which,false)}</div>`;
 }
 function watchDeliveryRow(f){
+  const p=PLAYER;
+  if(WATCH?.accepted&&p&&String(p.fileId)===String(f.id)&&playbackOwnsAttachedMedia(p)){
+    if(p.sessionId&&p.vod)return `<span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Attached fixed, seekable timeline</span>`;
+    if(p.sessionId)return `<span class="mode-chip live">Live HLS</span><span class="mode-detail">Attached rolling timeline</span>`;
+    const label=p.method==="direct"?"Direct play":p.method==="remux"?"Progressive remux":"Playback";
+    return `<span class="mode-chip">${label}</span><span class="mode-detail">Attached delivery</span>`;
+  }
   const s=f.vod_index_status;
-  if(s==="indexed")return `<span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Fixed, seekable timeline · analysis ready</span>`;
-  if(s==="partial")return `<span class="mode-chip vod">VOD HLS on some devices</span><span class="mode-detail">Analysis ready for some delivery routes</span>`;
-  if(s==="pending")return `<span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">${f.vod_index_refusal?esc(f.vod_index_refusal)+" — it will be tried again":"VOD analysis pending"}</span>`;
-  if(s==="refused")return `<span class="mode-chip live">Live HLS only</span><span class="mode-detail">VOD analysis ${f.vod_index_refusal?esc(f.vod_index_refusal):"was refused for this file"}</span>`;
-  if(s==="unsupported")return `<span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer</span>`;
+  if(s==="indexed")return `<span class="mode-chip vod">VOD analysis ready</span><span class="mode-detail">File capability · next open chooses delivery</span>`;
+  if(s==="partial")return `<span class="mode-chip vod">VOD analysis partly ready</span><span class="mode-detail">File capability · some delivery routes</span>`;
+  if(s==="pending")return `<span class="mode-chip">VOD analysis pending</span><span class="mode-detail">${f.vod_index_refusal?esc(f.vod_index_refusal):"File capability · analysis pending"}</span>`;
+  if(s==="refused")return `<span class="mode-chip">VOD analysis refused</span><span class="mode-detail">${f.vod_index_refusal?esc(f.vod_index_refusal):"Analysis unavailable"}</span>`;
+  if(s==="unsupported")return `<span class="mode-chip">VOD analysis unavailable</span><span class="mode-detail">This codec cannot use the VOD indexer</span>`;
   return "";
 }
+
 function watchLedgerHtml(){
   const f=watchCurrentFile();if(!f)return "";
   const vid=[f.video_codec&&f.video_codec.toUpperCase(),(f.width&&f.height)?`${f.width}×${f.height}`:null,f.bit_depth?`${f.bit_depth}-bit`:null,(f.hdr_format||f.hdr||(f.video_codec?"SDR":null)),fmtMbps(f.bitrate)].filter(Boolean).join(" · ");
@@ -150,7 +158,7 @@ function watchRenderLedger(){
     if(keep&&active.closest(`#${id}`)){const again=node.querySelector(keep);if(again)again.focus({preventScroll:true});}
   }
   const f=watchCurrentFile();
-  WATCH.ledgerSig=f?`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}`:"";
+  WATCH.ledgerSig=f?`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}|${PLAYER?.sessionId||""}|${PLAYER?.vod||false}|${PLAYER?.method||""}|${PLAYER?._mediaAttachmentOrdinal||0}`:"";
 }
 // The player bar's ⓘ in the compact and wide states. The facts are on the
 // page, but the transport row is pinned by the surface contract, so the
@@ -310,7 +318,7 @@ function watchMarkChapter(){
   const total=WATCH.accepted?pbTotalSec()*1000:0;
   if(total)document.querySelectorAll(".watch-remaining").forEach(r=>{r.textContent=fmtDur(Math.max(0,total-position))+" left";});
   const f=watchCurrentFile();
-  if(f){const sig=`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}`;if(sig!==WATCH.ledgerSig)watchRenderLedger();}
+  if(f){const sig=`${watchSelectedAudio(f)}|${watchSelectedSub(f)}|${WATCH.accepted}|${PLAYER?.sessionId||""}|${PLAYER?.vod||false}|${PLAYER?.method||""}|${PLAYER?._mediaAttachmentOrdinal||0}`;if(sig!==WATCH.ledgerSig)watchRenderLedger();}
   const rail=document.getElementById("watch-rail");if(!rail||rail.hidden)return;
   const chapters=watchChapters();if(!chapters.length)return;
   const totalMs=(f&&f.duration_ms)||WATCH.page.runtime||total||0;

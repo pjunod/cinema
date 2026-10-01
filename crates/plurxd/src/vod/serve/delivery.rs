@@ -12,43 +12,117 @@ impl VodServe {
     /// Cluster activity snapshots use this form so a node cannot make peer
     /// diagnostics enumerate more sessions than the wire contract can carry.
     pub async fn delivery_infos_bounded(&self, limit: usize) -> Vec<VodDeliveryInfo> {
-        let sessions = self.shared.sessions.lock().await;
-        let mut infos = sessions
-            .iter()
-            .filter(|(_, session)| session.tombstone.is_none())
-            .filter_map(|(id, session)| {
-                session.live_rendition()?;
-                Some(VodDeliveryInfo {
-                    id: id.clone(),
-                    method: match &session.kind {
-                        SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
-                        SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
-                    },
-                    file_id: session.file.id,
-                    item_id: session.file.item_id,
-                    item_title: session.item_title.clone(),
-                    user_name: session.user_name.clone(),
-                    target_height: session.target_height,
-                    started_unix: session.started_unix,
-                    idle_seconds: session
-                        .last_touch
-                        .lock()
-                        .expect("touch lock")
-                        .elapsed()
-                        .as_secs(),
-                    delivered_bytes: session.delivery.total_bytes(),
-                    delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
-                    delivered_idle_ms: session.delivery.idle_for_ms(),
+        // Copy identities/control synchronously, sort and truncate before any
+        // per-rendition await. Holding an Arc binds each observation to its row.
+        let mut selected = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(_, session)| session.tombstone.is_none())
+                .filter_map(|(id, session)| {
+                    let rendition = Arc::clone(session.live_rendition()?);
+                    let snapshot = session.last_control_snapshot.as_ref();
+                    let observation = VodActivityObservation {
+                        control_demand: snapshot.map(|s| {
+                            match s.demand {
+                                crate::playback_control::PlaybackDemand::Active => "active",
+                                crate::playback_control::PlaybackDemand::Hold => "hold",
+                                crate::playback_control::PlaybackDemand::End => "end",
+                            }
+                            .to_owned()
+                        }),
+                        render_state: snapshot.map(|s| {
+                            match s.render_state {
+                                crate::playback_control::RenderState::Starting => "starting",
+                                crate::playback_control::RenderState::Rendering => "rendering",
+                                crate::playback_control::RenderState::Waiting => "waiting",
+                                crate::playback_control::RenderState::Stalled => "stalled",
+                                crate::playback_control::RenderState::Seeking => "seeking",
+                                crate::playback_control::RenderState::Ended => "ended",
+                                crate::playback_control::RenderState::Failed => "failed",
+                            }
+                            .to_owned()
+                        }),
+                        position_ms: snapshot.map(|s| s.position_ms),
+                        client_runway_ms: snapshot
+                            .map(|s| s.buffered_through_ms.saturating_sub(s.position_ms)),
+                        control_age_ms: session
+                            .control_observed_at
+                            .map(|at| u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                        ..Default::default()
+                    };
+                    Some((
+                        VodDeliveryInfo {
+                            observation: Some(observation),
+                            id: id.clone(),
+                            method: match session.kind {
+                                SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
+                                SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
+                            },
+                            file_id: session.file.id,
+                            item_id: session.file.item_id,
+                            item_title: session.item_title.clone(),
+                            user_name: session.user_name.clone(),
+                            target_height: session.target_height,
+                            started_unix: session.started_unix,
+                            idle_seconds: session
+                                .last_touch
+                                .lock()
+                                .expect("touch lock")
+                                .elapsed()
+                                .as_secs(),
+                            delivered_bytes: session.delivery.total_bytes(),
+                            delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
+                            delivered_idle_ms: session.delivery.idle_for_ms(),
+                        },
+                        rendition,
+                    ))
                 })
-            })
-            .collect::<Vec<_>>();
-        infos.sort_by(|left, right| {
+                .collect::<Vec<_>>()
+        };
+        selected.sort_by(|(left, _), (right, _)| {
             right
                 .started_unix
                 .cmp(&left.started_unix)
                 .then(left.id.cmp(&right.id))
         });
-        infos.truncate(limit);
+        selected.truncate(limit);
+        let mut infos = Vec::with_capacity(selected.len());
+        for (mut info, rendition) in selected {
+            // Diagnostics never queue for a producer or acquire its manifest.
+            let belief = rendition.slot.try_belief();
+            let (state, hold) = if rendition.failure().is_some() {
+                ("failed", None)
+            } else {
+                match belief {
+                    Some(Producer::Running { .. }) => ("running", None),
+                    Some(Producer::Stopped { reason, .. }) => (
+                        "held",
+                        Some(match reason {
+                            crate::prodsched::Hold::Ahead { .. } => "ahead",
+                            crate::prodsched::Hold::WorkingSetFull { .. } => "working_set",
+                            crate::prodsched::Hold::NoRoom { .. } => "no_room",
+                        }),
+                    ),
+                    Some(Producer::Absent { .. }) => (
+                        "absent",
+                        match *rendition.capacity_hold.lock().expect("capacity hold") {
+                            Some(crate::prodsched::Hold::NoRoom { .. }) => Some("no_room"),
+                            Some(crate::prodsched::Hold::WorkingSetFull { .. }) => {
+                                Some("working_set")
+                            }
+                            _ => None,
+                        },
+                    ),
+                    None => ("unknown", None),
+                }
+            };
+            if let Some(observation) = info.observation.as_mut() {
+                observation.producer_state = Some(state.to_owned());
+                observation.producer_hold = hold.map(str::to_owned);
+            }
+            infos.push(info);
+        }
         infos
     }
 
