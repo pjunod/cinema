@@ -815,9 +815,9 @@ function applyPlayerOutcome(outcome,ctx={}){
     case "cancel_then_focus_marker_or_ignore":
       cancelPendingSeek(); return applyPlayerOutcome("focus_marker_or_ignore",ctx);
     case "commit_then_toggle_play": {
-      commitPendingSeek(); togglePlay(); return true;
+      commitPendingSeek(); togglePlay(ctx.origin||"viewer_keyboard"); return true;
     }
-    case "toggle_play": togglePlay(); return true;
+    case "toggle_play": togglePlay(ctx.origin||"viewer_keyboard"); return true;
     case "close_menu": closeMenu(); return true;
     case "close_info": toggleStats(); return true;
     case "hide": {
@@ -946,7 +946,7 @@ function playerMediaPlayPause(wanted){
   const outcome=watchRouteInput(playerInputState(),"play_pause");
   if(outcome!=="toggle_play"&&outcome!=="commit_then_toggle_play") return false;
   if(outcome==="commit_then_toggle_play") commitPendingSeek();
-  if(playerWantsPlayback(document.getElementById("video"))!==wanted) togglePlay();
+  if(playerWantsPlayback(document.getElementById("video"))!==wanted) togglePlay("media_session");
   return true;
 }
 function playerMediaSkip(input,seconds){

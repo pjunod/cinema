@@ -7969,6 +7969,22 @@ pub mod status {
         watermark_started_nanos: u64,
     }
 
+    /// Process-local diagnostic evidence. It carries no serving authority.
+    #[derive(Clone, Debug, Default)]
+    pub struct QuorumAttemptSnapshot {
+        pub sequence: u64,
+        pub started_nanos: u64,
+        pub tick_lateness_ms: u64,
+        pub phase: &'static str,
+        pub age_ms: u64,
+        pub target_leader: Option<u64>,
+        pub latest_outcome: Option<&'static str>,
+        pub latest_error_category: Option<&'static str>,
+        pub latest_error_reason: Option<&'static str>,
+        pub last_completed_sequence: u64,
+        pub in_flight: bool,
+    }
+
     #[derive(Default)]
     struct PassiveRaftMetricsAtomics {
         sequence: AtomicU64,
@@ -8002,6 +8018,7 @@ pub mod status {
         state_machine_snapshots_bytes: AtomicU64,
         state_machine_logs_bytes: AtomicU64,
         sampler_started: AtomicBool,
+        quorum_attempt: std::sync::Mutex<QuorumAttemptSnapshot>,
     }
 
     /// Narrow atomics-only handle for passive local Raft observability.
@@ -8142,6 +8159,61 @@ pub mod status {
                 .watermark_invalidated
                 .store(true, Ordering::Relaxed);
             self.end_write(sequence);
+        }
+
+        /// Read the in-flight attempt without waiting for the request or Store.
+        #[must_use]
+        pub fn quorum_attempt(&self) -> QuorumAttemptSnapshot {
+            let mut attempt = self
+                .inner
+                .quorum_attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            attempt.age_ms = self.elapsed_nanos().saturating_sub(attempt.started_nanos) / 1_000_000;
+            attempt
+        }
+
+        fn begin_quorum_attempt(&self, tick_lateness_ms: u64) -> u64 {
+            let target_leader = self.snapshot().sample.and_then(|sample| sample.leader_id);
+            let mut attempt = self
+                .inner
+                .quorum_attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let sequence = attempt.sequence.saturating_add(1);
+            *attempt = QuorumAttemptSnapshot {
+                sequence,
+                started_nanos: self.elapsed_nanos(),
+                tick_lateness_ms,
+                phase: "request_round_trip",
+                target_leader,
+                in_flight: true,
+                latest_outcome: attempt.latest_outcome,
+                latest_error_category: attempt.latest_error_category,
+                latest_error_reason: attempt.latest_error_reason,
+                last_completed_sequence: attempt.last_completed_sequence,
+                ..Default::default()
+            };
+            sequence
+        }
+
+        fn finish_quorum_attempt(
+            &self,
+            outcome: &'static str,
+            error: Option<(&'static str, &'static str)>,
+        ) {
+            let mut attempt = self
+                .inner
+                .quorum_attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            attempt.in_flight = false;
+            attempt.phase = "local_publication";
+            attempt.latest_outcome = Some(outcome);
+            attempt.last_completed_sequence = attempt.sequence;
+            attempt.latest_error_category = error.map(|(category, _)| category);
+            attempt.latest_error_reason = error.map(|(_, reason)| reason);
         }
 
         /// Read one coherent snapshot without locks, Store access, or IO.
@@ -8814,6 +8886,28 @@ pub mod status {
         }
     }
 
+    // Free-form errors may contain endpoints or credentials. Retain the actual
+    // enum class and a fixed safe reason rather than copying their payloads.
+    fn quorum_error_detail(error: &hiqlite::Error) -> (&'static str, &'static str) {
+        match error {
+            hiqlite::Error::Connect(_) => ("connect", "leader connection failed"),
+            hiqlite::Error::CheckIsLeaderError(_) | hiqlite::Error::LeaderChange(_) => {
+                ("leader", "leader confirmation failed")
+            }
+            hiqlite::Error::RaftError(_) | hiqlite::Error::RaftErrorFatal(_) => {
+                ("raft", "raft confirmation failed")
+            }
+            hiqlite::Error::Channel(_) => ("channel", "local request channel failed"),
+            hiqlite::Error::Request(_) => ("request", "leader request failed"),
+            hiqlite::Error::Timeout(_) => ("source_timeout", "leader request deadline elapsed"),
+            hiqlite::Error::Token(_) | hiqlite::Error::Unauthorized(_) => {
+                ("authorization", "leader request authorization failed")
+            }
+            hiqlite::Error::WebSocket(_) => ("websocket", "leader transport failed"),
+            _ => ("other", "quorum source returned an unclassified error"),
+        }
+    }
+
     async fn run_quorum_watermark_loop<S, F>(
         source: S,
         metrics: PassiveRaftMetrics,
@@ -8835,35 +8929,73 @@ pub mod status {
         }
         let mut refresh = tokio::time::interval(refresh_period);
         refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut failed_since: Option<Instant> = None;
+        let mut last_warning: Option<Instant> = None;
+        let mut suppressed = 0_u64;
+        let mut last_failure = None;
         loop {
-            tokio::select! {
+            let scheduled = tokio::select! {
                 biased;
                 _ = &mut shutdown => return,
-                _ = refresh.tick() => {}
-            }
-            let started_nanos = metrics.elapsed_nanos();
+                scheduled = refresh.tick() => scheduled,
+            };
+            let late = tokio::time::Instant::now().saturating_duration_since(scheduled);
+            let attempt_seq =
+                metrics.begin_quorum_attempt(u64::try_from(late.as_millis()).unwrap_or(u64::MAX));
+            let started_nanos = metrics.quorum_attempt().started_nanos;
             let result = tokio::select! {
                 biased;
-                _ = &mut shutdown => return,
+                _ = &mut shutdown => {
+                    metrics.finish_quorum_attempt("cancelled", None);
+                    return;
+                },
                 result = tokio::time::timeout(request_timeout, source.sample()) => result,
             };
-            match result {
+            let mut error_detail = None;
+            let outcome = match result {
                 Ok(Ok(watermark)) => {
-                    if !metrics.publish_watermark(watermark, started_nanos) {
-                        tracing::warn!(
-                            term = watermark.term,
-                            committed_index = watermark.committed_index,
-                            "rejected quorum watermark that does not match local Raft state"
-                        );
+                    if metrics.publish_watermark(watermark, started_nanos) {
+                        "accepted"
+                    } else {
+                        "proof_rejected"
                     }
                 }
                 Ok(Err(error)) => {
+                    error_detail = Some(quorum_error_detail(&error));
                     metrics.record_watermark_error();
-                    tracing::debug!(error = %error, "quorum watermark sample failed");
+                    "source_error"
                 }
                 Err(_) => {
                     metrics.record_watermark_error();
-                    tracing::debug!("quorum watermark sample timed out");
+                    "timeout"
+                }
+            };
+            metrics.finish_quorum_attempt(outcome, error_detail);
+            if outcome == "accepted" {
+                if let Some(since) = failed_since.take() {
+                    tracing::warn!(
+                        attempt_seq,
+                        outage_ms = since.elapsed().as_millis() as u64,
+                        suppressed,
+                        "quorum watermark sampling recovered"
+                    );
+                }
+                suppressed = 0;
+                last_warning = None;
+                last_failure = None;
+            } else {
+                failed_since.get_or_insert_with(Instant::now);
+                let failure = (outcome, error_detail.map(|(category, _)| category));
+                if last_failure != Some(failure)
+                    || last_warning.is_none_or(|at| at.elapsed() >= Duration::from_secs(10))
+                {
+                    tracing::warn!(attempt_seq, outcome, attempt = ?metrics.quorum_attempt(),
+                        suppressed, "quorum watermark sample failed");
+                    last_warning = Some(Instant::now());
+                    last_failure = Some(failure);
+                    suppressed = 0;
+                } else {
+                    suppressed = suppressed.saturating_add(1);
                 }
             }
         }
@@ -10517,6 +10649,73 @@ pub mod status {
             let view = metrics.snapshot();
             assert_eq!(view.watermark, None);
             assert_eq!(view.watermark_errors, 0);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn watermark_expiry_evidence_precedes_timeout_and_joins_completion() {
+            let metrics = PassiveRaftMetrics::new(true);
+            assert!(metrics.publish_at(&local_sample(7, Some(42), Some(1)), 0));
+            assert!(metrics.publish_watermark_at(watermark(7, 1, 42), 0, 0));
+            let proof = metrics
+                .eligible_serving_proof_at(0, 0)
+                .expect("seeded proof");
+            let calls = Arc::new(AtomicU64::new(0));
+            let (cancel, cancelled) = tokio::sync::oneshot::channel();
+            let task = tokio::spawn(run_quorum_watermark_loop(
+                FakeWatermarkSource {
+                    sample: watermark(7, 1, 42),
+                    delay: Duration::from_secs(60),
+                    calls: Arc::clone(&calls),
+                },
+                metrics.clone(),
+                async move {
+                    let _ = cancelled.await;
+                },
+                QUORUM_WATERMARK_REFRESH,
+                QUORUM_WATERMARK_REFRESH,
+                QUORUM_WATERMARK_TIMEOUT,
+            ));
+            tokio::task::yield_now().await;
+            tokio::time::advance(QUORUM_WATERMARK_REFRESH).await;
+            while calls.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+            tokio::time::advance(QUORUM_WATERMARK_REFRESH).await;
+            assert!(!metrics.serving_proof_remains_valid_at(
+                &proof,
+                1,
+                duration_nanos(QUORUM_WATERMARK_LEASE)
+            ));
+            let expiry = metrics.quorum_attempt();
+            assert!(expiry.in_flight);
+            assert_eq!(expiry.sequence, 1);
+            assert_eq!(expiry.target_leader, Some(1));
+            assert_eq!(
+                metrics.snapshot().watermark_errors,
+                0,
+                "at expiry the 500ms request has not timed out"
+            );
+            tokio::time::advance(QUORUM_WATERMARK_TIMEOUT - QUORUM_WATERMARK_REFRESH).await;
+            while metrics.snapshot().watermark_errors == 0 {
+                tokio::task::yield_now().await;
+            }
+            let completed = metrics.quorum_attempt();
+            assert_eq!(completed.last_completed_sequence, expiry.sequence);
+            assert_eq!(completed.latest_outcome, Some("timeout"));
+            cancel.send(()).expect("cancel sampler");
+            task.await.expect("sampler task");
+        }
+
+        #[test]
+        fn quorum_error_categories_never_copy_sensitive_payloads() {
+            assert_eq!(
+                quorum_error_detail(&hiqlite::Error::Connect("token=secret endpoint".into())),
+                ("connect", "leader connection failed")
+            );
+            assert_eq!(
+                quorum_error_detail(&hiqlite::Error::Token("secret".into())),
+                ("authorization", "leader request authorization failed")
+            );
         }
 
         #[tokio::test]

@@ -434,9 +434,13 @@ async function sendPlaybackControl(url,body,signal){
     const code=failure&&typeof failure.code==="string"?failure.code:null;
     const invalidField=failure&&typeof failure.invalid_field==="string"
       &&/^[a-z][a-z0-9_.]{0,63}$/.test(failure.invalid_field)?failure.invalid_field:null;
-    const error=new Error((code?`playback control ${code}`:"playback control HTTP "+response.status)
-      +(invalidField?` (${invalidField})`:""));
+    const error=/** @type {Error & {status?:number,code?:string,terminalReason?:string,retryAfterMs?:number,invalidField?:string,generation?:string,controlEpoch?:number}} */(new Error((code?`playback control ${code}`:"playback control HTTP "+response.status)
+      +(invalidField?` (${invalidField})`:"")));
     error.status=response.status; error.code=code;
+    if(typeof failure?.terminal_reason==="string"&&/^[a-z_]{1,48}$/.test(failure.terminal_reason))
+      error.terminalReason=failure.terminal_reason;
+    const retryAfter=Number(response.headers?.get("Retry-After"));
+    if(Number.isFinite(retryAfter)&&retryAfter>0)error.retryAfterMs=Math.min(60000,retryAfter*1000);
     if(invalidField) error.invalidField=invalidField;
     if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
     if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;

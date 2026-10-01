@@ -1130,6 +1130,17 @@
   }
 
   // The latch names its session, so a successor retires it by identity.
+  // Health is a run of observed presentation, never just an attachment event.
+  function recoveryHealthObservation(previous, {nowMs, key, healthy} = {}) {
+    if(!healthy || !Number.isFinite(nowMs)) return {state:null,rearm:false};
+    if(!previous || previous.key!==key || nowMs<previous.lastMs
+        || nowMs-previous.lastMs>2000) {
+      return {state:{key,startMs:nowMs,lastMs:nowMs},rearm:false};
+    }
+    const state={key,startMs:previous.startMs,lastMs:nowMs};
+    return {state,rearm:nowMs-state.startMs>=30000};
+  }
+
   function pausedRetirementCurrent(retirement, sessionId) {
     return !!retirement && !!sessionId && retirement.sessionId === sessionId;
   }
@@ -2341,6 +2352,7 @@
     parksPausedPlaybackError,
     isPauseGraceExpiry,
     pausedRetirementCurrent,
+    recoveryHealthObservation,
     SEEK_LOCAL_SETTLE_MS,
     SEEK_LOCAL_LANDING_SLACK_MS,
     seekRoute,

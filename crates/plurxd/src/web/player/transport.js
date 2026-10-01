@@ -314,6 +314,7 @@ function playbackProgressTick(v,p){
     &&(p.started||pending?.executed);
   if(!active){
     p.progressWatch=null;
+    p.recoveryHealth=null;
     playbackSurfaceStep({presenting:false,attached:playbackSurfaceGeneration(p)});
     return;
   }
@@ -337,6 +338,17 @@ function playbackProgressTick(v,p){
     watch=p.progressWatch={key,clock,frames,at:now,startedAt:now,fired:false};
   }
   const moved=clock>watch.clock+0.01 && (frames==null||frames>watch.frames);
+  const controlHealthy=!p.controlReporter || (!p.controlLastError
+    && Date.now()-(p.controlLastExchangeAt||0)<=Number(p.controlReporter.bootstrap?.next_exchange_ms||5000)+2000);
+  const health=PlaybackPolicy.recoveryHealthObservation(p.recoveryHealth,{nowMs:now,
+    key:`${key}:${p._mediaAttachmentOrdinal||0}`,healthy:moved&&!pending&&!v.seeking
+      &&!p.waitAt&&!p.terminalStop&&!p.sessionTerminal&&controlHealthy});
+  p.recoveryHealth=health.state;
+  if(health.rearm&&(p.stallRecoveries||0)>0){
+    p.stallRecoveries=0;p.recoveryHealth=null;
+    clientLog(Object.assign({level:"info",event:"stall_recovery",detail:"rearmed:healthy_30s",
+      message:"automatic recovery rearmed after continuous observed presentation"},playbackContext()));
+  }
   // THE evidence (contract §3.4): the film clock advanced and, where a frame
   // counter exists, so did the frames. Not `playing`, not `canplay` — a
   // decoder emits both and can still present nothing.
@@ -496,12 +508,13 @@ function playerWantsPlayback(v){
   if(PLAYER&&typeof PLAYER.wantsPlayback==="boolean") return PLAYER.wantsPlayback;
   return !v.paused;
 }
-function togglePlay(){
+function togglePlay(origin="viewer_control"){
   const v=document.getElementById("video"); if(!v) return;
   if(PLAYER&&PLAYER.libraryChannel&&v.paused
     &&LIBRARY_CHANNEL_CLOCK.now()>=Number(PLAYER.libraryChannel.ends_at_ms||0)){
     libraryChannelBoundary().catch(()=>{}); return;
   }
+  queuePlaybackTransportCommand(v,PLAYER,playerWantsPlayback(v)?"pause":"play",origin,"explicit_transport");
   endWait(false);
   supersedePlaybackControlIntent(PLAYER);
   const pending=typeof play==='function'&&play.pendingIntent;
@@ -515,11 +528,14 @@ function togglePlay(){
     const pauseStarted=PLAYER.abr&&PLAYER.abr.explicitPauseAtMs;
     const qualityBoundary=PLAYER.wantsPlayback&&pauseStarted!=null&&performance.now()-pauseStarted>=60000;
     if(PLAYER.abr) PLAYER.abr.explicitPauseAtMs=PLAYER.wantsPlayback?null:performance.now();
-    if(PLAYER.wantsPlayback&&PlaybackPolicy.pausedRetirementCurrent(
-      PLAYER.pausedRetirement,PLAYER.sessionId)){
+    if(PLAYER.wantsPlayback&&(PlaybackPolicy.pausedRetirementCurrent(
+      PLAYER.pausedRetirement,PLAYER.sessionId)
+      ||(PLAYER.sessionTerminal?.sessionId===PLAYER.sessionId
+        &&PLAYER.sessionTerminal.attachment===PLAYER.mediaAttachment))){
       // The session this pause held was retired (§9.5): reopen at the saved
       // position, or the seek made while paused. The reopen keeps Play.
       PLAYER.pausedRetirement=null;
+      PLAYER.sessionTerminal=null;
       const at=PLAYER.controlSeek?.targetMs!=null
         ? (PLAYER.controlSeek.targetMs+(PLAYER.bookOffset||0))/1000 : pbPosSec();
       clientLog(Object.assign({level:"info",event:"paused_retirement",detail:"reopen",

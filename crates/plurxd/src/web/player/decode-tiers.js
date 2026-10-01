@@ -993,7 +993,7 @@ function buildPlayer(attempt,decided,prepared){
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
     waitAt:null, waitStartedRunway:null, waitTimer:null, waitReported:false,
-    stallsByKind:null, stallRecoveries:0, recoveringStall:null,
+    stallsByKind:null, stallRecoveries:outgoing&&outgoing.fileId===fileId?(outgoing.stallRecoveries||0):0, recoveringStall:null,
     // The presenter's state, shared by every player object this page has: the
     // overlay is one element with one history and identity is the generation
     // each fault carries (PLAYBACK-SURFACE-CONTRACT.md §3.1).
