@@ -1,0 +1,10 @@
+#!/bin/bash
+# An available primary includes a busy runner. Never fail over for load.
+set -euo pipefail
+/bin/launchctl print system/org.forgejo.actions.runner.plurx.gha-mba-apple-01 |
+  /usr/bin/grep -E '^[[:space:]]*state = running$' >/dev/null
+xcode_version=$(DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer /usr/bin/xcodebuild -version)
+/usr/bin/grep -Fx 'Xcode 27.0' <<< "$xcode_version" >/dev/null
+/usr/bin/grep -Fx 'Build version 27A266a' <<< "$xcode_version" >/dev/null
+/usr/bin/curl --fail --silent --max-time 4 \
+  http://192.168.4.7:3000/api/v1/version >/dev/null

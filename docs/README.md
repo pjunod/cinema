@@ -207,6 +207,11 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md) | 2026-09-28: why Live TV said "all slots are busy" with every tuner idle — the subtitle backfill held the software pool while waiting out zombie claims, a live start refused after waiting for background work, and an encoder refusal labelled as a tuner one; the fix at each layer and the one reversed design ruling. | built |
 | [LIVE-TV-DIRECT-PLAY-AND-SURROUND.md](streaming/LIVE-TV-DIRECT-PLAY-AND-SURROUND.md) | 2026-09-24: why every ATSC 1.0 channel was encoded and every encode was stereo, the copy-first audio track selection, the sink-derived AAC channel claim, Android hardware MPEG-2, and the aspect-ratio report the server could not reproduce. | built |
 | [RESUME-ROLLING-PUBLICATION-RCA.md](streaming/RESUME-ROLLING-PUBLICATION-RCA.md) | Why resume stopped working on every client while starting from the beginning still did: which files fall back to the rolling engine, the web client whose MediaSource never opens, and the progress beat that erases a resume point once a startup fails. | open |
+| [PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md](streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md) | Monotonic phase origins, exact incident replay, repeated index/resource observations and transport measurement limits. | open |
+| [PLAYBACK-STARTUP-LATENCY-BUILD.md](streaming/PLAYBACK-STARTUP-LATENCY-BUILD.md) | Sol execution handoff: isolated clone, latest user CI/CD rulings, milestone deliverables, one reviewed PR, fast lane, merge and cleanup. | open |
+| [PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md](streaming/PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md) | Reviewed runtime build contract for the measured 14.2-second start, index availability, qualified publication policy and cross-client acceptance. | open |
+| [PLAYBACK-STARTUP-LATENCY-REVIEW.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
+| [Playback startup build status](streaming/PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: current phase, source, PR, evidence, review, fast lane and decisions. | open |
 | [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](streaming/SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, a writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
 | [Seek scratch reservations status](streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
@@ -303,6 +308,7 @@ failures.
 | File | Answers | |
 |---|---|---|
 | [STATUS-HISTORY.md](cluster/STATUS-HISTORY.md) | Status history: the `STATUS.md` sections for this folder's efforts, moved verbatim on 2026-09-24 and dated by when each was first recorded; `STATUS.md` keeps a one-line row per section pointing here. | done |
+| [CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md) | Activity tabs, exact worker/job visibility, and reviewed throughput improvements with playback and storage constraints. | open |
 | [CLOCK-SKEW-GUARD-DESIGN.md](cluster/CLOCK-SKEW-GUARD-DESIGN.md) | Accepted K-06 design and original review/gate receipt; runtime remains open through separately owned measurement and enforcement handoffs. | open |
 | [CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md) | Unclaimed K-06 measurement release: exact signed timing, continuity/filter/roster facts and identified observations, with no refusal consumers; enablement ruling pending. | open |
 | [CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md](cluster/CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md) | Unclaimed K-06 enforcement release: evidence prerequisites, actual authority boundaries, safe target removal, readiness and controlled acceptance; enablement ruling pending. | open |
@@ -479,6 +485,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [RIPWIRE.md](ci/RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
 | [RIPWIRE-STATUS.md](ci/RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
 | [CI_TEST_OVERHAUL_PLAN.md](ci/CI_TEST_OVERHAUL_PLAN.md) | Fast failures, selective evidence, safe reuse. | open |
+| [APPLE-RUNNER-FAILOVER.md](ci/APPLE-RUNNER-FAILOVER.md) | The M4 Apple primary, M3 Max standby, outage detection and installation. | live |
 | [CI_EXECUTION_ACCELERATION_PLAN.md](ci/CI_EXECUTION_ACCELERATION_PLAN.md) · [review](ci/CI_EXECUTION_ACCELERATION_REVIEW.md) | Persistent caches, native packaging, exact sharding. | open |
 | [AGENT-COMPILE-LOOP.md](ci/AGENT-COMPILE-LOOP.md) | A compiler for a checkout that has none. | live |
 | [AI-HARNESS-ASSESSMENT.md](ci/AI-HARNESS-ASSESSMENT.md) | Why agent navigation and dependable feedback should precede new orchestration, and where Ripwire fits. | open |

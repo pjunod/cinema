@@ -830,7 +830,9 @@ pub async fn scan_library_with_publication_and_prune_limit(
     check_scan_cancellation()?;
     observe_scan_phase(&SCAN_PHASE_METRICS.walk, walk_started.elapsed());
 
-    if candidates.is_empty() && walk_errors == 0 {
+    // An empty recordings folder is normal after explicit DVR deletions.
+    // Unexpected missing catalog entries still hit reconciliation below.
+    if candidates.is_empty() && walk_errors == 0 && library.kind != LibraryKind::Recordings {
         let (what, exts) = match library.kind {
             LibraryKind::Home => ("video or photo files", recognized_extensions(library)),
             LibraryKind::Books => ("book or audiobook files", recognized_extensions(library)),
@@ -928,8 +930,10 @@ pub async fn scan_library_with_publication_and_prune_limit(
                             "library reconciliation exceeded its prune bound"
                         );
                         report.note(format!(
-                            "vanished-file cleanup skipped: this scan would remove {requested} \
-                             files, above the configured limit of {limit}"
+                            "vanished-file cleanup skipped: {requested} catalog file entries were \
+                             not found on disk; removing them from the catalog would exceed the \
+                             configured limit of {limit}. No catalog entries were removed. \
+                             Verify the library mounts and recording deletion status"
                         ));
                     }
                 }
@@ -2868,6 +2872,54 @@ mod tests {
             "problems: {:?}",
             r.problems
         );
+    }
+
+    #[tokio::test]
+    async fn empty_recordings_library_is_normal_but_unexpected_losses_stay_protected() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Recordings".into(),
+                kind: LibraryKind::Recordings,
+                paths: vec![dir.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let empty = scan_library(&store, &lib).await.expect("empty scan");
+        assert_eq!(empty.errors, 0);
+        assert!(empty.problems.is_empty(), "{:?}", empty.problems);
+        let mut paths = Vec::new();
+        for n in 0..5 {
+            paths.push(write_fake_video(dir.path(), &format!("Recording {n}.ts")).await);
+        }
+        scan_library(&store, &lib).await.expect("initial scan");
+        for path in paths {
+            std::fs::remove_file(path).expect("unexpected disappearance");
+        }
+        let report = scan_library_with_progress_and_prune_percent(
+            &store,
+            &lib,
+            None,
+            crate::config::DEFAULT_SCAN_PRUNE_PERCENT,
+        )
+        .await
+        .expect("protected scan");
+        assert_eq!(report.errors, 1);
+        assert_eq!(report.removed_files, 0);
+        assert_eq!(
+            store
+                .library_file_paths(lib.id)
+                .await
+                .expect("kept entries")
+                .len(),
+            5
+        );
+        assert!(report
+            .problems
+            .iter()
+            .any(|p| p.contains("5 catalog file entries") && p.contains("limit of 1")));
     }
 
     /// The home arm end to end: folder mirroring, titles kept verbatim, the
