@@ -530,7 +530,7 @@ function togglePlay(origin="viewer_control"){
     if(PLAYER.abr) PLAYER.abr.explicitPauseAtMs=PLAYER.wantsPlayback?null:performance.now();
     if(PLAYER.wantsPlayback&&(PlaybackPolicy.pausedRetirementCurrent(
       PLAYER.pausedRetirement,PLAYER.sessionId)
-      ||(PLAYER.sessionTerminal?.sessionId===PLAYER.sessionId
+      ||(PLAYER.sessionTerminal&&PLAYER.sessionTerminal.sessionId===PLAYER.sessionId
         &&PLAYER.sessionTerminal.attachment===PLAYER.mediaAttachment))){
       // The session this pause held was retired (§9.5): reopen at the saved
       // position, or the seek made while paused. The reopen keeps Play.

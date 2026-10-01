@@ -237,10 +237,13 @@
     return immutableCopy({ snapshot, intentGeneration, owner });
   }
 
-  function sameIntent(left, right) {
-    return !!left && !!right && left.intentGeneration === right.intentGeneration
-      && left.owner.lifecycleId === right.owner.lifecycleId
+  function sameAttachment(left, right) {
+    return !!left && !!right && left.owner.lifecycleId === right.owner.lifecycleId
       && left.owner.attachmentGeneration === right.owner.attachmentGeneration;
+  }
+
+  function sameIntent(left, right) {
+    return sameAttachment(left, right) && left.intentGeneration === right.intentGeneration;
   }
 
   function validResponse(bootstrap, request, response) {
@@ -444,7 +447,8 @@
         // is still worth playing. The milestone that moves that authority is
         // the one that acts on this.
         if (request.demand === "end"
-            || response.action.type === "terminal") {
+            || (response.action.type === "terminal"
+              && sameAttachment(requestCapture, this.capture()))) {
           this.stop();
           return;
         }
@@ -474,8 +478,13 @@
             this.retryCapture = requestCapture;
             const fallback = retryableControl ? 500 : this.bootstrap.next_exchange_ms;
             this.nextAllowedAt = this.now() + retryDelay(reportedError, fallback);
-          } else {
+          } else if (status !== 410 || sameAttachment(requestCapture, this.capture())) {
             this.stop();
+          } else {
+            // Definitive death belongs to the old attachment, including any
+            // retry it left queued. The successor keeps its whole capture.
+            this.retryRequest = null;
+            this.retryCapture = null;
           }
         }
       } finally {

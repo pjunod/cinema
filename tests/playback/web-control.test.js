@@ -442,7 +442,7 @@ async function main() {
     subject.stop();
   }
 
-  {
+  for(const terminalKind of ["action","410"]){
     const held=deferred(),events=[];let sent;
     let latest=captureSnapshot(snapshot(4_000),0,{lifecycleId:'attachment',attachmentGeneration:1});
     const original=latest;
@@ -451,8 +451,9 @@ async function main() {
       send:async(_,request)=>{sent=request;return held.promise;},
       setTimer:()=>1,clearTimer:()=>{},onExchange:event=>events.push(event)}).start();
     latest=captureSnapshot(snapshot(8_000),0,{lifecycleId:'attachment',attachmentGeneration:2});
-    held.resolve({...response(sent),action:{type:'terminal',code:'unsupported',message:'old attachment'}});
-    await flush();
+    if(terminalKind === "410")held.resolve(Promise.reject(Object.assign(new Error("old attachment"),{status:410,code:"session_ended"})));
+    else held.resolve({...response(sent),action:{type:'terminal',code:'unsupported',message:'old attachment'}});
+    await flush();await flush();
     assert.strictEqual(events[0].capture,original);
     assert.equal(subject.stopped,false,'same numerical intent does not make a previous attachment terminal current');
     subject.stop();
@@ -2896,16 +2897,18 @@ async function main() {
       'a newer viewer intent cancels the old recovery episode before a callback can act');
     h.stub.detach(player);
   }
-  {
+  for(const terminalKind of ["action","410"]){
     const h=stallHarness(),player=stalledPlayer(),held=deferred();
     player.mediaAttachment={};player.controlIntentGeneration=0;
     h.holdWith(()=>held.promise);h.stub.attach(player,stalledVideo,bootstrap());h.attached.push(player);
     await flush();const old=h.sent[0];
     player.mediaAttachment={};player.subtitleReadinessReady=false;
-    held.resolve({...response(old),action:{type:'terminal',code:'unsupported',message:'old attachment'},
+    if(terminalKind === "410")held.resolve(Promise.reject(Object.assign(new Error("old attachment"),{status:410,code:"session_ended"})));
+    else held.resolve({...response(old),action:{type:'terminal',code:'unsupported',message:'old attachment'},
       delivery:{subtitle_readiness:'ready'}});
     await settleExchange();
     assert.equal(player.controlVerdict,undefined,'actual reporter callback cannot publish across an attachment change');
+    assert.equal(player.sessionTerminal,undefined,'old terminal cannot mark or reopen the successor');
     assert.equal(player.controlLastResponse,null);
     assert.equal(player.subtitleReadinessReady,false);
     h.stub.detach(player);
@@ -6985,7 +6988,7 @@ focused.catch((error) => {
 
 test("transport provenance retains old attempt on late media event and marks unmatched native events",()=>{
   const build=new Function("fetch",[
-    "let PLAYER={attemptId:'first',sessionId:'session-a',fileId:10,title:'First',method:'remux',wantsPlayback:true,controlIntentGeneration:1};const API='/api',TOKEN=null;function browserLabel(){return 'test';}",
+    "let PLAYER={attemptId:'first',sessionId:'session-a',fileId:10,title:'First',method:'remux',wantsPlayback:true,controlIntentGeneration:1};const API='/api',TOKEN=null;function browserLabel(){return 'test';}function refreshClientErrorReporterAuth(){}",
     shippedSource("clientLog"),
     transportTelemetrySources(),shippedSource("playbackTransportEvents"),
     shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
@@ -7026,4 +7029,28 @@ test("terminal attachment Play reopens once at the paused seek destination",()=>
     assert.equal(h.reopens[0][1],true);assert.equal(h.player.sessionTerminal,null);
     h.toggle();assert.equal(h.reopens.length,1,"Pause cannot reopen the ended attachment again");
   }
+});
+
+
+test("terminal attachment fencing discards stale retried requests",async()=>{
+  const held=deferred(),requests=[];let clock=0;
+  let latest=captureSnapshot(snapshot(4000),1,{lifecycleId:"stale-retry",attachmentGeneration:1});
+  const subject=new control.Reporter({bootstrap:bootstrap(),
+    clientInstanceId:"24242424-2424-4424-8424-242424242424",capture:()=>latest,
+    send:async(_,request)=>{requests.push(request);
+      if(requests.length === 1)throw Object.assign(new Error("fenced"),{status:503,code:"serving_fenced"});
+      if(requests.length === 2)return held.promise;
+      return response(request);},
+    now:()=>clock,setTimer:()=>1,clearTimer:()=>{}}).start();
+  await flush();clock=500;subject.notify(latest);await flush();
+  assert.strictEqual(requests[1],requests[0],"temporary failure retries the exact old request");
+  latest=captureSnapshot(snapshot(8000),2,{lifecycleId:"stale-retry",attachmentGeneration:2});
+  subject.notify(latest);
+  held.resolve(Promise.reject(Object.assign(new Error("old ended"),{status:410,code:"session_ended"})));
+  await flush();await flush();clock=750;await subject.drain();
+  assert.equal(subject.stopped,false,"old death cannot stop successor reporting");
+  assert.equal(subject.retryRequest,null);assert.equal(subject.retryCapture,null);
+  assert.equal(requests.length,3);assert.equal(requests[2].position_ms,8000,
+    "successor capture wins over the obsolete ended retry");
+  subject.stop();
 });
