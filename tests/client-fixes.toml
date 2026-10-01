@@ -3427,3 +3427,22 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "message = \"Completed staged candidate body\""
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "a05 staged completed body reports only its own attachment nonce"
+
+# A05 native pacing and attachment-bound quiet windows: each bridge names
+# the new native method executed once against its attributed source snapshot.
+[[fixes]]
+id = "apple.auto-paced-production-upgrade-windows"
+commits = ["080b45734c8246e46158662bed8c42b3766fd22d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func autoActiveProductionPressure("
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05PacingAndAttachmentUpgradeWindowsUseActualEvidence"
+
+[[fixes]]
+id = "android.auto-paced-production-upgrade-windows"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun autoActiveProductionPressure("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
