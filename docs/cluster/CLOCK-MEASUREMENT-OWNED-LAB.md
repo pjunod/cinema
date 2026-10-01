@@ -251,6 +251,16 @@ The launcher passing-worktree hash was `71fb16f2d365af42600745b183faa3b3fae683d2
 later collector/recovery refinements are source-inspected/syntax-checked, not
 relabeled as a repeated final-tree test execution. No successful test is rerun.
 
+Sole review35 found the threaded post-fork limiter and omitted daemon stderr.
+Two separate [local process regressions](../../tests/operations/test_k06_owned_lab_review.py)
+failed on the reviewed source (`3ef392`, `9e8758`), then each passed once on
+the correction (`de3044`, `2333ee`). The launcher now execs a fresh limiter
+interpreter before the command; no post-fork Python callback is used. Cleanup
+combines both daemon channels within the unchanged 32 MiB export cap before
+removing the exact owned container. Fake SSH/Docker executables used only
+private local fixtures; no host endpoint was contacted. Original passes remain
+historical evidence, not repeated executions or physical acceptance.
+
 No compiler artifact was built, lab voter started, load generated, production
 service changed or clock stepped during development. Operator review, selected
 artifact build/load, fresh host capacity, actual idle/load observations and
