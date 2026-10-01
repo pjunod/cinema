@@ -1,0 +1,54 @@
+#!/bin/bash
+# Install on the M3 Max as a system service, running jobs as pjunod.
+set -euo pipefail
+check_unmanaged() {
+  if [ "$(uname -s)" = Darwin ]; then
+    for domain in system "gui/$(id -u pjunod)"; do
+      for label in homebrew.mxcl.forgejo-runner tv.plurx.forgejo-apple-runner; do
+        if /bin/launchctl print "$domain/$label" >/dev/null 2>&1; then
+          echo "install: unload unmanaged launch service $domain/$label first" >&2
+          return 1
+        fi
+      done
+    done
+  fi
+  # Match the executable whether argv[0] is absolute, relative or bare,
+  # including versioned binaries and flags before the daemon subcommand.
+  local pids status
+  pids=$(/usr/bin/pgrep -f '^([^[:space:]]*/)?forgejo-runner(-[0-9.]+)?[[:space:]]+.*daemon([[:space:]]|$)' 2>&1) && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
+    echo "install: stop unmanaged Forgejo daemon PID(s): $pids" >&2
+    return 1
+  elif [ "$status" -ne 1 ] || [ -n "$pids" ]; then
+    echo "install: cannot inspect running processes: $pids" >&2
+    return 2
+  fi
+}
+if [ "${1:-}" = --check-unmanaged ]; then
+  check_unmanaged
+  exit
+fi
+[ "$(id -u)" -eq 0 ] || { echo 'install: run with sudo' >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || { echo 'install: macOS required' >&2; exit 1; }
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+/usr/bin/grep -Eq '^[[:space:]]*shutdown_timeout: 3h[[:space:]]*$' \
+  /opt/homebrew/etc/forgejo-runner/config.yaml || {
+    echo 'install: runner must have shutdown_timeout: 3h to finish active jobs' >&2
+    exit 1
+  }
+if /bin/launchctl print system/tv.plurx.apple-standby >/dev/null 2>&1; then
+  echo 'install: stop the existing controller after its job drains before updating' >&2
+  exit 1
+fi
+# A loaded legacy service can restart even if its daemon is currently absent.
+check_unmanaged
+/usr/bin/install -d -m 0755 /usr/local/bin /usr/local/etc
+/usr/bin/install -m 0755 "$here/plurx-apple-standby" /usr/local/bin/
+/usr/bin/install -m 0644 "$here/standby.json" /usr/local/etc/plurx-apple-standby.json
+/usr/bin/install -m 0644 "$here/tv.plurx.apple-standby.plist" /Library/LaunchDaemons/
+/usr/sbin/chown root:wheel /usr/local/bin/plurx-apple-standby \
+  /usr/local/etc/plurx-apple-standby.json \
+  /Library/LaunchDaemons/tv.plurx.apple-standby.plist
+/usr/bin/plutil -lint /Library/LaunchDaemons/tv.plurx.apple-standby.plist
+/bin/launchctl bootstrap system /Library/LaunchDaemons/tv.plurx.apple-standby.plist
+/bin/launchctl print system/tv.plurx.apple-standby | /usr/bin/sed -n '1,14p'

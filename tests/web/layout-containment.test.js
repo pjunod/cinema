@@ -9,6 +9,7 @@
 // instead of rediscovering the same overflow in each layout.
 
 const assert = require("node:assert/strict");
+const test = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 
@@ -188,11 +189,13 @@ for (const asset of ASSETS) {
   }
 }
 
-assert.deepEqual(
-  failures,
-  [],
-  `fractional content columns need an explicit minmax() floor:\n${failures.join("\n")}`,
-);
+test("fractional content columns have explicit non-intrinsic floors", () => {
+  assert.deepEqual(
+    failures,
+    [],
+    `fractional content columns need an explicit minmax() floor:\n${failures.join("\n")}`,
+  );
+});
 
 const index = fs.readFileSync(path.join(ROOT, ASSETS[0]), "utf8");
 assert.match(index, /main\{[^}]*padding:var\(--main-inset-top\) var\(--main-inset-x\) 60px/);
