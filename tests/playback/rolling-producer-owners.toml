@@ -1336,7 +1336,10 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-shared-admitted-media-body-lifetimes"
 pattern = "(?:MAX_ADMITTED_MEDIA_BODY_LIFETIME|MEDIA_BODY_NO_PROGRESS_TIMEOUT)"
-expected_occurrences = 15
+# Landed 63cc43f3a shares consumer-first local-body timeout ownership and
+# adds exact-deadline fixtures in hls/response.rs. Net source references +2;
+# the lifetime and no-progress budgets themselves are unchanged.
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-bounded-prepared-body-owner"
@@ -1346,12 +1349,17 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-driven-local-body-owner"
 pattern = "driven_local_body"
-expected_occurrences = 5
+# Landed 63cc43f3a removes the duplicate constructor and its two production
+# callers (plus the old direct-constructor fixture). The one remaining reference
+# is the historical terminal-failure regression's name, not another owner.
+expected_occurrences = 1
 
 [[module_symbols]]
 id = "m4-bounded-local-body-channel"
 pattern = "LOCAL_MEDIA_BODY_CHANNEL_CAPACITY"
-expected_occurrences = 3
+# Landed 63cc43f3a retains the two production channels and their constant;
+# the additional occurrence is the shared pump fixture's bounded channel.
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-bounded-relay-body-channel"
