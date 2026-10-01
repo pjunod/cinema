@@ -117,7 +117,7 @@ fn clock_measurement(state: &AppState) -> DeveloperEnableItem {
     };
     DeveloperEnableItem { id: "cluster_clock", title: "Cluster clock observation", enabled: None, setting: None,
         requirements: vec![
-            DeveloperRequirement { id: "contract", title: "Clock contract", status: RequirementStatus::Unknown, evidence: "preparatory readiness consumer; takeover, membership and fenced-target enforcement still await implementation and the identified measurement receipt".to_owned() },
+            DeveloperRequirement { id: "contract", title: "Clock contract", status: RequirementStatus::Unknown, evidence: "private readiness, expiry-scan and initial-takeover consumers; membership and fenced-target enforcement plus the identified measurement receipt are still pending. Submitted takeover reconciliation and ordinary renewal remain unchanged".to_owned() },
             DeveloperRequirement { id: "coverage", title: "Observation coverage", status, evidence: coverage },
             DeveloperRequirement { id: "upper_bound", title: "Worst observed upper bound", status: if worst.is_some() { status } else { RequirementStatus::Unobservable }, evidence: worst.map_or_else(|| "No peer offset observation applies".to_owned(), |value| format!("{} ms among bounded observations; unknown peers have no numeric offset", value as f64 / 1_000.0)) },
             DeveloperRequirement { id: "consequence", title: "Readiness consequence", status: RequirementStatus::Met, evidence: format!("Read-only advisory facts; /readyz refuses after two completed positive rounds above {CLOCK_OFFSET_REFUSAL_MS} ms, never for Unknown alone. Existing maintenance, quorum and Store failures retain precedence. This panel changes no setting") },
