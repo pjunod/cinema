@@ -192,7 +192,7 @@ pub(super) fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bo
         // Plan duration is rounded to a complete output frame, just like the
         // terminal -t. Neither audio padding nor the source's final VFR gap
         // may turn a short final entry into an unplanned audio-only tail.
-        let plan = encoding.grid.plan(file.duration_ms.unwrap_or(0), 0);
+        let plan = encoding.media_plan(file.duration_ms.unwrap_or(0));
         let end = plan
             .entries
             .last()

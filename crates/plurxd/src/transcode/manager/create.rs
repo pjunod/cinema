@@ -1006,6 +1006,7 @@ impl TranscodeManager {
             ));
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
+            shared_audio: None,
             source_object_version,
             plan,
             resources,

@@ -36,7 +36,8 @@ impl VodServe {
                     && !rendition.closed.load(Relaxed)
                     && rendition.failure().is_none()
                     && rendition.recipe.encoding.as_ref().is_some_and(|encoding| {
-                        encoding.plan.plan_digest() == plan_digest
+                        encoding.shared_audio.is_none()
+                            && encoding.plan.plan_digest() == plan_digest
                             && source_object_version
                                 .is_none_or(|version| encoding.source_object_version == version)
                             && pipeline.is_none_or(|pipeline| {

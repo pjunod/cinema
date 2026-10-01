@@ -1,7 +1,7 @@
 # Continuous quality — build uninterrupted resolution changes
 
-**Status:** adversarially reviewed; ready for isolated CQ0; production work
-waits for the upstream dependency in §1.2 · **Written:** 2026-09-30 ·
+**Status:** production implementation in progress; upstream integrated;
+final adversarial review and qualification pending · **Written:** 2026-09-30 ·
 **Source anchor:** `origin/main` at `1b2ae4f62e7d131d18c088a643470e40cdb9789c`
 · **Effort:** `effort/continuous-quality`
 
@@ -1274,3 +1274,24 @@ reservation. Production actor construction still must use that reservation;
 no hardware video slot belongs to this audio producer. The authored recipe
 regression checks identity reuse across changed video bitrate and each argv
 thread cap. Compilation is verification at this stage; tests remain deferred.
+
+### 10.10 Soundtrack role in immutable VOD
+
+The frozen VOD encoding wrapper now carries an optional shared soundtrack
+recipe. That role owns its audio-only sample plan, argv and separate artifact
+namespace. The normal stored-plan builder and restarted generation use the
+same role-aware plan. Admission and handoff calculations reserve three CPU
+threads and no video hardware slot for this producer, regardless of the
+parent video estimate. Video-only plan byte estimates exclude audio.
+
+Audio work does not publish or invalidate video-candidate throughput proofs
+and cannot satisfy a video-candidate cache offer. Existing video recipes
+retain their artifact namespace and defaults. The authored integration
+regression checks refusal at two CPU threads, admission at three with zero
+hardware slots, cleanup of the permit and actual one-track audio init output.
+It is compiled without execution.
+
+The family actor still needs to construct this role, install shared audio
+and video attachments and route their playlists. This wrapper is integrated
+with generation and admission; it is not yet reachable as a continuous
+client presentation.

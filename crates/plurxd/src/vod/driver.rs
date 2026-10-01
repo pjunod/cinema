@@ -200,8 +200,8 @@ async fn report_permit_wait(
             hardware_limit = refusal.hardware_limit,
             software_used = refusal.pool.software_used,
             software_budget = refusal.software_budget,
-            wants_hardware = encoding.resources.hardware_slot,
-            wants_threads = encoding.resources.cpu_threads,
+            wants_hardware = encoding.resources().hardware_slot,
+            wants_threads = encoding.resources().cpu_threads,
             live_waiters = refusal.pool.live_waiting,
             background_holds_permit = refusal.pool.background_active,
             reservations = refusal.pool.reservations,
@@ -319,7 +319,7 @@ async fn request_predecessor_handoff(
     if !encoding.fits_after_release(&released.resources) {
         return Err("would_not_fit");
     }
-    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources);
+    let fresh = predecessor.request_handoff(&incarnation, successor, encoding.resources());
     predecessor.kick();
     Ok((predecessor.key.clone(), fresh))
 }

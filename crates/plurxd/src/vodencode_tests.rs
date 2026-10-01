@@ -138,7 +138,7 @@ async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encod
         &crate::admission::Workload::of(&file, options.target_height),
     );
     let encoding = Arc::new(crate::vodencode::Encoding {
-        candidate_recipe: None,
+            shared_audio: None,        candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
         nonpreemptive_trial: false,
@@ -210,6 +210,58 @@ async fn encoded_identity_never_shares_a_renderer_across_processes() {
     .expect("other process");
     let other = mutable.identity(&file, 96.0);
     assert_ne!(first, other, "different nodes must never share encoded bytes");
+}
+
+#[tokio::test]
+async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
+    let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    let base = crate::test_tempdir().expect("shared soundtrack");
+    let (file, mut encoding) = encoded_fixture(base.path()).await;
+    let mutable = Arc::get_mut(&mut encoding).expect("unique recipe");
+    let video_identity = mutable.identity(&file, 4.0);
+    mutable.shared_audio =
+        plurx_core::transcode::VodSharedAudioRecipe::from_plan(&mutable.plan);
+    assert!(mutable.shared_audio.is_some());
+    mutable.resources = crate::admission::TranscodeResourceEstimate {
+        hardware_slot: true,
+        cpu_threads: 1,
+        decoder_threads: None,
+    };
+    let soundtrack_identity = mutable.identity(&file, 4.0);
+    assert_ne!(video_identity, soundtrack_identity);
+    mutable.options.video_bitrate_kbps += 1000;
+    refresh_encoded_plan(&file, mutable);
+    mutable.resources.hardware_slot = true;
+    mutable.resources.cpu_threads = 1;
+    assert_eq!(soundtrack_identity, mutable.identity(&file, 4.0));
+    assert_eq!(mutable.media_plan(4_000).timescale, 48_000);
+    assert!(mutable.media_plan(4_000).entries.iter().all(|entry|
+        entry.kind == plurx_core::segplan::PlanEntryKind::AudioTail));
+    assert!(!mutable.resources().hardware_slot);
+    assert_eq!(mutable.resources().cpu_threads, 3);
+    assert!(encoding.try_permit_after(std::future::ready(Ok((
+        Some("0".into()), Some("2".into()),
+    )))).await.is_none());
+    let permit = encoding.try_permit_after(std::future::ready(Ok((
+        Some("0".into()), Some("3".into()),
+    )))).await.expect("audio admits without a video hardware slot");
+    assert_eq!(encoding.admissions.software_in_use(), 3);
+    let output = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-loglevel", "error"])
+        .args(encoding.args(&file, 0.0, 4.0))
+        .kill_on_drop(true).output().await.expect("encode soundtrack");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let mut reader = FragmentReader::new();
+    reader.push(&output.stdout);
+    let Some(Unit::Init(init)) = reader.next_unit().expect("soundtrack init") else {
+        panic!("soundtrack must start with an init");
+    };
+    assert_eq!(init.tracks.len(), 1);
+    assert_eq!(init.tracks[0].kind, plurx_core::fmp4::TrackKind::Audio);
+    assert_eq!(init.tracks[0].timescale, 48_000);
+    assert!(matches!(reader.next_unit().expect("soundtrack media"), Some(Unit::Fragment(_))));
+    drop(permit);
+    assert_eq!(encoding.admissions.software_in_use(), 0);
 }
 
 #[tokio::test]
@@ -451,7 +503,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
         .expect_err("a captured old source cannot attach a new object");
     assert!(refused.contains("source changed"), "{refused}");
     let fresh = Arc::new(crate::vodencode::Encoding {
-        candidate_recipe: None,
+            shared_audio: None,        candidate_recipe: None,
         production_proofs: Arc::new(crate::vodencode::CandidateProductionProofs::default()),
         active_production: StdMutex::new(crate::vodencode::ActiveProductionWindow::default()),
         nonpreemptive_trial: false,

@@ -475,12 +475,7 @@ impl Shared {
             return Ok(plan);
         }
         let plan = if let Some(encoding) = &recipe.encoding {
-            encoding.grid.plan(
-                duration_ms,
-                (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
-                    .saturating_mul(1000)
-                    .into(),
-            )
+            encoding.media_plan(duration_ms)
         } else {
             let index = index.as_ref().expect("copy recipe has a fragment index");
             let policy = shipped_policy(index.timescale);
