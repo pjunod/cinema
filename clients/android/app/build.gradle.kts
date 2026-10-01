@@ -108,9 +108,16 @@ android {
         // builds share an explicit supported-platform policy.
         minSdk = 28
         targetSdk = 37
-        versionCode = 140
+        versionCode = 141
         versionName = "0.3.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Explicit isolated instrumentation only; ordinary debug/release builds
+    // keep their existing identities and test variant. Never installs over the
+    // viewer's tv.plurx.app package.
+    if (providers.gradleProperty("plurxIsolatedBudgetProbe").orNull == "true") {
+        testBuildType = "capabilityProbe"
     }
 
     signingConfigs {

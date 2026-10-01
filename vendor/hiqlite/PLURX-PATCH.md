@@ -1,9 +1,9 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries twenty-one patches for clustered deployments. An
+Apache-2.0. Plurx carries twenty-two patches for clustered deployments. An
 upstream release can retire the seven generic bugs and the one dependency-only
-constraint; it cannot retire the thirteen Plurx policies:
+constraint; it cannot retire the fourteen Plurx policies:
 
 **Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
 still needs a public upstream issue or pull request; it is deliberately not a
@@ -32,6 +32,7 @@ made-up URL and prevents the fork from being declared fully tracked.
 | 19 | Install the `ring` rustls provider for the HTTP clients | generic bug | pending M6 | Upstream release installs or declares a rustls crypto provider for its `rustls-no-provider` Reqwest clients. |
 | 20 | Compile `ring` as the only rustls provider | plurx policy | — | Never; Plurx installs `ring` in every process, so a second compiled provider is an unused C build and an ambiguous default. |
 | 21 | Report the committed Raft log index of a write (`WriteAck`) | plurx policy | — | Never; Plurx's watch-state read-your-write fence (K-04 M2) requires this negotiated response shape. |
+| 22 | Writer-fixed WAL snapshot cut, off-writer copy and bounded local storage admission | plurx policy | — | Never; Plurx owns the exact image/metadata cut, storage floor, and passive deferral evidence. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -237,11 +238,24 @@ made-up URL and prevents the fork from being declared fully tracked.
   `watch_fence_serves_watch_state_locally_only_behind_the_acknowledged_write`
   store contract drives a real streamed write end to end.
 
+- The SQLite writer persists the cut metadata and pins a dedicated read-only
+  WAL transaction before dequeuing another apply. Online Backup copies that
+  exact reader on the blocking pool. Completion updates only snapshot id on
+  success; later applies and membership stay live. Blank entries now update
+  the same last-applied boundary. Builds serialize with install/publication;
+  shutdown joins an outstanding copy. The focused `snapshot_cut_tests` and
+  builder generation/blank regressions pin concurrent apply, membership,
+  failure and checkpoint behavior. Target-local storage admission runs
+  before the writer request with a size-based floor, ten-second retries and
+  a ten-minute maximum (then existing error semantics), exposed through
+  passive fixed-label metrics. This changes no replicated enum ordinal,
+  metadata encoding, completed image format, or install format.
+
 Remove this vendor when both halves of its exit hold. First, the rows an
 upstream release can retire (rows 1, 8, 9, 10, 11, 17, 18 and 19: the
 `generic bug` and `dependency-only` kinds) have met their drop conditions in
 releases Plurx has upgraded to. Second, none of the `plurx policy` rows
-(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20 and 21) still needs a patch. Their
+(rows 2, 3, 4, 5, 6, 7, 12, 13, 14, 15, 16, 20, 21 and 22) still needs a patch. Their
 drop condition is `Never` by design (ARCHITECTURE §7 decision 10), so no
 upstream release retires them on its own: a policy row leaves only when
 upstream offers a way to express it without patching this source, or when the

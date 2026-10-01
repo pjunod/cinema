@@ -634,6 +634,91 @@ refusal, so M5 is deployed last and alone.
 
 ## Execution log
 
+### Bounded query-lab continuation claim — 2026-09-30
+
+gpt-6.1-sol (`agent:/root/p02_effort_sync_sol61`) claims one isolated
+source-only experiment from actual effort `8a7dbf5337584b2bb0556d0b617fef48122def2e`
+on `codex/k05-current-query-lab`, targeting that effort under the coordinator's
+integration override. This continues the existing statistics finding, not
+the original authors' merged implementation or declined policy decisions.
+The public WIP continuation is claimed before workload execution. No
+measurement result is claimed by this entry.
+
+The intended comparison uses the existing generator, SQLite statement
+capture, feature-enabled ignored `k05_capture_hiqlite_statements` (three
+real isolated loopback voters), schema/data rebuild and unchanged
+`query_plans measure`. Only each backend's exact captured `watch_rollups`
+statement/parameters are selected. Four independent owned DB copies
+(two schemas × none/`PRAGMA optimize=0x10002` advice) run in two reverse-order
+blocks: exactly eight reports. Each report emits one cold median of five
+runs and one warm median of five runs, not individual latency samples.
+No benchmark load, rewritten SQL, hint, `ANALYZE` substitute or deployed
+data is permitted. Advice absence and failure are honest outcomes.
+
+The scratch-only C executor links the exact static SQLite archive from the
+same locked Cargo query-tool build, with that crate's shipped matching
+header, no host SQLite substitution. It validates an owned canonical DB
+copy, prints version/source ID/all compile options and stat1/stat4 summaries,
+and bounds progress/busy waits/checkpoint/close. Prepared helper SHA256 is
+`f919ff8b589e0fb09bec235893d0c839c4f3f60a9a74cdebf52373d3450f39e8`;
+full source and final provenance must accompany this PR's final receipt so
+reproduction does not depend on private scratch availability.
+
+Approved ceilings: one new isolated container/volume, CPU2/shares128,
+PID512, build12GiB then runtime8GiB with equal memory-swap (no extra swap),
+Cargo `-j1`/nice19/ionice-c3; source-only archive, no Git/credentials/keys,
+host bind/socket/ports/privilege, P02 resource or global cache. Fetch only
+public locked crates, then disconnect external networking before offline
+build and private three-voter capture. Fresh admission requires available
+RAM24GiB, Docker free48GiB and healthy production
+ready200/restart baseline. Running floors are RAM12GiB/Docker free48GiB;
+owned scratch32GiB is a monitored soft ceiling with disclosed10s overshoot.
+Outer90min includes setup/fetch/build/capture/eight reports; each phase uses
+the smaller of its ceiling and remaining time, with cleanup separately
+bounded5min. One attempt, no automatic retry or cap raise; OOM/timeout/error
+preserves an incomplete receipt and exact owned cleanup evidence.
+
+Continuation amendment (agent:/root/k05_lan_lab_sol61): tooling attempts 1
+and 2 stopped before any build because the image lacked GNU time and rustup
+attempted an unavailable metadata refresh. The source-free dummy Cargo
+project smoke subsequently verified the installed explicit Rust 1.97.1,
+offline compile/check, signed GNU time package and network disconnection.
+Attempt 3 stopped after 668.410 seconds during examples compilation on an
+unidentified Cargo PID; no capture or measurement ran. Its origin is unknown:
+the PID vanished before ancestry inspection. Original receipts are preserved.
+Successful full inventories and Docker lifecycle events independently prove
+the exact owned container and volume were removed. The foreign-PID
+post-cleanup guard error does not mean owned cleanup failed.
+
+The coordinator authorizes one disclosed new bounded attempt, not a retry of
+a failed benchmark. Extraction, fetch and build may overlap a foreign compiler
+only while all unchanged resource and production guards pass; whole-host load
+is recorded as build telemetry, not an abort predicate. Compiler
+presence alone is not pressure evidence. Before fixture/capture and throughout
+measurement, require no unrelated compiler/CI and one-minute host load at most
+2.0. Admission waits retain the owned warm target but consume the same 90-minute
+attempt deadline, with no measurement retry, cap raise or silent deadline reset.
+Earlier attempts consumed 91.481, 28.238 and 669.156 seconds respectively;
+the new 90-minute allowance is explicitly additional, not a cumulative claim.
+
+Attempt 4's newly introduced whole-host build-load threshold stopped examples
+compilation at 620.852 seconds (load 16.38) despite no unrelated compiler
+observations, available RAM26.57GB/free78.17GB, healthy production/ready200/
+zero restarts and no owned OOM. No capture or measurement ran. Wall was
+622.296 seconds; exact owned container/volume absence was proved by successful
+full inventories before the independent post-health load check failed.
+Original receipts and copied checksums remain unchanged. Root authorizes one
+distinct corrected attempt 5 removing only that build-load abort predicate;
+all hard caps, resource/production/OOM guards and per-attempt deadlines stay
+unchanged. Measurement idle admission and strict runtime foreign/load checks
+remain at 2.0. Admission-only waits keep the owned warm target within the live
+deadline; terminal attempts clean their exact owned resources. The additional
+90-minute allowance is disclosed; no failed performance run is being retried.
+
+The laboratory cannot supply the M5 post-merge fleet migration, every-voter
+snapshot/index/statistics or Home/Title route evidence below. It adopts no
+product statistics/pragma policy and does not close K05 or qualify main.
+
 Executing sessions append one row per milestone PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
