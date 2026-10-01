@@ -427,7 +427,8 @@ const CAPS_DOCUMENT_PRELUDE = [
   `const PLAY_CAPS=${JSON.stringify({ vcodec: "hevc", dvprofile: "5,8" })};`,
   "function decodeLimits(){return {};}",
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
-  shippedSource("currentCapsDocument"),
+  "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
 function buildOpenSession(overrides) {
@@ -456,6 +457,7 @@ function buildOpenSession(overrides) {
     "decodeLimits",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -563,6 +565,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     "qualityForce",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -608,6 +611,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
     [
       'const PLAYBACK_ID="playback-1";',
+      "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -6558,9 +6562,9 @@ test("the Auto-quality fixture's defaults are the browser's own constants", () =
   );
   assert.equal(
     Object.prototype.hasOwnProperty.call(policy.AUTO_DEFAULTS, "switchBudgetPerHour"),
-    false,
-    "switchBudgetPerHour is a proposal (design 3.4, open question 7.3) and " +
-      "must stay in proposed_defaults until a shaped trace justifies it",
+    true,
+    "the combined controller limits voluntary moves to six per hour; " +
+      "emergency and natural recovery do not spend that budget",
   );
   assert.equal(autoQuality.proposed_defaults.switchBudgetPerHour, 6);
 });

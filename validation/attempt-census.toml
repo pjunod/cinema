@@ -92,3 +92,4 @@ recoveryEvidencePoll = { function = "startRecoveryEvidencePoll", scopes = ["open
 autoInitialLayout = { function = "load", scopes = ["initialDecision"] }
 autoCatalogRefresh = { function = "refreshAutoCatalogForViewerRecipe", scopes = ["lifecycle", "viewerAction"] }
 autoQualityOffer = { function = "tickDisplayAwareAuto", scopes = ["lifecycle", "viewerAction"] }
+autoQualityRollback = { function = "commitPreparedSuccessor", scopes = ["lifecycle", "open", "viewerAction"] }

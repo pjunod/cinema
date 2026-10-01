@@ -10631,9 +10631,7 @@ extension PlayerController: PreparedSuccessorHost {
         let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
-        let exposureLifecycle = lifecycleGeneration
-        let exposureViewer = viewerActionEpoch
-        let exposureOpen = openGeneration
+        let exposureAttempt = snapshotAttempt()
         stopStatusPolling()
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -10699,8 +10697,8 @@ extension PlayerController: PreparedSuccessorHost {
             guard automaticTrial else { return .switchedWithoutAFrame }
             // Keep the exact incumbent item alive until the new picture is proved.
             // A newer user/lifecycle owner must never be overwritten by rollback.
-            if let incumbent, started, lifecycleGeneration == exposureLifecycle,
-               viewerActionEpoch == exposureViewer, openGeneration == exposureOpen,
+            if let incumbent, started,
+               attemptStillCurrent(exposureAttempt, fence: .autoQualityRollback),
                player.currentItem === item {
                 stopStatusPolling()
                 retireItemObserver()

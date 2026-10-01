@@ -332,13 +332,6 @@ class ControlRequestWireCase(unittest.TestCase):
 
     def test_the_capabilities(self) -> None:
         rust = rust_struct_fields(self.rust, "DynamicCapabilities")
-        # B-R1 is deliberately server-first receive-only infrastructure. This
-        # exact extensions are optional and omitted when absent; no native port
-        # emits them before negotiated B-R3/B4. Compare every legacy field now,
-        # and remove these exact exceptions when both clients gain the field.
-        # The premise test below prevents broad or silently mandatory drift.
-        rust.remove("presentation_target")
-        rust.remove("decoder_caps")
         self.assertSameWire(
             "DynamicCapabilities",
             rust,
@@ -346,21 +339,28 @@ class ControlRequestWireCase(unittest.TestCase):
             kotlin_fields(self.android, "DynamicCapabilities"),
         )
 
-    def test_parser_floor_target_is_optional_receive_only_until_clients_negotiate(self) -> None:
+    def test_negotiated_target_and_decoder_snapshots_keep_legacy_omission(self) -> None:
         match = re.search(r"pub\(crate\) struct DynamicCapabilities\s*\{(.*?)\n\}", self.rust, re.DOTALL)
         self.assertIsNotNone(match)
         self.assertRegex(match.group(1), r'#\[serde\(default, skip_serializing_if = "Option::is_none"\)\]\s*pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>')
         self.assertRegex(match.group(1), r'#\[serde\(default, skip_serializing_if = "Option::is_none"\)\]\s*pub decoder_caps: Option<DecoderCapsSnapshot>')
-        for fields in (
-            swift_coding_keys(self.apple, "DynamicCapabilities"),
-            kotlin_fields(self.android, "DynamicCapabilities"),
-        ):
-            self.assertNotIn("decoder_caps", fields,
-                "a client gained decoder snapshot: replace phased premise with parity")
-            self.assertNotIn("presentation_target", fields,
-                "a client gained the extension: replace the parser-floor premise with full parity")
+        self.assertSameWire(
+            "DecoderCapsSnapshot",
+            rust_struct_fields(self.rust, "DecoderCapsSnapshot"),
+            swift_coding_keys(self.apple, "DecoderCapabilitySnapshot"),
+            kotlin_fields(self.android, "DecoderCapabilitySnapshot"),
+        )
+        # Native capability APIs do not report a bitrate ceiling. Its omission
+        # stays unknown; every field they do emit must match the strict server.
+        runtime = rust_struct_fields(self.rust, "RuntimeVideoConstraint")
+        runtime.remove("max_bitrate_bps")
+        self.assertSameWire(
+            "RuntimeVideoConstraint", runtime,
+            swift_coding_keys(self.apple, "RuntimeVideoConstraint"),
+            kotlin_fields(self.android, "RuntimeVideoConstraint"),
+        )
         self.assertIn("auto_candidate_parser_floor_retains_nested_route_for_owner_dispatch", self.rust,
-            "the phased exception requires the nested preservation/legacy omission regression")
+            "negotiated snapshots must retain the legacy omission regression")
 
     def test_the_observation(self) -> None:
         self.assertSameWire(

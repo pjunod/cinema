@@ -20,6 +20,7 @@
   "defaults_source": "AUTO_DEFAULTS in crates/plurxd/src/web/playback-policy.js, asserted equal by the runner",
   "defaults": {
     "sampleMs": 5000,
+    "switchBudgetPerHour": 6,
     "decisionMs": 1000,
     "safeEstimateFactor": 0.95,
     "severeEstimateRatio": 0.7,
@@ -215,9 +216,7 @@
         "action": "suppressed",
         "emergency": false,
         "evidence": {"kind": "control-stall-verdict"}
-      },
-      "web_current": {"height": 360, "reason": "bandwidth cliff", "action": "switch", "emergency": true},
-      "finding": "The server answered this client's own `stalled` ask with `hold` or `retry_resource`, so production is paused or restarting and a fragment fetched now measures the producer, not the link: on a JIT server a transfer that waits on production reads as a cliff. `decideRung` cannot tell, because no platform hands it the verdict. The web holds the verdict only as a local inside `persistentWait` (crates/plurxd/src/web/player/measurements.js), Android only inside `applyStallVerdict` (Controller.kt), and `autoControllerTick` keeps running through the deferral, so a fresh slow transfer during a held stall takes the emergency branch and reopens a rung lower. This is a gap the fixture records, not an observed field defect: nobody has a trace of it. The build plan's M0.1 settles it by adding `control-stall-verdict` to `namedSuppression`, scoped to the stall deferral (20 s on the web, `CONTROL_STALL_DEFER_DEADLINE_MS`). Upgrades need nothing new here: the stall that prompted the ask already set `lastStallAtMs`, and `stallFree` refuses every upgrade for `stallWindowMs`."
+      }
     },
     {
       "name": "hold: a routine paced hold is the steady state and never blocks an upgrade",
@@ -487,9 +486,7 @@
         "lastSwitchAtMs": 540000,
         "switchesThisPlaybackHour": 6
       },
-      "expect": {"height": 720, "reason": null},
-      "web_current": {"height": 480, "reason": "bandwidth pressure"},
-      "finding": "No platform has a switch budget. `decideRung` takes no count of automatic changes and returns none, so `switchesThisPlaybackHour` in this sample is inert and the browser takes the seventh switch exactly like the first. The browser bounds the rate (cooldown plus stall window) and not the total, which is the gap section 3.4 names. The proposed number is six per playback-hour and it is a proposal, not a measurement: section 7.3 asks whether a real cliff even provokes that many, and the shaped-network traces of D3 are what answers it. If those traces show two, this case and the `switchBudgetPerHour` row in `proposed_defaults` are deleted rather than implemented."
+      "expect": {"height": 720, "reason": "switch-budget", "action": "suppressed"}
     }
   ],
   "controller_gates": [

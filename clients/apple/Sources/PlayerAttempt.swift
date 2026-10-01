@@ -174,6 +174,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case autoCatalogRefresh = "auto_catalog_refresh"
     /// An asynchronous Auto offer cannot alter a newer title or viewer intent.
     case autoQualityOffer = "auto_quality_offer"
+    /// Failed exposure may restore only the incumbent belonging to this owner.
+    case autoQualityRollback = "auto_quality_rollback"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -192,6 +194,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .autoInitialLayout: return [.initialDecision]
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
+        case .autoQualityRollback: return [.lifecycle, .open, .viewerAction]
         }
     }
 }
