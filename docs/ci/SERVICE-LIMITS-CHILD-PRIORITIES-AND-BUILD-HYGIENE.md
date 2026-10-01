@@ -1239,6 +1239,11 @@ hashed build basename when present). There is no macOS daemon release archive in
 this workflow; macOS packed debug is a dSYM and is not represented as a DWP.
 The Windows format/zip regression uses an owned synthetic PE/PDB pair, not a
 claim that a Windows release was rebuilt or executed here.
+Archive creation uses Python's standard `zipfile` writer, already required
+by PE/PDB verification, rather than assuming the preflight host has Info-ZIP.
+The regression puts a failing external `zip` on PATH and verifies the actual
+archive's executable/PDB bytes and missing-PDB refusal; no dependency skip
+or mocked archive substitutes for those checks.
 
 The GNU proof was a separate committed, std-only Rust fixture
 `4d52c6d4ca59e18acd086adc4f7532620d213f36`, archive SHA-256

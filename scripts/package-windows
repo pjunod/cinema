@@ -22,6 +22,8 @@ cp "$root/deploy/windows/README.md" "$stage/README.md"
 
 mkdir -p "$(dirname "$archive")"
 rm -f "$archive"
-(cd "$(dirname "$stage")" && zip -q -r "$archive" "$(basename "$stage")")
+# Python is already required by the PE/PDB verifier. Keep archive creation
+# available on the same hosts without a second, undeclared `zip` executable.
+(cd "$(dirname "$stage")" && python3 -m zipfile -c "$archive" "$(basename "$stage")")
 sha256sum "$archive" > "$archive.sha256"
 printf '%s\n' "$archive"
