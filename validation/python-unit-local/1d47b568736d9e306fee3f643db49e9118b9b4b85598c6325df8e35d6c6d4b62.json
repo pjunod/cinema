@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/effort-web-static-contracts",
+  "suite": "validation",
+  "test_file": "tests/validation/test_effort_web_static.py",
+  "test_file_sha256": "efe88b7c118839fdcdeb8aca38d5b0a2ee7ea950f98cfab272c7960a5fe568fd",
+  "source_commit": null,
+  "command": "python3 -m unittest tests.validation.test_effort_web_static.EffortWebStaticCase.test_input_shape_refuses_watch_close_control_and_acceleration_drift tests.validation.test_effort_web_static.EffortWebStaticCase.test_info_and_surface_shape_refuse_missing_diagnostics_and_stop_contracts -v",
+  "test_ids": [
+    "test_effort_web_static.EffortWebStaticCase.test_input_shape_refuses_watch_close_control_and_acceleration_drift",
+    "test_effort_web_static.EffortWebStaticCase.test_info_and_surface_shape_refuse_missing_diagnostics_and_stop_contracts"
+  ],
+  "output": "Observed root local tool chunk89e93c exit0: both named new IDs ... ok; Ran 2 tests in0.099s; OK. Original uncommitted own-clone composition d7 plus landed abdc, new data-only guard fixes. Prior twelve successes retained, not rerun. No CI attribution.",
+  "result": {
+    "failed": 0,
+    "errors": 0,
+    "skipped": 0,
+    "expected_failures": 0,
+    "unexpected_successes": 0,
+    "count": 2
+  }
+}
