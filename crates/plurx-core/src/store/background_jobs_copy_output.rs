@@ -36,7 +36,7 @@ WITH request AS (
    AND job.lease_expires_ms=json_extract(body,'$.token.lease_expires_ms')
    AND job.lease_expires_ms>json_extract(body,'$.now_ms')
    AND job.revision<9223372036854775807
-   AND json_extract(job.payload_json,'$.copy_output_version')=1
+   AND json_extract(job.payload_json,'$.copy_output_version') IN (1,2)
    AND json_extract(job.payload_json,'$.intent')=json_extract(body,'$.intent')
    AND json_extract(job.payload_json,'$.source_object_version')=json_extract(body,'$.output.source_object_version')
    AND NOT EXISTS(SELECT 1 FROM settings WHERE key='internal.cluster_job_owner_removed.'||job.owner_node_id)

@@ -136,6 +136,47 @@ pub(crate) struct RetainedVodArtifact {
 pub(super) struct PreparedOrigin {
     _reservation: uuid::Uuid,
     artifact_id: uuid::Uuid,
+    executable: String,
+    engine: String,
+    source_metadata: [u8; 32],
+}
+
+/// Private versioned metadata identity complements the held physical object
+/// and LogicalOutput. It is never serialized as acquisition authority.
+pub(crate) fn manual_source_metadata(file: &MediaFile) -> Option<[u8; 32]> {
+    let bytes = serde_json::to_vec(&(
+        "manual-source-v1",
+        file.id,
+        file.item_id,
+        &file.container,
+        &file.video_codec,
+        &file.video_profile,
+        file.width,
+        file.height,
+        file.bit_depth,
+        &file.hdr,
+        &file.hdr_format,
+        &file.dolby_vision,
+        &file.audio_streams,
+    ))
+    .ok()?;
+    (bytes.len() <= 64 * 1024).then(|| Sha256::digest(bytes).into())
+}
+
+/// Closed manual intent binding; source metadata alone cannot identify a
+/// selected audio stream, offset, delivery, grade or output transform.
+pub(crate) fn manual_copy_policy_generation(
+    file: &MediaFile,
+    intent: &plurx_core::store::background_jobs::CopyOutputIntent,
+) -> Option<String> {
+    let bytes = serde_json::to_vec(&(
+        "manual-copy-intent-v2",
+        manual_source_metadata(file)?,
+        intent,
+    ))
+    .ok()?;
+    (bytes.len() <= 64 * 1024)
+        .then(|| format!("manual-copy-v2:{}", hex::encode(Sha256::digest(bytes))))
 }
 
 impl RetainedVodArtifact {
@@ -698,6 +739,47 @@ impl RetainedArtifactRegistry {
         .then_some(artifact)
     }
 
+    /// Manual NEW attachments may acquire only locally minted, settled private
+    /// preparation. A manifest, job result, recipe alias or rate cannot mint
+    /// PreparedOrigin; restart discovery does not participate in this lookup.
+    pub(super) async fn acquire_prepared_manual(
+        &self,
+        rendition: &Rendition,
+        incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
+        incoming_file: &MediaFile,
+    ) -> Option<Arc<RetainedVodArtifact>> {
+        if rendition.recipe.encoding.is_some()
+            || rendition.recipe.measured_candidate.is_some()
+            || incoming_logical.is_none()
+        {
+            return None;
+        }
+        let executable = crate::ffmpeg::EncodedExecutable::capture().await.ok()?;
+        let engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok()?;
+        let source_metadata = manual_source_metadata(incoming_file)?;
+        let facts = {
+            // Registry is capped at MAX_ARTIFACTS. Keep no lock over awaits.
+            let state = self.state.lock().expect("retained registry lock");
+            state.entries.values().find_map(|entry| {
+                let artifact = &entry.artifact;
+                let origin = artifact.private_preparation_origin.get()?;
+                (origin.artifact_id == artifact.id
+                    && origin.executable == executable.digest
+                    && origin.engine == engine.digest
+                    && origin.source_metadata == source_metadata
+                    && artifact.candidate.is_none()
+                    && artifact.validated.load(Acquire)
+                    && artifact.logical == *incoming_logical
+                    && artifact.observation.preimage.playlist == rendition.playlist
+                    && rendition.source.as_ref().is_some_and(|source| {
+                        source.unchanged() && source.object_version() == artifact.source_version
+                    }))
+                .then(|| artifact.facts())
+            })
+        }?;
+        self.acquire_expected_for_request(&facts, rendition, incoming_logical)
+    }
+
     /// Only an exact issued proof may request lazy full-byte validation. The
     /// registry lease protects it from GC throughout the blocking operation.
     pub(super) async fn reacquire_expected_for_request(
@@ -1015,11 +1097,17 @@ impl RetainedArtifactRegistry {
         {
             return false;
         }
+        let Some(source_metadata) = manual_source_metadata(&rendition.recipe.file) else {
+            return false;
+        };
         preparation.publish_staged(rendition, artifact, |artifact| {
             let mut state = self.state.lock().expect("retained registry lock");
             let _ = artifact.private_preparation_origin.set(PreparedOrigin {
                 _reservation: preparation.allowance.nonce,
                 artifact_id: artifact.id,
+                executable: preparation.executable.digest.clone(),
+                engine: preparation.engine.digest.clone(),
+                source_metadata,
             });
             state.preparations.remove(&preparation.allowance.nonce);
             state.entries.insert(
