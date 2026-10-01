@@ -1,6 +1,11 @@
 use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
+pub(crate) struct ResolvedQualityCatalog {
+    pub(crate) candidates: Vec<QualityCandidate>,
+    pub(crate) measured_candidate_outputs: Vec<crate::vodserve::retained::MeasuredCandidateOutput>,
+}
+
 pub(super) fn copy_candidate_grade(file: &plurx_core::domain::MediaFile) -> OutputGrade {
     match transcode::routing_hdr(file) {
         Some("hlg" | "hdr10" | "hdr10plus" | "dolby_vision") => OutputGrade::Hdr10,
@@ -55,13 +60,48 @@ impl TranscodeManager {
         &self,
         candidate: &QualityCandidate,
         request: &SessionRequest,
+        held_source: Option<&crate::fragment_index_cluster::SourceFence>,
     ) -> Option<crate::vodserve::retained::MeasuredCandidateCostProof> {
-        let file = self.store.get_file(request.file_id).await.ok()??;
-        let source = crate::fragment_index_cluster::open_source_fence(&file, None)
-            .await
-            .ok()?;
+        let mut resolved = request.clone();
+        let file = if held_source.is_none() || resolved.audio_delivery.is_none() {
+            Some(self.store.get_file(request.file_id).await.ok()??)
+        } else {
+            None
+        };
+        if resolved.audio_delivery.is_none() {
+            let file = file.as_ref()?;
+            let claim = request.audio_claim.as_ref()?;
+            let selected = request.audio_index.map_or_else(
+                || file.audio_streams.first(),
+                |index| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            let route = match candidate.route {
+                CandidateRoute::Remux => plurx_core::playback::audio::AudioRoute::Progressive,
+                CandidateRoute::Encode => plurx_core::playback::audio::AudioRoute::EncodedVod,
+                CandidateRoute::Original => return None,
+            };
+            resolved.audio_delivery = Some(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                route,
+                request.audio_offset_ms,
+            ));
+        }
+        let opened;
+        let source = if let Some(source) = held_source {
+            source
+        } else {
+            opened = crate::fragment_index_cluster::open_source_fence(file.as_ref()?, None)
+                .await
+                .ok()?;
+            &opened
+        };
         self.vod
-            .measured_candidate_cost(candidate, request, &source)
+            .measured_candidate_cost(candidate, &resolved, source)
     }
     /// Resolve the same output contracts used at dispatch. This never reserves
     /// capacity: incomplete cache verification and unknown production remain
@@ -79,12 +119,48 @@ impl TranscodeManager {
         retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
         retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
     ) -> Vec<QualityCandidate> {
+        let resolved = self
+            .quality_candidates_with_measured_outputs(
+                file,
+                caps,
+                audio,
+                audio_offset_ms,
+                subtitle,
+                presentation,
+                retained_copy,
+                retained_audio,
+                retained_claim,
+            )
+            .await;
+        // A strict worker response deliberately discards the public sidecar.
+        drop(resolved.measured_candidate_outputs);
+        resolved.candidates
+    }
+
+    /// Companion PUBLIC descriptor projection from the same actual resolution.
+    /// The compatibility Vec wrapper above is the only strict worker result.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn quality_candidates_with_measured_outputs(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        caps: &plurx_core::playback::DeviceCaps,
+        audio: Option<i64>,
+        audio_offset_ms: i64,
+        subtitle: Option<i64>,
+        presentation: Presentation,
+        retained_copy: Option<(bool, bool, bool)>,
+        retained_audio: Option<&plurx_core::playback::audio::AudioDelivery>,
+        retained_claim: Option<&plurx_core::playback::audio::AudioClaim>,
+    ) -> ResolvedQualityCatalog {
         let mut catalog_file = file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
         let audio = self.candidate_audio_index(file, audio).await;
         let Ok(audio_claim) = plurx_core::playback::audio::AudioClaim::from_caps(caps) else {
-            return Vec::new();
+            return ResolvedQualityCatalog {
+                candidates: Vec::new(),
+                measured_candidate_outputs: Vec::new(),
+            };
         };
         let audio_claim = retained_claim.cloned().or(audio_claim);
         let source_facts = self.quality_source_facts(file).await;
@@ -345,6 +421,7 @@ impl TranscodeManager {
         // The catalog can expose a complete retained measurement, but its
         // serialized numbers never carry authority. Dispatch still resolves
         // the actual recipe and reacquires an exact private artifact.
+        let mut measured_candidate_outputs = Vec::new();
         for candidate in &mut result {
             let kind = match candidate.route {
                 CandidateRoute::Remux => SessionKind::Copy {
@@ -369,7 +446,30 @@ impl TranscodeManager {
                 kind,
                 start_seconds: 0.0,
                 audio_index: audio,
-                audio_delivery: retained_audio.cloned(),
+                audio_delivery: retained_audio.cloned().or_else(|| {
+                    audio_claim.as_ref().map(|claim| {
+                        let selected = audio.map_or_else(
+                            || file.audio_streams.first(),
+                            |index| {
+                                file.audio_streams
+                                    .iter()
+                                    .find(|stream| stream.index == index)
+                            },
+                        );
+                        let route = match candidate.route {
+                            CandidateRoute::Remux => {
+                                plurx_core::playback::audio::AudioRoute::Progressive
+                            }
+                            _ => plurx_core::playback::audio::AudioRoute::EncodedVod,
+                        };
+                        plurx_core::playback::audio::resolve_audio(
+                            selected,
+                            &claim.profile(),
+                            route,
+                            audio_offset_ms,
+                        )
+                    })
+                }),
                 audio_claim: audio_claim.clone(),
                 subtitle_burn: subtitle,
                 audio_offset_ms,
@@ -378,14 +478,26 @@ impl TranscodeManager {
                 block_budget_secs: None,
                 transport: None,
             };
-            if let Some(proof) = self.measured_candidate_cost(candidate, &request).await {
+            let proof = if let Some(source) = copy_source.as_ref() {
+                self.measured_candidate_cost(candidate, &request, Some(source))
+                    .await
+            } else {
+                None
+            };
+            if let Some(proof) = proof {
                 let measured = proof.public_descriptor();
                 candidate.average_bps = Some(measured.average_bps);
                 candidate.peak_bps = Some(measured.peak_bps);
                 candidate.complete_cache = true;
+                if measured_candidate_outputs.len() < 64 {
+                    measured_candidate_outputs.push(measured);
+                }
             }
         }
-        result
+        ResolvedQualityCatalog {
+            candidates: result,
+            measured_candidate_outputs,
+        }
     }
 
     pub(crate) async fn candidate_audio_index(

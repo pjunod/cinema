@@ -1,5 +1,19 @@
 use super::*;
 
+fn recovered_retained_output_matches(
+    capture: &crate::vodserve::RetainedOutputCapture,
+    candidate_expected: Option<&RetainedOutputFacts>,
+    actual: Option<&RetainedOutputFacts>,
+) -> bool {
+    match capture {
+        crate::vodserve::RetainedOutputCapture::Restore(expected) => expected.as_ref() == actual,
+        crate::vodserve::RetainedOutputCapture::ReceiverUnavailable => actual.is_none(),
+        crate::vodserve::RetainedOutputCapture::New => {
+            candidate_expected.is_none_or(|expected| actual == Some(expected))
+        }
+    }
+}
+
 impl TranscodeManager {
     /// Retained output is authoritative; an initial claim is negotiated only
     /// after this producer has selected the encoded route and its AAC lattice.
@@ -509,27 +523,27 @@ impl TranscodeManager {
             ));
         }
         let claim = match req.request_id.as_deref() {
-            Some(key) => {
-                match self.claim_request(key, req, supersession_user).await? {
-                    Claimed::Recovered(info) => {
-                        if matches!(
-                            retained_capture,
-                            crate::vodserve::RetainedOutputCapture::ReceiverUnavailable
-                        ) && info.retained_output.is_some()
-                        {
-                            return Err(vod_refusal_error("retained_artifact_unavailable", "a legacy receiver cannot rebind an already issued retained artifact"));
-                        }
-                        if let Some(admission) = serving_admission {
-                            self.require_cluster_serving_authority(admission)?;
-                        }
-                        return Ok(SessionCreation {
-                            info: *info,
-                            created: false,
-                        });
+            Some(key) => match self.claim_request(key, req, supersession_user).await? {
+                Claimed::Recovered(info) => {
+                    if !recovered_retained_output_matches(
+                        &retained_capture,
+                        req.candidate_context
+                            .as_ref()
+                            .and_then(|context| context.retained_output.as_ref()),
+                        info.retained_output.as_ref(),
+                    ) {
+                        return Err(vod_refusal_error("retained_artifact_unavailable", "the recovered presentation does not own the exact issued retained artifact"));
                     }
-                    Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
+                    if let Some(admission) = serving_admission {
+                        self.require_cluster_serving_authority(admission)?;
+                    }
+                    return Ok(SessionCreation {
+                        info: *info,
+                        created: false,
+                    });
                 }
-            }
+                Claimed::Mine(claim, normalized) => Some((claim, *normalized)),
+            },
             None => None,
         };
         let normalized;
@@ -1294,6 +1308,9 @@ impl TranscodeManager {
                 ));
             }
             Some(crate::vodserve::RetainedCandidateBinding {
+                kind,
+                normalized_geometry: context.normalized_geometry,
+                profile: context.profile,
                 candidate_id: context.candidate_id,
                 recipe_digest: actual,
                 file_id: file.id,
@@ -1979,5 +1996,71 @@ impl TranscodeManager {
             }
         };
         Ok((normalized, Some(target_height)))
+    }
+}
+
+#[cfg(test)]
+mod retained_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn idempotent_recovery_preserves_captured_absence_and_exact_artifact_identity() {
+        use crate::vodserve::RetainedOutputCapture;
+        let original = RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        };
+        let mut other = original.clone();
+        other.artifact_id = uuid::Uuid::new_v4().to_string();
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            None
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(None),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            None
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&original)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::Restore(Some(original.clone())),
+            None,
+            Some(&other)
+        ));
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::ReceiverUnavailable,
+            None,
+            Some(&original)
+        ));
+        assert!(
+            recovered_retained_output_matches(&RetainedOutputCapture::New, None, Some(&original)),
+            "new capable replay reads the incumbent without changing it"
+        );
+        assert!(
+            !recovered_retained_output_matches(&RetainedOutputCapture::New, Some(&original), None),
+            "a measured selection cannot silently downgrade to old captured None"
+        );
+        assert!(!recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&other)
+        ));
+        assert!(recovered_retained_output_matches(
+            &RetainedOutputCapture::New,
+            Some(&original),
+            Some(&original)
+        ));
     }
 }

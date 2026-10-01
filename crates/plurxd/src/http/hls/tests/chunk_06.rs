@@ -362,6 +362,94 @@
         );
     }
 
+    #[test]
+    fn a05_candidate_hls_isolation_requires_actual_auto_not_protocol_or_manual() {
+        use plurx_core::playback::DesiredQuality;
+        let mut body = bare_create();
+        assert!(!body.candidate_auto_policy(), "old inferred Auto is not a candidate claim");
+        body.quality_auto = Some(true);
+        assert!(body.candidate_auto_policy());
+        body.copy = Some(true);
+        assert!(!body.candidate_auto_policy(), "compat Original keeps legacy semantics");
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        assert!(body.candidate_auto_policy(), "typed Auto is authoritative");
+        body.intent = Some(envelope(1, DesiredQuality::Manual { height: 1080 }));
+        assert!(!body.candidate_auto_policy(), "typed manual wins over compat Auto");
+        body.intent = Some(envelope(1, DesiredQuality::Original));
+        assert!(!body.candidate_auto_policy());
+        body.intent = Some(envelope(1, DesiredQuality::Auto { height: None, candidate_id: None }));
+        body.height = Some(1440);
+        assert!(!body.candidate_auto_policy(), "the explicit 1440 route is preserved");
+    }
+
+    #[tokio::test]
+    async fn a05_candidate_auto_fallback_ignores_both_legacy_prior_branches() {
+        let state = resolver_state();
+        let mut source = hls_file(Vec::new());
+        source.height = Some(2160);
+        let prior = plurx_core::domain::NetworkPrior {
+            credential_generation: Default::default(),
+            client_class: "web".to_owned(),
+            network_fingerprint: "candidate-isolation".to_owned(),
+            sustained_kbps: Some(1),
+            worst_rung_height: Some(2160),
+            starved_at_ms: Some(unix_ms()),
+            sample_count: 99,
+            updated_at_ms: unix_ms(),
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
+        };
+        let neutral = resolve_height(&state, Some(&source), None, false, None).await;
+        let isolated = resolve_height(
+            &state, Some(&source),
+            crate::http::stream::prior_for_candidate_policy(Some(&prior), true),
+            false, None,
+        ).await;
+        let legacy = resolve_height(&state, Some(&source), Some(&prior), false, None).await;
+        assert_eq!(isolated, neutral);
+        assert!(legacy < isolated, "legacy policy still consumes its old rate/starvation history");
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(1440)).await, 1440);
+        assert_eq!(resolve_height(&state, Some(&source), Some(&prior), false, Some(2160)).await, 2160);
+    }
+
+    #[tokio::test]
+    async fn a05_geometry_promoted_compat_copy_carries_resolved_auto_policy() {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        let state = resolver_state();
+        let library = state.store.create_library(&NewLibrary {
+            name: "A05 geometry promotion".into(), kind: LibraryKind::Movies,
+            paths: vec![], anime: false,
+        }).await.expect("library");
+        let item = state.store.insert_item(&NewItem {
+            library_id: library.id, kind: ItemKind::Movie, parent_id: None,
+            title: "geometry promotion".into(), year: None,
+            season_number: None, episode_number: None,
+        }).await.expect("item");
+        let id = state.store.upsert_file(item, "/media/a05-geometry.mkv", 1000, 1, &ProbeResult {
+            video_codec: Some("h264".into()), width: Some(3840), height: Some(2160),
+            bit_depth: Some(8), raw_json: Some(serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"h264","profile":"High",
+                "width":3840,"height":2160,"pix_fmt":"yuv420p",
+                "sample_aspect_ratio":"1:1","r_frame_rate":"24/1","avg_frame_rate":"24/1"
+            }]}).to_string()), ..Default::default()
+        }).await.expect("file");
+        let source = state.store.get_file(id).await.expect("file read").expect("source");
+        let body = CreateSession {
+            playback_id: "geometry-auto".into(), copy: Some(true), quality_auto: Some(true),
+            caps: Some(serde_json::from_value(serde_json::json!({"v":2,"video":[{
+                "codec":"h264","max_width":1920,"max_height":1080
+            }]})).expect("bounded decoder caps")), ..bare_create()
+        };
+        assert!(!body.candidate_auto_policy(), "the original wire copy was not candidate Auto");
+        let resolved = resolve_plan(PlanInputs {
+            state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None,
+        }, None, body).await.expect("geometry-promoted plan");
+        assert!(matches!(resolved.request.kind, crate::transcode::SessionKind::Transcode { .. }));
+        assert!(resolved.candidate_auto_policy, "response policy must follow actual normalized Auto");
+        assert_eq!(resolved.intent_fingerprint, resolved.request.durable_intent_fingerprint(7),
+            "the private resolved policy field does not alter request identity");
+    }
+
     async fn resolved_height(state: &AppState, source: &MediaFile, asked: Option<i64>) -> i64 {
         let body = CreateSession {
             playback_id: "player-a".into(),
@@ -460,6 +548,8 @@
             starved_at_ms: Some(1),
             sample_count: 12,
             updated_at_ms: 1,
+            link_worst_rung_height: None,
+            link_starved_at_ms: None,
         };
 
         for hdr10 in [false, true] {

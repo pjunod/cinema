@@ -405,7 +405,7 @@ use crate::queue_fixture::QueueFixture;
 
     include!("../../vodencode_tests.rs");
 
-    fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
+    pub(super) fn media_file_at(path: PathBuf, duration_ms: i64) -> MediaFile {
         let metadata = std::fs::metadata(&path).ok();
         let size = metadata.as_ref().map(|m| m.len() as i64).unwrap_or(1);
         let mtime = metadata.and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|t| t.as_secs() as i64).unwrap_or(1);

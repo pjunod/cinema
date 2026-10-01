@@ -1331,3 +1331,34 @@ and iOS/tvOS build-for-testing passed without executing tests (versions 140/202)
 Final main integration, adversarial review and fast-lane qualification remain
 in progress. No physical D3,
 TCL playback, source-grade 1440 throughput or production deployment is claimed.
+
+### 9.9 A-05 measured-Link attribution foundation (2026-10-01)
+
+Frozen source `c0914fe7e` implements §3.3's attribution storage boundary:
+the measured-Link height/completion pair is independent of legacy supply
+negatives, and SQLite v89 / sidecar v11 initialize historical evidence to
+unattributed. A private typed proof requires a completed positive body,
+known network/cache/pacing provenance and at most 15 seconds of age.
+The fold rechecks freshness and keeps completion time independent of receipt.
+
+Five new focused regressions passed once on the precursor working tree;
+the subsequent test-only panic-diagnostic repair changed no successful path
+or assertion. The committed source passed pinned Rust 1.97.1 compilation
+and the normal hook. Sole review 38 approves the bounded foundation.
+Actual current-effort composition `7a3d75ee` after #675 retains those source
+bytes; final same-record review publication and its gate remain separate.
+
+Actual ClientLog intake cannot establish completed-body provenance and
+explicitly supplies no measured-Link proof. A reachable producer and
+candidate-aware negative-prior consumer remain required; neither is claimed
+by this foundation. Existing controllers and legacy readers remain intact.
+Typed recovery, authenticated decoder evidence and physical qualification
+remain open; this is not combined-feature completion.
+
+The bounded candidate-reader isolation follow-up refuses legacy starvation
+and coarse rate EWMA in actual enabled caps_v2 catalogs and actual HLS Auto
+candidate execution, including their `prior_kbps` hints. Legacy routes,
+explicit candidate lookup and manual 1440 selection remain unchanged.
+This does not yet apply a measured negative to a candidate: the stored pair
+has no failed recipe/route identity. Fresh transfer rate proof, candidate-aware
+negative selection and the reachable provenance producer remain required.

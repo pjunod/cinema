@@ -510,6 +510,9 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
 /// Private dispatch-attested identity, never a client proof or catalog budget.
 #[derive(Clone, Debug)]
 pub(crate) struct RetainedCandidateBinding {
+    pub(crate) kind: SessionKind,
+    pub(crate) normalized_geometry: bool,
+    pub(crate) profile: Option<plurx_core::transcode::AutoQualityRateProfile>,
     pub(crate) candidate_id: plurx_core::playback::candidate::CandidateId,
     pub(crate) recipe_digest: [u8; 32],
     pub(crate) file_id: i64,

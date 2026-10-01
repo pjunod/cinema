@@ -1726,6 +1726,49 @@ mod tests {
     use plurx_core::domain::{AudioStream, SubtitleStream};
     use tokio::sync::mpsc;
 
+    #[tokio::test]
+    async fn retained_receipt_receiver_requires_fresh_actual_peer_advertisement() {
+        let pool = MediaPool::new(MembershipManager::unavailable());
+        assert!(!pool.retained_output_receiver("worker").await);
+        let legacy = snapshot("worker", &["h264"], 1080);
+        let mut wire = serde_json::to_value(&legacy).expect("snapshot");
+        wire.as_object_mut()
+            .expect("snapshot object")
+            .remove("retained_output_receipts");
+        let restored: MediaNodeSnapshot = serde_json::from_value(wire).expect("old advertisement");
+        assert!(!restored.retained_output_receipts);
+        let now = tokio::time::Instant::now();
+        pool.snapshots.write().await.insert(
+            "worker".to_owned(),
+            CachedSnapshot {
+                snapshot: restored,
+                expires_at: now + Duration::from_secs(15),
+            },
+        );
+        assert!(!pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .snapshot
+            .retained_output_receipts = true;
+        assert!(pool.retained_output_receiver("worker").await);
+        pool.snapshots
+            .write()
+            .await
+            .get_mut("worker")
+            .expect("cached peer")
+            .expires_at = now - Duration::from_secs(1);
+        assert!(!pool.retained_output_receiver("worker").await);
+        let mut snapshots = pool.snapshots.write().await;
+        let cached = snapshots.get_mut("worker").expect("cached peer");
+        cached.expires_at = now + Duration::from_secs(15);
+        cached.snapshot.protocol_version = PROTOCOL_VERSION - 1;
+        drop(snapshots);
+        assert!(!pool.retained_output_receiver("worker").await);
+    }
+
     fn snapshot(node: &str, decoders: &[&str], max_height: i64) -> MediaNodeSnapshot {
         MediaNodeSnapshot {
             retained_output_receipts: false,

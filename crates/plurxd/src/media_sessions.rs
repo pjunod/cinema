@@ -5927,6 +5927,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn retained_receipt_extensions_are_omitted_for_legacy_and_require_negotiation() {
+        // The pre-extension strict worker key set, not a permissive JSON map.
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        #[allow(dead_code)]
+        struct LegacyStart {
+            candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+            presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+            decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
+            protocol_version: i64,
+            incarnation_id: String,
+            user_id: i64,
+            source_size: i64,
+            source_mtime: i64,
+            typeless_playlist: bool,
+            library_channel: Option<serde_json::Value>,
+            request: SessionRequest,
+        }
+        let mut request = valid_start_request();
+        let legacy_wire = serde_json::to_value(&request).expect("legacy serialization");
+        assert!(legacy_wire.get("retained_output_receiver").is_none());
+        assert!(legacy_wire.get("retained_output").is_none());
+        assert!(serde_json::from_value::<LegacyStart>(legacy_wire.clone()).is_ok());
+        let decoded: RemoteStartRequest =
+            serde_json::from_value(legacy_wire).expect("new parser accepts legacy");
+        assert_eq!(decoded.retained_output_receiver, None);
+        assert!(decoded.retained_output.is_none());
+        request.retained_output_receiver = Some(1);
+        let negotiated = serde_json::to_value(&request).expect("negotiated serialization");
+        assert!(
+            serde_json::from_value::<LegacyStart>(negotiated).is_err(),
+            "never send extension to a strict old worker"
+        );
+        assert!(request.is_valid());
+        request.retained_output_receiver = Some(2);
+        assert!(!request.is_valid());
+        request.retained_output_receiver = None;
+        request.retained_output = Some(crate::transcode::RetainedOutputFacts {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            output_identity: "ab".repeat(32),
+            average_bps: 8000,
+            peak_bps: 12000,
+        });
+        assert!(
+            !request.is_valid(),
+            "unnegotiated retained descriptor is not accepted"
+        );
+        request.retained_output_receiver = Some(1);
+        assert!(request.is_valid());
+        let mut response = valid_start_response();
+        let legacy_response = serde_json::to_value(&response).expect("legacy response");
+        assert!(
+            legacy_response.get("retained_output").is_none(),
+            "new worker with legacy capture emits no extension"
+        );
+        response.retained_output = request.retained_output;
+        assert!(response.is_valid());
+        response.vod = false;
+        assert!(
+            !response.is_valid(),
+            "retained VOD proof cannot be replayed onto rolling output"
+        );
+    }
+
     fn valid_prepare_request() -> RemotePrepareRequest {
         RemotePrepareRequest {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
