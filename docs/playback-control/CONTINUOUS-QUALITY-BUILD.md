@@ -1615,3 +1615,15 @@ and preserves its established policy. The regression covers a two-video plus
 AAC group, partial release, waiting-viewer priority, overflow and refusal.
 Encoder permits now support shared ownership so a parent can retain its reservation while a worker clone remains held through reap. Ordinary producers still release with their exact process. Parent ownership still needs to retain these permits for its advertised family;
 this allocator alone does not grant child serving. Unit execution is deferred.
+
+### 10.31 Exact shared-audio dependency projection
+
+A verified presentation family now derives AAC interval dependencies from
+its immutable video/audio plans using integer cross-clock comparisons. The
+projection validates both clocks and their common film end, includes both
+AAC intervals when a video boundary crosses them, and refuses missing,
+foreign, gapped or extended soundtracks. A silent family returns no audio
+dependencies. Each video interval names at most three AAC intervals. The
+regression covers boundary drift and the final whole-frame tail. This is the
+server-side projection; durable AAC reservations and serving integration still
+need to call it. Unit execution remains deferred.

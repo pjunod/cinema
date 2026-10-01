@@ -436,6 +436,31 @@ fn continuous_media_playlist(
     kind: PlanEntryKind,
 ) -> Result<String, crate::fmp4::Fmp4Error> {
     use std::fmt::Write;
+    validate_continuous_media_plan(plan, timescale, span, frame_ticks, kind)?;
+    let mut out = String::with_capacity(256 + plan.entries.len() * 48);
+    out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
+    let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration);
+    out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n");
+    let _ = writeln!(out, "#EXT-X-MAP:URI=\"init/{init_id}.mp4\"");
+    for entry in &plan.entries {
+        let _ = writeln!(
+            out,
+            "#EXTINF:{:.6},\nsegment/{}.m4s",
+            entry.seconds(timescale),
+            entry.index
+        );
+    }
+    out.push_str("#EXT-X-ENDLIST\n");
+    Ok(out)
+}
+
+fn validate_continuous_media_plan(
+    plan: &SegmentPlan,
+    timescale: u32,
+    span: u64,
+    frame_ticks: u64,
+    kind: PlanEntryKind,
+) -> Result<(), crate::fmp4::Fmp4Error> {
     let refuse = || {
         crate::fmp4::Fmp4Error::Unsupported(
             "continuous media plan does not match its verified rendition clock".into(),
@@ -464,21 +489,7 @@ fn continuous_media_playlist(
             return Err(refuse());
         }
     }
-    let mut out = String::with_capacity(256 + plan.entries.len() * 48);
-    out.push_str("#EXTM3U\n#EXT-X-VERSION:7\n");
-    let _ = writeln!(out, "#EXT-X-TARGETDURATION:{}", plan.target_duration);
-    out.push_str("#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n");
-    let _ = writeln!(out, "#EXT-X-MAP:URI=\"init/{init_id}.mp4\"");
-    for entry in &plan.entries {
-        let _ = writeln!(
-            out,
-            "#EXTINF:{:.6},\nsegment/{}.m4s",
-            entry.seconds(timescale),
-            entry.index
-        );
-    }
-    out.push_str("#EXT-X-ENDLIST\n");
-    Ok(out)
+    Ok(())
 }
 
 /// Server-owned delivery budgets for one immutable rendition, including its
@@ -534,6 +545,83 @@ impl VodPresentationFamily {
     }
     pub fn audio(&self) -> Option<&VodSharedAudioRendition> {
         self.audio.as_ref()
+    }
+
+    /// Derive shared AAC dependencies from the parent's immutable plans.
+    /// Half-open sample ranges, not matching ordinals or floating seconds,
+    /// decide which audio intervals a video interval must retain.
+    pub fn shared_audio_dependencies(
+        &self,
+        rendition_id: &str,
+        video_plan: &SegmentPlan,
+        video_index: u32,
+        audio_plan: Option<&SegmentPlan>,
+    ) -> Result<Vec<u32>, crate::fmp4::Fmp4Error> {
+        let refuse = || {
+            crate::fmp4::Fmp4Error::Unsupported(
+                "shared soundtrack does not cover the exact planned video interval".into(),
+            )
+        };
+        let rung = self
+            .video
+            .rungs
+            .iter()
+            .find(|rung| rung.rendition_id == rendition_id)
+            .ok_or_else(refuse)?;
+        validate_continuous_media_plan(
+            video_plan,
+            rung.grid.numerator,
+            rung.grid.segment_ticks(),
+            u64::from(rung.grid.denominator),
+            PlanEntryKind::Video,
+        )?;
+        let video = video_plan.entry(video_index).ok_or_else(refuse)?;
+        let Some(_) = self.audio.as_ref() else {
+            return if audio_plan.is_none() {
+                Ok(Vec::new())
+            } else {
+                Err(refuse())
+            };
+        };
+        let audio_plan = audio_plan.ok_or_else(refuse)?;
+        validate_continuous_media_plan(
+            audio_plan,
+            VOD_AUDIO_RATE,
+            94 * VOD_AAC_FRAME_SAMPLES,
+            VOD_AAC_FRAME_SAMPLES,
+            PlanEntryKind::AudioTail,
+        )?;
+        let video_scale = u128::from(video_plan.timescale);
+        let audio_scale = u128::from(audio_plan.timescale);
+        let video_end =
+            u128::from(video_plan.entries.last().ok_or_else(refuse)?.end_ticks()) * audio_scale;
+        let audio_end =
+            u128::from(audio_plan.entries.last().ok_or_else(refuse)?.end_ticks()) * video_scale;
+        if audio_end < video_end || audio_end - video_end >= video_scale {
+            return Err(refuse());
+        }
+        let from = u128::from(video.start_ticks) * audio_scale;
+        let through = u128::from(video.end_ticks()) * audio_scale;
+        let first = audio_plan
+            .entries
+            .partition_point(|entry| u128::from(entry.end_ticks()) * video_scale <= from);
+        let mut dependencies = Vec::with_capacity(3);
+        let mut covered = from;
+        for entry in &audio_plan.entries[first..] {
+            let start = u128::from(entry.start_ticks) * video_scale;
+            if start >= through {
+                break;
+            }
+            if start > covered || dependencies.len() == 3 {
+                return Err(refuse());
+            }
+            covered = u128::from(entry.end_ticks()) * video_scale;
+            dependencies.push(entry.index);
+        }
+        if dependencies.is_empty() || covered < through {
+            return Err(refuse());
+        }
+        Ok(dependencies)
     }
 
     /// Render only verified media identities. The owner must independently
@@ -1302,6 +1390,63 @@ mod tests {
         assert!(VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone())).is_ok());
         let paired = VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone()))
             .expect("paired soundtrack");
+        let video_plan = low.grid.plan(4_300, 4_000_000);
+        let audio_plan = shared_audio_plan_ticks(low.grid.shared_audio_end_ticks(4_300), 160);
+        assert_eq!(
+            paired
+                .shared_audio_dependencies(low.rendition_id(), &video_plan, 0, Some(&audio_plan))
+                .expect("first interval"),
+            vec![0]
+        );
+        assert_eq!(
+            paired
+                .shared_audio_dependencies(low.rendition_id(), &video_plan, 1, Some(&audio_plan))
+                .expect("drifting boundary"),
+            vec![0, 1]
+        );
+        assert_eq!(
+            paired
+                .shared_audio_dependencies(low.rendition_id(), &video_plan, 2, Some(&audio_plan))
+                .expect("final interval"),
+            vec![1, 2]
+        );
+        assert!(paired
+            .shared_audio_dependencies(low.rendition_id(), &video_plan, 3, Some(&audio_plan))
+            .is_err());
+        assert!(paired
+            .shared_audio_dependencies(&"0".repeat(64), &video_plan, 0, Some(&audio_plan))
+            .is_err());
+        assert!(paired
+            .shared_audio_dependencies(low.rendition_id(), &video_plan, 0, None)
+            .is_err());
+        assert!(
+            paired
+                .shared_audio_dependencies(
+                    low.rendition_id(),
+                    &video_plan,
+                    0,
+                    Some(&vod_shared_audio_plan(4_300, 160))
+                )
+                .is_err(),
+            "short source-duration AAC cannot cover whole-frame video"
+        );
+        let mut broken_audio = audio_plan.clone();
+        broken_audio.entries[1].start_ticks += 1;
+        assert!(paired
+            .shared_audio_dependencies(low.rendition_id(), &video_plan, 1, Some(&broken_audio))
+            .is_err());
+        broken_audio = audio_plan.clone();
+        broken_audio
+            .entries
+            .last_mut()
+            .expect("tail")
+            .duration_ticks += 1;
+        assert!(
+            paired
+                .shared_audio_dependencies(low.rendition_id(), &video_plan, 2, Some(&broken_audio))
+                .is_err(),
+            "an extra sample cannot silently extend the common film end"
+        );
         let budgets = vec![
             VodRenditionBandwidth {
                 rendition_id: low.rendition_id.clone(),
@@ -1372,6 +1517,25 @@ mod tests {
         let silent_master = silent
             .master_playlist(&budgets, None)
             .expect("silent master");
+        assert_eq!(
+            silent
+                .shared_audio_dependencies(
+                    silent.video.rungs[0].rendition_id(),
+                    &video_plan,
+                    0,
+                    None
+                )
+                .expect("silent interval"),
+            Vec::<u32>::new()
+        );
+        assert!(silent
+            .shared_audio_dependencies(
+                silent.video.rungs[0].rendition_id(),
+                &video_plan,
+                0,
+                Some(&audio_plan)
+            )
+            .is_err());
         assert!(!silent_master.contains("TYPE=AUDIO"));
         assert!(!silent_master.contains("mp4a"));
         assert!(silent_master.contains("BANDWIDTH=4000000,AVERAGE-BANDWIDTH=3000000"));
@@ -1464,7 +1628,7 @@ mod tests {
             assert_eq!(grid.shared_audio_end_ticks(-1), 0);
         }
         let grid = VodFrameGrid::new(24_000, 1_001).expect("NTSC cadence");
-        assert_eq!(grid.shared_audio_end_ticks(4_300), 206_206);
+        assert_eq!(grid.shared_audio_end_ticks(4_300), 208_208);
     }
 
     #[test]
