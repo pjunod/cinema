@@ -1606,6 +1606,45 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertFalse(window.allowsUpgrade(nowMs: 500_000))
     }
 
+    func testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline() {
+        let manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
+        let intervals = autoVODAdvertisedIntervals(Data(manifest.utf8))!
+        XCTAssertEqual(intervals["seg00001.m4s"]?.startSeconds, 1)
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg00000").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg1").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "#EXT-X-ENDLIST", with: "#EXT-X-DISCONTINUITY").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(repeating: 65, count: 1_048_577)))
+        let scope = UUID()
+        func transfer(_ index: Int) -> PlayerController.AutoCompletedTransfer {
+            .init(bodyBytes: 100_000, bodyDurationSeconds: 0.1, completedAtMs: 1_000,
+                origin: "https://node", networkLoad: true, fromLocalCache: false, producerPaced: false,
+                statusCode: 200, segmentId: "https://node/hls/staged/seg0000\(index).m4s", mediaDurationSeconds: nil,
+                receipt: "00000000-0000-0000-0000-00000000000\(index)", etag: "object\(index)",
+                installedSessionId: "staged", installedCandidateId: "candidate", observedMediaDurationMs: 1_000,
+                stageScope: scope)
+        }
+        let first = transfer(0), second = transfer(1)
+        func margin(_ samples: [PlayerController.AutoCompletedTransfer], now: Int = 2_000, token: UUID? = nil) -> Bool {
+            autoVODEmpiricalMargin(samples, intervals: intervals, scope: token ?? scope,
+                sessionId: "staged", candidateId: "candidate", nowMs: now, deadlineMs: 15_000)
+        }
+        XCTAssertTrue(margin([first, second]))
+        XCTAssertFalse(margin([first, first]))
+        XCTAssertFalse(margin([first, second], token: UUID()))
+        XCTAssertFalse(margin([first, second], now: 15_000))
+        XCTAssertFalse(margin([first, second], now: 999))
+        var mismatched = second
+        mismatched.observedMediaDurationMs = 1_002
+        XCTAssertFalse(margin([first, mismatched]))
+        mismatched = second
+        mismatched.installedCandidateId = "replacement"
+        XCTAssertFalse(margin([first, mismatched]))
+        let overlapping = ["seg00000.m4s": intervals["seg00000.m4s"]!,
+            "seg00001.m4s": AutoVODAdvertisedInterval(startSeconds: 0.5, durationSeconds: 1)]
+        XCTAssertFalse(autoVODEmpiricalMargin([first, second], intervals: overlapping, scope: scope,
+            sessionId: "staged", candidateId: "candidate", nowMs: 2_000, deadlineMs: 15_000))
+    }
+
     func testStagedProductionProofRequiresExactCandidateAndCombinedAge() {
         var status = PlaybackSessionStatus(id: "staged")
         status.activeEncodeCandidateId = "candidate"
