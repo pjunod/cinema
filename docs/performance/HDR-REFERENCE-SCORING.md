@@ -105,6 +105,8 @@ distorted output must both decode as BT.709 eight-bit limited-range with the
 same dimensions/grid as the source, without residual HDR light/mastering or
 DV metadata. Only then does the separate scorer execute `vmaf_v0.6.1` on
 every frame. The reported domain is **SDR BT709 VMAF**, never HDR VMAF.
+The parent-dimension check is independent of reference/output agreement:
+resizing both SDR files together still refuses before model execution.
 The receipt is externally pinned provenance, not a signature or a proof that
 an arbitrary caller executed its contents; retain the original execution
 log/tool/image identities for independent acceptance.
@@ -152,3 +154,11 @@ individual results; the first invocation also contained a different method's
 fixture error. They require independent authenticated admissibility review,
 not an assertion that the entire invocation was green or a current-tree run.
 No successful method is repeated to manufacture a cleaner receipt.
+
+Review43 found the missing parent-dimension check at the original candidate.
+The new
+[`test_codec_hdr_parent_geometry.py`](../../tests/operations/test_codec_hdr_parent_geometry.py)
+consumer case failed against that source for both width-only and height-only
+joint resizes, then passed once after the check was added before libvmaf.
+That correction remains within the same sole review; earlier successes are
+retained at their original source hashes, not repeated or relabeled.
