@@ -3836,43 +3836,43 @@ impl MembershipManager {
             );
             return Err(MembershipError::LearnerProtocolInactive);
         }
-        let resume_legacy_partial = match record.state.as_str() {
-            "redeemed" => return Err(MembershipError::ReusedToken),
-            "redeeming" if record.node_id.as_deref() != Some(&request.node_id) => {
-                return Err(MembershipError::ReservedToken)
-            }
-            // Redemption reserves the credential to one generated node id.
-            // That same staged node may resume after the original TTL; expiry
-            // still refuses an unused token below, and a different node id is
-            // refused above, so this does not restore bearer authority.
-            "redeeming" => {
-                match self.redeeming_node_matches(request).await? {
-                    Some(false) => return Err(MembershipError::NodeIdentityInUse),
-                    Some(true) => {
-                        if let Some(http_base) = http_base.as_deref() {
-                            self.claim_redeeming_http_origin(request, http_base).await?;
-                        }
-                        self.upsert_hostname(
-                            &request.node_id,
-                            &membership_hostname(&request.hostname, &request.api_address),
-                        )
-                        .await?;
-                        return Ok(());
-                    }
-                    // The previous rolling version reserved the token before
-                    // its node-publication transaction. Repair that crash
-                    // shape below under the exact reservation.
-                    None if role.is_learner() => {
-                        return Err(MembershipError::Internal(
-                            "learner token reservation has no staged node".to_owned(),
-                        ));
-                    }
-                    None => true,
+        use lifecycle::{JoinEffect, JoinTransition};
+        let mut transition = JoinTransition::reservation(
+            &request.token_digest,
+            &request.node_id,
+            request.raft_id,
+            role,
+            &record.state,
+            record.node_id.as_deref(),
+            record.expires_at <= now,
+        )?;
+        // Redemption reserves the credential to one generated node id.
+        // That same staged node may resume after the original TTL; expiry
+        // still refuses an unused token below, and a different node id is
+        // refused above, so this does not restore bearer authority.
+        if transition.effect == JoinEffect::InspectStagedIdentity {
+            transition = transition.staged_identity(self.redeeming_node_matches(request).await?)?;
+        }
+        let resume_legacy_partial = match transition.effect {
+            JoinEffect::RepairPublishedNode => {
+                if let Some(http_base) = http_base.as_deref() {
+                    self.claim_redeeming_http_origin(request, http_base).await?;
                 }
+                self.upsert_hostname(
+                    &request.node_id,
+                    &membership_hostname(&request.hostname, &request.api_address),
+                )
+                .await?;
+                return Ok(());
             }
-            "issued" if record.expires_at <= now => return Err(MembershipError::ExpiredToken),
-            "issued" => false,
-            _ => return Err(MembershipError::InvalidToken),
+            JoinEffect::PublishStagedNode {
+                resume_legacy_partial,
+            } => resume_legacy_partial,
+            _ => {
+                return Err(MembershipError::Internal(
+                    "invalid join reservation transition".to_owned(),
+                ))
+            }
         };
 
         // Claiming the origin, reserving the token, installing the rolling-
@@ -4229,42 +4229,44 @@ impl MembershipManager {
         {
             return Err(MembershipError::ReservedToken);
         }
-        if record.state == "redeemed" {
-            return Ok(());
-        }
+        let transition = lifecycle::JoinTransition::finalization(
+            &request.token_digest,
+            &request.node_id,
+            request.raft_id,
+            expected_role,
+            record.state == "redeemed",
+        );
         // What "admitted" means depends on what the token admits. A voter has
         // to have committed a *vote*; a learner has to be a committed member
         // and must not have acquired one, because a learner that appears in
         // the voter set was not admitted by this protocol at all.
-        let metrics = inner.client.metrics_db().await?;
-        let is_voter = metrics
-            .membership_config
-            .voter_ids()
-            .any(|id| id == request.raft_id);
-        let is_member = metrics
-            .membership_config
-            .nodes()
-            .any(|(id, _)| *id == request.raft_id);
-        let admitted = role_is_admitted(record.role()?, is_member, is_voter);
-        if !admitted {
-            return Err(MembershipError::Internal(format!(
-                "joining node has not committed {} membership",
-                record.role()?.as_str()
-            )));
-        }
-        let now = unix_ms()?;
-        let changed = inner
-            .client
-            .execute(
-                "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
+        dispatch_join_finalization(
+            transition,
+            || async {
+                let metrics = inner.client.metrics_db().await?;
+                let is_voter = metrics
+                    .membership_config
+                    .voter_ids()
+                    .any(|id| id == request.raft_id);
+                let is_member = metrics
+                    .membership_config
+                    .nodes()
+                    .any(|(id, _)| *id == request.raft_id);
+                Ok((is_member, is_voter))
+            },
+            |transition| async move {
+                let now = unix_ms()?;
+                Ok(inner
+                    .client
+                    .execute(
+                        "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
                  WHERE token_hash = $2 AND state = 'redeeming' AND node_id = $3",
-                params!(now, request.token_digest.as_str(), request.node_id.as_str()),
-            )
-            .await?;
-        if changed != 1 {
-            return Err(MembershipError::ReusedToken);
-        }
-        Ok(())
+                        params!(now, transition.token_digest, transition.node_id),
+                    )
+                    .await?)
+            },
+        )
+        .await
     }
 
     async fn token_record(&self, token_hash: &str) -> Result<JoinTokenRow, MembershipError> {
@@ -9608,6 +9610,31 @@ enum MembershipChangeFailure {
     Ambiguous(MembershipError),
 }
 
+/// Manager-owned authoritative reads and writes are polled in their original
+/// order. An idempotent completion does no I/O; neither a failed membership
+/// proof nor an error may poll the token CAS.
+async fn dispatch_join_finalization<'a, O, OF, R, RF>(
+    transition: lifecycle::JoinTransition<'a>,
+    observe: O,
+    redeem: R,
+) -> Result<(), MembershipError>
+where
+    O: FnOnce() -> OF,
+    OF: Future<Output = Result<(bool, bool), MembershipError>>,
+    R: FnOnce(lifecycle::JoinTransition<'a>) -> RF,
+    RF: Future<Output = Result<usize, MembershipError>>,
+{
+    use lifecycle::JoinEffect;
+    if transition.effect == JoinEffect::Complete {
+        return Ok(());
+    }
+    let (member, voter) = observe().await?;
+    let transition = transition.committed_role(member, voter)?;
+    let changed = redeem(transition).await?;
+    transition.redeemed(changed)?;
+    Ok(())
+}
+
 /// The production outcome consumer. Effects remain manager-owned operations;
 /// the pure step cannot inspect fresh rows, clear another attempt, or interpret
 /// an ambiguous send as a definite failure. The wrapper adds no I/O, task or
@@ -10926,6 +10953,82 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn join_finalization_consumer_preserves_failure_and_effect_order() {
+        use super::lifecycle::{JoinEffect, JoinTransition};
+        for (redeemed, observation, changed, expected_events, succeeds) in [
+            (true, Some((false, false)), Some(0), vec![], true),
+            (false, Some((true, false)), Some(1), vec!["observe"], false),
+            (false, None, Some(1), vec!["observe"], false),
+            (
+                false,
+                Some((true, true)),
+                None,
+                vec!["observe", "redeem"],
+                false,
+            ),
+            (
+                false,
+                Some((true, true)),
+                Some(0),
+                vec!["observe", "redeem"],
+                false,
+            ),
+            (
+                false,
+                Some((true, true)),
+                Some(1),
+                vec!["observe", "redeem"],
+                true,
+            ),
+        ] {
+            let events = std::sync::Mutex::new(Vec::new());
+            let events = &events;
+            let transition = JoinTransition::finalization(
+                "digest",
+                "node",
+                41,
+                super::ClusterRole::Voter,
+                redeemed,
+            );
+            let outcome = super::dispatch_join_finalization(
+                transition,
+                || async {
+                    events.lock().expect("record observation").push("observe");
+                    observation.ok_or_else(|| {
+                        super::MembershipError::Internal("metrics failed".to_owned())
+                    })
+                },
+                |step| async move {
+                    assert_eq!(step.effect, JoinEffect::RedeemToken);
+                    assert_eq!(
+                        (step.token_digest, step.node_id, step.raft_id, step.role),
+                        ("digest", "node", 41, super::ClusterRole::Voter)
+                    );
+                    events.lock().expect("record redemption").push("redeem");
+                    changed.ok_or_else(|| super::MembershipError::Internal("CAS failed".to_owned()))
+                },
+            )
+            .await;
+            assert_eq!(outcome.is_ok(), succeeds);
+            assert_eq!(
+                *events.lock().expect("read ordered effects"),
+                expected_events
+            );
+            if !redeemed && observation.is_none() {
+                assert!(
+                    matches!(outcome, Err(super::MembershipError::Internal(message)) if message == "metrics failed")
+                );
+            } else if !redeemed && observation == Some((true, true)) && changed.is_none() {
+                assert!(
+                    matches!(outcome, Err(super::MembershipError::Internal(message)) if message == "CAS failed")
+                );
+            } else if !redeemed && observation == Some((true, true)) && changed == Some(0) {
+                assert!(matches!(outcome, Err(super::MembershipError::ReusedToken)));
+            }
+        }
+    }
+
     #[test]
     fn snapshot_floor_requires_current_process_heartbeat_proof() {
         let database = rusqlite::Connection::open_in_memory().expect("floor SQL fixture");
