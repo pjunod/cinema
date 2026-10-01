@@ -32,7 +32,7 @@ crates/plurxd/src/web/layouts/renderers.js	TS2339	4
 crates/plurxd/src/web/layouts/renderers.js	TS2363	1
 crates/plurxd/src/web/layouts/theater.js	TS2339	2
 crates/plurxd/src/web/layouts/theater.js	TS2769	1
-crates/plurxd/src/web/pages/activity-stream.js	TS2339	9
+crates/plurxd/src/web/pages/activity-stream.js	TS2339	8
 crates/plurxd/src/web/pages/analysis.js	TS2339	10
 crates/plurxd/src/web/pages/analysis.js	TS2367	1
 crates/plurxd/src/web/pages/cluster-database.js	TS2339	2

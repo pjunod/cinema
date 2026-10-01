@@ -538,20 +538,25 @@ async fn pass(
     {
         return Ok(false);
     }
-    let Some(admission) = state.transcode.admit_fragment().await else {
-        return Ok(false);
-    };
-    let page = state
+    let mut page = state
         .store
         .job_candidates(CandidateQuery {
             node_id: state.node_id.clone(),
             kinds: vec![JobKind::ArtifactHydrate],
-            after: cursor.take(),
+            after: cursor.clone(),
             now_ms: now_ms(),
             limit: 128,
         })
         .await?;
-    *cursor = page.next;
+    page.jobs.retain(|job| matches!(job.supported_payload(), Ok(JobPayload::ArtifactHydrate { artifact_key, target_node_id }) if parse_key(&artifact_key).is_some() && target_node_id == state.node_id));
+    if page.jobs.is_empty() {
+        *cursor = page.next;
+        return Ok(false);
+    }
+    let Some(admission) = state.transcode.admit_fragment().await else {
+        return Ok(false);
+    };
+
     for candidate in page.jobs {
         let Ok(JobPayload::ArtifactHydrate {
             artifact_key,
@@ -574,7 +579,9 @@ async fn pass(
         {
             continue;
         }
-        if !state.transcode.fragment_worker_idle(&admission) {
+        if !authority.may_execute_job(JobKind::ArtifactHydrate).await
+            || !state.transcode.fragment_worker_idle(&admission)
+        {
             return Ok(false);
         }
         let now = now_ms();
@@ -619,7 +626,8 @@ async fn pass(
                 }
             }
         };
-        if !matches!(result, Ok(true)) {
+        let published = matches!(result, Ok(true));
+        if !published {
             if let Err(error) = result {
                 tracing::warn!(job = job.id, %error, "transcode copy deferred");
             }
@@ -642,8 +650,10 @@ async fn pass(
             }
         }
         active.finish().await;
-        return Ok(true);
+        *cursor = None;
+        return Ok(published);
     }
+    *cursor = page.next;
     Ok(false)
 }
 
@@ -659,7 +669,7 @@ pub(crate) async fn run(state: AppState) {
                 tracing::warn!(%error, "transcode copy pass failed");
                 false
             });
-        tokio::time::sleep(pacing.delay(progressed)).await;
+        tokio::time::sleep(pacing.after_completion(progressed)).await;
     }
 }
 

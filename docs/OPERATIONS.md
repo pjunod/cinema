@@ -2315,6 +2315,16 @@ failure drills, or performance runs. Bounded-replica freshness uses a local
 monotonic deadline, but clock synchronization remains an operational
 prerequisite for the existing cross-node protocols and comparable evidence.
 
+The measurement release exposes `plurx_cluster_clock_offset_seconds`, its
+uncertainty and per-peer `observation_state` on `/metrics`; numeric gauges
+are absent for Unknown peers. Compare `abs(offset) + uncertainty` with the
+fixed 2,000 ms relative contract, retain the discontinuity and Unknown-round
+counters, and report `plurx_cluster_clock_authority_reads_total` to measure
+inbound probe authorization cost. This observation changes no acquisition or
+readiness decision and does not replace the absolute 250 ms discipline rule.
+See [the measurement handoff](cluster/CLOCK-SKEW-MEASUREMENT-IMPLEMENTATION.md)
+for the identified one-hour idle and sixty-second loaded receipt still owed.
+
 **Prepare the existing voter.** Give each node reachable, unique Raft and
 cluster-API addresses. `advertise_host` is a host or IP, not a URL. Set
 `join_url` when the public API used for cluster admission is reached through a
@@ -3283,6 +3293,16 @@ a small library; `0` still disables automatic removal. Above that floor, the
 percentage is a hard ceiling rounded down. A refused scan still records new and
 changed files, but keeps every apparently missing row and reports the refusal
 in library status and logs.
+
+The limit counts catalog file entries missing from disk, not files still in
+the directory. An empty directory can therefore trigger the limit when the
+catalog still contains older entries. Explicit DVR deletions take a separate
+path: after removing the recording artifacts, the DVR worker removes that
+recording's catalog file and empty item and clears its catalog links. It also
+repairs already-purged recordings left linked by older versions. Recording
+history remains available. An empty Recordings library is normal and does not
+produce the generic “no video files found” warning; unexpected missing catalog
+entries still receive the same scan deletion protection as other libraries.
 
 The first verified, non-empty scan records the library's canonical path-set
 identity. Changing a library's paths clears that identity automatically. For a
@@ -4295,13 +4315,56 @@ abandoned queue bytes remain reclaimable after restart even when there are no
 cache-location rows. Rename-to-publication holds both the recipe eviction
 guard and final-directory orphan guard until fenced completion.
 
-Settings → Activity lists durable work separately from live playback and offers
-admin cancellation and explicit retry. A cancelled interest does not cancel
+Settings → Activity keeps Watching above its Status and Jobs tabs. Status
+shows the node matrix and collapsible activity sections. Jobs offers global
+job-type counts, state and owner/destination filters, 20-row pages (selectable 10, 20 or 50), and admin
+cancellation and explicit retry. Select a node or job for its detail dialog;
+job details separate Summary, Stages and History. Unknown stages stay unknown. A cancelled interest does not cancel
 another viewer's demand. Running children keep their physical permits until
 they have exited. Offline packages retain their own quota and download
 permissions; an exact recipe already preparing on their delivery node can be
 joined at priority 2 without starting another encoder. Cross-node offline
 transcode delivery is not yet provided by this queue adapter.
+
+**How to read Cluster workers:** Activity shows each known node, its shared
+heavy-background slot, GPU sessions and reserved CPU threads. The totals
+include only fresh capacity reports; unreachable peers and older servers are
+unknown, never idle. Capacity refreshes with Activity; durable assignments
+refresh separately every 15 seconds and show their observation time. Expired
+leases identify a previous owner awaiting recovery, not a running worker.
+The assignment list is bounded to 100 running and 100 cancelling jobs and
+labels itself partial when either page has more results.
+
+Each node admits **one heavy background pipeline** at a time. Preparation,
+indexing, subtitles, probing, artwork, semantic indexing, verification and
+transcode copies share this permit. A media-probe batch may execute up to two
+one-thread probes within that admission when its reserved CPU budget permits.
+Each probe claims its own shared storage reader. Only one background reader
+per domain is allowed; the second reader is reserved for playback. Scans
+probe inline under their own reservation. Repair batches can run two probes
+only across separate available domains. The node detail panel reports the
+batch ceiling. Other worker loops, playback and transfers
+have their own admission limits. An available heavy slot still needs eligible
+work, enabled settings, compatible tools, source access and storage capacity.
+An occupied slot is retained until its physical work exits. A blocked free
+slot means media resources are allocated or foreground/offline work is waiting.
+CPU figures are reservations, not utilization: indexing conservatively reserves
+the whole configured software budget. Raising the heavy-slot count alone would
+not let two such jobs run. Child-process disclosures show observed work on each
+reporting node; a job can also be active without a child process.
+
+Probe, artwork and transcode-copy consumers wait 100–250 ms after confirmed
+publication. Empty, refused, retrying and yielding passes retain the 5–30 second
+backoff. Claim-based orchestration loops retain their prior pacing. Candidate
+pages and supported payloads are checked before taking the heavy permit;
+capability subprocesses remain admitted. A refused admission preserves the
+candidate cursor so compatible work is retried.
+
+Select a job's Stages section for exact attempt observations. Fragment indexing
+and media probes carry durable job/fence identity; an expired lease, different
+owner, completed job or stale observation is never displayed as active progress.
+See the [reviewed design and validation record](cluster/CLUSTER-WORK-CAPACITY-IMPLEMENTATION.md)
+for the constraints and fleet measurement procedure.
 
 The analysis and speculative-preparation preferences are ordinary settings:
 Settings → Analysis enables the analysis workers and Settings → Maintenance

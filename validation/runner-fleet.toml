@@ -228,15 +228,24 @@ arch = "X64"
 labels = ["lab", "general", "high-cpu", "baremetal", "ubuntu-26.04"]
 
 # --- maca / macb: laptops, non-voters -----------------------------------------
-# The macOS Apple runner is on the MacBook Pro (`macb`). The two Linux ARM64
-# guests are Lima VMs registered by hand rather than by ansible, and they are
+# Apple CI uses the M4 Air (`maca`) as primary and the M3 Max Pro (`macb`)
+# as standby; deploy/apple-runner controls eligibility during outages. The two
+# Linux ARM64 guests are Lima VMs registered by hand rather than by ansible, and
+# they are
 # the required `ci-arm64` packaging pool: `macb` is primary, `maca` is backup.
+[[runners]]
+name = "gha-maca-apple-01"
+host = "maca"
+os = "macOS"
+arch = "ARM64"
+labels = ["lab", "apple", "xcode-27", "primary"]
+
 [[runners]]
 name = "gha-macb-apple-01"
 host = "macb"
 os = "macOS"
 arch = "ARM64"
-labels = ["lab", "apple", "xcode-27"]
+labels = ["lab", "apple", "xcode-27", "backup"]
 
 [[runners]]
 name = "gha-maca-linux-arm-01"
