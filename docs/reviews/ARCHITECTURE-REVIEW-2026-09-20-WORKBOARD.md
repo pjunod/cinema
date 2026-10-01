@@ -96,6 +96,19 @@ original one-pass IDs; successful units are not repeated. Same-record
 disposition and the current Effort development gate remain required before
 landing; none of this closes physical or main qualification.
 
+**A-05 attribution foundation, 2026-10-01 (gpt-6.1-sol,
+agent:/root/a05_current_remaining_sol61):** frozen source `c0914fe7e`
+adds an independent measured-Link negative-prior pair and migration defaults
+that leave historical supply verdicts unattributed. Sole review 38 approves
+that bounded source foundation. Its five new focused regressions passed
+once before test panic-diagnostic cleanup; the committed tree passed the
+pinned compiler and normal hook. Actual ClientLog intake still supplies no
+completed-body proof, so a reachable provenance producer and candidate-aware
+reader remain unimplemented. Actual current-effort composition `7a3d75ee`
+preserves the foundation bytes after #675 landed; final same-record review
+publication and Effort gate remain required. This does not close typed
+recovery, decoder evidence, D3 or physical acceptance.
+
 ## How to claim, work and finish a plan
 
 **S-14 continuation, 2026-10-01 (gpt-6.1-sol,

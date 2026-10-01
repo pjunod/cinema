@@ -2044,6 +2044,11 @@ fn prior_observation(
         throughput_kbps,
         starved_rung_height,
         observed_at_ms: event.at_unix_ms,
+        // ClientLog supplies a smoothed meter and aggregate delivery facts,
+        // not a completed, unpaced network body's timing/provenance. Even a
+        // `link:` label must remain legacy evidence until a real producer
+        // supplies the typed completed-transfer proof.
+        measured_link: None,
     })
 }
 
@@ -3233,6 +3238,36 @@ mod tests {
             ..PlaybackEvent::default()
         };
         assert!(prior_observation(&event, Some(&network)).is_none());
+    }
+
+    #[test]
+    fn a05_legacy_link_meter_never_claims_completed_transfer_provenance() {
+        let network = NetworkIdentity {
+            client_class: "android".into(),
+            network_fingerprint: "192.0.2.0/24".into(),
+            credential_generation: Some(CredentialGeneration::from("test-gen".to_owned())),
+            user_id: Some(42),
+        };
+        for cause in ["link", "supply", "encode", "decode", "hold", "authority"] {
+            let event = PlaybackEvent {
+                at_unix_ms: 123_000,
+                event: "stall".into(),
+                height: Some(1080),
+                bandwidth_kbps: Some(100),
+                delivered_bps: Some(100_000),
+                runway_ds: Some(0),
+                detail: Some(format!("{cause}:buffering")),
+                ..PlaybackEvent::default()
+            };
+            let observation = prior_observation(&event, Some(&network));
+            if matches!(cause, "link" | "supply") {
+                let observation = observation.expect("legacy prior remains available");
+                assert_eq!(observation.starved_rung_height, Some(1080));
+                assert!(observation.measured_link.is_none());
+            } else {
+                assert!(observation.is_none(), "{cause}");
+            }
+        }
     }
 
     /// How the writer called its Store, recorded call by call.
