@@ -4300,7 +4300,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # http/browse.rs::a_detail_render_unpacks_no_index. The authenticated in-process
 # oneshot response is inspected before its body is collected. This adds no
 # process launch, asynchronous task, timer or producer owner.
-expected_occurrences = 411
+# +2 B-R1: Axum Response::status() reads in the authenticated local-refusal
+# and public-ingress remote-owner fixtures. Both assert HTTP response codes;
+# neither creates a process/task or changes producer lifecycle ownership.
+# Combined effort411 plus these two independent response reads =413.
+expected_occurrences = 413
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

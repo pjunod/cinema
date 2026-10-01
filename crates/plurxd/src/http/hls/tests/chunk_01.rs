@@ -171,7 +171,10 @@
         ("status.rs", include_str!("../status.rs")),
         ("response.rs", include_str!("../response.rs")),
         ("playlist.rs", include_str!("../playlist.rs")),
-        ("subtitle_playlist.rs", include_str!("../subtitle_playlist.rs")),
+        (
+            "subtitle_playlist.rs",
+            include_str!("../subtitle_playlist.rs"),
+        ),
         ("context.rs", include_str!("../context.rs")),
         ("subtitle_names.rs", include_str!("../subtitle_names.rs")),
         ("playlist_text.rs", include_str!("../playlist_text.rs")),
@@ -444,6 +447,7 @@
     #[test]
     fn a_replacement_is_measured_against_the_session_it_replaced() {
         let selection = |height: i64| crate::playback_control::EffectiveSelection {
+            candidate_id: None,
             height,
             ..sample_effective_selection()
         };
@@ -510,6 +514,7 @@
     #[test]
     fn a_replacement_the_viewer_did_not_ask_for_is_not_measured() {
         let selection = |height: i64| crate::playback_control::EffectiveSelection {
+            candidate_id: None,
             height,
             ..sample_effective_selection()
         };
@@ -643,6 +648,7 @@
     /// A minimal delivered selection; only `height` matters to these tests.
     fn sample_effective_selection() -> crate::playback_control::EffectiveSelection {
         crate::playback_control::EffectiveSelection {
+            candidate_id: None,
             height: 1080,
             quality_auto: false,
             codec: "server_selected".to_owned(),
@@ -906,6 +912,9 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: generation.clone(),
             user_id: 7,
@@ -995,7 +1004,10 @@
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -1006,6 +1018,8 @@
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1729,7 +1743,10 @@
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -1740,6 +1757,8 @@
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Web,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -1883,6 +1902,64 @@
             "the commit is what puts the predecessor into its drain",
         );
 
+        // A newer ingress may transparently forward the bounded extension to
+        // this parser-floor owner. Refuse only at this local semantic boundary,
+        // preserving the active predecessor and its sequence/admission state.
+        for decoder_loss in [false, true] {
+            let mut unsupported = drain_control_request(generation.clone(), 1);
+            unsupported.selection.quality = crate::playback_control::QualitySelection::Auto {
+                height: Some(720),
+                candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
+            };
+            if decoder_loss {
+                unsupported.selection.quality = crate::playback_control::QualitySelection::Original;
+                unsupported
+                    .capabilities
+                    .as_mut()
+                    .expect("fixture capabilities")
+                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                    revision: 4,
+                    video: vec![],
+                });
+            }
+            let response = crate::http::internal_media_sessions::control_authorized(
+                fixture.state.clone(),
+                crate::playback_control::ControlRelayRequest {
+                    session_id: session_id.clone(),
+                    generation: generation.clone(),
+                    expected_owner_node_id: fixture.state.node_id.clone(),
+                    expected_owner_epoch: 1,
+                    deadline_unix_ms: unix_ms().saturating_add(4_000),
+                    control: unsupported,
+                },
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("valid parser-floor test fixture");
+            let refusal: crate::playback_control::ControlErrorBody =
+                serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
+            assert_eq!(
+                refusal.invalid_field.as_deref(),
+                Some(if decoder_loss {
+                    "capabilities.decoder_caps_unsupported"
+                } else {
+                    "selection.quality.candidate_id_unsupported"
+                })
+            );
+            assert!(refusal.is_valid_for_status(400));
+            let preserved = fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("valid parser-floor test fixture")
+                .expect("valid parser-floor test fixture");
+            assert_eq!(preserved.state, "active");
+            assert_eq!(preserved.incarnation_id, draining.incarnation_id);
+            assert_eq!(preserved.drain_deadline_ms, draining.drain_deadline_ms);
+        }
+
         let switched = || crate::playback_control::ActionAcknowledgement {
             action_id: uuid::Uuid::new_v4().to_string(),
             state: crate::playback_control::AcknowledgementState::Switched,
@@ -1920,7 +1997,7 @@
                 .map(|route| route.state),
             Some("active".to_owned()),
             "a refused exchange proves nothing about what reached a screen, \
-             and must not end the stream the client is still watching",
+         and must not end the stream the client is still watching",
         );
 
         // An accepted exchange carrying no acknowledgement is ordinary
@@ -1972,7 +2049,7 @@
             response.status(),
             StatusCode::OK,
             "the packet that reports the switch is answered; ending the row \
-             ahead of it is what answered it 410",
+         ahead of it is what answered it 410",
         );
         let released = fixture
             .store
@@ -1996,6 +2073,9 @@
             .await
             .expect("terminal cancellation user");
         let recipe = RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: generation.clone(),
             user_id: user.id,
@@ -2086,7 +2166,10 @@
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto { height: None },
+                quality: crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id: None,
+                },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -2097,6 +2180,8 @@
                 dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
             },
             capabilities: Some(crate::playback_control::DynamicCapabilities {
+                presentation_target: None,
+                decoder_caps: None,
                 platform: crate::playback_control::ClientPlatform::Apple,
                 max_height: 1080,
                 codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -2229,11 +2314,31 @@
                 "complete",
                 Some(true),
             ),
+            (
+                "vod-candidate",
+                crate::transcode::Presentation::Vod,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                "complete",
+                Some(true),
+            ),
+            (
+                "vod-remote-candidate",
+                crate::transcode::Presentation::Vod,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                "complete",
+                Some(true),
+            ),
         ] {
+            let candidate_id = label
+                .ends_with("candidate")
+                .then_some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
             let session_id = uuid::Uuid::new_v4().to_string();
             let generation = uuid::Uuid::new_v4().to_string();
             let client_instance_id = uuid::Uuid::new_v4().to_string();
             let recipe = RemoteStartRequest {
+                candidate_id: None,
+                presentation_target: None,
+                decoder_caps: None,
                 protocol_version: crate::media_pool::PROTOCOL_VERSION,
                 incarnation_id: generation.clone(),
                 user_id: user.id,
@@ -2271,7 +2376,7 @@
                 media_origin_ms: Some(0),
                 height: 720,
                 encoder: "software".to_owned(),
-                vod: label == "vod",
+                vod: label.starts_with("vod"),
                 ladder: vec![],
                 prior_kbps: None,
                 delivered_dynamic_range: Some("sdr".to_owned()),
@@ -2298,7 +2403,11 @@
                     fence_predecessor: false,
                     request_id: None,
                     request_fingerprint: "a".repeat(64),
-                    owner_node_id: fixture.state.node_id.clone(),
+                    owner_node_id: if label == "vod-remote-candidate" {
+                        "remote-owner".to_owned()
+                    } else {
+                        fixture.state.node_id.clone()
+                    },
                     lease_expires_at_ms: now_ms.saturating_add(60_000),
                     recipe_json: serde_json::to_string(&recipe).expect("recipe"),
                     response_json: serde_json::to_string(&start).expect("start response"),
@@ -2308,6 +2417,52 @@
                 },
             )
             .await;
+            if label == "vod-remote-candidate" {
+                // Exercise public ingress routing, not just a serde roundtrip.
+                // The fixture has no remote transport: reaching that precise
+                // peer error proves structural validation forwarded the ask
+                // rather than applying the local unsupported-route refusal.
+                let mut ask = drain_control_request(generation.clone(), 1);
+                ask.selection.quality = crate::playback_control::QualitySelection::Auto {
+                    height: None,
+                    candidate_id,
+                };
+                ask.capabilities
+                    .as_mut()
+                    .expect("fixture capabilities")
+                    .decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                    revision: 4,
+                    video: vec![],
+                });
+                let response = control_inner(
+                    fixture.state.clone(),
+                    session_id.clone(),
+                    Bytes::from(serde_json::to_vec(&ask).expect("valid parser-floor test fixture")),
+                    unix_ms().saturating_add(4_000),
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                    .await
+                    .expect("valid parser-floor test fixture");
+                let error: crate::playback_control::ControlErrorBody =
+                    serde_json::from_slice(&bytes).expect("valid parser-floor test fixture");
+                assert_eq!(
+                    error.message,
+                    "the owning media worker did not answer the control exchange"
+                );
+                assert_eq!(
+                    fixture
+                        .store
+                        .media_session_route(&session_id)
+                        .await
+                        .expect("valid parser-floor test fixture")
+                        .expect("valid parser-floor test fixture")
+                        .state,
+                    "active"
+                );
+                continue;
+            }
             let request = crate::playback_control::ControlRequestV1 {
                 intent: None,
                 protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
@@ -2324,7 +2479,10 @@
                 seek_target_ms: None,
                 observed_download_bps: None,
                 selection: crate::playback_control::ClientSelection {
-                    quality: crate::playback_control::QualitySelection::Auto { height: None },
+                    quality: crate::playback_control::QualitySelection::Auto {
+                        height: None,
+                        candidate_id,
+                    },
                     audio_track: None,
                     subtitle: crate::playback_control::SubtitleSelection {
                         mode: crate::playback_control::SubtitleMode::Off,
@@ -2334,9 +2492,19 @@
                     codec: crate::playback_control::CodecPolicy::Auto,
                     dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
                 },
-                // Sequence > 1 retries may omit capabilities; replay
-                // telemetry must come from the retained accepted result.
-                capabilities: None,
+                // Legacy retries may omit capabilities. A newer retry can
+                // report decoder loss; terminal replay must still precede
+                // unsupported owner dispatch and retain accepted telemetry.
+                capabilities: candidate_id.map(|_| {
+                    let mut caps = drain_control_request(generation.clone(), 1)
+                        .capabilities
+                        .expect("fixture capabilities");
+                    caps.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+                        revision: 4,
+                        video: vec![],
+                    });
+                    caps
+                }),
                 observation: None,
                 acknowledgement: None,
                 supported_actions: None,
@@ -2354,7 +2522,7 @@
                     expires_at_unix_ms: terminal_time_ms,
                 },
                 delivery: crate::playback_control::DeliveryView {
-                    presentation: if label == "vod" {
+                    presentation: if label.starts_with("vod") {
                         "vod".to_owned()
                     } else {
                         "live-recovery".to_owned()
@@ -2375,6 +2543,7 @@
                     owner_epoch: 1,
                 },
                 effective_selection: crate::playback_control::EffectiveSelection {
+                    candidate_id,
                     quality_auto: true,
                     height: 720,
                     audio_track: None,

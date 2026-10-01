@@ -1179,6 +1179,14 @@ impl ReleaseSettlement {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
+    /// Retained route context. Tolerated by the parser floor, never minted by
+    /// it and never sufficient to authorize a worker route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_target: Option<plurx_core::playback::candidate::PresentationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_caps: Option<crate::playback_control::DecoderCapsSnapshot>,
     pub protocol_version: i64,
     pub incarnation_id: String,
     pub user_id: i64,
@@ -1209,7 +1217,9 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    request.protocol_version == crate::media_pool::PROTOCOL_VERSION
+    request.candidate_id.is_none()
+        && request.decoder_caps.is_none()
+        && request.protocol_version == crate::media_pool::PROTOCOL_VERSION
         && uuid::Uuid::parse_str(&request.incarnation_id).is_ok()
         && request.user_id > 0
         && request.source_size >= 0
@@ -5843,6 +5853,9 @@ mod tests {
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            candidate_id: None,
+            presentation_target: None,
+            decoder_caps: None,
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation_id.clone(),
             user_id: 7,
@@ -6527,7 +6540,10 @@ mod tests {
                 seek_target_ms: None,
                 observed_download_bps: Some(8_000_000),
                 selection: crate::playback_control::ClientSelection {
-                    quality: crate::playback_control::QualitySelection::Auto { height: None },
+                    quality: crate::playback_control::QualitySelection::Auto {
+                        height: None,
+                        candidate_id: None,
+                    },
                     audio_track: Some(0),
                     subtitle: crate::playback_control::SubtitleSelection {
                         mode: crate::playback_control::SubtitleMode::Off,
@@ -6538,6 +6554,8 @@ mod tests {
                     dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
                 },
                 capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    presentation_target: None,
+                    decoder_caps: None,
                     platform: crate::playback_control::ClientPlatform::Web,
                     max_height: 2160,
                     codecs: vec![crate::playback_control::CodecPolicy::H264],
@@ -6584,6 +6602,7 @@ mod tests {
                 owner_epoch: 1,
             },
             effective_selection: crate::playback_control::EffectiveSelection {
+                candidate_id: None,
                 quality_auto: true,
                 height: 1080,
                 audio_track: Some(0),
@@ -6594,6 +6613,47 @@ mod tests {
             },
             action: crate::playback_control::ControlAction::None,
         }
+    }
+
+    #[test]
+    fn auto_candidate_parser_floor_remote_context_is_retained_but_not_executed() {
+        let mut request = valid_start_request();
+        assert!(request.is_valid());
+        request.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot {
+            revision: 4,
+            video: vec![],
+        });
+        assert!(
+            !request.is_valid(),
+            "explicit decoder loss must not be ignored without a candidate"
+        );
+        assert!(!takeover_recipe_is_valid(&request));
+        request.candidate_id = Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
+        request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
+            width_px: 2400,
+            height_px: 1600,
+            revision: 3,
+        });
+        let value = serde_json::to_value(&request).expect("valid parser-floor test fixture");
+        let parsed: RemoteStartRequest =
+            serde_json::from_value(value.clone()).expect("valid parser-floor test fixture");
+        assert_eq!(
+            serde_json::to_value(&parsed).expect("valid parser-floor test fixture"),
+            value
+        );
+        assert!(
+            !parsed.is_valid(),
+            "a parser-floor worker must not reinterpret the route"
+        );
+        assert!(!takeover_recipe_is_valid(&parsed));
+        let mut unknown = value;
+        unknown["unexpected"] = true.into();
+        assert!(serde_json::from_value::<RemoteStartRequest>(unknown).is_err());
+        let legacy =
+            serde_json::to_value(valid_start_request()).expect("valid parser-floor test fixture");
+        assert!(legacy.get("candidate_id").is_none());
+        assert!(legacy.get("presentation_target").is_none());
+        assert!(legacy.get("decoder_caps").is_none());
     }
 
     /// ffmpeg's HLS muxer carries the segment number through a C `int`. A
@@ -8922,9 +8982,15 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_control_relay_accepts_and_replays_the_exact_ended_response() {
-        let request = terminal_relay_request();
+        let mut request = terminal_relay_request();
+        request.control.selection.quality = crate::playback_control::QualitySelection::Auto {
+            height: None,
+            candidate_id: Some(plurx_core::playback::candidate::CandidateId([0x12; 16])),
+        };
         assert!(request.is_valid());
-        let expected = terminal_relay_response(&request);
+        let mut expected = terminal_relay_response(&request);
+        expected.effective_selection.candidate_id =
+            Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
         let body = serde_json::to_vec(&expected).expect("terminal relay response");
 
         for disposition in ["accepted", "replayed"] {

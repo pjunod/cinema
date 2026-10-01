@@ -1,6 +1,45 @@
 use super::*;
 
 impl TranscodeManager {
+    /// Retained output is authoritative; an initial claim is negotiated only
+    /// after this producer has selected the encoded route and its AAC lattice.
+    pub(super) fn encoded_start_audio_options(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        mut options: TranscodeOptions,
+    ) -> Result<TranscodeOptions, String> {
+        if let Some(audio) = &req.audio_delivery {
+            options.set_audio_delivery(audio.clone());
+        } else if let Some(claim) = &req.audio_claim {
+            let selected = req.audio_index.map_or_else(
+                || file.audio_streams.first(),
+                |index| {
+                    file.audio_streams
+                        .iter()
+                        .find(|stream| stream.index == index)
+                },
+            );
+            options.set_audio_delivery(plurx_core::playback::audio::resolve_audio(
+                selected,
+                &claim.profile(),
+                plurx_core::playback::audio::AudioRoute::EncodedVod,
+                file.audio_offset_ms,
+            ));
+        }
+        if options
+            .audio
+            .as_ref()
+            .is_some_and(|audio| !audio.is_encoded_vod_compatible())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_recipe_invalid",
+                "encoded VOD requires its fixed AAC sample lattice",
+            ));
+        }
+        Ok(options)
+    }
+
     /// Create a session, or hand back the one an identical request already
     /// created.
     ///
@@ -614,6 +653,7 @@ impl TranscodeManager {
                     req.hdr10,
                     priority,
                     req.audio_claim.as_ref(),
+                    req.audio_delivery.as_ref(),
                 )
                 .await
             }
@@ -902,34 +942,7 @@ impl TranscodeManager {
             Some(software_threads),
             grade,
         );
-        if let Some(claim) = &req.audio_claim {
-            let selected = req.audio_index.map_or_else(
-                || file.audio_streams.first(),
-                |index| {
-                    file.audio_streams
-                        .iter()
-                        .find(|stream| stream.index == index)
-                },
-            );
-            options.set_audio_delivery(plurx_core::playback::audio::resolve_audio(
-                selected,
-                &claim.profile(),
-                plurx_core::playback::audio::AudioRoute::EncodedVod,
-                file.audio_offset_ms,
-            ));
-        } else if let Some(audio) = &req.audio_delivery {
-            options.set_audio_delivery(audio.clone());
-        }
-        if options
-            .audio
-            .as_ref()
-            .is_some_and(|audio| !audio.is_encoded_vod_compatible())
-        {
-            return Err(vod_refusal_error(
-                "vod_audio_recipe_invalid",
-                "encoded VOD requires its fixed AAC sample lattice",
-            ));
-        }
+        options = self.encoded_start_audio_options(req, file, options)?;
         let subtitle = if let Some(subtitle) = burn_file {
             #[cfg(unix)]
             {
