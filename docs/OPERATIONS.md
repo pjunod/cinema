@@ -1929,13 +1929,32 @@ start at all. Never move two voters concurrently and retain both verified copies
 through a soak period.
 
 `cluster.read_pool_size` is bounded from 1 through 16 and defaults to 4. It
-changes only local read-only SQLite connections. WAL size/sync, the 10,000-log
-snapshot trigger, disaster-recovery log retention, heartbeat, and election
+changes only local read-only SQLite connections. WAL size/sync, the default
+10,000-log snapshot trigger, disaster-recovery log retention, heartbeat, and election
 timers remain unchanged. The setting now reaches the named-host runner's node
 configuration and is repeated in schema-versioned raw and campaign evidence,
 so a 4/8/16 sweep measures and attests three different pools; an earlier runner
 built its own configuration and would have measured the default three times,
 so no deferred artifact from before that change means anything.
+
+`cluster.logs_until_snapshot` accepts 1,000 through 200,000 and defaults to
+10,000. `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` overrides the TOML value. The
+threshold is read when the embedded node starts, so a change takes effect on
+the next separately authorized restart and must match on every voter. The
+range is not a tuning recommendation: retain 10,000 until the snapshot
+cadence plan's fleet B/E/S/W/A evidence supports a different value. Retention
+stays `max_in_snapshot_log_to_keep = 1`.
+
+Snapshot builds check `2 × live DB bytes + max(live WAL bytes, 32 MiB) +
+64 MiB` on the state-machine filesystem before requesting the writer cut.
+Insufficient or unknown space defers for ten seconds per recheck, bounded
+by ten minutes; expiry attempts the existing path and cannot claim success
+on a full disk. `plurx_raft_snapshot_deferrals_total{reason="storage"}` counts
+retries; `plurx_raft_snapshot_required_storage_bytes` is the last known local
+floor, not a promise about current free space. Promotion needs the target's
+fresh same-heartbeat floor proof and `max(512 MiB, floor)` headroom. Upgrade a
+legacy target before promotion; its old 512 MiB-only readiness is unknown for
+this proof. No new Developer toggle gates this automatic correctness path.
 
 Run three campaigns from the same clean source/image, changing only
 `read_pool_size` and the new output directory. Validate all three directories,
@@ -3085,6 +3104,7 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_CLUSTER_BOUNDED_REPLICA_READS` | `cluster.bounded_replica_reads` | `true` | Initial bounded-read preference; the replicated Developer setting overrides it. Each read proves consistency independently |
 | `PLURX_CLUSTER_BOUNDED_REPLICA_MAX_LAG_ENTRIES` | `cluster.bounded_replica_max_lag_entries` | `64` | Maximum quorum-commit to local-applied gap admitted for a bounded catalogue operation; `0..10000`, identical on every voter |
 | `PLURX_CLUSTER_READ_POOL_SIZE` | `cluster.read_pool_size` | `4` | Local replicated-read connection pool, bounded 1–16; tune only with retained 4/8/16 evidence |
+| `PLURX_CLUSTER_LOGS_UNTIL_SNAPSHOT` | `cluster.logs_until_snapshot` | `10000` | Snapshot trigger, bounded 1,000–200,000; next restart, identical on every voter; change from the default only with fleet cadence evidence |
 | `PLURX_CLUSTER_SNAPSHOT_CHUNK_TIMEOUT_SECS` | `cluster.snapshot_chunk_timeout_secs` | `30` | One non-final snapshot chunk RPC in seconds, bounded 5–300; must not exceed the transfer timeout and must match on every voter |
 | `PLURX_CLUSTER_SNAPSHOT_TRANSFER_TIMEOUT_SECS` | `cluster.snapshot_transfer_timeout_secs` | `1200` | Absolute snapshot transfer stage in seconds, bounded 60–14,400; retries, reconnects, and mismatches cannot renew it |
 | `PLURX_CLUSTER_INSTALL_SNAPSHOT_TIMEOUT_SECS` | `cluster.install_snapshot_timeout_secs` | `120` | Final chunk/install RPC cap in seconds, bounded 10–3,600; keep identical on every voter |
