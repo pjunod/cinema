@@ -12,6 +12,7 @@ import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.pressKey
@@ -27,6 +28,48 @@ class PlayerControlsFocusTest {
     val compose = createComposeRule()
 
     @Test
+    fun bothSkipDistancesRemainReachableBesidePlayPause() {
+        val seeks = mutableListOf<Int>()
+        compose.setContent {
+            PlurxTheme {
+                Controls(
+                    title = "Example episode",
+                    positionMs = 60_000,
+                    durationMs = 120_000,
+                    isPlaying = true,
+                    requestInitialFocus = false,
+                    onClose = {},
+                    onPlayPause = {},
+                    onSeekBack30 = { seeks.add(-30) },
+                    onSeekBack = { seeks.add(-10) },
+                    onSeekForward = { seeks.add(10) },
+                    onSeekForward30 = { seeks.add(30) },
+                    onScrub = {},
+                    onScrubEnd = {},
+                    onTracks = {},
+                    onSettings = {},
+                    onInfo = {},
+                    onPip = null,
+                )
+            }
+        }
+        for (label in listOf("Back 30 seconds", "Back 10 seconds", "Forward 10 seconds", "Forward 30 seconds")) {
+            compose.onNodeWithContentDescription(label).performClick()
+        }
+        assertEquals(listOf(-30, -10, 10, 30), seeks)
+        val back30 = compose.onNodeWithContentDescription("Back 30 seconds")
+        back30.performSemanticsAction(SemanticsActions.RequestFocus)
+        back30.performKeyInput { pressKey(Key.DirectionRight) }
+        compose.onNodeWithContentDescription("Back 10 seconds").assertIsFocused()
+        compose.onNodeWithContentDescription("Forward 10 seconds")
+            .performSemanticsAction(SemanticsActions.RequestFocus)
+        compose.onNodeWithContentDescription("Forward 10 seconds")
+            .performKeyInput { pressKey(Key.DirectionRight) }
+        compose.onNodeWithContentDescription("Forward 30 seconds").assertIsFocused()
+        assertEquals(listOf(-30, -10, 10, 30), seeks)
+    }
+
+    @Test
     fun playPauseReceivesFocusWhenControlsOpen() {
         compose.setContent {
             PlurxTheme {
@@ -38,8 +81,10 @@ class PlayerControlsFocusTest {
                     requestInitialFocus = true,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},
@@ -69,8 +114,10 @@ class PlayerControlsFocusTest {
                     requestInitialFocus = false,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},
@@ -114,8 +161,10 @@ class PlayerControlsFocusTest {
                     initialFocus = PlayerControlId.Info,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},
@@ -150,8 +199,10 @@ class PlayerControlsFocusTest {
                     requestInitialFocus = true,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},
@@ -243,8 +294,10 @@ class PlayerControlsFocusTest {
                     requestInitialFocus = false,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},
@@ -273,8 +326,10 @@ class PlayerControlsFocusTest {
                     requestInitialFocus = false,
                     onClose = {},
                     onPlayPause = {},
+                    onSeekBack30 = {},
                     onSeekBack = {},
                     onSeekForward = {},
+                    onSeekForward30 = {},
                     onScrub = {},
                     onScrubEnd = {},
                     onTracks = {},

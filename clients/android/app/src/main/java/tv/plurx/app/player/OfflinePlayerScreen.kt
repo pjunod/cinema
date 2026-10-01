@@ -333,7 +333,9 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                     }
                 },
                 onPlayPause = { if (player.isPlaying) player.pause() else player.play(); poke() },
+                onSeekBack30 = { player.seekTo(clampToKnownDuration(player.currentPosition - 30_000, durationMs)); poke() },
                 onSeekBack = { player.seekTo((player.currentPosition - PlayerInputPolicy.SKIP_STEP_MS).coerceAtLeast(0)); poke() },
+                onSeekForward30 = { player.seekTo(clampToKnownDuration(player.currentPosition + 30_000, durationMs)); poke() },
                 onSeekForward = { player.seekTo(clampToKnownDuration(player.currentPosition + PlayerInputPolicy.SKIP_STEP_MS, durationMs)); poke() },
                 onScrub = { pendingMs = it },
                 onScrubEnd = { pendingMs?.let(player::seekTo); pendingMs = null; poke() },

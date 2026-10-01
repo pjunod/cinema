@@ -91,6 +91,7 @@ function localSeekHarness({buffered, published, vod=false, seekable, copyHls=fal
     "let nextTimerId=0;function setTimeout(fn,ms){if(ms===100){fn();return -1;}const id=++nextTimerId;timers.set(id,{fn,ms});return id;}",
     "function clearTimeout(id){timers.delete(id);} function markerNowMs(){return 0;} function pbTotalSec(){return 600;}",
     "function playbackChangeAlreadyInFlight(){return false;} function endWait(){}",
+    "function qualityForce(){return null;}",
     "function restartPendingPlaybackOpen(){return false;} function hasPendingPlaybackOpen(){return false;}",
     "function beginPlaybackControlSeek(p,target){const value={targetMs:target*1000,executed:false};p.controlSeek=value;return value;}",
     "function markPlaybackControlSeekExecuted(p){p.controlSeek.executed=true;p.controlSeek.executedAt=now;p.controlSeek.frameFloor=0;}",
@@ -632,4 +633,50 @@ test("the last two seconds of a title still deduplicate", () => {
   player.inFlightChangeKey = recipe.key(player, 7198, change);
   assert.equal(recipe.inFlight(player, 7198, change), true,
     "the guard has to run on the clamped target the execution was keyed on");
+});
+
+
+test("10 and 30 second buttons accumulate mixed taps and clamp at title bounds", () => {
+  const player = {pendingMediaChange: {reason: "seek"},
+    controlSeek: {targetMs: 100_000, executed: false}};
+  const commits = [], timers = new Map();
+  const nudge = new Function("PLAYER", "PlaybackPolicy", "timers", "commits", `
+    let NUDGE_T=null, timerId=0;
+    const PLAYER_SEEK_GESTURE={cancel(){}};
+    function setTimeout(fn){const id=++timerId;timers.set(id,fn);return id;}
+    function clearTimeout(id){timers.delete(id);}
+    function pbPosSec(){return 20;}
+    function pbTotalSec(){return 150;}
+    function pbTick(){} function playerActivity(){}
+    function seekTo(target){commits.push(target);}
+    ${source("unexecutedPlaybackDestinationSec")}
+    ${source("pbRelativeSeekBase")}
+    ${source("clearPointerSeekTimer")}
+    ${source("clearPendingSeekTimer")}
+    ${source("commitPendingSeek")}
+    ${source("nudge")}
+    return nudge;
+  `)(player, policy, timers, commits);
+  const html = shellSource().html;
+  const click = (id) => {
+    const button = html.match(new RegExp('<button[^>]*id="' + id + '"[^>]*>'))?.[0];
+    assert.ok(button, `${id} must be offered by the shipped player`);
+    const handler = button.match(/onclick="([^"]+)"/)?.[1];
+    assert.ok(handler, `${id} must be wired`);
+    new Function("nudge", handler)(nudge);
+    assert.equal(timers.size, 1, "mixed taps coalesce into one seek");
+    return player._seekPending;
+  };
+  assert.equal(click("pbforward30"), 130, "count from the pending destination");
+  assert.equal(click("pbback"), 120);
+  assert.equal(click("pbforward"), 130);
+  assert.equal(click("pbback30"), 100);
+  click("pbforward30");
+  assert.equal(click("pbforward30"), 150, "stop at the end");
+  for (let i = 0; i < 5; i++) click("pbback30");
+  assert.equal(click("pbback"), 0, "stop at the start");
+  click("pbforward30");
+  [...timers.values()][0]();
+  assert.deepEqual(commits, [30], "dispatch only the final selected destination");
+  assert.equal(timers.size, 0);
 });
