@@ -3447,6 +3447,24 @@ source_anchor = "internal fun autoActiveProductionPressure("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05PacingAndAttachmentUpgradeWindowsUseActualEvidence()"
 
+[[fixes]]
+id = "apple.auto-observed-attachment-quiet-window"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let quietStart = max(observationStartMs, lastStallMs ?? observationStartMs)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade"
+
+[[fixes]]
+id = "android.auto-observed-attachment-quiet-window"
+commits = []
+supplements = "apple.auto-paced-production-upgrade-windows"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "val quietStart = maxOf(start, lastStallMs ?: start)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "fun a05FreshAttachmentRequiresObservedQuietIntervalBeforeHeadroomUpgrade()"
+
 # The new exact Android regression compiles this existing test source; this
 # bridge does not claim that any old PlaybackControlAskTest method executed.
 [[fixes]]
