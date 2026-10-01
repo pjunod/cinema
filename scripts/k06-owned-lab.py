@@ -110,14 +110,25 @@ def config(n, joining):
             + ('join_token_file = "/data/join.token"\n' if joining else ''))
 
 
-def command(args, limit=1024 * 1024, timeout=20):
+LIMITER_CODE = """import json,os,resource,sys
+for name,value in json.loads(sys.argv[1]).items():
+    resource.setrlimit(getattr(resource,name),(value,value))
+os.execvp(sys.argv[2],sys.argv[2:])
+"""
+
+
+def limited_args(args, caps):
+    # Limits run in a fresh exec'ed interpreter, never a threaded post-fork callback.
+    return [sys.executable, "-c", LIMITER_CODE, json.dumps(caps, sort_keys=True), *args]
+
+
+def command(args, limit=1024 * 1024, timeout=20, capture_stderr=False):
     # Temporary file prevents subprocess PIPE accumulation; reject oversized output.
     import tempfile
     with tempfile.TemporaryFile() as output:
-        def cap_output():
-            resource.setrlimit(resource.RLIMIT_FSIZE, (limit, limit))
-        result = subprocess.run(args, stdout=output, stderr=subprocess.DEVNULL, timeout=timeout,
-                                preexec_fn=cap_output)
+        result = subprocess.run(limited_args(args, {"RLIMIT_FSIZE": limit}), stdout=output,
+                                stderr=subprocess.STDOUT if capture_stderr else subprocess.DEVNULL,
+                                timeout=timeout)
         require(output.tell() <= limit, "command output cap exceeded")
         output.seek(0)
         data = output.read(limit + 1)
@@ -135,10 +146,9 @@ def remote(path, m, n, action, payload=None):
             "python3 -c " + shlex.quote(wrapper) + " --worker"]
     import tempfile
     with tempfile.TemporaryFile() as output:
-        def cap_output():
-            resource.setrlimit(resource.RLIMIT_FSIZE, (2 * 1024 * 1024, 2 * 1024 * 1024))
-        result = subprocess.run(args, input=(json.dumps(source) + "\n" + request + "\n").encode(),
-                                stdout=output, stderr=subprocess.DEVNULL, timeout=30, preexec_fn=cap_output)
+        result = subprocess.run(limited_args(args, {"RLIMIT_FSIZE": 2 * 1024 * 1024}),
+                                input=(json.dumps(source) + "\n" + request + "\n").encode(),
+                                stdout=output, stderr=subprocess.DEVNULL, timeout=30)
         require(result.returncode == 0, "remote operation refused on " + n["host"])
         output.seek(0)
         return json.loads(output.read(2 * 1024 * 1024))
@@ -249,20 +259,21 @@ def start_load(root, host):
               "--server-bitrate-limit", "22M", "-J"] if receiver else
              ["-c", "192.168.4.8", "-B", "192.168.4.14", "-p", "55423", "-t", "60", "-b", "20M",
               "--connect-timeout", "3000", "-J"])
-    def limits():
-        for kind, value in ((resource.RLIMIT_AS, 256 * 1024**2), (resource.RLIMIT_CPU, 15),
-                            (resource.RLIMIT_FSIZE, 2 * 1024**2), (resource.RLIMIT_NPROC, 256),
-                            (resource.RLIMIT_NOFILE, 64)):
-            resource.setrlimit(kind, (value, value))
+    caps = {"RLIMIT_AS": 256 * 1024**2, "RLIMIT_CPU": 15, "RLIMIT_FSIZE": 2 * 1024**2,
+            "RLIMIT_NPROC": 256, "RLIMIT_NOFILE": 64}
     fd = os.open(root / "load.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
-        process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=fd, stderr=subprocess.DEVNULL,
-                                   start_new_session=True, preexec_fn=limits)
+        process = subprocess.Popen(limited_args(args, caps), stdin=subprocess.DEVNULL, stdout=fd,
+                                   stderr=subprocess.DEVNULL, start_new_session=True)
     finally:
         os.close(fd)
-    time.sleep(0.05)
+    deadline = time.monotonic() + 2
+    expected = str(Path(shutil.which("timeout")).resolve())
     identity = process_identity(process.pid)
-    require(identity and identity["exe"] == str(Path(shutil.which("timeout")).resolve()), "load identity unavailable")
+    while identity and identity["exe"] != expected and time.monotonic() < deadline:
+        time.sleep(0.01)
+        identity = process_identity(process.pid)
+    require(identity and identity["exe"] == expected, "load identity unavailable")
     private_write(root / ".load-process.json", identity)
     return identity
 
@@ -403,7 +414,8 @@ def worker(request):
                 command(["docker", "stop", "--time=10", n["container_id"]])
             logs = root / "daemon.log"
             require(not logs.exists(), "existing partial logs require reviewed recovery")
-            data = command(["docker", "logs", "--timestamps", n["container_id"]], limit=32 * 1024**2)
+            data = command(["docker", "logs", "--timestamps", n["container_id"]],
+                           limit=32 * 1024**2, capture_stderr=True)
             fd = os.open(logs, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
             with os.fdopen(fd, "w") as stream:
                 stream.write(data)
