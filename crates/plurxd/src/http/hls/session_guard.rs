@@ -23,6 +23,12 @@ pub struct StartResponse {
     /// Actual server-produced audio, not the client's proposed video plan.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_audio: Option<plurx_core::playback::audio::AudioDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_aware_auto_protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_candidates: Option<Vec<plurx_core::playback::candidate::QualityCandidate>>,
     pub session_id: String,
     pub playlist_url: String,
     pub duration_ms: Option<i64>,

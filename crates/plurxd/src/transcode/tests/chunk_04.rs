@@ -1066,6 +1066,7 @@
         previous_session_id: &str,
     ) -> SessionRequest {
         SessionRequest {
+            candidate_context: None,
             control_sequence: None,
             file_id,
             playback_id: playback_id.into(),

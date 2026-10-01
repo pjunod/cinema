@@ -253,6 +253,7 @@ struct PlayerSurface: UIViewRepresentable {
     let pictureInPicture: PictureInPictureController
     let pgsOverlay: PGSOverlayWindow?
     let allowsPictureInPicture: Bool
+    var presentationTargetChanged: ((Int?, Int?) -> Void)? = nil
 
     nonisolated static func shouldAllowPictureInPicture(
         isTearingDown: Bool,
@@ -267,6 +268,7 @@ struct PlayerSurface: UIViewRepresentable {
 
     func makeUIView(context: Context) -> PlayerSurfaceView {
         let view = PlayerSurfaceView()
+        view.presentationTargetChanged = presentationTargetChanged
         view.playerLayer.player = player
         view.applyPGSOverlay(pgsOverlay, to: player.currentItem)
         if allowsPictureInPicture {
@@ -276,6 +278,8 @@ struct PlayerSurface: UIViewRepresentable {
     }
 
     func updateUIView(_ view: PlayerSurfaceView, context: Context) {
+        view.presentationTargetChanged = presentationTargetChanged
+        view.reportPresentationTarget()
         if view.playerLayer.player !== player {
             view.playerLayer.player = player
         }
@@ -296,6 +300,8 @@ struct PlayerSurface: UIViewRepresentable {
         coordinator.pictureInPicture.detach(resetPublishedState: false)
         view.applyPGSOverlay(nil, to: nil)
         view.playerLayer.player = nil
+        view.presentationTargetChanged?(nil, nil)
+        view.presentationTargetChanged = nil
         #if os(tvOS)
         PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
         #endif
@@ -312,6 +318,37 @@ struct PlayerSurface: UIViewRepresentable {
 
 final class PlayerSurfaceView: UIView {
     let playerLayer = AVPlayerLayer()
+    var presentationTargetChanged: ((Int?, Int?) -> Void)?
+
+    func reportPresentationTarget() {
+        var ancestor: UIView? = self
+        while let view = ancestor {
+            if view.isHidden || view.alpha <= 0 {
+                presentationTargetChanged?(nil, nil)
+                return
+            }
+            ancestor = view.superview
+        }
+        guard let window, window.windowScene?.activationState == .foregroundActive,
+              !bounds.isEmpty, !convert(bounds, to: window).intersection(window.bounds).isEmpty else {
+            presentationTargetChanged?(nil, nil)
+            return
+        }
+        let scale = window.screen.scale
+        let width = bounds.width * scale
+        let height = bounds.height * scale
+        guard width.isFinite, height.isFinite,
+              width >= 1, height >= 1, width <= 16384, height <= 16384 else {
+            presentationTargetChanged?(nil, nil)
+            return
+        }
+        presentationTargetChanged?(Int(width.rounded()), Int(height.rounded()))
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        reportPresentationTarget()
+    }
 
     private struct OverlayNode {
         let layer: CALayer
@@ -347,6 +384,7 @@ final class PlayerSurfaceView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        reportPresentationTarget()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         playerLayer.frame = bounds

@@ -2064,6 +2064,7 @@
         use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
         let mut request = SessionRequest {
             control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
+            candidate_context: None,
             automatic: false, previous_session_id: None, reopen_reason: None,
             kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
             audio_index: None, audio_delivery: None, audio_claim: None,
@@ -2105,6 +2106,7 @@
         }, downmix: None, reason: "retained actual producer".into() };
         let mut request = SessionRequest {
             control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,
+            candidate_context: None,
             automatic: false, previous_session_id: None, reopen_reason: None,
             kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
             audio_index: Some(0), audio_delivery: Some(retained.clone()), audio_claim: Some(claim.clone()),

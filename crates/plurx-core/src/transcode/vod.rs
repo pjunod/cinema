@@ -207,7 +207,15 @@ pub fn vod_pipe_args(
     );
     // Use the same explicit even raster for CPU scale, GPU/bitmap scale,
     // identity and HLS facts; -2's independent aspect rounding can differ.
-    if let Some((width, height)) = super::output_size(source, media.target_height) {
+    let raster = if plan.output_contract().normalized_geometry().is_some() {
+        plan.output_contract()
+            .effective_width()
+            .zip(plan.output_contract().effective_height())
+            .map(|(width, height)| (i64::from(width), i64::from(height)))
+    } else {
+        super::output_size(source, media.target_height)
+    };
+    if let Some((width, height)) = raster {
         let automatic = format!("scale=-2:'min({},ih)'", media.target_height);
         for flag in ["-vf", "-filter_complex"] {
             if let Some(index) = args.iter().position(|arg| arg == flag) {

@@ -26,14 +26,15 @@ mod vod;
 
 pub use decode::{
     plan_can_name_decoder, resolve_transcode, ArtifactQualification, AttemptRestrictions,
-    CapabilityStatus, DecodeBackend, DecodeCacheIdentity, DecodeCapabilities, DecodeCapability,
-    DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
-    DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
-    DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
-    FrameRateProvenance, InterlaceVerdict, OutputWidthRule, PlanError, PlanSourceBinding,
-    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
-    StreamSelectionProvenance, SubtitleRendering, ToneMapPeakSource, TranscodeMediaOptions,
-    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
+    AutoQualityRateProfile, CapabilityStatus, DecodeBackend, DecodeCacheIdentity,
+    DecodeCapabilities, DecodeCapability, DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata,
+    DecodeEvidence, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot, DecodeReason,
+    DecodeSourceIdentity, DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain,
+    FrameRate, FrameRateProvenance, InterlaceVerdict, NormalizedGeometry, OutputBandwidth,
+    OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract, Rational, ResolvedDecode,
+    ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance, SubtitleRendering,
+    ToneMapPeakSource, TranscodeMediaOptions, TranscodeRequest,
+    HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 pub use encoder::{
@@ -799,6 +800,9 @@ pub struct SubtitleBurn {
 /// Everything needed to build a transcode command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TranscodeOptions {
+    /// Conditional candidate semantics; absent preserves the legacy recipe.
+    pub auto_quality_rate_profile: Option<AutoQualityRateProfile>,
+    pub normalized_geometry: bool,
     pub target_height: i64,
     pub video_bitrate_kbps: u32,
     /// Validated rate control. Requested settings never reach this struct: a
@@ -987,6 +991,8 @@ pub const AUDIO_BITRATE_KBPS_DEFAULT: u32 = 160;
 impl Default for TranscodeOptions {
     fn default() -> Self {
         TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             video_bitrate_kbps: 8000,
             effective_rate_control: EffectiveRateControl::Vbr,
@@ -1105,7 +1111,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
         |value| (u32::try_from(value).unwrap_or(1000), ToneMapPeakSource::Cll),
     );
     video_filters_for_contract(
-        output_size(source, opts.target_height),
+        (output_size(source, opts.target_height), None),
         (
             source.hdr.as_deref(),
             source.hdr.is_some(),
@@ -1125,7 +1131,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
 // this signature at seven. What the source declares, whether that counts as
 // HDR, and what the route will carry are one question asked three ways.
 fn video_filters_for_contract(
-    output_size: Option<(i64, i64)>,
+    geometry: (Option<(i64, i64)>, Option<NormalizedGeometry>),
     dynamic_range: (Option<&str>, bool, Option<&str>),
     deinterlace: Deinterlace,
     tone_map_peak: (u32, ToneMapPeakSource),
@@ -1133,7 +1139,11 @@ fn video_filters_for_contract(
     source_path: &str,
 ) -> String {
     let (input_dynamic_range, input_is_hdr, routing_dynamic_range) = dynamic_range;
+    let (output_size, normalization) = geometry;
     let mut chain: Vec<String> = Vec::new();
+    if let Some(rate) = normalization.and_then(|geometry| geometry.frame_rate) {
+        chain.push(format!("fps={}/{}", rate.numerator(), rate.denominator()));
+    }
 
     // A GPU pipeline owns scale and tone-map together: they are one pass on
     // the video-processing block, and splitting them would put the download
@@ -1170,6 +1180,17 @@ fn video_filters_for_contract(
                 .expect("special software renderers always contain a scale step");
             gpu.insert_str(scale, "bwdif=mode=send_frame:parity=auto:deint=interlaced,");
         }
+        if let Some(normalization) = normalization {
+            if let Some(rotation) = normalization.rotation_filter() {
+                // Dolby RPU processing precedes spatial transformation. These
+                // software graphs have one scale step after reshape/tonemap.
+                let scale = gpu
+                    .find("scale=")
+                    .expect("normalized software renderer has scale");
+                gpu.insert_str(scale, &format!("{rotation},"));
+            }
+            gpu.push_str(",setsar=1");
+        }
         if (bitmap_burn || text_burn)
             && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
         {
@@ -1186,9 +1207,16 @@ fn video_filters_for_contract(
     if deinterlace == Deinterlace::BwdifSendFrame {
         chain.push("bwdif=mode=send_frame:parity=auto:deint=interlaced".to_owned());
     }
-
-    // Downscale to target height, keep aspect, even dims, never upscale.
-    chain.push(format!("scale=-2:'min({h},ih)'", h = opts.target_height));
+    if let Some(normalization) = normalization {
+        if let Some(rotation) = normalization.rotation_filter() {
+            chain.push(rotation.to_owned());
+        }
+        let (width, height) = output_size.expect("normalized plan has exact raster");
+        chain.push(format!("scale={width}:{height},setsar=1"));
+    } else {
+        // Preserve the shipping argument/identity contract for legacy routes.
+        chain.push(format!("scale=-2:'min({h},ih)'", h = opts.target_height));
+    }
 
     // HDR → SDR tone-map when the source carries HDR.
     if input_is_hdr && opts.tone_map != ToneMap::None {
@@ -1517,6 +1545,8 @@ pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec
 pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecution) -> Vec<String> {
     let media = plan.options();
     let options = TranscodeOptions {
+        auto_quality_rate_profile: None,
+        normalized_geometry: false,
         target_height: media.target_height,
         video_bitrate_kbps: media.video_bitrate_kbps,
         effective_rate_control: media.effective_rate_control,
@@ -1659,6 +1689,16 @@ fn hls_args_inner(
         (pipeline_decode, None)
     };
     args.extend(decode_args);
+    if plan.is_some_and(|plan| plan.output_contract().normalized_geometry().is_some()) {
+        // Clearing the INPUT matrix prevents it surviving manual pixel rotation
+        // into MP4 (output rotate tags alone do not remove this side data).
+        // Exact worker qualification must prove this option/graph on its build.
+        args.extend([
+            "-noautorotate".to_owned(),
+            "-display_rotation".to_owned(),
+            "0".to_owned(),
+        ]);
+    }
 
     // Pace this input (see [`Pacing`]). An encode that runs faster than
     // realtime otherwise writes the whole film ahead of a playhead that will
@@ -1725,7 +1765,10 @@ fn hls_args_inner(
         },
         |plan| {
             video_filters_for_contract(
-                planned_output_size,
+                (
+                    planned_output_size,
+                    plan.output_contract().normalized_geometry(),
+                ),
                 (
                     plan.input_hdr_format(),
                     plan.input_is_hdr(),
@@ -1824,6 +1867,21 @@ fn hls_args_inner(
         opts.force_idr,
         opts.software_threads,
     ));
+
+    if plan
+        .and_then(|plan| plan.output_contract().normalized_geometry())
+        .and_then(|geometry| geometry.rate_profile)
+        .is_some()
+    {
+        // The class explicitly promises H.264 High level5.0, not a profile
+        // inferred from the requested height or encoder default.
+        args.extend([
+            "-profile:v".to_owned(),
+            "high".to_owned(),
+            "-level:v".to_owned(),
+            "5.0".to_owned(),
+        ]);
+    }
 
     // Segment-aligned keyframes so each segment is independently decodable.
     args.push("-force_key_frames".into());
@@ -2730,6 +2788,8 @@ mod tests {
     #[test]
     fn the_cpu_tone_map_names_peak_provenance_in_its_recipe() {
         let options = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             pipeline: Pipeline::Cpu,
             tone_map: ToneMap::Zscale,
@@ -2824,6 +2884,8 @@ mod tests {
         let heavy_hevc = file(Some("hdr10"));
         let dovi = file(Some("dolby_vision"));
         let options = |pipeline| TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             pipeline,
             ..TranscodeOptions::default()
         };
@@ -2985,6 +3047,8 @@ mod tests {
     #[test]
     fn software_hls_args_are_well_formed() {
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             video_bitrate_kbps: 6000,
             ..Default::default()
@@ -3025,6 +3089,8 @@ mod tests {
         f.width = Some(3840);
         f.height = Some(2160);
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 2,
@@ -3064,6 +3130,8 @@ mod tests {
         // A text burn is a filter in the chain, not a composite — it must not
         // take this path.
         let text = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 0,
                 bitmap: false,
@@ -3087,6 +3155,8 @@ mod tests {
         f.height = Some(2160);
         f.bit_depth = Some(10);
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 2160,
             pipeline: Pipeline::VppQsv,
             subtitle_burn: Some(SubtitleBurn {
@@ -3134,6 +3204,8 @@ mod tests {
         f.height = Some(2160);
         f.bit_depth = Some(10);
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 0,
@@ -3153,6 +3225,8 @@ mod tests {
         );
         // Without a burn the suffix stays at the end of the plain chain.
         let plain = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             ..Default::default()
         };
@@ -3267,6 +3341,8 @@ mod tests {
                 &source,
                 Encoder::Software,
                 &TranscodeOptions {
+                    auto_quality_rate_profile: None,
+                    normalized_geometry: false,
                     pipeline,
                     ..TranscodeOptions::default()
                 },
@@ -3319,6 +3395,8 @@ mod tests {
         let mut source = file(Some("dolby_vision"));
         source.hdr_format = Some("Dolby Vision · Profile 5".into());
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             tone_map: ToneMap::Tonemapx,
             pipeline: Pipeline::DoviTonemapx,
             ..Default::default()
@@ -3393,6 +3471,8 @@ mod tests {
         let mut source = file(Some("dolby_vision"));
         source.hdr_format = Some("Dolby Vision · Profile 5".into());
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             tone_map: ToneMap::Tonemapx,
             pipeline: Pipeline::DoviTonemapx,
             target_height: 1080,
@@ -3475,6 +3555,8 @@ mod tests {
         let mut source = file(Some("dolby_vision"));
         source.hdr_format = Some("Dolby Vision · Profile 5".into());
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             tone_map: ToneMap::None,
             pipeline: Pipeline::DoviPassthrough,
             target_height: 1080,
@@ -3518,6 +3600,8 @@ mod tests {
             &source,
             Encoder::Qsv,
             &TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 tone_map: ToneMap::None,
                 pipeline: Pipeline::DoviPassthrough,
                 target_height: 2160,
@@ -3664,6 +3748,8 @@ mod tests {
             &source,
             Encoder::Software,
             &TranscodeOptions {
+                auto_quality_rate_profile: None,
+                normalized_geometry: false,
                 tone_map: ToneMap::None,
                 pipeline: Pipeline::DoviPassthrough,
                 target_height: 1080,
@@ -3744,6 +3830,8 @@ mod tests {
     fn tonemap_none_passes_hdr_through() {
         // PLURX_TONEMAP=off → no tone-map filter, HDR just normalized to yuv420p.
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             tone_map: ToneMap::None,
             ..Default::default()
         };
@@ -3763,6 +3851,8 @@ mod tests {
     #[test]
     fn start_offset_seeks_input() {
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             start_seconds: 90.5,
             ..Default::default()
         };
@@ -3783,6 +3873,8 @@ mod tests {
     #[test]
     fn text_subtitle_burn_uses_libass() {
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             subtitle_burn: Some(SubtitleBurn {
                 subtitle_index: 2,
                 bitmap: false,
@@ -3806,6 +3898,8 @@ mod tests {
         f.height = Some(2160);
         f.bit_depth = Some(10);
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 1080,
             pipeline: Pipeline::VppQsv,
             subtitle_burn: Some(SubtitleBurn {
@@ -4659,6 +4753,8 @@ mod tests {
         let out_dir = dir.path().join("tx");
         std::fs::create_dir_all(&out_dir).expect("out dir");
         let opts = TranscodeOptions {
+            auto_quality_rate_profile: None,
+            normalized_geometry: false,
             target_height: 108,
             start_seconds: 12.3,
             tone_map: ToneMap::None,
