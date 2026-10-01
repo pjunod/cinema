@@ -199,6 +199,44 @@ def command(args, limit=1024 * 1024, timeout=20, capture_stderr=False):
     return data.decode()
 
 
+POLICY_REFUSALS = frozenset((
+    "available RAM below 8 GiB", "available disk below 10 GiB", "host not idle",
+    "sustained host pressure", "active swap traffic", "active build campaign",
+))
+
+
+def remote_failure(stderr, returncode, timed_out=False):
+    """Retain bounded diagnostic facts, never arbitrary remote text or inputs."""
+    import tempfile
+    stderr.seek(0)
+    digest = hashlib.sha256()
+    total = 0
+    tail = b""
+    while chunk := stderr.read(64 * 1024):
+        digest.update(chunk)
+        total += len(chunk)
+        tail = (tail + chunk)[-64 * 1024:]
+    # Exact whole lines only: a legitimate prefix followed by a secret is not
+    # a policy reason. Untrusted SSH/worker output never becomes terminal text.
+    lines = tail.splitlines()
+    if total > len(tail) and lines:
+        lines = lines[1:]  # The first retained line might be partial.
+    allowed = {("k06-owned-lab: " + reason).encode(): reason for reason in POLICY_REFUSALS}
+    reasons = sorted({allowed[line] for line in lines if line in allowed})
+    sanitized = "\n".join(line.decode("ascii") if line in allowed else "<redacted>"
+                          for line in lines)
+    retained = sanitized.encode()[-64 * 1024:].decode("ascii")
+    root = Path(tempfile.mkdtemp(prefix="k06-remote-failure-"))
+    private_write(root / "stderr-evidence.json", {
+        "schema": 1, "returncode": returncode, "timed_out": timed_out,
+        "stderr_bytes": total, "stderr_sha256": digest.hexdigest(),
+        "tail_truncated": total > 64 * 1024, "redacted_tail": retained,
+        "policy_reasons": reasons, "stdout_retained": False,
+    })
+    reason = reasons[0] if len(reasons) == 1 and not timed_out else "remote transport refused"
+    return "{}; private evidence: {}".format(reason, root / "stderr-evidence.json")
+
+
 def remote(path, m, n, action, payload=None):
     # The complete controller goes over stdin, not git history or credentials.
     source = Path(__file__).read_text()
@@ -208,11 +246,15 @@ def remote(path, m, n, action, payload=None):
             "-o", "ConnectionAttempts=1", "pjunod@" + n["ip"],
             "python3 -c " + shlex.quote(wrapper) + " --worker"]
     import tempfile
-    with tempfile.TemporaryFile() as output:
-        result = subprocess.run(limited_args(args, {"RLIMIT_FSIZE": 2 * 1024 * 1024}),
-                                input=(json.dumps(source) + "\n" + request + "\n").encode(),
-                                stdout=output, stderr=subprocess.DEVNULL, timeout=30)
-        require(result.returncode == 0, "remote operation refused on " + n["host"])
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as stderr:
+        try:
+            result = subprocess.run(limited_args(args, {"RLIMIT_FSIZE": 2 * 1024 * 1024}),
+                                    input=(json.dumps(source) + "\n" + request + "\n").encode(),
+                                    stdout=output, stderr=stderr, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise ValueError(remote_failure(stderr, None, timed_out=True)) from None
+        if result.returncode != 0:
+            raise ValueError(remote_failure(stderr, result.returncode))
         output.seek(0)
         return json.loads(output.read(2 * 1024 * 1024))
 
