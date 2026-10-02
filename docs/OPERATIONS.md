@@ -5148,6 +5148,9 @@ Hiqlite operation.
 
 Playback telemetry writer metrics are also node-local and fixed-cardinality;
 they never label a session, file, user, network, or path.
+Each store instance owns a separate writer registration. Expired store
+registrations are discarded when a new writer is registered, so a replacement
+store cannot inherit an abandoned event queue.
 
 | Metric | How to read it |
 |---|---|
