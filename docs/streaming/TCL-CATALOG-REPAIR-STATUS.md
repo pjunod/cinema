@@ -24,7 +24,7 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Android compaction and shared contract | done | No legacy blanket 400 |
 | Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
 | Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
-| Review and fast lane | pending | No tests claimed yet |
+| Review and fast lane | ready for review | Complete batched diff; no tests claimed yet |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
 
 ## 2. Decisions — evidence required before dependent changes
@@ -94,3 +94,8 @@ integration base; no independently merged task PRs are being created. Main's
 fast lane includes its fast Rust unit/SQLite lane. It runs only after the
 adversarial review, alongside focused feature-enabled generation evidence.
 Full cluster qualification and device deployment remain separate acceptance.
+
+Review candidate: `56e52c50e` integrates typed outcomes and deadlines;
+`853487d70` integrates current main and the retained-source regression. All
+commits ran the tracked lint/format/Clippy/JavaScript hook. The decoder snapshot
+regression now tests overflow at 65, matching the negotiated shared bound.

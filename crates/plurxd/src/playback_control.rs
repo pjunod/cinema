@@ -15799,7 +15799,7 @@ mod tests {
             );
         }
         let mut bad = valid.clone();
-        bad["video"] = serde_json::json!(vec![valid["video"][0].clone(); 17]);
+        bad["video"] = serde_json::json!(vec![valid["video"][0].clone(); 65]);
         assert!(serde_json::from_value::<DecoderCapsSnapshot>(bad).is_err());
     }
 
