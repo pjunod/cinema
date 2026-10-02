@@ -482,7 +482,7 @@ async fn publish_copy_reader_outcome(
     sid: &str,
     producer_attempt: u64,
     outcome: copyseg::Outcome,
-) {
+) -> bool {
     let classification = match outcome {
         copyseg::Outcome::Completed(counts) => {
             tracing::info!(
@@ -531,7 +531,7 @@ async fn publish_copy_reader_outcome(
                 counts = %copyseg::summary(&counts),
                 "copy segmenter stopped after lifecycle teardown"
             );
-            return;
+            return false;
         }
     };
     let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
@@ -548,7 +548,9 @@ async fn publish_copy_reader_outcome(
             ?rejection,
             "copy reader classification was not accepted by the exact producer attempt"
         );
+        return false;
     }
+    classification == crate::playback_control::CopyProducerExitClassification::Completed
 }
 
 #[allow(clippy::too_many_arguments)] // one copy producer's worth of identity
@@ -581,6 +583,11 @@ pub(super) fn spawn_copy_reader_owner(
         let stdout = Arc::new(Mutex::new(stdout));
         let reader_stdout = Arc::clone(&stdout);
         let worker_sid = sid.clone();
+        let measurement = Arc::new(std::sync::Mutex::new(
+            crate::rolling_output::RollingOutputMeasurement::default(),
+        ));
+        let worker_measurement = Arc::clone(&measurement);
+        let measurement_dir = dir.clone();
         // The completion barrier is installed *before* the worker is spawned
         // and moved into it, so there is no instant in which retirement can
         // observe no writer for a reader that is about to exist. Registration
@@ -621,7 +628,7 @@ pub(super) fn spawn_copy_reader_owner(
         let worker = tokio::spawn(async move {
             let _writer = writer;
             let mut stdout = reader_stdout.lock_owned().await;
-            copyseg::run(
+            copyseg::run_observed(
                 &mut *stdout,
                 dir,
                 &worker_sid,
@@ -629,6 +636,7 @@ pub(super) fn spawn_copy_reader_owner(
                 &source,
                 video,
                 grants,
+                Some(worker_measurement),
             )
             .await
         });
@@ -668,9 +676,45 @@ pub(super) fn spawn_copy_reader_owner(
                 return;
             }
         };
-        publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await;
+        if publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await {
+            let playlist = tokio::time::timeout(
+                COPY_READER_INGRESS_TIMEOUT,
+                plurx_core::transcode::manifest::read_bounded_playlist(
+                    &measurement_dir,
+                    "index.m3u8",
+                ),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten();
+            if !session.control.is_retired()
+                && session.control.current_producer_attempt() == producer_attempt
+            {
+                let observed = playlist
+                    .as_deref()
+                    .and_then(|playlist| measurement.lock().ok()?.complete(playlist));
+                record_output_observation(&sid, producer_attempt, observed);
+            }
+        }
         drop(stdout);
     });
+}
+
+/// Explicitly observational: these numbers are not an artifact/candidate
+/// promise and never amend the session's already frozen master.
+fn record_output_observation(
+    sid: &str,
+    attempt: u64,
+    observation: Option<plurx_core::output_measurement::CompleteOutputRates>,
+) {
+    if let Some(rates) = observation {
+        tracing::info!(target: "plurxd::transcode", session = %session_log_id(sid), producer_attempt = attempt,
+            wire_bytes = rates.wire_bytes, duration_micros = rates.duration_micros,
+            average_bps = rates.average_bps, rfc_peak_bps = rates.rfc_peak_bps,
+            segment_burst_bps = rates.segment_burst_bps,
+            "complete full-mux output observed; reusable retained authority not issued");
+    }
 }
 
 /// Refuse every further upload from the reaped attempt before its directory
@@ -758,6 +802,15 @@ async fn classify_successful_transcode_exit(
         .control
         .classify_producer_exit_before(evidence, probe.deadline)
         .await;
+    if matches!(disposition, Ok(crate::playback_control::RollingProducerCompletionDisposition::CompleteVerifiedDuration
+        | crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration))
+        && !session.control.is_retired()
+        && session.control.current_producer_attempt() == probe.producer_attempt
+        && session.compatibility_producer_attempt() == probe.producer_attempt
+    {
+        record_output_observation(sid, probe.producer_attempt,
+            session.upload.as_ref().and_then(|upload| upload.observed_complete_output()));
+    }
     tracing::info!(
         target: "plurxd::transcode",
         session = %session_log_id(sid),

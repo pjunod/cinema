@@ -32,7 +32,7 @@ use crate::store::{
     AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSION,
 };
 
-use super::clock::{ClockDecision, ClockRefusal};
+use super::clock::{ClockAcquisitionTicket, ClockDecision, ClockRefusal, ClusterClockGuard};
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
@@ -48,6 +48,9 @@ pub const UNKNOWN_HOSTNAME: &str = "unknown-host";
 const JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
 const JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
 const JOIN_TOKEN_VERSION: u32 = 1;
+const FINALIZE_JOIN_TOKEN_SQL: &str =
+    "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
+     WHERE token_hash = $2 AND state = 'redeeming' AND node_id = $3";
 /// Learner admission is a *different* protocol, not a flag on the voter one.
 /// The prefix, the AEAD associated data, and the version constant are all
 /// distinct, so a build that only knows v1 refuses a v2 token at the prefix,
@@ -4238,6 +4241,8 @@ impl MembershipManager {
         expected_role: ClusterRole,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
@@ -4261,7 +4266,9 @@ impl MembershipManager {
         // to have committed a *vote*; a learner has to be a committed member
         // and must not have acquired one, because a learner that appears in
         // the voter set was not admitted by this protocol at all.
-        dispatch_join_finalization(
+        dispatch_clocked_join_finalization(
+            &clock,
+            prepared_admission,
             transition,
             || async {
                 let metrics = inner.client.metrics_db().await?;
@@ -4275,13 +4282,11 @@ impl MembershipManager {
                     .any(|(id, _)| *id == request.raft_id);
                 Ok((is_member, is_voter))
             },
-            |transition| async move {
-                let now = unix_ms()?;
+            |transition, now| async move {
                 Ok(inner
                     .client
                     .execute(
-                        "UPDATE cluster_join_tokens SET state = 'redeemed', redeemed_at = $1 \
-                 WHERE token_hash = $2 AND state = 'redeeming' AND node_id = $3",
+                        FINALIZE_JOIN_TOKEN_SQL,
                         params!(now, transition.token_digest, transition.node_id),
                     )
                     .await?)
@@ -9682,6 +9687,37 @@ where
     Ok(())
 }
 
+/// Finalization is new lifecycle publication only while the token is still
+/// redeeming. Capture precedes the manager's awaited token/role reads; consume
+/// that exact proof after committed-role validation and immediately before
+/// submitting the CAS. An already-completed retry neither consumes nor counts
+/// the capture, and no admission check interprets a submitted CAS's outcome.
+async fn dispatch_clocked_join_finalization<'guard, 'a, O, OF, R, RF>(
+    clock: &'guard ClusterClockGuard,
+    prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    transition: lifecycle::JoinTransition<'a>,
+    observe: O,
+    redeem: R,
+) -> Result<(), MembershipError>
+where
+    O: FnOnce() -> OF,
+    OF: Future<Output = Result<(bool, bool), MembershipError>>,
+    R: FnOnce(lifecycle::JoinTransition<'a>, i64) -> RF,
+    RF: Future<Output = Result<usize, MembershipError>>,
+{
+    dispatch_join_finalization(transition, observe, |transition| async move {
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let now = admission.now_ms();
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        redeem(transition, now).await
+    })
+    .await
+}
+
 /// The production outcome consumer. Effects remain manager-owned operations;
 /// the pure step cannot inspect fresh rows, clear another attempt, or interpret
 /// an ambiguous send as a definite failure. The wrapper adds no I/O, task or
@@ -11000,6 +11036,162 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn finalization_preserves_clock_ticket_and_completed_retry() {
+        use std::cell::Cell;
+        use std::time::Instant;
+
+        use crate::cluster::clock::{ClockRefusal, ClusterClockGuard, PeerClockOffset};
+
+        use super::lifecycle::JoinTransition;
+        use super::{ClusterRole, MembershipError, FINALIZE_JOIN_TOKEN_SQL};
+
+        let publish = |guard: &ClusterClockGuard| {
+            let round = guard.roster(&["peer".into()]);
+            assert!(guard.publish(
+                round,
+                std::collections::BTreeMap::from([(
+                    "peer".into(),
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1_000,
+                        observed_at: Instant::now(),
+                    },
+                )])
+            ));
+        };
+        for role in [ClusterRole::Voter, ClusterRole::Learner] {
+            for schedule in [
+                "completed retry",
+                "unknown entry recovers",
+                "evidence changes during role read",
+                "role not committed",
+                "same original proof",
+                "token owner changed",
+            ] {
+                let database = rusqlite::Connection::open_in_memory().expect("token CAS fixture");
+                database
+                    .execute_batch(
+                        "CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, \
+                         state TEXT, node_id TEXT, redeemed_at INTEGER);",
+                    )
+                    .expect("create token table");
+                let completed = schedule == "completed retry";
+                database
+                    .execute(
+                        "INSERT INTO cluster_join_tokens VALUES ('digest', ?1, ?2, 77)",
+                        rusqlite::params![
+                            if completed { "redeemed" } else { "redeeming" },
+                            if schedule == "token owner changed" {
+                                "other"
+                            } else {
+                                "node"
+                            }
+                        ],
+                    )
+                    .expect("seed token lifecycle");
+                let guard = ClusterClockGuard::new(true);
+                if !matches!(schedule, "completed retry" | "unknown entry recovers") {
+                    publish(&guard);
+                }
+                let prepared = guard.acquire();
+                let original_now = prepared.as_ref().ok().map(|ticket| ticket.now_ms());
+                let observations = Cell::new(0);
+                let writes = Cell::new(0);
+                let database = &database;
+                let writes = &writes;
+                let transition =
+                    JoinTransition::finalization("digest", "node", 41, role, completed);
+                let outcome = super::dispatch_clocked_join_finalization(
+                    &guard,
+                    prepared,
+                    transition,
+                    || async {
+                        observations.set(observations.get() + 1);
+                        tokio::task::yield_now().await;
+                        if schedule == "unknown entry recovers" {
+                            publish(&guard);
+                        } else if schedule == "evidence changes during role read" {
+                            guard.roster_failed();
+                            publish(&guard);
+                        }
+                        Ok((
+                            schedule != "role not committed",
+                            schedule != "role not committed" && role == ClusterRole::Voter,
+                        ))
+                    },
+                    |step, now| async move {
+                        writes.set(writes.get() + 1);
+                        assert_eq!(Some(now), original_now, "{role:?}: {schedule}");
+                        Ok(database
+                            .execute(
+                                FINALIZE_JOIN_TOKEN_SQL,
+                                rusqlite::params![now, step.token_digest, step.node_id],
+                            )
+                            .expect("production token CAS SQL"))
+                    },
+                )
+                .await;
+                let (state, redeemed_at): (String, i64) = database
+                    .query_row(
+                        "SELECT state, redeemed_at FROM cluster_join_tokens WHERE token_hash='digest'",
+                        [],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .expect("inspect actual CAS outcome");
+                match schedule {
+                    "completed retry" => {
+                        assert!(outcome.is_ok());
+                        assert_eq!((observations.get(), writes.get()), (0, 0));
+                        assert_eq!((state.as_str(), redeemed_at), ("redeemed", 77));
+                        assert!(guard
+                            .prometheus()
+                            .contains("decision=\"membership_change\",cause=\"unknown\"} 0\n"));
+                    }
+                    "same original proof" => {
+                        assert!(outcome.is_ok());
+                        assert_eq!((observations.get(), writes.get()), (1, 1));
+                        assert_eq!(state, "redeemed");
+                        assert_eq!(Some(redeemed_at), original_now);
+                    }
+                    "token owner changed" => {
+                        assert!(matches!(outcome, Err(MembershipError::ReusedToken)));
+                        assert_eq!(writes.get(), 1);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    "unknown entry recovers" | "evidence changes during role read" => {
+                        let cause = if schedule == "unknown entry recovers" {
+                            ClockRefusal::Unknown
+                        } else {
+                            ClockRefusal::GenerationChanged
+                        };
+                        assert!(
+                            matches!(outcome, Err(MembershipError::ClockUnbounded(actual)) if actual == cause)
+                        );
+                        assert_eq!(writes.get(), 0);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    "role not committed" => {
+                        assert!(matches!(outcome, Err(MembershipError::Internal(_))));
+                        assert_eq!(writes.get(), 0);
+                        assert_eq!((state.as_str(), redeemed_at), ("redeeming", 77));
+                    }
+                    _ => unreachable!("closed schedules"),
+                }
+            }
+        }
+        let source = include_str!("membership.rs");
+        let finalization = super::tests::method_body(source, "async fn finalize_for_role(");
+        assert!(
+            finalization
+                .find("let prepared_admission = clock.acquire();")
+                .expect("entry")
+                < finalization.find(".await").expect("token read")
+        );
+        assert!(finalization.contains("dispatch_clocked_join_finalization("));
+        assert!(!finalization.contains("let now = unix_ms()?"));
+    }
+
     #[tokio::test]
     async fn join_finalization_consumer_preserves_failure_and_effect_order() {
         use super::lifecycle::{JoinEffect, JoinTransition};

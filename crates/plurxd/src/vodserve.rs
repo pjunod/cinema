@@ -802,6 +802,12 @@ struct Shared {
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
+    /// Only live reserved preparation media already included in working_set.
+    preparation_media: AtomicU64,
+    /// Observes successful foreground graph attachments, not admission attempts.
+    /// Lock order: this guard, private staged artifact, retained registry.
+    /// No await while held; issued immutable artifacts are never revoked here.
+    preparation_attachment: StdMutex<u64>,
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
@@ -1014,6 +1020,8 @@ use generation::*;
 #[path = "vod/output_measurement.rs"]
 mod output_measurement;
 use output_measurement::PublishedOutputMeasurement;
+#[path = "vod/copy_preparation.rs"]
+mod copy_preparation;
 #[path = "vod/retained.rs"]
 pub(crate) mod retained;
 #[path = "vod/retained_manifest.rs"]

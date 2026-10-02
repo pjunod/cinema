@@ -2,6 +2,7 @@
 //! its admission guard until its child has joined; this module owns only the
 //! durable token, monotonic deadline and cancellation notification.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -30,6 +31,43 @@ use metrics::Event;
 pub(crate) use metrics::{accepted_claims, prometheus};
 
 const PUBLICATION_MARGIN: Duration = Duration::from_secs(3);
+
+/// One finite Copy watchdog covers resolution through historical settlement.
+/// Returning drops the owned operation before its caller settles or retires;
+/// cancellation does not assert that an already-dispatched SQL write rolled back.
+pub(crate) async fn watch_copy_preparation(
+    fence: &JobFence,
+    deadline: Instant,
+    still_idle: impl Fn() -> bool,
+    operation: impl std::future::Future<Output = Result<bool, String>>,
+) -> Result<bool, String> {
+    let lost = fence.loss_token();
+    if Instant::now() >= deadline
+        || !still_idle()
+        || (lost.is_cancelled() && !fence.copy_output_completed())
+    {
+        return Err("copy output original admission or deadline unavailable".to_owned());
+    }
+    tokio::pin!(operation);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut operation => return result,
+            _ = tokio::time::sleep_until(deadline) =>
+                return Err("copy output original deadline".to_owned()),
+            _ = lost.cancelled(), if !fence.copy_output_completed() => {
+                if !fence.copy_output_completed() {
+                    return Err("copy output lease lost; settlement may be historical".to_owned());
+                }
+            },
+            _ = tokio::time::sleep(crate::transcode::PRODUCER_POLL) => {
+                if !still_idle() {
+                    return Err("copy output foreground attachment or admission".to_owned());
+                }
+            },
+        }
+    }
+}
 
 /// Disposable per-loop pacing. Empty polls never need a durable timestamp.
 pub(crate) struct IdlePoll {
@@ -116,6 +154,8 @@ struct Inner {
     state: Mutex<ClaimState>,
     deadline: watch::Sender<Instant>,
     lost: CancellationToken,
+    /// Historical acknowledged completion only; never artifact authority.
+    copy_output_completed: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -269,6 +309,7 @@ impl ActiveBackgroundJob {
             }),
             deadline,
             lost: CancellationToken::new(),
+            copy_output_completed: AtomicBool::new(false),
         }));
         let stop = CancellationToken::new();
         let heartbeat_stop = stop.clone();
@@ -353,6 +394,9 @@ impl Drop for ActiveBackgroundJob {
 }
 
 impl JobFence {
+    pub(crate) fn copy_output_completed(&self) -> bool {
+        self.0.copy_output_completed.load(Ordering::Acquire)
+    }
     pub(crate) fn loss_token(&self) -> CancellationToken {
         self.0.lost.clone()
     }
@@ -560,6 +604,58 @@ impl JobFence {
                     .await
             }
         }
+    }
+
+    pub(crate) async fn publish_copy_output(
+        &self,
+        intent: plurx_core::store::background_jobs::CopyOutputIntent,
+        output: plurx_core::store::background_jobs::CopyOutputJobOutput,
+    ) -> Result<bool, StoreError> {
+        let mut state = self.0.state.lock().await;
+        if self.0.kind != plurx_core::store::background_jobs::JobKind::CopyOutputPrepare
+            || !self.0.authority.may_execute_job(self.0.kind).await
+            || !self.may_publish()
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = plurx_core::store::background_jobs::PublishCopyOutputJob {
+            token,
+            intent,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self.0.store.publish_copy_output_job(request.clone()).await {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_copy_output_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        if published {
+            self.0.copy_output_completed.store(true, Ordering::Release);
+        }
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        if published {
+            state.token = None;
+        }
+        Ok(published)
     }
 
     pub(crate) async fn publish_transcode(
@@ -1040,6 +1136,19 @@ impl JobFence {
 /// Find a compatible candidate without letting an unreadable high-priority
 /// item hide every lower item. Keyset pages bound each read; the active-row
 /// cap bounds a complete pass. Admission is held through ambiguous claims.
+pub(crate) enum PreparationClaim {
+    Transcode(
+        plurx_core::domain::PretranscodeJob,
+        ActiveBackgroundJob,
+        crate::transcode::PretranscodeFence,
+    ),
+    Copy(
+        plurx_core::store::background_jobs::BackgroundJob,
+        ActiveBackgroundJob,
+        crate::transcode::FragmentAdmission,
+    ),
+}
+
 pub(crate) async fn claim_pretranscode(
     store: Arc<dyn Store>,
     authority: Arc<dyn ClusterJobAuthority>,
@@ -1047,20 +1156,19 @@ pub(crate) async fn claim_pretranscode(
     node: &str,
     capabilities: &plurx_core::domain::PretranscodeWorkerCapabilities,
     excluded: &[String],
-) -> Result<
-    Option<(
-        plurx_core::domain::PretranscodeJob,
-        ActiveBackgroundJob,
-        crate::transcode::PretranscodeFence,
-    )>,
-    StoreError,
-> {
+) -> Result<Option<PreparationClaim>, StoreError> {
     use plurx_core::store::background_jobs::{
         CandidateQuery, JobKind, JobPayload, MAX_ACTIVE_JOBS, MAX_PAGE_SIZE,
     };
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
-    if !authority.may_execute_job(JobKind::TranscodePrepare).await {
+    let mut kinds = Vec::new();
+    for kind in [JobKind::TranscodePrepare, JobKind::CopyOutputPrepare] {
+        if authority.may_execute_job(kind).await {
+            kinds.push(kind);
+        }
+    }
+    if kinds.is_empty() {
         return Ok(None);
     }
     let mut cursor = None;
@@ -1068,7 +1176,7 @@ pub(crate) async fn claim_pretranscode(
         let page = store
             .job_candidates(CandidateQuery {
                 node_id: node.into(),
-                kinds: vec![JobKind::TranscodePrepare],
+                kinds: kinds.clone(),
                 after: cursor,
                 now_ms: unix_ms()?,
                 limit: MAX_PAGE_SIZE,
@@ -1092,6 +1200,49 @@ pub(crate) async fn claim_pretranscode(
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
+            if let JobPayload::CopyOutputPrepare {
+                intent,
+                scratch_bytes,
+                ..
+            } = &payload
+            {
+                if intent.target_node_id != node || *scratch_bytes > capabilities.scratch_bytes {
+                    continue;
+                }
+                let Some(admission) = transcode.admit_fragment().await else {
+                    return Ok(None);
+                };
+                if !authority.may_execute_job(JobKind::CopyOutputPrepare).await {
+                    continue;
+                }
+                let now_ms = unix_ms()?;
+                let request = ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::CopyOutputPrepare,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                };
+                let Some((job, deadline)) =
+                    claim_with_resolution(store.as_ref(), &candidate, request).await?
+                else {
+                    continue;
+                };
+                let active = ActiveBackgroundJob::start(
+                    Arc::clone(&store),
+                    Arc::clone(&authority),
+                    job.token.clone().ok_or_else(|| {
+                        StoreError::Task("claimed copy job has no ownership token".into())
+                    })?,
+                    deadline,
+                    JobKind::CopyOutputPrepare,
+                )?;
+                return Ok(Some(PreparationClaim::Copy(job, active, admission)));
+            }
             let JobPayload::TranscodePrepare {
                 requirements,
                 target_height,
@@ -1101,7 +1252,8 @@ pub(crate) async fn claim_pretranscode(
             else {
                 continue;
             };
-            if !requirements.compatible_with(capabilities)
+            if !capabilities.validate()
+                || !requirements.compatible_with(capabilities)
                 || i64::from(*target_height) > capabilities.max_target_height
             {
                 continue;
@@ -1154,7 +1306,7 @@ pub(crate) async fn claim_pretranscode(
                 active.fence(),
                 admission,
             );
-            return Ok(Some((projection, active, fence)));
+            return Ok(Some(PreparationClaim::Transcode(projection, active, fence)));
         }
         cursor = page.next;
         if cursor.is_none() {
@@ -1586,6 +1738,85 @@ mod tests {
         CancelJob, EnqueueJob, JobKind, JobPayload, JobRequest, JobState,
     };
     use plurx_core::store::SqliteStore;
+
+    #[tokio::test]
+    async fn copy_watchdog_bounds_pending_operation_and_distinguishes_historical_completion() {
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let (_store, _id, active) = active().await;
+        let fence = active.fence();
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        let pending = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+            Ok(true)
+        };
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_millis(20),
+            || true,
+            pending
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "deadline drops private operation before caller settlement"
+        );
+
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = Dropped(Arc::clone(&dropped));
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || checks.fetch_add(1, Ordering::Relaxed) == 0,
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+                Ok(true)
+            }
+        )
+        .await
+        .is_err());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "changed observational predicate drops unfinished body"
+        );
+
+        fence.0.lost.cancel();
+        assert!(
+            watch_copy_preparation(
+                &fence,
+                Instant::now() + Duration::from_secs(1),
+                || true,
+                async { Ok(true) }
+            )
+            .await
+            .is_err(),
+            "unacknowledged loss must refuse"
+        );
+        // Model only the watchdog's phase signal, not SQL success or artifact
+        // authority. The real publication consumer independently covers those.
+        fence.0.copy_output_completed.store(true, Ordering::Release);
+        assert!(watch_copy_preparation(
+            &fence,
+            Instant::now() + Duration::from_secs(1),
+            || true,
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(true)
+            }
+        )
+        .await
+        .expect("historical completion is not own-lease loss"));
+        active.finish().await;
+    }
 
     async fn active() -> (Arc<dyn Store>, String, ActiveBackgroundJob) {
         active_with_deadline(None).await

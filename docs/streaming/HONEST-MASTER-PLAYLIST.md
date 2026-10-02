@@ -1020,6 +1020,59 @@ fleet.
 
 ## Execution log
 
+**2026-10-01 remaining-output implementation claim:** the new owned
+`codex/s10-remaining-output` branch connects real rolling-copy rename and PUT
+commit observations to bounded complete full-mux accounting. ENDLIST alone,
+queued bytes, body replacement, a stale attempt or an abnormal producer exit
+cannot qualify a reusable output. These collectors do not themselves grant
+retained-body authority or revise an issued presentation.
+
+For normalized, exactly resolved automatic copy candidates, a distinct
+version-one `CopyOutputPrepare` payload uses the existing bounded job lane,
+claim, cancellation, lease and settlement owners. It does not reinterpret
+`TranscodePrepare` or add a scheduler. The actual VOD driver owns a finite
+private preparation incarnation, domain-separated from the ordinary key by
+the reservation nonce while preserving the canonical recipe and full logical,
+audio and physical-source tuple. It creates no viewer, GET or frontier demand
+and never retires an ordinary partial rendition.
+
+The full-footprint reservation charges init, metadata, media and in-flight
+bytes before writes. Only successful media already present in the node's real
+working-set total receives a temporary ordinary-horizon exclusion. Release
+removes that exclusion, not the physical charge; retained conversion is once
+only, under the existing allowance and GC. Complete verified original-epoch
+output assembles privately. Exact queue settlement records historical
+completion, then independent post-await source/engine/attachment validation
+must succeed before registry exposure. SQL success is not cross-filesystem
+atomic visibility and is never later acquisition authority.
+
+A process-private attachment observation advances only after a real successful
+foreground graph commit. Installation, the existing 250 ms preparation
+watchdog and final check-plus-exposure all compare its captured value. No await
+occurs under the short exposure guard; issued immutable bodies remain intact.
+Only successfully settled and exposed artifacts receive an unforgeable local
+prepared-origin seal. Compatible new attachments still reacquire exact bytes,
+playlist, logical/audio/source facts and issued identity; no worker/public
+field or durable recipe alias grants this authority. Ordinary cold playback
+remains uncaptured and playable without a whole-film wait.
+
+The actual rolling producer emits MPEG-TS `seg%05d.ts`, not always fMP4.
+Metadata collection therefore supports self-initializing TS without inventing
+an init or codec fact. Complete measurement requires segment zero, media
+sequence zero (or its standard absent default), every committed media member
+exactly once and no omitted known tail. fMP4 requires its actual MAP/init;
+TS with a MAP or ambiguous mixed container remains unknown. An ENDLIST seek
+suffix cannot qualify a title cost. These guards never reject playback or
+promote collector numbers to retained-body authority.
+
+Twelve new focused IDs have passed individually once so far; failed-only
+retries and precursor source attribution remain in the development receipt.
+Current-base composition, normal hook/compiler and independent review are
+still required. **Still open:** manual-copy preparation and its original
+first-publication acceptance, rolling/PUT retained-consumer qualification,
+arbitrary source/audio/corpus coverage, fetched-wire equality and physical
+device/fleet acceptance. This implementation claim is not complete M5.
+
 **2026-10-01 durable completed-output continuation:** PR #680 landed as
 `35275de3d86c48bcb6787033911ba5e68626bfa7`; its retained-artifact implementation
 is the starting point, not repeated work. The next owned branch adds a private
@@ -1112,6 +1165,17 @@ The older software-cache-unchanged claim applied only to the profile flag and
 does not cover this implementation. Unqualified plans keep their old recipe
 digest and encoder arguments. Local Homebrew FFmpeg 9 development observations
 are not shipped FFmpeg 8 or fleet qualification evidence.
+
+**2026-10-01 manual-copy reachability continuation:** the existing worker lane
+also accepts a closed version-two server-resolved manual Copy intent, without
+inventing candidate context. Source metadata and the full resolved audio,
+offset, delivery, grade, video and engine intent are bound together. A later
+compatible new attachment can acquire only the actually settled, locally
+minted private artifact after physical/source/logical/engine revalidation;
+persisted job success and restart manifests cannot mint this capability.
+The initial uncaptured attachment remains uncaptured. This does not make
+unknown full-tail facts available before preparation completes, and does not
+implement cold encoded preparation or waive original corpus/device evidence.
 
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the

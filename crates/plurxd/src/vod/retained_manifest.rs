@@ -312,6 +312,7 @@ impl ArtifactManifest {
         let charge = self.charge()?;
         let seal = self.seal()?;
         Ok(super::retained::RetainedVodArtifact {
+            private_preparation_origin: std::sync::OnceLock::new(),
             id: uuid::Uuid::parse_str(&self.id).map_err(|_| io::ErrorKind::InvalidData)?,
             observation,
             directory,
