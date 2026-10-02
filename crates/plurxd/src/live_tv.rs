@@ -139,6 +139,10 @@ const ADMISSION_WAIT: Duration = Duration::from_secs(5);
 const SOURCE_PREFIX_BYTES: usize = 8 * 1024 * 1024;
 const SOURCE_PREFIX_TIME: Duration = Duration::from_secs(3);
 const SOURCE_PROBE_TIME: Duration = Duration::from_secs(2);
+/// The budget of a Live TV probe nobody is waiting on: the readiness graph
+/// probe, and the boot caption self-test's source probe, both of which run
+/// beside the boot's background encoder qualification.
+const READINESS_PROBE_TIME: Duration = Duration::from_secs(20);
 const MAX_SOURCE_PROBE_JSON_BYTES: usize = 256 * 1024;
 /// Uniform one-second segments, for the whole session. The short first
 /// segment `-hls_init_time 1` used to cut is what keeps a start no slower
@@ -7584,18 +7588,42 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
     })
 }
 
+/// Who waits on a source probe, as one value: the child's priority class and
+/// the probe's budget travel together so a caller cannot pair a background
+/// class with a viewer's two-second budget (review 76, P2-1), or the reverse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SourceProbeWork {
+    class: crate::process_control::ChildClass,
+    budget: Duration,
+}
+
+impl SourceProbeWork {
+    /// A viewer's start or a DVR transport is waiting on the probe.
+    const VIEWER: Self = Self {
+        class: crate::process_control::ChildClass::Realtime,
+        budget: SOURCE_PROBE_TIME,
+    };
+    /// Nobody is waiting: the boot caption self-test. Background class, and
+    /// the readiness probe's budget, because a loaded boot can hold a nice-15
+    /// child well past a viewer's two seconds.
+    const SELF_TEST: Self = Self {
+        class: crate::process_control::ChildClass::Background,
+        budget: READINESS_PROBE_TIME,
+    };
+}
+
 /// Probe a retained tuner prefix with the configured ffprobe.
 ///
-/// `class` is the caller's, as for the other dual-use probe helpers
-/// (`ChildWork::new(class, ..)`): a viewer's start and a DVR transport wait on
-/// this child and pass `Realtime`; the boot caption probe reuses the same
-/// helper through the production graph path with nobody waiting and passes
-/// `Background`.
+/// `work` is the caller's, as the other dual-use probe helpers take their
+/// class from the caller (`ChildWork::new(class, ..)`): a viewer's start and a
+/// DVR transport pass [`SourceProbeWork::VIEWER`]; the boot caption probe
+/// reuses the same helper through the production graph path with nobody
+/// waiting and passes [`SourceProbeWork::SELF_TEST`].
 async fn probe_live_source(
     system: &SystemInfo,
     directory: &Path,
     prefix: &[u8],
-    class: crate::process_control::ChildClass,
+    work: SourceProbeWork,
 ) -> Result<LiveSourceFacts, LiveTvError> {
     if system.ffprobe.trim().is_empty() {
         return Err(LiveTvError::CodecUnsupported(
@@ -7631,7 +7659,7 @@ async fn probe_live_source(
     }
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
-        crate::process_control::ChildWork::new(class, "Live TV source probe"),
+        crate::process_control::ChildWork::new(work.class, "Live TV source probe"),
     )
     .map_err(|error| {
         LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
@@ -7661,14 +7689,15 @@ async fn probe_live_source(
         }
         parse_probe_facts(&bytes)
     };
-    let result = match tokio::time::timeout(SOURCE_PROBE_TIME, probe).await {
+    let result = match tokio::time::timeout(work.budget, probe).await {
         Ok(result) => result,
         Err(_) => {
             let _ = child.start_kill();
             let _ = child.wait().await;
-            Err(LiveTvError::StartupTimeout(
-                "source_probe_incomplete: FFprobe exceeded its two-second budget".into(),
-            ))
+            Err(LiveTvError::StartupTimeout(format!(
+                "source_probe_incomplete: FFprobe exceeded its {} s budget",
+                work.budget.as_secs()
+            )))
         }
     };
     let remove = tokio::fs::remove_file(&sample).await;
@@ -9520,7 +9549,7 @@ async fn run_graph_probe(
         live_ffmpeg_command_for_input(system, &plan, directory, LiveTvFfmpegInput::GraphProbe)
             .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
     let output = tokio::time::timeout(
-        Duration::from_secs(20),
+        READINESS_PROBE_TIME,
         crate::process_control::output_job_owned(
             &mut command,
             crate::process_control::ChildWork::background("Live TV readiness probe"),
@@ -9633,6 +9662,63 @@ mod caption_probe;
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Review 76, P2-1: class and budget travel together. A viewer keeps the
+    /// two-second budget and the realtime class; the self-test gets the
+    /// readiness budget and the background class.
+    #[test]
+    fn source_probe_work_pairs_each_class_with_its_budget() {
+        assert_eq!(
+            super::SourceProbeWork::VIEWER,
+            super::SourceProbeWork {
+                class: crate::process_control::ChildClass::Realtime,
+                budget: Duration::from_secs(2),
+            }
+        );
+        assert_eq!(
+            super::SourceProbeWork::SELF_TEST,
+            super::SourceProbeWork {
+                class: crate::process_control::ChildClass::Background,
+                budget: super::READINESS_PROBE_TIME,
+            }
+        );
+    }
+
+    /// The counterpart of the caption module's slow-probe test: the same
+    /// three-second stub is past a viewer's budget, so that test measures a
+    /// probe a viewer would have abandoned.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_viewer_source_probe_still_gives_up_after_two_seconds() {
+        let root = crate::test_tempdir().expect("slow probe root");
+        let answer = root.path().join("probe.json");
+        std::fs::write(
+            &answer,
+            r#"{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080},{"codec_type":"audio","codec_name":"ac3","channels":2}]}"#,
+        )
+        .expect("probe answer");
+        let script = root.path().join("slow-ffprobe");
+        crate::write_test_executable(
+            &script,
+            format!("#!/bin/sh\nsleep 3\nexec /bin/cat '{}'\n", answer.display()),
+            0o755,
+        );
+        let system = SystemInfo {
+            ffprobe: script.to_string_lossy().into_owned(),
+            ..SystemInfo::default()
+        };
+        let facts = super::probe_live_source(
+            &system,
+            root.path(),
+            b"prefix",
+            super::SourceProbeWork::VIEWER,
+        )
+        .await;
+        assert!(
+            matches!(facts, Err(LiveTvError::StartupTimeout(_))),
+            "{facts:?}"
+        );
+    }
 
     use super::guide::LiveTvProgramme;
     use super::*;
