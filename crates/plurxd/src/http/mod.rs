@@ -6,6 +6,7 @@
 //! in later slices.
 
 mod analysis;
+mod analysis_reconcile;
 mod auth;
 mod background_jobs;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
@@ -298,6 +299,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/analysis/jobs/{id}"
         | "/api/v1/analysis/jobs/{id}/retry"
         | "/api/v1/analysis/reopen"
+        | "/api/v1/analysis/reconcile"
         | "/api/v1/dvr/status"
         | "/api/v1/dvr/overview"
         | "/api/v1/dvr/recordings"
@@ -1583,6 +1585,7 @@ pub fn router(state: AppState) -> Router {
         .route("/analysis/jobs/{id}", delete(analysis::cancel_job))
         .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
         .route("/analysis/reopen", post(analysis::reopen))
+        .route("/analysis/reconcile", post(analysis_reconcile::reconcile))
         .route("/files/{id}/offline-packages", post(offline::create))
         .route("/files/{id}/publication", post(publication::open))
         .layer(axum::middleware::from_fn(json_long_deadline));
@@ -16224,6 +16227,57 @@ mod tests {
         assert_eq!(credits["start_ms"], 8_500_000);
         assert_eq!(credits["provenance"], "manual");
         assert_eq!(credits["confidence"], 1_000);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_api_requires_admin_and_exact_apply_selection() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let url = "/api/v1/analysis/reconcile";
+        assert_eq!(
+            call(&app, post(url, None, json!({}))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, preview) = call(&app, post(url, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["dry_run"], true);
+        assert_eq!(preview["candidates"], json!([]));
+        for bad in [
+            json!({"dry_run":false}),
+            json!({"dry_run":false,"cursor":"old","candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]}),
+            json!({"dry_run":false,"candidates":[{"request_id":"x","candidate_id":"bad"}]}),
+            json!({"dry_run":true,"candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]}),
+        ] {
+            assert_eq!(
+                call(&app, post(url, Some(&admin), bad)).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            call(&app, post(url, Some(&admin), json!({"force":true})))
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("disable analysis queue");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    url,
+                    Some(&admin),
+                    json!({"dry_run":false,
+            "candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]

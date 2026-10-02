@@ -5338,6 +5338,34 @@ sample.
 
 ### Putting a failed queue back to work
 
+**Unfinished requests after a worker update:** Open **Activity → Content
+analysis → Reconcile analysis…**, then **Preview reconciliation**. The preview
+walks the whole unfinished backlog, independent of the history page and its
+filters. Review the reasons and target nodes, then choose **Apply N repairs**.
+Obsolete requests are replaced with current work or joined to an existing
+current request. Completed indexes stay available; attempts remain historical
+records under the usual retention policy.
+
+The saved `foreground_preempted` reason is displayed as **Analysis deferred**.
+It means the last attempt yielded for media capacity or paused analysis. It
+does not say a node is playing anything now. A current request may legitimately
+keep waiting; reconciliation only repairs obsolete request identities.
+
+Leave **Move requests whose target cannot report its worker version…** unchecked
+for an offline node you intend to restore. Enable it when you intend this node
+to take over and the source is accessible here. Old server versions cannot
+report their engine identity, so updating a reachable peer can resolve an
+unknown target without moving its work. A forced rebuild already using the
+current engine needs its original node restored, or cancellation followed by a
+new rebuild; the preview calls this out instead of replacing its active slot.
+
+**How to read the result:** `reconciled` means current work was secured before
+the old request was retired. `changed or already handled` means the preview no
+longer applied, a worker claimed it, or live playback/another request prevented
+replacement. Run a fresh preview after an interruption or to inspect what
+remains. Running work and worker retry schedules continue normally. This action
+does not reopen terminal failures; use the separate action below for those.
+
 When the verdict turns green again after an outage, the work that failed during
 it is still terminal. Nothing reopens it on its own: a `failed` row is a durable
 statement that the queue tried and stopped, and the queue is right not to
