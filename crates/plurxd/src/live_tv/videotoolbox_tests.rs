@@ -153,14 +153,10 @@ async fn live_tv_videotoolbox_atsc1_publishes_decodable_segments() {
             ),
             "every decoded source frame must carry A/53 captions"
         );
-        let source = probe_live_source(
-            &system,
-            root.path(),
-            &source_bytes,
-            crate::process_control::ChildClass::Realtime,
-        )
-        .await
-        .expect("probe generated ATSC 1.0 source");
+        let source =
+            probe_live_source(&system, root.path(), &source_bytes, SourceProbeWork::VIEWER)
+                .await
+                .expect("probe generated ATSC 1.0 source");
         assert_eq!(source.video_codec.as_deref(), Some("mpeg2video"));
         assert_eq!(source.audio_codec.as_deref(), Some("ac3"));
         assert_eq!(source.audio_channels, Some(audio_channels));

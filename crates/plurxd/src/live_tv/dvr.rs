@@ -3379,7 +3379,7 @@ async fn run_transport(
                 &system,
                 &transport.scratch,
                 &input.prefix,
-                crate::process_control::ChildClass::Realtime,
+                super::SourceProbeWork::VIEWER,
             )
             .await;
             (Some(system), source)
@@ -3556,7 +3556,7 @@ async fn pump_tuner_fanout(
                                     &system,
                                     &directory,
                                     &collected,
-                                    crate::process_control::ChildClass::Realtime,
+                                    super::SourceProbeWork::VIEWER,
                                 )
                                 .await
                             }
