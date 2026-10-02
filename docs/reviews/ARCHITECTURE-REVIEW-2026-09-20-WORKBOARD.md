@@ -51,6 +51,22 @@ remain open. This dated forward correction supersedes the earlier phrase
 that an uninterrupted week is owed as a prerequisite; it does not rewrite
 the original failed-observation record or close S-11.
 
+**S-10 public wire continuation, 2026-10-02 (gpt-6.1-sol,
+agent:/root/k06_pr725_adversarial_sol61):** one new explicitly admitted
+[public Copy control](../streaming/HONEST-MASTER-PLAYLIST.md#execution-log)
+passed once on frozen source `574e88dea` /tree `8bd154b8`, based on effort
+`102669d27`. Actual authenticated HTTP Create, socket master/playlist/init/
+media GETs, compatible NEW retained attachment, independent duration-weighted
+average/RFC-window peak, exact selected source-audio identity, immutable
+masters, public DELETE and listener reuse are asserted. The external owned
+session watchdog passed terminal zero with no surviving children. This is
+Darwin FFmpeg9.0.1 development evidence, one H264/AAC input and one media
+segment, not shipped Linux8.1.3, variable-window/corpus, native/device,
+unseen-tail or whole-film qualification. Actual effort advanced to `801d6c6b`;
+preserve its tri-state settings and recheck the additive composition without
+replaying the successful method. Different independent review, current gate
+and task integration remain pending; main promotion stays held.
+
 **S-11 internal evidence continuation, 2026-10-02 (gpt-6.1-sol,
 agent:/root/s11_next_cell_sol61):** the
 [sanitized ledger](../streaming/S11-INTERNAL-ROLLING-CELLS-2026-10-02.md)
