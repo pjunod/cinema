@@ -1193,6 +1193,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::COPY_OUTPUT_SCHEMA,
     // v92: authenticated candidate failures, independent of network priors.
     super::candidate_recovery::SCHEMA,
+    // v93: exact encoded preparation shares source-revision cancellation.
+    super::background_jobs::ENCODED_OUTPUT_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

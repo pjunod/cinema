@@ -84,6 +84,15 @@ seekTelemetrySupersession = { function = "beginSeekPresentationMonitor", scopes 
 blackFrameDecodeFailure = { function = "makePeriodicPlaybackObservation", scopes = ["lifecycle", "viewerAction"] }
 stallRecovery = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
 itemFailureLadder = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
+# Exact original pre/post-ACK continuations; each case remains single-use.
+# No epoch scope changes, handwritten allowance growth or renewed capture.
+blackFrameDecoderAcknowledgement = { function = "handleBlackFrameDecodeFailure", scopes = ["lifecycle", "viewerAction"] }
+itemDecoderAcknowledgement = { function = "handleItemFailure", scopes = ["open", "viewerAction"] }
+decoderEvidenceAcknowledgement = { function = "noteAutoDecodeFailure", scopes = ["open", "viewerAction"] }
+stallCandidateAcknowledgement = { function = "selectAutoStallRecoveryCandidate", scopes = ["open", "viewerAction"] }
+stallCandidateReturn = { function = "retrySameDeliveryAfterStall", scopes = ["open", "viewerAction"] }
+preparedPressureEntry = { function = "sampleThePreparedSwitch", scopes = ["lifecycle", "viewerAction"] }
+preparedPressureAcknowledgement = { function = "sampleThePreparedSwitch", scopes = ["lifecycle", "viewerAction"] }
 seekIntent = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
 seekIntentAfterControl = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
 seekIntentAfterOptionalBoundary = { function = "issueSeek", scopes = ["viewerAction", "seek"] }
