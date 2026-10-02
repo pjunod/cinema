@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`7f738563e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+(`d4bf682b7`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -144,3 +144,7 @@ SQLite 91 and replicated 69 before the final test pass.
   stopped at corrective-history audit because three client commits needed
   source-to-regression anchors. Those rows are added. Compiler/test jobs were
   skipped, so the fast Rust unit lane has not yet run.
+
+Corrective-history audit passed after the anchor fix. Main subsequently added
+only the HLS request-cleanup timing regression adjustment; it is integrated
+before the next fast-lane push. Previously passing focused tests are unaffected.
