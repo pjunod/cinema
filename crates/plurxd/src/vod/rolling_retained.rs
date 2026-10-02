@@ -16,6 +16,7 @@ pub(crate) struct RollingArtifact {
     charge: AtomicU64,
     objects: StdMutex<BTreeMap<String, crate::rolling_output::CommittedObject>>,
     complete: OnceLock<RollingComplete>,
+    refused: AtomicBool,
 }
 
 struct RollingComplete {
@@ -31,13 +32,17 @@ pub(crate) struct RollingCollection {
     artifact: Arc<RollingArtifact>,
     cap: u64,
     deadline: Instant,
-    gate: Mutex<()>,
+    gate: Arc<Mutex<()>>,
     refused: AtomicBool,
     published: AtomicBool,
 }
 
 impl RollingCollection {
-    pub(crate) async fn capture(
+    #[cfg(test)]
+    pub(crate) async fn hold_optional_capture_for_test(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.gate).lock_owned().await
+    }
+    pub(crate) fn capture(
         self: &Arc<Self>,
         source: PathBuf,
         name: &str,
@@ -47,7 +52,7 @@ impl RollingCollection {
             self.refuse();
             return;
         }
-        let Ok(_gate) = self.gate.try_lock() else {
+        let Ok(gate) = Arc::clone(&self.gate).try_lock_owned() else {
             self.refuse();
             return;
         };
@@ -78,32 +83,36 @@ impl RollingCollection {
         let destination = self.artifact.directory.join(name);
         let owner = Arc::clone(self);
         let expected_len = object.bytes;
-        let link = tokio::task::spawn_blocking(move || {
-            let _owner = owner;
-            let before = plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&source)?;
-            if before.size != expected_len {
-                return Err(io::ErrorKind::InvalidData.into());
+        let name = name.to_owned();
+        // One optional operation owns the gate and conservative charge. The
+        // ordinary publisher never waits for filesystem proof collection.
+        tokio::task::spawn_blocking(move || {
+            let _gate = gate;
+            let result = (|| {
+                let before =
+                    plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&source)?;
+                if before.size != expected_len {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                std::fs::hard_link(&source, &destination)?;
+                let after =
+                    plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&destination)?;
+                if !before.same_inode(after) || after.size != expected_len {
+                    return Err(io::ErrorKind::InvalidData.into());
+                }
+                Ok::<_, io::Error>(())
+            })();
+            if result.is_err() || Instant::now() >= owner.deadline {
+                owner.refuse();
+                return;
             }
-            std::fs::hard_link(&source, &destination)?;
-            let after =
-                plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&destination)?;
-            if !before.same_inode(after) || after.size != expected_len {
-                return Err(io::ErrorKind::InvalidData.into());
-            }
-            Ok::<_, io::Error>(())
+            owner
+                .artifact
+                .objects
+                .lock()
+                .expect("rolling inventory lock")
+                .insert(name, object);
         });
-        if !matches!(
-            tokio::time::timeout(Duration::from_secs(2), link).await,
-            Ok(Ok(Ok(())))
-        ) {
-            self.refuse();
-            return;
-        }
-        self.artifact
-            .objects
-            .lock()
-            .expect("rolling inventory lock")
-            .insert(name.to_owned(), object);
     }
 
     pub(crate) fn refuse(&self) {
@@ -118,7 +127,9 @@ impl RollingCollection {
         playlist: &[u8],
         attempt: u64,
     ) -> Option<Arc<RollingArtifact>> {
-        let _gate = self.gate.lock().await;
+        let _gate = tokio::time::timeout(Duration::from_secs(2), self.gate.lock())
+            .await
+            .ok()?;
         if self.refused.load(Acquire)
             || Instant::now() >= self.deadline
             || self.published.load(Acquire)
@@ -258,6 +269,9 @@ impl Drop for RollingCollection {
 }
 
 impl RollingArtifact {
+    pub(crate) fn acquirable(&self) -> bool {
+        !self.refused.load(Acquire)
+    }
     pub(crate) fn object_etag(&self, name: &str) -> Option<String> {
         let object = self
             .complete
@@ -408,7 +422,7 @@ impl VodServe {
             shared: Arc::downgrade(shared),
             cap,
             deadline,
-            gate: Mutex::new(()),
+            gate: Arc::new(Mutex::new(())),
             refused: AtomicBool::new(false),
             published: AtomicBool::new(false),
             artifact: Arc::new(RollingArtifact {
@@ -418,6 +432,7 @@ impl VodServe {
                 charge: AtomicU64::new(0),
                 objects: StdMutex::new(BTreeMap::new()),
                 complete: OnceLock::new(),
+                refused: AtomicBool::new(false),
             }),
         });
         let owner = Arc::clone(&collection);
@@ -439,8 +454,33 @@ impl VodServe {
             .lock()
             .expect("retained registry lock");
         let entry = state.rolling.get_mut(&production.binding())?;
+        if !entry.artifact.acquirable() {
+            return None;
+        }
         entry.idle_since = None;
         Some(Arc::clone(&entry.artifact))
+    }
+
+    /// Refuse this exact incarnation permanently without revoking issued
+    /// body owners or releasing their accounting before collector unlink.
+    pub(crate) fn refuse_rolling_output(&self, artifact: &Arc<RollingArtifact>) {
+        artifact.refused.store(true, Release);
+        let mut state = self
+            .shared
+            .retained_artifacts
+            .state
+            .lock()
+            .expect("retained registry lock");
+        let binding = artifact.production.binding();
+        if state
+            .rolling
+            .get(&binding)
+            .is_some_and(|entry| Arc::ptr_eq(&entry.artifact, artifact))
+        {
+            if let Some(entry) = state.rolling.remove(&binding) {
+                state.rolling_retired.push_back(entry.artifact);
+            }
+        }
     }
 }
 

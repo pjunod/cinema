@@ -16,6 +16,9 @@ pub(crate) struct RollingProduction {
 }
 
 impl RollingProduction {
+    pub(crate) fn executable_path(&self) -> &std::path::Path {
+        &self.executable.path
+    }
     /// `logical` is freshly constructed by the real route's resolved argv
     /// builder, with a fixed output destination. It is not received metadata.
     pub(crate) async fn capture(

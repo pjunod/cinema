@@ -76,7 +76,7 @@ impl TranscodeManager {
             frozen_presentation: Some(frozen),
             rolling_provenance: None,
             rolling_collection: None,
-            rolling_artifact: Some(artifact),
+            rolling_artifact: Some(Arc::clone(&artifact)),
             copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
@@ -161,11 +161,11 @@ impl TranscodeManager {
         });
         // Source/engine equality is checked after actor await and immediately
         // before the real attachment. Received rates/locator never enter here.
-        if !production.input_current().await {
+        if !artifact.acquirable() || !production.input_current().await {
             return None;
         }
         self.register_session(&session_id, session, 0).await.ok()?;
-        if !production.input_current().await {
+        if !artifact.acquirable() || !production.input_current().await {
             self.stop_session(&session_id, "source_changed").await;
             return None;
         }

@@ -393,16 +393,14 @@ impl SessionDir {
         if written.is_ok() && name != "index.m3u8" {
             if let Some(collector) = &self.retained {
                 use sha2::Digest;
-                collector
-                    .capture(
-                        self.dir.join(name),
-                        name,
-                        crate::rolling_output::CommittedObject {
-                            bytes: bytes.len() as u64,
-                            digest: sha2::Sha256::digest(bytes).into(),
-                        },
-                    )
-                    .await;
+                collector.capture(
+                    self.dir.join(name),
+                    name,
+                    crate::rolling_output::CommittedObject {
+                        bytes: bytes.len() as u64,
+                        digest: sha2::Sha256::digest(bytes).into(),
+                    },
+                );
             }
         }
         written

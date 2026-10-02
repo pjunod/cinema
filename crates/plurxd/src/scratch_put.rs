@@ -920,13 +920,11 @@ async fn commit_object(
             .clone();
         if let Some(collector) = collector {
             if request.lane == 0 {
-                collector
-                    .capture(
-                        shared.dir.join(&request.name),
-                        &request.name,
-                        observed.clone(),
-                    )
-                    .await;
+                collector.capture(
+                    shared.dir.join(&request.name),
+                    &request.name,
+                    observed.clone(),
+                );
             } else {
                 collector.refuse();
             }

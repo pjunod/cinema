@@ -1216,6 +1216,18 @@ plus 300 seconds, capped at 24 hours. The same collector releases charges only
 after exact owned unlink. Pending collection and body owners retain their
 leases; no second registry, scheduler, or payload buffer is introduced.
 
+**Review59 correction:** optional member capture synchronously reserves and
+charges its single owned operation, then returns without awaiting hardlink I/O
+inside Copy publication or the PUT commit mutex. A busy or expired optional
+owner refuses only proof collection; completion alone may join that owner
+within its existing bounded wait. Proof-enabled initial launches use the exact
+captured executable path, not a second resolution of its configured symlink.
+An actual verified-GET integrity failure permanently refuses that exact
+artifact's acquisition entry while preserving issued body owners and charged
+collector cleanup. Exact retained lookup precedes encoder and scratch
+admission; its preferred graph uses the existing read-only workload/bundle
+thread policy, and a later hardware demotion never broadens compatibility.
+
 Only the original normal successful child/reader completion, verified source
 duration, full canonical zero-origin ENDLIST and exact committed inventory can
 mint this process-private artifact. Source bytes are inherited through the
