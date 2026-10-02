@@ -1,6 +1,6 @@
 # Jellyfin compatibility — build contract for Infuse and Android TV
 
-**Status:** open · Opus approved starting J0; R1–R8 reconciled; J0 unproved ·
+**Status:** open · Opus approved; R1–R8 and S1–S4 reconciled; J0 unproved ·
 **Written / revised:** 2026-10-02 · **Original source:** `4d7257019` ·
 **Review source independently checked:** `f1f1390f1` · **Publication base:**
 `9a719fcb7` · [First review](JELLYFIN-COMPATIBILITY-REVIEW.md) ·
@@ -295,17 +295,27 @@ this consequence on the opt-in setting and in operations/security docs.
 Allow only mapped supported items, no user avatars, listing endpoint,
 arbitrary filename/path or unsupported libraries. Quantize requested widths
 up to the next width in the existing 300/500/780 derivative set (default 500),
-clamping above 780; no arbitrary
-size or format combinations. Anonymous requests serve existing derivatives
-only: a miss returns 404 without fetching, resizing or queueing work. Proposed
+clamping above 780; no arbitrary size or format combinations. Anonymous
+requests serve existing derivatives. An admitted miss returns 404 and enqueues
+deduplicated `(item, width)` materialization through the existing artwork
+worker, peer-fetch path, locks and admission. Fetch/resize work never runs
+inline in the anonymous request. Coalesce repeated demands, bound queued
+keys and retries, and revalidate the current artwork identity before publishing
+so a changed poster cannot reuse stale bytes. Do not create detached tasks or
+a second worker pool. Requests rejected by the miss budget enqueue no work.
+Proposed
 miss budget: 20/minute per resolved client address, with a bounded 4,096-entry
 60-second idle TTL table; when full, refuse new addresses until entries expire
 rather than evicting live budgets. Return 429
 when admission is exhausted. Reuse native trusted-proxy address resolution.
-Authenticated/background materialization must share existing image locks and
-resize admission, never create a parallel unbounded worker pool. J2 verifies
-cache-hit/miss behavior, width floods and admission saturation; J0 records
-whether missing art under this policy is acceptable to each target.
+The per-address budget bounds request and demand admission; shared worker
+admission bounds fetch/resize work. J2 measures first-sync art coverage on an
+ingress with neither local source artwork nor warm derivatives, then checks
+coverage after materialization and the client's next fetch/sync. Return no
+long-lived negative cache entry for a cold 404. Do not assume a client retries
+it: if J0 shows it does not, amend the policy to warm the three sizes through
+the same bounded worker when the switch is enabled, before qualifying first
+sync. Also test width floods, deduplication and queue/admission saturation.
 Require authentication if both target clients reliably provide it. J0 records
 the selected policy explicitly before J2; do not silently weaken native image
 routes. Streams and subtitles remain authenticated at entry, or use the
@@ -363,6 +373,17 @@ replicated statement parameter; `retired` is the authority. Lazy existence
 checks cannot detect delete-and-reinsert of the same row ID. Retired wire IDs
 never resolve to a replacement entity. Retain the retired identity/tombstone
 or an equivalent permanent non-reuse proof; do not blindly TTL these mappings.
+Use [dv_conversion.rs](../../crates/plurx-core/src/store/dv_conversion.rs)'s
+`dv_queue_admission_settings_ai` as the precedent for a trigger executing
+inside a hiqlite Raft entry. Explicit hiqlite file/item deletes also fire
+retirement triggers, independently of FK enforcement. Preserve that coverage:
+J1 adds a source guard against `INSERT OR REPLACE` and `REPLACE INTO` targeting
+`users`, `libraries`, `items` or `files`, including multiline/quoted SQL and
+migration paths. REPLACE can delete without firing DELETE triggers when
+`recursive_triggers` is off. Prove the guard catches an injected replacement;
+any future exception needs an explicit retirement contract and both-backend
+tests, not a silent allowlist addition.
+
 J1 enumerates deletion paths and deletes a library with nested descendants,
 asserting every item/file mapping is retired on both backends. Also verify
 trigger installation, migration replay and concurrent allocation/deletion.
@@ -605,6 +626,7 @@ source changes and capacity races; negotiation is not a reservation.
 | `vod_source_unsupported`: parameter sets vary | Try a permitted encoded VOD recipe, which does not copy those parameter sets; otherwise refuse. |
 | `vod_source_unsupported`: no positive probed duration | Encoded VOD also refuses: it needs a closed film-time plan. Use another independently validated delivery, such as permitted progressive remux, only if its native path supports the source; otherwise refuse negotiation. |
 | `vod_transcode_unavailable` / `vod_subtitle_burn_unavailable` | No valid encoded recipe: refuse that candidate, never advertise a URL known to fail. Any other candidate must independently pass profile and native policy checks. |
+| Other predictable typed VOD refusals, including `vod_video_geometry_unknown` / `vod_frame_cadence_unknown` (native 422) and `vod_source_rescan_required` (native 409) | Refuse that candidate, map to the pinned protocol error DTO/status, and never advertise its URL. Try another candidate only when it independently passes validation; unknown refusal codes do not grant playback or enter the retry allowlist. |
 
 The index guard in
 [vod/serve/create.rs](../../crates/plurxd/src/vod/serve/create.rs) is
@@ -618,13 +640,21 @@ video transcoding or silently allow rolling recovery.
 
 **Bounded transient startup:** classify actual codes from `START_NOT_YET_CODES`
 in [playstart.rs](../../crates/plurxd/src/playstart.rs). Only retry capacity,
-owner-transition and startup-timeout outcomes that can clear within seconds,
+owner-transition, startup-timeout and encoded engine-attestation outcomes
+that can clear within the measured budget,
 under one deadline and the same native claim. Index generation takes longer
 and is explicitly excluded. Proposed maximum wait: 15 seconds, reduced if J0
 measures a shorter app timeout; honor retry hints within the remaining budget
 with bounded backoff. The initial retry allowlist is `startup_timeout`,
-`media_owner_transition` and `transcode_capacity_pending`; other codes need
-an explicit measured ruling. Share the in-flight result across duplicate GETs. Do not
+`media_owner_transition` and `transcode_capacity_pending`, plus
+`vod_engine_unattested` **for encoded candidates only**. Engine capture can
+return this native 503 while attestation is in progress after restart; it does
+not require rolling fallback. J0 measures restart-to-attestation readiness and
+requests a transcode within the first minute after restart. Keep the same
+bounded deadline and terminal-failure rules if readiness takes too long;
+record the measured distribution before changing the budget. Other codes need
+an explicit measured ruling. Share the in-flight result across duplicate GETs.
+Do not
 assume foreign players implement native retry semantics, pass intermediate
 503s through, invent a playable manifest or hold a request indefinitely.
 
@@ -810,9 +840,9 @@ the task that changes a shared file owns its tests and docs in that commit.
 
 | Milestone | Owned work / likely files | Dependency | Acceptance |
 |---|---|---|---|
-| J0: trace and lifecycle spike | Pinned manifest, minimized fixtures and disposable prototype outside maintained source unless promoted with tests | This review disposition | Both required apps connect/browse; direct play; Infuse 8.5+ transcode request, Android TV HLS/remux flow; image/subtitle/stream carriers; unindexed copy versus transcode outcomes; missing-duration refusal; transient startup retries; track/quality renegotiation without old Stopped; pause over 300 s; revised estimate |
-| J1: identity and service seams | Pure crate; incarnation/tombstone migrations and binding-to-native-route mapping; auth/watch service extraction | J0 | Concurrent and reused IDs safe; library deletion retires every descendant item/file mapping on both backends; token-only logout/replacement preserves reader grants; no native behavior regression |
-| J2: connect and browse | Flat router entry and child handlers, DTOs/catalog/artwork, settings/readiness, version-implied ancillary routes | J1 | Both apps finish full library paging and navigation; selected artwork policy proved; no SPA fallback; advisory switch works |
+| J0: trace and lifecycle spike | Pinned manifest, minimized fixtures and disposable prototype outside maintained source unless promoted with tests | This review disposition | Both required apps connect/browse; direct play; Infuse 8.5+ transcode request, Android TV HLS/remux flow; image/subtitle/stream carriers; unindexed copy versus transcode outcomes; missing-duration refusal; restart attestation timing and first-minute transcode; transient startup retries; track/quality renegotiation without old Stopped; pause over 300 s; revised estimate |
+| J1: identity and service seams | Pure crate; incarnation/tombstone migrations and binding-to-native-route mapping; auth/watch service extraction | J0 | Concurrent and reused IDs safe; library deletion retires every descendant item/file mapping on both backends; source guard rejects mapped-table REPLACE writes; token-only logout/replacement preserves reader grants; no native behavior regression |
+| J2: connect and browse | Flat router entry and child handlers, DTOs/catalog/artwork, settings/readiness, version-implied ancillary routes | J1 | Both apps finish full library paging and navigation; cold-node first-sync and post-materialization artwork coverage measured; deduplicated bounded misses proved; no SPA fallback; advisory switch works |
 | J3: direct play and watch | Direct adapter, events, new revision bookkeeping/fence and per-play `put_final` | J2 | Both apps play/seek/stop/resume; cross-client state; Store-level edit revisions; own-edit continuation and external-edit fencing; mixed coalescer provenance tests; two simultaneous devices |
 | J4: negotiation and transcode | Single-profile translation; native claims; per-create VOD-only policy through worker routing; predictable negotiation refusals, bounded transient startup and mount aliases | J3; J0 R1/R2 experiments settled | Real-client transcode/remux; no rolling allocation for compatibility; retry/replay creates once; alias redaction; copy fallback without index wait, encoded VOD without index, bounded capacity deadline and long-pause recovery |
 | J5: tracks and protocol completion | VTT/audio selection; named additional formats only if required; complete observed ancillary routes | J4 | Track/source/seek matrix and real HDR-grade guard; every mandatory target flow works; WebSocket added only if observed necessary |
@@ -862,7 +892,7 @@ log location. Required rows cannot graduate as “probably works”.
 | A07 | Stop then resume in other app; same-token/device unwatch mid-play then progress, mark-played then Stopped; external edits and delayed progress | Durable final state; own edit advances only eligible active binding; external edits fence across nodes; queued pre-edit beats retain old revision; mixed native/compat pending beats safe | Cross-node tests and cross-client run |
 | A08 | Forced bitrate-limited transcode and incompatible-container remux | Truthful single-profile flags/URLs; Android TV decodes HLS; Infuse 8.5+ selected transcode flow measured | Planner tests plus a real requesting client |
 | A09 | HLS GET retried concurrently and on another ingress; caller disconnects during create | One native claim/attempt, including beyond 60 s; deterministic fingerprint; no orphan producer/reservation | Fault/concurrency tests |
-| A10 | VOD pause over 300 s then resume; background/app kill; separate unindexed copy/transcode; missing duration; transient capacity delay; replayed ping | Idle resurrection works via real client request; terminal stop never resurrects; no rolling allocation or invented presentation; copy takes immediate valid fallback/refusal, encoded VOD starts without index when other prerequisites hold; transient retries bounded | Fake-clock/fault tests and required device runs |
+| A10 | VOD pause over 300 s then resume; background/app kill; separate unindexed copy/transcode; missing duration; first-minute post-restart transcode and engine attestation; transient capacity delay; replayed ping | Idle resurrection works via real client request; terminal stop never resurrects; no rolling allocation or invented presentation; copy takes immediate valid fallback/refusal, encoded VOD starts without index when other prerequisites hold; encoded attestation retries bounded with measured readiness/failure; other transient retries bounded | Fake-clock/fault tests and required device runs |
 | A11 | Transcoded track/quality switch without old Stopped; seek successor and late old stop/progress/segment requests | Exactly one producer per player after supersession; old traffic cannot kill/revive/alter successor; other devices independent; backward seek legal | Concurrency tests and physical seek run |
 | A12 | Two audio tracks, text subtitle on/off, stream index zero, nonzero start then seek | Correct selection and subtitle timing; no duplicated origin | Both physical clients; declared format-specific limits |
 | A13 | HDR/DV source and missing/unsupported claims; bitmap subtitle selection | Legal native policy outcome; no fabricated capability; current session-grade burn refusal preserved | Planner regressions plus a supported physical HDR path |
@@ -870,7 +900,7 @@ log location. Required rows cannot graduate as “probably works”.
 | A15 | Switch off during create/play, re-enable; storage unavailable during stop | No new activation/renewal after disable; bounded cleanup; no false durable success; IDs retained | Race/fault tests |
 | A16 | Alternate ingress, owner loss, restart, rolling-version mismatch | No duplicate owner, wrong-user state or leak; continuity classified honestly | Isolated cluster test plus client observation |
 | A17 | Native/Plex login, browse, direct/HLS playback after shared extractions | Existing behavior retained | Focused existing regression suites |
-| A18 | Schema upgrade, library cascade deletion, highest-row-ID reuse and old executable rollback | Deterministic retirement triggers cover all descendants on both backends; retired wire IDs never resolve replacements; additive tables/triggers remain through rollback | Both supported Store backends and upgrade fixture |
+| A18 | Schema upgrade, library cascade deletion, highest-row-ID reuse and old executable rollback | Deterministic retirement triggers cover all descendants on both backends; mutation-proved guard rejects REPLACE writes to mapped tables; retired wire IDs never resolve replacements; additive tables/triggers remain through rollback | Both supported Store backends and upgrade fixture |
 
 A13 need not prove every HDR format. It must prove the supported outcome for
 the chosen corpus, including refusal where appropriate. A16 does not add a
@@ -958,7 +988,7 @@ delete user watch state or rotate native user credentials as rollback.
 
 The [first review](JELLYFIN-COMPATIBILITY-REVIEW.md) approves the architecture.
 The [re-review](JELLYFIN-COMPATIBILITY-REREVIEW.md) approves starting J0. This
-revision incorporates B1–B5, M1–M6 and R1–R8; R2 is qualified by the source
+revision incorporates B1–B5, M1–M6, R1–R8 and third-review S1–S4; R2 is qualified by the source
 requirement for positive duration even on encoded VOD.
 The choices below are the revised proposal, not a claim that Paul separately
 ruled on each one or that J0 has passed.
@@ -969,12 +999,12 @@ ruled on each one or that J0 has passed.
 | D2: baseline | Pin server/schema/client revisions and version-implied ancillary calls | Response shapes and actual feature-dependent calls |
 | D3: IDs | Random UUIDs with native incarnation and permanent retirement/non-reuse protection | Deterministic AFTER DELETE triggers and full library cascade tests on both backends |
 | D4: binding | Compatibility identity/manual revision/terminal mapping; reuse MediaSessionRoute and native activation claims | Expiry, owner transfer and bounded writes |
-| D5: lifecycle | Passive VOD, no rolling fallback; immediate copy fallback, encoded VOD without index, bounded transient startup | Separate copy/encode, missing-duration/capacity behavior and >300 s physical pause/resume |
+| D5: lifecycle | Passive VOD, no rolling fallback; immediate copy fallback, encoded VOD without index, bounded transient startup including encoded engine attestation | Separate copy/encode, first-minute post-restart transcode, missing-duration/capacity behavior and >300 s physical pause/resume |
 | D6: consistency | Existing batched authoritative watch reads with `read_after=None` | Alternate-node read-after-write and first-sync auth cost |
 | D7: activation | Stable player digest → playback_id; PlaySessionId plus delivery digest → request_id; mount-relative HLS aliases | Renegotiation without old Stopped, one producer, missing IDs and late replay |
 | D8: watch writes | Store-level manual revision plus same-token/device own-edit advance; per-play `put_final` | Queue provenance, external-edit fences, own-edit continuation and failure cleanup |
 | D9: event order | Server-owned lifecycle fences; intra-play packet order remains best effort | Actual ambiguous flows and narrowed promises |
-| D10: extras | Trace version-implied routes; WebSocket only if a target demonstrably needs it | Required bootstrap replies and image credential policy |
+| D10: extras | Trace version-implied routes; deduplicated artwork miss materialization; WebSocket only if demonstrated necessary | Required bootstrap replies, image credentials and cold-node first-sync coverage |
 | D11: subtitles/HDR | Current session-grade burn guard; VTT first | Requested formats and actual HDR route outcome |
 | D12: estimate | J0 4–6 engineer-days; useful release 5–9 engineer-weeks cumulative | Re-estimate from J0, especially preparation and watch-write work |
 

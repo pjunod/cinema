@@ -199,3 +199,36 @@ source verification, not compiler qualification of a future implementation or
 physical-client acceptance. Documentation checks and the normal commit hook
 are recorded in the draft PR. J0 remains unrun; its estimate stays 4–6 days,
 and the useful release stays 5–9 engineer-weeks cumulative.
+
+
+## 6. Third review — approved with S1–S4 incorporated
+
+**Reviewer:** Opus · **Delivered / incorporated:** 2026-10-02 EDT ·
+**Reviewed:** PR #744 at `89a34548d`, based on `9a719fcb7` ·
+**Verdict supplied:** APPROVED, ready after the small amendments.
+
+This is an author summary of the third review supplied in chat, not a verbatim
+transcript. The reviewer confirmed R1–R8, accepted the positive-duration
+correction to R2, and confirmed the hiqlite trigger design. This section
+supersedes §5's existing-derivatives-only artwork rule and retry exclusions;
+the current build contract carries the executable requirements.
+
+| Finding | Disposition | Contract and evidence |
+|---|---|---|
+| S1: restart engine attestation | Accepted | §7.2 adds vod_engine_unattested only for encoded candidates under the same bounded retry deadline. J0 measures attestation after restart; A10 includes a transcode requested in the first minute. The native engine capture maps this error to 503 and START_NOT_YET_CODES includes it. |
+| S2: cold-node anonymous artwork | Accepted | §5.1 admits deduplicated item/width materialization through the existing bounded worker and peer-fetch path, with no inline fetch/resize. Keep cold 404 and per-address 429; rejected requests enqueue no work. J2 measures first-sync and later coverage on a cold ingress. If clients do not refetch, qualifying the flow requires bounded enable-time warming or an amended measured policy. |
+| S3: remaining typed refusals | Accepted | §7.2 adds a catch-all for predictable typed refusals, explicitly naming unknown geometry/cadence (native 422) and rescan-required (native 409). Refuse the candidate and map the pinned protocol error rather than advertising its URL. |
+| S4: trigger precedent and replacement guard | Accepted | §5.2 cites dv_queue_admission_settings_ai in dv_conversion.rs. J1/A18 require a mutation-proved source guard against mapped-table INSERT OR REPLACE / REPLACE INTO, whose implicit deletes otherwise bypass DELETE triggers when recursive_triggers is off. |
+
+The author rechecked the cited create/status/retry seams and trigger precedent
+in the publication checkout. The third review reports explicit hiqlite file
+and item deletions also fire triggers independently of FK enforcement. No
+runtime behavior is changed by these amendments. D1–D12 stand with the D5
+attestation and D10 materialization additions; estimates remain J0 4–6 days
+and useful release 5–9 engineer-weeks. J0 remains unproved.
+
+Publication order: push these amendments to #744, mark ready after the supplied
+adversarial review, and merge only when the current candidate's required gate
+passes. The implementation session then starts J0 from current main on
+`effort/jellyfin-compat`, with task branches targeting that effort and the
+pinned compiler loop established before Rust edits.
