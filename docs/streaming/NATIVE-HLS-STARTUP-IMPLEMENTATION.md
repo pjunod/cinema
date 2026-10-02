@@ -1,6 +1,6 @@
 # reference film G startup repair — an implementation contract for native HLS and source preparation
 
-**Status:** ready for implementation; no product patch or deployment claimed.
+**Status:** Track N candidate built; review/qualification pending; Track S open. No deployment claimed.
 **Written:** 2026-09-17. **Executes:** Fable's “approve with changes” review
 of the [reference film G RCA](NATIVE-HLS-STARTUP-RCA.md).
 **Verified source base:** `363a22e28aa53094d899a9ad3c812241a6243548`.

@@ -1,7 +1,7 @@
 # Playback startup latency — recover fast starts without moving the wait into a stall
 
-**Status:** revised after adversarial review; M0–M2 ready for investigation,
-M3 awaits measured policy selection · **Written:** 2026-09-29 EDT ·
+**Status:** October 2 candidate built; M2 continuity/native qualification pending,
+final implementation review not started · **Written:** 2026-09-29 EDT ·
 **Executes:** the measured library-playback startup investigation below ·
 **Runtime changes:** none in this document change.
 

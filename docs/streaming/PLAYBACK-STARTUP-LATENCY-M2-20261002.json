@@ -133,5 +133,8 @@
     "32 seconds of media is an interim improvement, not the strict few-seconds buffer requirement.",
     "No deployment, queue reset, digest migration or live reference-film acceptance."
   ],
-  "regressions": "authored, not run; deferred until final adversarial review fixes"
+  "regressions": "authored, not run; deferred until final adversarial review fixes",
+  "integrated_main": "b43d9cdb8d3de0edf918b5af9b17a4f4bdab5737",
+  "compiled_source_head": "e3cffab449d7db31a77b985667f1097badf1c34c",
+  "compiler": "rustc 1.97.1, macOS, workspace all-target check --locked passed; units deferred"
 }

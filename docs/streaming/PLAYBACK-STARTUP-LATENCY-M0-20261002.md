@@ -6,8 +6,8 @@
 
 This records the lab6 native Safari failure for reference film / file **120**
 and folds the proposed repair into the existing
-[Track N contract](NATIVE-HLS-STARTUP-IMPLEMENTATION.md#10-proposed-amendment--reuse-track-n-and-preflight-the-compatible-route)
-and [startup-latency contract](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md#11-proposed-amendment--incident-evidence-for-m0m1-and-a-measured-m2-choice).
+[Track N contract](NATIVE-HLS-STARTUP-IMPLEMENTATION.md#10-authorized-amendment--reuse-track-n-and-preflight-the-compatible-route)
+and [startup-latency contract](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md#11-authorized-amendment--incident-evidence-for-m0m1-and-a-measured-m2-choice).
 It supersedes the standalone fast-start proposal. Read the
 [review](PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) alongside the
 [sanitized receipt](PLAYBACK-STARTUP-LATENCY-M0-20261002.json).

@@ -212,14 +212,16 @@ fast-lane validation remains the merge prerequisite; no new TTFF claim.
 ## October 2 amendment — candidate rejection and generated browser sweep
 
 The September measurements above are retained history of the conservative
-settings correction. Current build base is `dea1a403e`; the current decision
+settings correction. Initial build base was `dea1a403e`; current main `b43d9cdb` is integrated; the current decision
 receipt is [M2-20261002](PLAYBACK-STARTUP-LATENCY-M2-20261002.json).
 
 The new replay uses the normal 16-second publication cadence, complete
 8/16-second objects, 0.25–4× playback, 1.05× relative production, three origin
 leads, three reload phases, a 0/2-second source pause and an assumed 2.5-second
 transfer/append margin. `scripts/playback-startup-trace --output <owned-path>`
-reproduces it. These margins are experiment inputs, not measured fleet bounds.
+reproduces it. Initial endpoint rounding is capped by position plus 124 seconds;
+when rounding up crosses the grant, the model uses the largest complete
+in-grant endpoint, matching the ceiling regression. These margins are experiment inputs, not measured fleet bounds.
 
 | 1× candidate / minimum | Buffer deficits / 180 rows |
 |---|---:|

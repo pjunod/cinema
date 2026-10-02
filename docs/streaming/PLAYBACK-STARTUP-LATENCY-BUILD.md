@@ -66,7 +66,7 @@ The builder's repository is:
 ```text
 /private/tmp/plurx-fast-start-build-20261002
 branch: codex/playback-startup-latency
-current build base: dea1a403e9a650fc51e35909b36e596be5a5ed13
+current build base: b43d9cdb
 ```
 
 This is an independent clone of the configured remote. It contains only the

@@ -1013,7 +1013,9 @@ retain exact attachment/execution/intent ownership and the original deadline.
 
 The candidate `WebFixedHlsV1` policy freezes the explicit web transport class
 at create. Accepted explicit demand uses ceil(32 seconds × rate), clamped to
-32–124 media seconds, for the first snapshot. Existing steady production and
+32–124 media seconds, for the first snapshot. At the ceiling, whole-cut
+rounding selects the largest in-grant endpoint within one maximum segment
+of the target, rather than exposing the first tiny object. Existing steady production and
 scratch bounds remain intact; all eligible completed endpoints publish while
 reserve grows. Only actor-proved presentation promotes ActiveLowReserve, which
 has no renewed startup deadline. Prefix removal retains at least 48 seconds
