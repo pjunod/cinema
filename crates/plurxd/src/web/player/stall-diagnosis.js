@@ -776,7 +776,7 @@ async function stallDiagnose(){
     const episode=p.hlsStartup;
     episode.state='exhausted';
     clearTimeout(episode.retry.timer); episode.retry.timer=null;
-    abortHlsStartupLoaders(episode);
+    abortHlsStartupLoaders(episode,true);
     try{episode.hls.stopLoad()}catch(e){}
   }
   const episode=hlsStartup?p.hlsStartup:null;

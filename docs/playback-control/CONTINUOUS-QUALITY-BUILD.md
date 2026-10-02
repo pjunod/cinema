@@ -3294,3 +3294,21 @@ The remote main has advanced from the prior integrated c63859963 to 4f55ae17e
 with native startup/readiness and producer-capacity fixes. Completed CQ commits
 are backed up through a73f0add9; this newer main needs integration and matching
 compiler evidence before runtime qualification or final review.
+
+
+### 10.106 Current main integration preserves continuous publication ownership
+
+Main 4f55ae17e is integrated into the batch. The single playlist conflict was
+resolved by preserving continuous-family master publication before the ordinary
+master path, while retaining main's readiness deadline for ordinary session and
+context lookup. Each publication budget starts after the corresponding ready
+resource is available. Native readiness and producer-capacity fixes remain
+intact. Web player, startup/failure ownership and documentation changes merged
+without textual conflicts.
+
+Rust 1.97.1 (8bab26f4f) workspace/all-target source and test-source compilation
+passes against this integrated tree in 59.21 seconds. The normal commit hook
+provides formatting, all-target Clippy and served-JavaScript syntax evidence.
+Unit execution, adversarial review, exact-source production replay and physical
+native qualification remain pending. No runtime receipt from the older Linux
+binary qualifies this merged source.
