@@ -1019,6 +1019,21 @@ const CACHE_ADMIN_REVOCATION_PEERS_SQL: &str =
      WHERE node.node_id != $1 AND node.removed_at IS NULL \
        AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each($2)) \
      ORDER BY node.raft_id";
+// The directory and sender fence come from one consistent SQLite snapshot.
+// Pending removals remain in full-roster coverage, but cannot sign requests.
+const AUTHENTICATED_CLOCK_PEERS_SQL: &str =
+    "WITH args AS (SELECT $1 AS local_node, $2 AS members, $3 AS sender) \
+     SELECT node.node_id, node.raft_id, node.last_seen_at, http.public_http_url, \
+       EXISTS (SELECT 1 FROM cluster_nodes sender \
+         WHERE sender.node_id = args.sender AND sender.removed_at IS NULL \
+           AND sender.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each(args.members)) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+             WHERE removal.node_id = sender.node_id)) AS request_authorized \
+     FROM cluster_nodes node CROSS JOIN args \
+     LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+     WHERE node.node_id != args.local_node AND node.removed_at IS NULL \
+       AND node.raft_id IN (SELECT CAST(value AS INTEGER) FROM json_each(args.members)) \
+     ORDER BY node.raft_id";
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // Exact-request proofs are accepted on the public listener. Bound the work
@@ -6862,6 +6877,30 @@ impl MembershipManager {
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
     pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
+        self.clock_peers_for_request(None).await
+    }
+
+    /// Last awaited response check after ordinary exact-request authorization.
+    /// Does not consume a nonce again. Directory and sender removal fence must
+    /// be from the same consistent read, not two snapshots separated by await.
+    pub async fn clock_peers_after_authenticated_request(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<ClockPeerRoster, MembershipError> {
+        if !self.authenticated_clock_request_still_fresh(auth)? {
+            return Err(MembershipError::Internal("clock request expired".into()));
+        }
+        let roster = self.clock_peers_for_request(Some(&auth.node_id)).await?;
+        if !self.authenticated_clock_request_still_fresh(auth)? {
+            return Err(MembershipError::Internal("clock request expired".into()));
+        }
+        Ok(roster)
+    }
+
+    async fn clock_peers_for_request(
+        &self,
+        sender: Option<&str>,
+    ) -> Result<ClockPeerRoster, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(ClockPeerRoster {
                 membership: None,
@@ -6879,13 +6918,31 @@ impl MembershipManager {
             ));
         }
         let members_json = bounded_committed_raft_ids_json(&membership.members)?;
-        let rows = inner
-            .client
-            .query_consistent_map::<ActivityPeerRow, _>(
-                CACHE_ADMIN_REVOCATION_PEERS_SQL,
-                params!(inner.identity.node_id.as_str(), members_json),
-            )
-            .await?;
+        let rows = if let Some(sender) = sender {
+            let rows = inner
+                .client
+                .query_consistent_map::<AuthenticatedClockPeerRow, _>(
+                    AUTHENTICATED_CLOCK_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json, sender),
+                )
+                .await?;
+            if !rows.first().is_some_and(|row| row.request_authorized)
+                || rows.iter().any(|row| !row.request_authorized)
+            {
+                return Err(MembershipError::Internal(
+                    "clock sender is removed or fenced".into(),
+                ));
+            }
+            rows.into_iter().map(|row| row.peer).collect()
+        } else {
+            inner
+                .client
+                .query_consistent_map::<ActivityPeerRow, _>(
+                    CACHE_ADMIN_REVOCATION_PEERS_SQL,
+                    params!(inner.identity.node_id.as_str(), members_json),
+                )
+                .await?
+        };
         if inner.local_metrics.current().as_ref() != Some(&membership) {
             return Err(MembershipError::ClockUnbounded(
                 ClockRefusal::GenerationChanged,
@@ -11365,6 +11422,20 @@ struct ActivityPeerRow {
     http_base: Option<String>,
 }
 
+struct AuthenticatedClockPeerRow {
+    peer: ActivityPeerRow,
+    request_authorized: bool,
+}
+
+impl From<&mut Row<'_>> for AuthenticatedClockPeerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            peer: ActivityPeerRow::from(&mut *row),
+            request_authorized: row.get("request_authorized"),
+        }
+    }
+}
+
 struct NodeHostnameRow {
     node_id: String,
     hostname: String,
@@ -12755,6 +12826,43 @@ mod tests {
         assert!(rows
             .iter()
             .all(|(node_id, _)| !node_id.starts_with("abandoned-")));
+    }
+
+    #[test]
+    fn k06_final_clock_directory_reads_sender_fence_in_same_snapshot() {
+        let db = rusqlite::Connection::open_in_memory().expect("owned sqlite");
+        db.execute_batch(
+            "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, \
+               last_seen_at INTEGER, removed_at INTEGER); \
+             CREATE TABLE cluster_node_http (node_id TEXT PRIMARY KEY, public_http_url TEXT); \
+             CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+             INSERT INTO cluster_nodes VALUES ('local',1,0,NULL),('learner',2,0,NULL); \
+             INSERT INTO cluster_node_http VALUES ('learner','http://learner:32400');",
+        )
+        .expect("fixture schema");
+        let read = |sender: &str| {
+            db.prepare(AUTHENTICATED_CLOCK_PEERS_SQL)
+                .expect("production query")
+                .query_map(rusqlite::params!["local", "[1,2]", sender], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, bool>(4)?))
+                })
+                .expect("consistent statement")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("whole directory")
+        };
+        assert_eq!(read("learner"), vec![("learner".into(), true)]);
+        assert_eq!(read("foreign"), vec![("learner".into(), false)]);
+        db.execute("INSERT INTO cluster_node_removals VALUES ('learner')", [])
+            .expect("actual durable sender fence");
+        // Full coverage still includes the peer; authority in that SAME read
+        // is false, not borrowed from a preceding unfenced response check.
+        assert_eq!(read("learner"), vec![("learner".into(), false)]);
+        db.execute(
+            "UPDATE cluster_nodes SET removed_at=1 WHERE node_id='learner'",
+            [],
+        )
+        .expect("actual durable removal");
+        assert!(read("learner").is_empty());
     }
 
     #[test]

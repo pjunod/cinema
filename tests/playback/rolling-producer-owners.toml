@@ -3673,12 +3673,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # six authenticated fault/memory/current-incumbent helpers, one prepared
 # memory read, one negative-ack fold. None renew a playback/producer budget.
 # Additive composition: existing S10 1173 plus the eight A05 waits above.
-# K06 causal startup: +12 net bounded clock-service/ownership waits. Six
+# K06 causal startup: +11 net bounded clock-service/ownership waits. Five
 # timeout_at calls share the original two-second receipt deadline; three
 # shutdown drains use the existing bound, and three startup fixture waits
 # are test-owned. The periodic probe keeps its existing interval; no media
 # deadline or producer life is renewed.
-expected_occurrences = 1193
+# Review64 R4 combines sender-fence/directory proof in the last read: removes
+# one preceding timeout, retaining the SAME original two-second deadline.
+expected_occurrences = 1192
 
 [[module_structures]]
 id = "bare-time-constructor"
