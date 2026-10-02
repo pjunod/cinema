@@ -359,10 +359,13 @@ plurx_interlace_verdicts_total` shows both labels after playing both.
 boot probe's verdict, each its own PR. Until a graph passes, the M2 decline
 arm stands.
 
-> **Superseded 2026-10-02 (§9).** The bars originally written here — `idet`
-> ≥ 95 % progressive and mean Y/U/V within `MAX_CHANNEL_DELTA` of CPU bwdif —
-> cannot judge a deinterlacer and are replaced by §9.3. Measured against
-> them, neither hardware graph is adopted (§9.4).
+> **Proposed to be superseded (2026-10-02, §9).** The bars originally
+> written here — `idet` ≥ 95 % progressive and mean Y/U/V within
+> `MAX_CHANNEL_DELTA` of CPU bwdif — cannot judge a deinterlacer; §9.3
+> proposes replacements, pending ratification. Until then these bars stand
+> as written, and the M5 decision does not depend on which set applies:
+> both hardware graphs fail these bars on the real recordings too (`idet`
+> 35.7–65.4 % progressive), so the decline stands under either (§9.4).
 
 GPT prompt: "On media1 run the 1080i fixture through
 `-hwaccel qsv -hwaccel_output_format qsv -vf
@@ -372,8 +375,8 @@ through the CPU `bwdif=send_frame,scale` chain; report `idet` summaries,
 each."
 
 Acceptance: the QSV graph's numbers in the PR; `Pipeline::declined` no
-longer names interlace for QSV once it passes. Judged by §9.3, not by the
-two bars above.
+longer names interlace for QSV once it passes. Judged by §9.3 once
+ratified; by the two bars above until then.
 
 ## 6. Verification and rollout
 
@@ -450,7 +453,11 @@ two bars above.
   including audio-only and cover-art-only files (the token the backfill
   already wrote for those rows), so the SQLite and Hiqlite upserts and the
   background probe job's facts document all store the same value; `NULL`
-  now means only "never probed". The backfill was re-armed under new keys
+  now means only "never probed". Every write boundary enforces the same rule
+  (`ProbeResult::stored_field_order`: both catalogue upserts, both fenced
+  publication upserts, and the coordinator's apply of probe-job facts), so a
+  probe worker still on the old binary in a rolling deploy cannot strand a
+  fresh `NULL` row. The backfill was re-armed under new keys
   (`jobs.field_order_backfilled_v2`, `jobs.field_order_backfill_v2_cursor`);
   the new stamp alone re-arms the loop. The first pass's stamp and cursors
   stay in place, as every superseded backfill's do: `NULL` and `unknown`
@@ -482,12 +489,18 @@ two bars above.
   from the request's `opts.pipeline` (`PrepublicationTranscodeRetry::prepare`
   in `manager/start.rs`; a GPU request would "retry" onto the exact plan it
   already got), and the start log and session descriptor print
-  `opts.pipeline` (`start.rs`, `construct.rs`). The fix is to make every
-  post-resolve reader take `plan.options().pipeline` (retry preparation, log,
-  descriptor, and the other `live_lookup_options` call sites in
-  `create.rs`, `candidates.rs`, `produce.rs`) and then drop the scan argument
-  from the request-time guard, leaving `resolve_transcode` the sole,
-  verdict-aware authority. That is a restructuring of the request/plan
+  `opts.pipeline` (`start.rs`, `construct.rs`); so do the session-event
+  grade (`start.rs` ~1221, `opts.pipeline.output_grade()`) and the codec
+  qualification attribution (`start.rs` ~1390–1392, the grade and
+  `Some(opts.pipeline)`, and the grade again at ~1408). The fix is to make
+  every post-resolve reader take `plan.options().pipeline` — retry preparation, log, descriptor, session
+  event, qualification attribution, and whatever the other
+  `live_lookup_options` callers read after their resolve (`create.rs`,
+  `candidates.rs`, `construct.rs`, `start.rs`; `plan.rs` defines it; the
+  producer's `speculative_producer_options`/`offline_package_options` in `produce.rs`
+  are separate entry points over the same request options) — and then drop
+  the scan argument from the request-time guard, leaving `resolve_transcode`
+  the sole, verdict-aware authority. That is a restructuring of the request/plan
   boundary, not a routing tweak, so it is recorded here instead of forced.
   Practical reach today: interlaced sources are MPEG-2/H.264 8-bit, which
   `heavy_source` keeps on the CPU chain anyway; only a mis-flagged heavy
@@ -526,7 +539,7 @@ intends); hardware outputs drop one edge frame. The misflagged source through
 bwdif without M4's overrule measures PSNR-Y 52.5 dB / SSIM 0.9966 against
 untouched — mild softening, which M4 removes.
 
-### 9.3 Bars that can judge a deinterlacer (replace §5.5's)
+### 9.3 Proposed replacement bars (pending ratification)
 
 What failed as written: `idet` ≥ 95 % progressive fails real content *for
 the CPU reference itself* (78.8 %, 83.2 %) while every graph passes the
@@ -535,8 +548,10 @@ residual line structure; and "mean Y/U/V within `MAX_CHANNEL_DELTA` (24)"
 passes the un-deinterlaced weave at 0.23, so it cannot tell a deinterlacer
 from none. A 1.2× wall-time rule (the boot probe's `MIN_SPEEDUP`) applied to
 deinterlace alone rejects both GPU paths at these resolutions, though they
-use 5–6× less CPU. A future hardware candidate is judged, per source in
-§9.1 (the real recordings, not only the fixture), by:
+use 5–6× less CPU. **Proposed, pending ratification:** a future hardware
+candidate is judged, per source in §9.1 (the real recordings, not only the
+fixture), by the following. The thresholds are drawn from this run's
+numbers and are not yet agreed; until they are, §5.5's bars apply.
 
 1. **Field timing first.** PSNR against CPU `bwdif=send_field` with the
    reference shifted by −1, 0 and +1 field (`setpts=PTS±1/(2·rate)/TB`): the
@@ -560,7 +575,10 @@ use 5–6× less CPU. A future hardware candidate is judged, per source in
 
 **Hardware deinterlace is not adopted; the CPU `bwdif=send_frame` chain
 stays the only file-path deinterlacer**, and the decline arm stands for all
-four GPU graphs. VA-API fails bar 1 on every source (constant one-field,
+four GPU graphs. The decision holds under the original §5.5 bars as well as
+the proposed §9.3 ones: under §5.5 both graphs fail `idet` ≥ 95 % on both
+real recordings (35.7 % and 64.1 % for QSV, 37.1 % and 65.4 % for VA-API).
+Under §9.3, VA-API fails bar 1 on every source (constant one-field,
 16.7 ms, video lag). QSV fails bar 1 on the DVR recording (one field ahead)
 and bar 2 there as a consequence, while passing on the broadcast 1080i — a
 source-dependent timing, which a boot probe on one fixture cannot certify.
@@ -587,4 +605,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`a55bad845`) | Ten-second-media `idet` pass uses the snapshotted FFprobe and held descriptor under the existing overall deadline, output caps, cancellation/reap and offset ownership. Verdict is cached/digested, strict >90% progressive overrides bwdif, and three fixed metric labels are exported. Real FFmpeg/FFprobe descriptor acceptance confirms both overrule and confirmation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) | **needs:** run the §5.5 media1 QSV/VAAPI prompt and record idet, cadence, signalstats and wall-time comparisons. Hardware graphs remain conservatively declined; no unqualified filter was added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Review disposition | [#417 comment 3298](http://192.168.4.7:3000/noirr/plurx/pulls/417#issuecomment-3298) (`9789ca4ed`, merged with `6063b37c0` in `3fd0d8ac1`) | Both P1 findings resolved: the three special Dolby Vision/HDR10 graphs apply the recorded bwdif decision before scale without moving Dolby Vision reshape, and Live TV selects one complete final H.264 limit only after output cadence is known. Focused argv, 30/60 fps capability, rational bitrate, affected compile and all-target Clippy evidence is green. M5 remains honestly blocked on media1 qualification. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M1 defect + M5 | branch `opus/s08-interlace-continuation` (unpushed) | `parse_probe_json` owns `unknown`; backfill re-armed under v2 keys (first pass's stamp left in place); store contract on both backends. M5 measured on lab3 (§9): hardware deinterlace not adopted, CPU bwdif stays; §5.5 bars replaced by §9.3. Open question 4 closed. Routing by the M4 verdict recorded as a gap (§8), not forced. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M1 defect + M5 | [#728](http://192.168.4.7:3000/noirr/plurx/pulls/728) (branch `opus/s08-interlace-continuation`) | `parse_probe_json` owns `unknown`; backfill re-armed under v2 keys (first pass's stamp left in place); store contract on both backends. M5 measured on lab3 (§9): hardware deinterlace not adopted, CPU bwdif stays, under §5.5's bars and the proposed §9.3 bars alike (§9.3 pending ratification). Review 66: the write boundary also stores `unknown` for probed rows (rolling-deploy safety). Open question 4 closed. Routing by the M4 verdict recorded as a gap (§8), not forced. |
