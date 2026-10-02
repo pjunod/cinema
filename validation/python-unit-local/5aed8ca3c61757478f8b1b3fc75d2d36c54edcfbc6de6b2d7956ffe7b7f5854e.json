@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "repository": 1,
+  "branch": "codex/s10-rolling-retained-output",
+  "suite": "operations",
+  "test_file": "tests/operations/test_decoder_diagnostic_qualification.py",
+  "test_file_sha256": "2ba365353c93d141be1088283d70b509e4da096a1ad55a1b6258f76861b32220",
+  "source_commit": null,
+  "command": "python3 -m unittest tests.operations.test_decoder_diagnostic_qualification.DecoderSelectionInventoryTests.test_every_inventory_anchor_exists_and_identifiers_are_unique tests.operations.test_decoder_diagnostic_qualification.DecoderSelectionInventoryTests.test_every_shipping_hls_builder_is_in_the_m0_inventory",
+  "test_ids": [
+    "test_decoder_diagnostic_qualification.DecoderSelectionInventoryTests.test_every_inventory_anchor_exists_and_identifiers_are_unique",
+    "test_decoder_diagnostic_qualification.DecoderSelectionInventoryTests.test_every_shipping_hls_builder_is_in_the_m0_inventory"
+  ],
+  "output": "Actual working-tree failed-only execution chunk0890e6 exit0: Ran 2 tests in 0.087s; OK. Raw /private/tmp/s10-706-inventory-failed-only-20261002.log SHA256 c33da458566e46279ad1290fa79d90dd1b1dc19d3678511374c9af9ccb7fc774. Inventory SHA256 8d597639a0aa0b649736cd5f9a0d07c6bb5ef7591d28a76104ea676ca9e57b47. Exactly two run3810 failures selected; all923 CI successes and ten Rust controls retained without replay. Two additional hls_args calls are canonical identity projections, not producer launches; exact pipe constructor anchor updated.",
+  "result": {"failed": 0, "errors": 0, "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 2}
+}
