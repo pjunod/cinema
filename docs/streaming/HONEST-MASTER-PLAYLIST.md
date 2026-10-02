@@ -1177,6 +1177,28 @@ The initial uncaptured attachment remains uncaptured. This does not make
 unknown full-tail facts available before preparation completes, and does not
 implement cold encoded preparation or waive original corpus/device evidence.
 
+**2026-10-02 encoded preparation continuation (in progress):** a distinct closed
+version-one `EncodedOutputPrepare` intent uses the existing node-affine
+preparation lane, not speculative `TranscodePrepare` or live-wait admission.
+The actual foreground resolver supplies selected audio delivery and offset,
+subtitle/body digest, output grade, geometry, executable and engine identity.
+The worker recomputes the full intent against held current source bytes before
+using the existing Background resource bundle and finite VOD preparation
+reservation. Normal complete output is privately retained before exact job
+settlement; only successful settlement plus post-await physical/logical/owner
+revalidation exposes the process-private origin to a compatible new attachment.
+Historical SQL success alone grants no attachment or artifact authority.
+
+The new real consumer case has passed once with selected EAC3-to-AAC delivery
+and a 250ms offset, without invented candidate context. Production migrations
+SQLite93/Hiqlite69 follow the immutable independently owned recovery92/68
+parent; a new actual SQLite upgrade case passes once. This is not yet a frozen
+or independently reviewed implementation. Rolling-copy/PUT
+complete observations still require actual retained consumer authority before
+their rates can become wire facts. Exact first-master facts for an unseen tail
+without a whole-film foreground wait, and original fleet/device/corpus
+qualification, remain explicit acceptance boundaries rather than guessed costs.
+
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
