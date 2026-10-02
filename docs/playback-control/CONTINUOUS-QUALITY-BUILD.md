@@ -3693,3 +3693,42 @@ bytes were omitted. A fresh exact-source run has started; all qualification
 rows remain open. No unit tests, final adversarial review or merge occurred.
 The human will be notified when the final adversarial review is finished and
 the handoff is ready for Fable, as requested in §10.118.
+
+
+### 10.123 Startup isolation and native autonomous M0 evidence
+
+The bounded-log Chrome retry on `655b4e884` failed before its first frame:
+its local worker exceeded the placement deadline while startup FFmpeg
+validation and caption probes were still active. The failed receipt is
+`continuous-chrome-mixed-auto-linux-655b4e884-index-fixed-bounded.json`.
+No isolated worker or FFmpeg process remained after its normal cleanup.
+This startup failure is preserved separately from switching evidence.
+
+A subsequent wrapper observed this daemon's own startup FFmpeg children
+quiet for eight seconds before opening playback (49,014 ms observed wait).
+It changes no product deadline, admission or quality policy. That exact-source
+run is now progressing through the fifteen manual changes preceding real
+Auto decisions; a fresh producer census began before playback. It has no
+final verdict yet.
+
+A separate generated native Safari M0 fixture exposes two real AVC High
+Level 4.1 / 24 fps video playlists and one shared AAC soundtrack. FFprobe
+verified 1280×720 and 1920×1080 against actual init plus fragment bytes;
+manifest bandwidth comes from actual generated segment sizes. Its first
+four-minute run observed native callbacks at 720p initially and 1080p from
+film time 0.5 seconds, on the same video element with one video and one audio
+track. It recorded 5,759 callbacks and maximum callback gap 83 ms. The
+receipt is `native-safari-autonomous-short-pressure.json` in ignored reports.
+
+The actual shaped-link interval did not produce a downgrade: Safari retained
+1080p with advancing playback. Network `stalled` events were recorded and
+must not be erased or called zero stalls. This fixture proves an autonomous
+initial selection and upgrade only; production adapter switching, exact
+manual selection, physical display, audible continuity and resource admission
+remain unqualified. The generated fixture is not a production-family receipt.
+
+The experiment tab was closed and its own server stopped. The Mac then locked
+before a fresh longer-pressure experiment could start; manual unlock was
+requested while independent browser work continues. No production tab,
+profile or security preference was changed. The final adversarial / Fable
+boundary remains pending, with no unit-test execution or merge.
