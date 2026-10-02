@@ -1,7 +1,7 @@
 # Shared libraries — the Tailscale build contract for Opus and Sol
 
-**Status:** revised after Opus S0; awaiting review confirmation and topology
-qualification; not implemented · **Revised:** 2026-10-02 ·
+**Status:** ready to build after Opus S0 corrections; S2 topology
+qualification pending; not implemented · **Revised:** 2026-10-02 ·
 **Source rechecked:** `15e36f7f4` ·
 **Executes:** the Cinema-to-Cinema and private-Tailscale decisions in
 [SHARED-LIBRARIES-DESIGN.md](SHARED-LIBRARIES-DESIGN.md) ·
@@ -12,7 +12,8 @@ contract: authority, state, wire shapes, code seams, work packages, and the
 observations that make the feature complete. Opus reviews it before Sol
 builds; record findings and their dispositions here, then change the status.
 The [original Opus review](SHARED-LIBRARIES-REVIEW.md) records the rejected
-first draft; §16 owns the revised dispositions. No runtime qualification or
+first draft; the [re-review](SHARED-LIBRARIES-RE-REVIEW.md) accepts the prior
+dispositions subject to its corrections. §16 owns current dispositions. No runtime qualification or
 deployment is implied by this file. Existing symbols below were inspected; all new symbols, paths, tables,
 and routes are proposed. Re-verify the seams against the implementation base.
 
@@ -121,6 +122,8 @@ tailscale serve status --json
 
 `init-tls` is to be implemented; it creates a node key and self-signed
 certificate with owner-only access and refuses to overwrite an existing key.
+Initial issuance and renewal set `notBefore = now - 1 hour`, allowing bounded
+receiver clock skew without disabling validity checks.
 The operator configures Serve, then Cinema reads readiness. Raw `--tcp`
 forwards TLS without terminating it; `--bg` retains Serve configuration over
 restarts. See [Serve CLI](https://tailscale.com/docs/reference/tailscale-cli/serve).
@@ -277,7 +280,10 @@ keys follow the existing node-local provisioning and backup rules. Generalize `S
 including sharing credentials, pending claims, rotations and upstream session
 secrets. Preserve the existing startup refusal when sealed rows outlive the
 key or its key ID does not match. This follows Trakt's existing safety rule;
-it is **not** per-import degradation. Joining nodes receive the credential
+it is **not** per-import degradation. This is the contract author's engineering
+default, matching Opus's recommendation, not a decision explicitly attributed
+to Paul. Retain it for S1; a request to isolate failure by secret purpose
+would change startup/restore semantics and needs its own contract and tests. Joining nodes receive the credential
 key through the existing admission mechanism before serving sealed state.
 Test both purposes, backups and join-token provisioning; never regenerate a
 key over ciphertext. Runtime peer/key failures cannot authorize delivery.
@@ -506,7 +512,7 @@ retention, are required in the same storage work package:
 | Table | Required identity and state |
 |---|---|
 | `sharing_rotations` | Grant/import, request UUID, old verification hash, new hash/sealed credential as appropriate, state, created time, 10-minute expiry; no plaintext |
-| `sharing_catalogue_revisions` | Library ID and positive revision; bumped atomically for every shared metadata/membership/order change, no per-browse writes |
+| `sharing_catalogue_revisions` | Library ID and positive membership/order revision; bump only on membership or sort-key changes, not metadata-only writes; no per-browse writes |
 | `sharing_relay_upstream` | Existing B media-session incarnation FK; import, lifecycle/assignment observations, remote item/file/revision, A request/session/incarnation, approved endpoint revision, sealed upstream capability, source position; one row per incarnation |
 | `sharing_delivery_grants` | File-grant-style hash verifier bound to B relay/session incarnation and source login-token hash, active/revoked state, deadline; no second player token |
 | `sharing_endpoint_manifest` | Singleton approved node endpoint set and monotonic revision, modified only by local admin; node private keys excluded |
@@ -625,6 +631,9 @@ Require `AuthUser` and assignment authorization at every entry point:
 | GET `/imports/{i}/items/{item}` | Details, hierarchy, playable files, tracks, chapter/skip metadata |
 | GET `/imports/{i}/items/{item}/children` | Paginated season/episode children |
 | GET `/imports/{i}/art/{resource}` | Mapped artwork resource; authorization before cache lookup |
+| GET/POST `/imports/{i}/files/{opaque}/decision` | Existing decision types; pre-session, assigned viewer and current source membership required |
+| POST `/imports/{i}/files/{opaque}/hls/sessions` | Existing start request/response types through remote-source admission; same idempotent start path as playback below |
+| GET/HEAD `/imports/{i}/files/{opaque}/...` | Closed file-resource suffixes in §7.3, including pre-session subtitles/chapter thumbnails and admitted media delivery |
 | POST `/imports/{i}/playback` | `{item_id,file_id,revision,playback_id,request_id,start_ms,caps,selection}` |
 | GET `/playback/{id}` | Recover start result or terminal state without a new transcode |
 | POST `/playback/{id}/control` | Existing playback-control semantics through B's session adapter |
@@ -634,15 +643,36 @@ Require `AuthUser` and assignment authorization at every entry point:
 | POST `/imports/{i}/items/{item}/watched` | `{watched:boolean}`; explicit local override, not an A write |
 | GET `/continue-watching` | Authorized remote history with source-labelled references |
 
-Media URLs use `/api/v1/shared/hls/{session_id}/...` with the existing HLS
-sub-grammar, and `/api/v1/shared/hls/{session_id}/files/{file_id}/...` for
-admitted file resources. `session_id` is B's high-entropy relay capability,
-not A's handle. Match the local HLS capability model; no second delivery
-secret or player renewal protocol. Bind it to the originating live login
-using the file-grants pattern (§7.3). Session control under this prefix uses
-the existing bounded control protocol with ownership fencing. Management,
-selection intent and progress endpoints additionally require B's `AuthUser`.
-The capability cannot browse, administer or start arbitrary files.
+B serves remote-source sessions on the **ordinary**
+`/api/v1/hls/{session_id}/...` namespace. Its existing HLS handlers dispatch on
+producer kind after local ownership/capability checks: local producer or
+`remote_source` relay. This includes playlists, media, `/control`, `/status`,
+and `DELETE /api/v1/hls/{session_id}`. Prepared payloads carry ordinary HLS
+paths, preserving server/web/Apple/Android reporter validation. The session
+ID is B's UUID capability, never A's handle; §7.3 binds it to the live login.
+A sharing principal remains forbidden on this ordinary router. B's relay is
+a local principal, which is why this dispatch is allowed.
+
+Each playable file in B's shared detail includes a `file_base` such as
+`/api/v1/shared/imports/{i}/files/{opaque}`. It is a B-relative locator, not a
+bearer capability. B MAC-signs a bounded opaque reference over import ID,
+import lifecycle, source identity/epoch, library, item, file and revision;
+verify that binding and current viewer authority on every call. No raw source
+ID is looked up in B's local files table. The suffix builder accepts only
+§7.3's file grammar. Details, decision and thumbnails need no relay session;
+bytes that create playback use admission before delivery. The authenticated
+`hls/sessions` and `/playback` starts share one idempotency implementation.
+
+Catalogue/detail/pre-session file calls require `AuthUser`. Native media
+requests without account headers use the B relay capability: ordinary HLS
+paths embed it; file media URLs add the bounded `session=<B UUID>` query.
+That session must bind the exact opaque file reference, revision, recipe,
+viewer and live login. B's authenticated start returns these delivery URLs;
+the client file-context helper appends the same session query for later
+media/subtitle requests. A `file_base` alone never authorizes delivery.
+Pre-session calls can use existing local authenticated requests; no second
+long-lived capability or account credential is sent to A. Management,
+selection intent and progress endpoints also require B's `AuthUser`.
 
 ### 5.4 Private peer routes on A
 
@@ -666,7 +696,8 @@ to the requirement for an active grant.
 | GET `/playback/requests/{id}` | Recover exact start outcome, scoped by grant and viewer identity |
 | POST `/playback/{id}/control`, POST `/playback/{id}/selection` | Existing typed lifecycle and selection semantics |
 | GET/HEAD `/hls/{session}/...`, POST `/hls/{session}/control` | Closed existing HLS resource/control grammar; verify share principal before internal relay |
-| GET/HEAD `/playback/{session}/files/{file}/...` | Only admitted file and typed side-resource grammar in §7.3; no raw file lookup |
+| GET/HEAD `/items/{item}/files/{file}/...` | Typed subtitle/overlay/chapter suffixes before start; active grant and item/file/library membership, bounded extraction; no raw file lookup |
+| GET/HEAD `/playback/{session}/files/{file}/...` | Direct/progressive and other admitted file bytes under §7.3; exact principal/session/recipe |
 | GET/POST `/items/{item}/files/{file}/decision` | Existing decision request/response types, grant-check item/file relationship before invoking shared decision service |
 | DELETE `/playback/{id}` | Retire only this grant's session; repeated deletion succeeds |
 
@@ -693,7 +724,8 @@ Remote item reference:
 Use a new `SharedItemDto` composed from the existing presentation vocabulary,
 not a changed meaning for `ItemDto.id`. It contains this reference, title,
 kind, parent reference, sort title, year, genres, overview, tracks, media facts,
-B-relative artwork URLs and B's watch overlay. Never include source paths,
+B-relative artwork URLs, each playable file's `file_base`, and B's watch
+overlay. Never include source paths,
 source account state, internal nodes, raw capabilities or filesystem errors.
 
 A returns `{items,next_cursor,catalogue_revision,scope_generation}`. Default
@@ -705,17 +737,38 @@ cluster-shared purpose-separated key provisioned through the credential-key
 mechanism. Bound cursor length to 4 KiB and lifetime to 5 minutes; reject
 invalid signature/fields/expiry rather than accepting client SQL.
 
-All nodes use identical collation, NULL ordering and sort vocabulary. First
-page and later pages validate authority and read revision/items in one
-consistent read boundary. Any catalogue mutation that can change metadata,
-selection or ordering increments the library revision in the same transaction.
-A changed revision or grant catalogue/scope generation returns `cursor_stale`;
-B restarts the list and deduplicates references. Stable revisions guarantee
-no duplicates/skips; **mutable sort keys alone do not provide that guarantee**.
-Do not claim a snapshot across mutations. Test revision changes between
-validation and row fetch. This avoids per-browse Raft writes and removes the
-100,000-item snapshot cap. An index supports `(library, sort_key, item_id)`;
-query plans and large-library latency are S4 evidence.
+All nodes use identical collation, NULL ordering and sort vocabulary. Validate
+authority and read the current revision/page in one consistent read boundary.
+Only membership or sort-key changes advance the library's order revision;
+metadata-only artwork, analysis and description updates do not. Filtering
+uses the current item values on each page. Metadata changes that alter filter
+eligibility have live-list semantics, not a frozen browse snapshot.
+
+An order-revision change **resumes** from the signed last `(sort_key, item_id)`
+under the new revision; it does not restart the list. The response's next
+cursor records the new revision. Grant scope/catalogue changes trigger current
+authorization revalidation: deny removed libraries, continue a still-allowed
+library from its prior boundary, and refresh observed counters. Never use an
+old scope counter as authority. Expired/invalid cursors or changed query/sort
+require a fresh open, with a typed result; ordinary scans do not.
+
+B deduplicates the logical browse by full source reference. The guarantee is
+no duplicate displayed items, and forward progress while scans run. An item
+whose sort key moves behind the boundary, or which newly matches a filter
+behind it, can be missed until the next open. Items moved ahead may be sent
+again by A but are suppressed by B. With unchanged membership/order/filter
+eligibility, keyset traversal has no skips. Do not claim snapshot isolation
+across mutations or completion of an unbounded continuously growing library.
+B retains seen references for the current logical browse, including evicted
+page payloads; destroying that browse also discards its cursor. Empty pages
+after dedup must still advance from A's cursor, not B's last rendered item.
+
+This avoids per-browse Raft writes and removes the 100,000-item snapshot cap.
+An index supports `(library, sort_key, item_id)`. S4 pages a large finite
+fixture to exhaustion while metadata updates run continuously, then exercises
+sort/membership mutation, duplicate suppression and forward cursor movement.
+Record latency and seen-reference memory on large libraries; no unbounded
+server-side snapshot or automatic restart loop.
 
 B caches at most 32 MiB of metadata in memory and 256 MiB of artwork on disk
 per node initially, with LRU eviction and no media file cache. Metadata TTL
@@ -753,40 +806,78 @@ enum PlaybackPrincipal {
 }
 ```
 
-Keep one existing media-session family and one session-ID namespace. Add a
-principal discriminator to the current rows; do not create a second family:
+Keep one existing media-session family and one session-ID namespace. All
+ownership-bearing rows carry a canonical `owner_key TEXT NOT NULL`, built
+only by a typed `PlaybackPrincipal::owner_key()` constructor:
+
+- Local: `local:<canonical decimal user_id>`.
+- Sharing: `share:<canonical grant UUID>:<64 lowercase hex viewer_key>`.
+
+The fixed UUID/hex grammars exclude delimiters; user IDs use canonical signed
+64-bit decimal representation. Request bodies cannot supply `owner_key`.
+Use this column for every principal composite key and conflict target; keep
+separate principal projections for authorization and explicit local filtering.
+Required columns/constraint in rebuilt ownership-bearing tables:
 
 ```sql
--- Required columns/constraint in the rebuilt media_sessions table.
+owner_key TEXT NOT NULL,
 principal_kind TEXT NOT NULL DEFAULT 'local'
     CHECK (principal_kind IN ('local', 'sharing')),
-user_id INTEGER REFERENCES users(id),
-share_grant_id TEXT REFERENCES sharing_exports(id),
+user_id INTEGER,
+share_grant_id TEXT,
 share_viewer_key TEXT,
 CHECK (
     (principal_kind = 'local' AND user_id IS NOT NULL
-     AND share_grant_id IS NULL AND share_viewer_key IS NULL)
+     AND share_grant_id IS NULL AND share_viewer_key IS NULL
+     AND owner_key = 'local:' || CAST(user_id AS TEXT))
  OR (principal_kind = 'sharing' AND user_id IS NULL
-     AND share_grant_id IS NOT NULL AND share_viewer_key IS NOT NULL)
+     AND share_grant_id IS NOT NULL AND share_viewer_key IS NOT NULL
+     AND owner_key = 'share:' || share_grant_id || ':' || share_viewer_key)
 )
 ```
 
-This is a table-definition fragment, not an executable ALTER migration.
+This is a table-definition fragment, not an ALTER migration. The store
+validates UUID/pseudonym grammar and real owner existence before admission;
+the CHECK prevents the stored key/projections from disagreeing. Keep rebuilt
+session tables **FK-free**, matching today's lifecycle: do not add references
+to users or export grants. Ended rows must not block user/grant deletion.
+On B, a remote-source session's principal is local; its remote grant belongs
+only to its upstream binding, not B's export principal projection.
+
 Use the table-rebuild precedent `MEDIA_SESSIONS_V10_SCHEMA` in
 [hiqlite_sessions.rs](../../crates/plurx-core/src/store/hiqlite_sessions.rs).
-Backfill existing rows as local and preserve indexes, triggers, foreign keys,
-leases and terminal state. S3 must migrate every ownership-bearing request,
-pointer, preparation, desired-selection and producer-recovery key in the
-same family to typed principal ownership. Partial UNIQUE indexes enforce
-`(user_id, playback_id/request_id)` for local rows and
-`(share_grant_id, share_viewer_key, playback_id/request_id)` for sharing rows;
-do not rely on NULL equality in composite UNIQUE constraints. Apply the
-exact-one-owner CHECK to each such row and its references.
+Backfill local owner keys; preserve non-ownership columns, terminal records,
+leases and required triggers/indexes. Apply this ownership change to requests,
+pointers, preparations, desired selection and producer recovery, not only
+`media_sessions`. Explicit key/query contract:
+
+| Operation | Required ownership key |
+|---|---|
+| Request claim/replay/upsert | `PRIMARY KEY (owner_key, request_id)`; `ON CONFLICT(owner_key, request_id)` |
+| Current pointer, desired selection, preparation per playback | `PRIMARY KEY (owner_key, playback_id)`; matching conflict target |
+| Recovery/attempt ledgers | Replace the `user_id` component with `owner_key`, retaining all epoch/attempt/decision fences |
+| Admission counts and supersession | Predicate `owner_key = ?`, plus source grant/server caps for sharing; prepared and unresolved slots count |
+| Incarnation/session lookup | Existing unique ID plus returned/validated principal; one namespace |
+
+No nullable principal column belongs to a composite PK, and no partial-index
+conflict target is needed. Both backends use the same key encoding and
+transaction predicates. Exact retries must resolve the original incarnation;
+repeat-request tests must prove that only one encoder is allocated.
+
+Owner existence checks remain authoritative after deletion. User deletion
+invalidates login-bound delivery, ends active local/remote-source sessions,
+and leaves retained terminal rows readable until ordinary cleanup; reusing a
+numeric ID cannot resurrect their authority. Grant deletion first revokes and
+cancels sharing sessions, then prunes dependent records in a store transaction
+under the retention policy. Retained terminal rows carry immutable owner keys
+but confer no access to a missing grant. Test deletion with active, ended and
+terminal-ack rows on both backends; do not add cleanup FKs as a shortcut.
 
 The recheck at `15e36f7f4` confirms Opus's 36 `MediaSessionStore` operations:
 16 explicitly user-keyed and 20 keyed by session/incarnation/owner. Recount
 at implementation HEAD. The S3 PR carries
-a finite census of **every user-keyed query**, both backends, row decoders,
+a finite census of **every `user_id` predicate, key, conflict target and
+decoder**, both backends, plus
 activation structs, direct/progressive registries, telemetry and admin paths.
 Local-only queries explicitly require `principal_kind = 'local'`; common
 principal-aware queries select the appropriate branch. No sentinel user ID,
@@ -834,8 +925,10 @@ ordinary app router.
 The peer response reuses the existing
 [StartResponse](../../crates/plurxd/src/http/hls/session_guard.rs) and decision
 DTOs, with protocol/authority metadata in a peer envelope. B unwraps and
-returns the existing player type, changing only session identifiers and
-URL-bearing fields to B's relay namespace. Preserve `quality_catalog_status`,
+returns the existing player type with B session IDs and ordinary
+`/api/v1/hls/{B-session}/...` paths. Client-side file URL builders separately
+use the `file_base` context (§8); changing response URL fields alone is
+insufficient. Preserve `quality_catalog_status`,
 `ladder`, `quality_candidates`, `quality_candidate_id`,
 `display_aware_auto_protocol`, `prior_kbps`, `vod`, `height`, `encoder`,
 `start_seconds`, `media_origin_ms`, duration, delivered dynamic range/Dolby
@@ -859,7 +952,7 @@ nodes forward through B's existing internal cluster relay (§10).
 
 ### 7.3 Resource and lifecycle translation
 
-Preserve the engine's relative HLS URIs under B's prefix. Examples already
+Preserve the engine's relative HLS URIs under B's ordinary HLS prefix. Examples already
 emitted are `init.mp4`, `seg…m4s` and `subs/{index}/index.m3u8`; the closed
 sub-grammar comes from the actual HLS router and producers. Map the prefix
 and session once; do not create a resource UUID or replicated row per segment.
@@ -870,29 +963,43 @@ unexpected keys/encryption as `sharing_resource_unsupported`. Explicitly
 allow only the current engine's query keys with typed bounds. S5 inventories
 all emitted playlist forms so legitimate renditions are not silently dropped.
 
-File resources are not children of the HLS producer. Mount these typed
-suffixes beneath B's admitted relay/file and A's admitted playback/file:
+File resources are not children of the HLS producer. B mounts these typed
+suffixes under `file_base`; A separates pre-session item/file routes from
+admitted playback/file routes (§5.4):
 
 | Suffix | Contract |
 |---|---|
-| `direct`, `stream.mp4` | Existing GET/HEAD and Range/If-Range/416 semantics; source revision and exact admitted recipe |
-| `subs/{subtitle}` | Existing sidecar/VTT track grammar, bounded track selection |
-| `subs/{index}/overlay.json` | PGS manifest; preserve timing and generation |
-| `subs/{index}/overlay/{generation}/objects/{object}` | Exact generation/object grammar from the existing PGS route |
-| `chapters/{index}/thumb` | Admitted file and chapter index only |
+| `decision` | Existing GET/POST request/decision types, available before a session; authorize exact file reference |
+| `hls/sessions` | Existing authenticated start semantics, creates B's remote-source session through one idempotent admission path |
+| `direct`, `stream.mp4` | GET/HEAD and Range/If-Range/416; authenticated admission or exact existing session binding before bytes; no uncounted streaming |
+| `subs/{subtitle}` | Existing sidecar/VTT track grammar; pre-session authenticated preview or exact session delivery |
+| `subs/{index}/overlay.json` | Pre-session PGS manifest; timing/generation preserved |
+| `subs/{index}/overlay/{generation}/objects/{object}` | Exact PGS generation/object grammar; same file/track authorization |
+| `chapters/{index}/thumb` | Available on shared details before start; exact file/chapter membership |
 
-Decision routes in §5.4 precede start and require current item/file/grant
-membership. After admission, file routes cannot select another file or alter
-the recipe through arbitrary query parameters. A revision change returns a
-typed reopen result. B details carry B-relative artwork and auxiliary URLs.
-Typed decision/start/PGS-manifest URL fields may need explicit prefix
-translation even though HLS playlist bodies remain unchanged. Inventory and
-test each URL field, including control bootstrap and prepared replacements;
-never leak an A address, A handle, account token or raw filesystem path.
+Decision, subtitle extraction and chapter-thumbnail requests check current
+item/file/library/assignment authority without requiring a fabricated session.
+They remain bounded by extraction/RPC limits. Direct/progressive requests
+that initiate delivery must use the same session admission/accounting and
+login binding as HLS; HEAD and Range cannot bypass those checks. Prefer the
+authenticated `/playback` start before handing a native player its returned
+file media URL with `session=<B UUID>`. Repeated resource requests must never
+create an extra source producer. A source file revision change returns a
+typed reopen result, not another local-file lookup.
 
-B's `session_id` is a fresh 256-bit base64url relay capability used in those
-paths, following local HLS semantics. Adapt the existing session-ID length
-constraints if needed. Model `sharing_delivery_grants` on
+The single file-context builder (§8) handles all suffixes and the optional
+session binding; raw source file numbers are never B API identifiers.
+Typed decision/start/PGS-manifest URL fields still need explicit translation,
+even though HLS playlist bodies remain unchanged. Inventory and test every
+URL field, control bootstrap, status/stop and prepared replacement. Never leak
+an A address, A handle, account token or raw filesystem path.
+
+B's `session_id` is a fresh cryptographically random UUIDv4, following the
+existing local HLS capability format. Server and native prepared-payload
+validators require UUID session IDs; a 256-bit base64url ID would break them.
+Invitation/grant secrets remain 256-bit. Keep the UUID grammar and reporter
+rules unchanged, hash the delivery verifier, rate-limit guesses, redact URL
+capabilities and enforce parent-login/session authority. Model `sharing_delivery_grants` on
 [file_grants.rs](../../crates/plurx-core/src/store/file_grants.rs): hash verifier,
 `source_token_hash`, `source_active`, incarnation binding and revocation.
 Existing lifecycle storage may retain the session ID as it does for local
@@ -940,26 +1047,59 @@ is not automatically extended to remote history in v1; document that limit.
 
 ## 8. Clients and settings — remote context stays explicit
 
-Keep a small typed source reference at browse/start/progress boundaries in
-web, Apple and Android:
-local retains its existing item/file/session path; shared contains import,
-remote reference and B relay identity. The existing player consumes its usual full start/decision wire; avoid a
-parallel remote playback engine or wholesale controller rewrite. Native account
-origins never change when a remote title opens. Every deep link, progress write, next-episode
-transition and retry dispatches on that context. Numeric source IDs must never
-be passed into local item/file APIs by a convenience helper.
+Use one `PlaybackFileContext` contract on web, Apple and Android:
 
-Web needs sharing settings plus shared library/detail routes and a start/progress
-adapter. New plain scripts obey [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md):
-file, `WEB_ASSETS`, shell tag, documentation row in one commit. Existing
-sidecars keep their current module conventions. Reuse common card/player
-renderers through explicit view models instead of copying whole screens.
+```text
+source_ref     local reference | full shared reference
+file_base      /api/v1/files/{local_id}
+               | /api/v1/shared/imports/{import_id}/files/{opaque}
+session_id     optional B UUID, assigned by playback admission
+```
 
-Apple and Android need matching reference/DTO models, source-labelled grids,
-shared details, relay playback adapters, Continue Watching, next episode, and
-typed remote failures. Lock-screen/remote/PiP actions use the same player
-context. Unsupported offline/edit actions are absent for shared media.
-Library selection and player focus must work on physical Apple TV and Google TV.
+All file URL construction goes through one platform helper that appends only
+the typed suffix/query vocabulary in §7.3. For shared files, accept `file_base`
+only from B's authenticated detail response and validate its B-relative
+shared prefix/import; reject absolute URLs, traversal and a local `/files`
+base for a shared reference. The opaque reference is a locator, never proof
+of authorization. The helper carries normal B authentication or the exact
+admitted session query for headerless media delivery. Retain source IDs only
+as remote metadata; never coerce them to a local numeric file model.
+
+Session URLs continue to be built from the B UUID under ordinary
+`/api/v1/hls/{session}/...`. Existing control/prepared reporters and their
+validation remain unchanged. This avoids a parallel playback engine, but
+**does require converting every file-keyed call site**. Start/progress adapters
+alone are insufficient. Shared detail, resume, quality/seek replacement,
+stall reopen, subtitle selection and next episode must preserve the context.
+Account origin remains B; watch writes dispatch by the full source reference.
+
+S6/S7 must turn this seed census into an exhaustive per-platform inventory
+at their implementation HEAD:
+
+| Surface | Required converted call sites / regression |
+|---|---|
+| Apple `PlurxAPI.swift` | Decision, overlay manifest/objects, HLS starts and every subtitle/chapter/direct/progressive builder use `file_base` |
+| Apple `PlaybackControlReporter.swift` | Ordinary HLS master/index/control and prepared successor UUID accepted unchanged |
+| Android `PlurxApi.kt`, player `Controller.kt` | Decision, overlay manifest/objects, HLS start, direct/progressive reopen; HLS status/DELETE/control use B session UUID |
+| Android `PlaybackControlReporter.kt` | Ordinary HLS path and UUID validation preserved |
+| Web `decode-tiers.js`, `audio-sync.js`, `watch-browser.js` | Every progressive fallback, subtitle fetch and pre-session chapter thumbnail uses file context |
+| Web `playback-control.js` | Ordinary B HLS control/prepared path; no source ID or shared HLS prefix |
+
+Add executable source-contract tests that fail on file-path interpolation
+outside the platform's approved context helper; inventory deliberate unrelated
+admin/download routes explicitly rather than weakening the check. Behavioral
+fixtures use the same numeric file ID on A and B with different media: shared
+decision/subtitle/thumbnail/start/reopen must always reach A. Also exercise no
+local file, details before playback, prepared successors, HDR/Auto and logout.
+
+Web needs settings/shared-library/detail, file-context and progress integration.
+New plain scripts obey [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md):
+file, `WEB_ASSETS`, shell tag and documentation row in one commit. Reuse the
+existing card/player renderers through explicit view models. Apple and Android
+need matching reference/DTOs, source-labelled browse, shared details, Continue
+Watching and next episode. Remote/lock-screen/PiP actions retain the same
+context. Unsupported offline/edit actions are absent. Qualify physical
+Apple TV and Google TV focus and playback, not only simulators.
 
 Settings → Developer initially contains the explicit sharing switch and
 advisory readiness: Tailscale/Serve and egress · certificate · peer access · protocol
@@ -1054,16 +1194,32 @@ session URLs survive ingress changes with unchanged suffix meaning. Loss of
 an unrecoverable producer returns an honest reopen result with source position;
 this is not a promise of uninterrupted playback.
 
-**Mixed-version rollout:** principal-aware storage is a rebuild, not merely
-an additive table. Old decoders expect non-null users and known producer
-kinds. S3 must deliver a tested coordinated-upgrade procedure: drain playback,
-stop all old session readers/writers, back up, migrate both backends, restart
-only principal-aware binaries, verify every member, then admit remote rows.
-Enforce a cluster schema/protocol floor at node admission so an old binary
-cannot rejoin and decode sharing rows. Do not insert a remote row into a
-cluster with an old participating session reader. The saved Developer choice
-is preserved; unsupported operations return explicit schema incompatibility.
-Do not claim rolling compatibility without a separate proven bridge release.
+**Mixed-version rollout:** use the repository's existing schema-marker and
+newer-schema refusal mechanisms. The runtime invariant is that no
+sharing-principal row on A, or `remote_source` producer row on B, exists while
+any participating session reader/writer runs an incompatible binary. Check
+the schema/protocol floor of **every member** at sharing admission; unknown
+or stale member capability means unavailable. Fence incompatible rejoin;
+roll failed nodes forward after a newer marker commits. Preserve the saved
+Developer choice and refuse only operations whose prerequisites are absent.
+
+Do not mandate a full-cluster stop without testing compatibility. S3 runs
+actual old-binary named-column reads, local inserts/upserts, counts and
+cleanup against the candidate rebuilt schema on both backends, before any
+remote rows are admitted. `DEFAULT 'local'` is not sufficient by itself:
+§7.1's explicit non-null `owner_key` and changed conflict targets mean an old
+writer that omits the key fails on the bare fragment. The compatibility
+receipt must test that case; it cannot claim rolling safety from reads alone.
+
+If a staged migration/compatibility bridge preserves those old local writes,
+use it with the admission floor and document its removal boundary. Otherwise
+record the failed old-writer case and use a coordinated drain/backup/upgrade
+for this schema transition: stop incompatible writers before rebuild, restart
+only compatible members, verify the floor, then admit sharing. The full stop
+is the tested fallback, not a standing requirement for every installation or
+release. Do not weaken `owner_key`, duplicate replay claims, or synthesize user
+IDs merely to pass an upgrade test. S3's migration receipt fixes which path
+is supported before the implementation PR can land.
 
 **Rollback:** disable sharing, drain/cancel remote sessions and stop members.
 Retain ciphertext/history for forward repair. There is no assumed in-place
@@ -1111,14 +1267,14 @@ milestones serially against the effort's current head.
 
 | Step | Scope and boundary | Required acceptance |
 |---|---|---|
-| S0 | Opus design review and dispositions; finalize fixture vocabulary and numbers | Opus confirms revised dispositions; S2 topology experiments explicitly pending; no implementation approval inferred |
+| S0 | Opus design review and dispositions; finalize fixture vocabulary and numbers | Opus re-review corrections SL-18–24 incorporated; build contract ready; S2 topology experiments remain pending |
 | S1 | Domain/schema, secret wrapping, pairing/rotation/assignment state machines | SQLite + Hiqlite parity; exact retry/claim race/expiry/rotation loss/user-recreation tests; no plaintext in durable rows |
 | S2 | Serve/loopback deployment, TLS provisioning/renewal, pinned egress, peer/admin routes, Developer switch | Two NATed servers over Tailscale; no public/LAN listener; TLS mismatch, VPN loss, wrong port/route, redirect/proxy and broad-grant cases |
-| S3 | Playback principal migration in existing family and cluster schema floor | Local session regressions unchanged; remote/local ID collisions, independent viewers, prepared successor, cluster ownership and legacy capability refusal |
-| S4 | Shared catalogue, revision-fenced keyset paging, batch metadata, scoped art, assignments and local history | Huge IDs, same IDs on two sources, scan during pagination, expiry/deletion, unauthorized cache read, offline isolation, progress ordering |
+| S3 | Playback principal migration in existing family and cluster schema floor | Owner-key PK/upsert/count parity; local/shared replay races; user/grant deletion; old-writer migration receipt; prepared successor, cluster ownership and ordinary-router refusal |
+| S4 | Shared catalogue, live keyset paging, batch metadata, scoped art, assignments and local history | Huge IDs, same IDs on two sources, paging completes during continuous metadata writes, moved sort keys, expiry/deletion, denied cache reads, progress ordering |
 | S5 | Source start/decision, B relay, full playback wire/prefix relay, cleanup and limits | Direct/HLS/transcode, Range/416, subtitles/HDR, seek/quality/track replacement, ambiguous start, logout/revoke during open body, bounded memory |
-| S6 | Web settings/library/detail/player/Continue Watching integration | Executable browser evidence for complete journey and failures; assets/order/input/surface contracts |
-| S7 | Apple and Android integrations, platform tests and builds | Matching wire fixture results; source-labelled browse; remote/PiP controls; no token leakage; actual Apple TV/Google TV playback |
+| S6 | Web settings/library/detail/player/Continue Watching integration | Complete browser journey, file-context call-site census/collision fixture, pre-session thumbnails; assets/order/input/surface contracts |
+| S7 | Apple and Android integrations, platform tests and builds | Matching full-wire/file-context fixtures and call-site census; UUID/prepared/status/stop controls; actual Apple TV/Google TV playback |
 | S8 | Cluster/NAT/resource qualification, operator docs and promotion | Matrix in §13 complete; current candidate qualified under the current development pipeline; Developer graduation |
 
 S1–S5 may carry executable server fixtures before any client UI. A milestone
@@ -1151,7 +1307,7 @@ Required regression cases, with stable test names in the implementation:
 | Pairing | Two simultaneous claimants; retry after committed response loss; expired/cancelled invite; wrong TLS pin; unconfirmed recipient; pending credential browsing |
 | Authorization | Unexported library/item/file/art; cross-grant session ID; assignment removal; scope narrowing vs expansion/rotation; deleted/recreated user; access through legacy/Plex/cluster routes |
 | Secrets | Redacted debug/log/error/body; ciphertext cross-import/server/purpose substitution; key absent; rotated old token denied except status; snapshot contains no cleartext |
-| Catalogue | IDs above 2^53; same ID from two sources; source epoch change; cursor_stale during sort-key/scan mutation; deleted item; cursor substitution; cursor revision races/cache bounds; denied cached art |
+| Catalogue | IDs above 2^53; same ID from two sources; source epoch change; paging liveness during continuous metadata writes; sort-key movement and display dedup; deleted item; cursor substitution; cursor revision races/cache bounds; denied cached art |
 | Playback | Duplicate request after timeout; concurrent viewers; same playback ID in different grants; source revision changes; seek origin; direct Range/416; rendition map; malformed/foreign playlist URI |
 | Recovery | Old prepared response; replacement cancel/commit; source loss; receiver ingress change; VPN removal; revoked session on a stale/minority node; no local-user fallback |
 | Progress | No frame means no zero save; stale sequence; old session after new one; manual unwatched vs late beat; separate households; next episode reauthorizes |
@@ -1269,7 +1425,7 @@ from tuning and later scope. In particular, attack:
    source positions, malformed metadata and capacity exhaustion.
 5. Revocation while blocked in an open response, stale clustered readers,
    receiver ingress change, source endpoint failover and rollback/restore.
-6. Revision-fenced catalogue paging, remote identity collision, per-user history,
+6. Live keyset pagination and continuous-scan liveness, remote identity collision, per-user history,
    late progress and next-episode authorization.
 7. Whether the milestones are buildable and acceptance tests expose the above
    failures; identify every unresolved interface that would force Sol to invent
@@ -1303,7 +1459,7 @@ implied by the build handoff.
 
 | Milestone | State | PR / commit | Evidence / outstanding work |
 |---|---|---|---|
-| S0 | revised; confirmation pending | Original `4e81bc38c`; this standalone revision | SL-01–17 dispositions in §16; network/runtime experiments not yet executed |
+| S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
 | S1 | not started | — | — |
 | S2 | not started | — | — |
 | S3 | not started | — | — |
@@ -1316,19 +1472,23 @@ implied by the build handoff.
 ## 16. Opus S0 dispositions — corrections are not runtime evidence
 
 The [2026-10-02 review](SHARED-LIBRARIES-REVIEW.md) remains the record of the
-first draft. “Revised” below means the build contract changed; it does not
-mean Opus approved it or an implementation passed. S0 awaits confirmation.
+first draft. The [re-review](SHARED-LIBRARIES-RE-REVIEW.md) accepts its
+dispositions subject to SL-18–24. Those corrections are incorporated below,
+meeting its condition to mark the contract ready to build. This is design
+readiness, not a claim that implementation or S2 topology experiments passed.
+No additional agent review is required by this contract. SL-08 is explicitly
+an engineering default preserving current behavior, not a recorded Paul ruling.
 
 | Finding | Disposition and acceptance owner |
 |---|---|
 | SL-01 · blocker | Revised §2 to raw TCP Serve and loopback publication; S2 must prove shared-user Serve reach, Docker isolation/start order and real container egress. Topology qualification remains open. |
 | SL-02 · blocker | Revised §2/§3/§5: FQDN/address hints, recipient-side override, generation-CAS endpoint edit, pin before secrets. S2 tests address remap and resolver/route failure. |
-| SL-03 · blocker | Revised §7.1/§10: one session family, exact-one principal, ownership-query census and coordinated schema upgrade. S3 proves local isolation, relay and takeover. |
-| SL-04 · blocker | Revised §5/§7: complete existing StartResponse/decision wire, relative HLS prefix, file/PGS/chapter routes. S5/S7 prove all player fields and side resources. |
+| SL-03 · blocker | Revised §7.1/§10: one session family, canonical owner key, exact-one principal and full key/query/upsert census; §10 qualifies upgrade compatibility. S3 proves local isolation, relay and takeover. |
+| SL-04 · blocker | Revised §5/§7: complete existing StartResponse/decision wire, ordinary B HLS namespace and file_base for all file/PGS/chapter routes. S5/S7 prove all player fields and side resources. |
 | SL-05 · major | Revised §3/§4/§9: separate scope, credential, catalogue and admin-CAS counters; only loss of effective authority stops playback. S1/S5 exercise rotation and expansion mid-film. |
 | SL-06 · major | Revised §7.2/§10: B local-user session with remote_source producer and upstream side row; eligible-node placement/takeover. Login revocation is explicit S5 work, not assumed inherited. |
-| SL-07 · major | Revised §6: signed keyset cursors, no replicated snapshots. Refinement: changing sort keys invalidates revision-fenced cursors; no unsupported no-skip promise across mutations. S4 tests consistent read races. |
-| SL-08 · major | Ruling (a), §3.1: preserve whole-server startup refusal for missing/mismatched wrapping key; generalize purpose census. S1 proves sharing and Trakt behavior. |
+| SL-07 · major | Revised §6: signed keyset cursors, no replicated snapshots. SL-20 refines liveness: resume on order changes, suppress duplicates at B, and allow moved items to appear on the next open. S4 tests continuous scans. |
+| SL-08 · major | Engineering default (a), §3.1, not an explicit Paul decision: preserve whole-server startup refusal for missing/mismatched wrapping key; generalize purpose census. S1 proves sharing and Trakt behavior. |
 | SL-09 · major | Revised §2: network reach is user-granular; Cinema credential authorizes logical server; corrected deny cases and operator key-expiry guidance. S2 records actual policy results. |
 | SL-10 · major | Revised §2: generated node key, same-key certificate renewal, credentialed pinned endpoint manifests and explicit lost-pin recovery. S2 tests renewal and added/replaced nodes. |
 | SL-11 · major | Revised §5/§6: batch metadata ≤200 IDs, per-ID authorization, bounded concurrency and independent Home sections. S4 tests large/offline history lists. |
@@ -1338,3 +1498,20 @@ mean Opus approved it or an implementation passed. S0 awaits confirmation.
 | SL-15 · low | Revised §9: derive deadlines from engine symbols plus named margins; S5 tests ordering. |
 | SL-16 · low | Revised §2.3/§13: observe failed connections and bounded body cancellation, not interface disappearance. S2 records VPN stop/restart. |
 | SL-17 · process | Documents isolated on codex/shared-libraries-review from main 15e36f7f4 for their own docs PR; no unrelated player changes. Portable home-path example. Landing remains subject to review and repository gates. |
+
+### 16.1 Re-review corrections — SL-18 through SL-24
+
+| Finding | Disposition and acceptance owner |
+|---|---|
+| SL-18 · blocker | Corrected §5/§7/§8: B uses ordinary HLS routes and UUIDs; all file URLs use the shared file_base context, with pre-session routes and explicit native delivery binding. S5–S7 prove prepared/control/status/stop and A/B numeric-ID collisions. |
+| SL-19 · blocker | Corrected §7.1: non-null canonical owner_key in every principal PK, conflict target, count and replay path; checked projections, no partial-index/null ownership trick. S3 proves concurrent retries allocate one incarnation and admission counts sharing rows. |
+| SL-20 · major | Corrected §6: metadata-only changes do not bump order revision; changed order resumes after the signed boundary. B suppresses duplicate references; moved-behind items may wait for next open. S4 proves paging liveness under continuous scan writes. |
+| SL-21 · major | Corrected §7.1: no new session ownership FKs; explicit revocation/retention cleanup. S3 proves user and grant deletion with active/ended/ack rows and no B export lookup for a local relay. |
+| SL-22 · medium | Corrected §10: all-member admission floor and old-binary read/write/upsert tests. Full stop only on failed compatibility evidence; explicit owner_key means default-local alone is not compatibility. S3 records the supported migration path. |
+| SL-23 · low | Corrected §2.1: certificate notBefore is backdated one hour on initial issue and renewal; validity still enforced. S2 tests a receiver behind by several minutes, expiry and excessive skew. |
+| SL-24 · low | Corrected §8: one file_base context and per-platform census shared by S6/S7; source-contract tests and behavioral file-ID collision fixtures required. |
+
+Process correction: `eb9038755` was already pushed as draft PR #740 when the
+re-review was supplied; its statement that the branch was unpushed is stale.
+The draft contains only sharing docs and their index. No implementation,
+merge, deployment, or production network change is part of these corrections.

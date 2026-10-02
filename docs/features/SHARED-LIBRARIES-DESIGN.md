@@ -1,7 +1,7 @@
 # Shared libraries — the Cinema-to-Cinema scope decision
 
-**Status:** scope and Tailscale transport accepted; build contract revised after
-Opus S0; review confirmation and topology qualification pending · **Written:** 2026-10-02 · **Decider:** Paul.
+**Status:** scope and Tailscale transport accepted; build contract ready to
+build after Opus S0 corrections; topology qualification pending · **Written:** 2026-10-02 · **Decider:** Paul.
 
 This is the short decision record. The companion
 [implementation contract](SHARED-LIBRARIES-IMPLEMENTATION.md) contains the

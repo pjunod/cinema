@@ -1,6 +1,7 @@
 # Shared libraries: Opus S0 review of the Tailscale build contract
 
-**Status:** original findings retained; revised dispositions await confirmation.
+**Status:** historical S0 findings; accepted with corrections in the
+[re-review](SHARED-LIBRARIES-RE-REVIEW.md).
 The current [build contract](SHARED-LIBRARIES-IMPLEMENTATION.md#16-opus-s0-dispositions--corrections-are-not-runtime-evidence)
 owns dispositions. The review below is historical, not the status of the
 revised contract. The personal home-path example is normalized to `~`.
