@@ -1543,6 +1543,22 @@ pub fn audio_offset_filter(offset_ms: i64) -> Option<String> {
     }
 }
 
+/// The one audio `-af` an encode carries: the delivery's measured downmix,
+/// then the per-file A/V correction. ffmpeg keeps only the last `-af` it is
+/// given, so the two must travel as one chain or the second silently erases
+/// the first.
+pub fn audio_filter_chain(
+    audio: Option<&crate::playback::audio::AudioDelivery>,
+    offset: Option<String>,
+) -> Option<String> {
+    let chain: Vec<String> = audio
+        .and_then(|audio| audio.downmix_filter())
+        .into_iter()
+        .chain(offset)
+        .collect();
+    (!chain.is_empty()).then(|| chain.join(","))
+}
+
 /// Build the full ffmpeg argument vector to transcode `source` into HLS in
 /// `out_dir` (which must exist). Produces `index.m3u8` + `seg%05d.ts`.
 #[cfg(test)]
@@ -1915,7 +1931,7 @@ fn hls_args_inner(
 
     // Audio: downmix + AAC (browser-universal), with the A/V correction as
     // a filter on the same input rather than a second read of the source.
-    if let Some(af) = audio_offset {
+    if let Some(af) = audio_filter_chain(opts.audio.as_ref(), audio_offset) {
         args.push("-af".into());
         args.push(af);
     }
@@ -2304,9 +2320,11 @@ pub fn push_audio_delivery_args(
                 }
             }
             args.extend(["-ar".into(), sample_rate.to_string()]);
-            // RequiresLayoutMeasurement is not a pan expression. The
-            // incumbent default downmix remains unchanged until the named
-            // content and phase qualifications authorize a concrete recipe.
+            // A measured downmix is a filter, emitted by the caller's single
+            // `-af` (see `audio_filter_chain`); `-ac` above is then a no-op
+            // confirmation of the stereo the chain already produced. The
+            // incumbent `RequiresLayoutMeasurement` fold has no filter and
+            // is performed by `-ac` alone, exactly as before.
         }
     }
 }
@@ -2390,10 +2408,13 @@ fn copy_input_args(
     args.extend(strip_plurx_markers(&copy_video_args(source, video)));
 
     if let Some(audio) = audio {
-        if has_offset && transcode_audio {
-            if let Some(af) = audio_offset_filter(source.audio_offset_ms) {
-                args.extend(["-af".into(), af]);
-            }
+        let offset = if has_offset && transcode_audio {
+            audio_offset_filter(source.audio_offset_ms)
+        } else {
+            None
+        };
+        if let Some(af) = audio_filter_chain(Some(audio), offset) {
+            args.extend(["-af".into(), af]);
         }
         // Preserve the incumbent copy conversion's exact spelling when its
         // byte semantics match. Explanatory reason text must never select
@@ -4187,6 +4208,113 @@ mod tests {
             "{args}"
         );
         assert!(!args.contains("pan=") && !args.contains("alimiter="));
+    }
+
+    /// ffmpeg keeps only the last `-af`. The measured fold and the per-file
+    /// A/V correction therefore travel as one chain — fold first — on the
+    /// rolling transcode and on the copy-video conversion alike.
+    #[test]
+    fn a_stereo_fold_and_the_offset_share_one_audio_filter_chain() {
+        use crate::playback::audio::{resolve_audio, AudioRoute, DownmixMatrix};
+        let mut media = file(None);
+        media.audio_offset_ms = 250;
+        media.audio_streams = vec![crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            channel_layout: Some("5.1(side)".into()),
+            sample_rate: Some(48_000),
+            index: 1,
+            ..Default::default()
+        }];
+        let fold = DownmixMatrix::LoRo51.filter().expect("measured fold");
+        let filters = |args: &[String]| -> Vec<String> {
+            args.windows(2)
+                .filter(|pair| pair[0] == "-af")
+                .map(|pair| pair[1].clone())
+                .collect()
+        };
+
+        let mut options = TranscodeOptions::default();
+        options.set_audio_delivery(resolve_audio(
+            media.audio_streams.first(),
+            crate::playback::default_profile(),
+            AudioRoute::RollingHls,
+            media.audio_offset_ms,
+        ));
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert_eq!(filters(&args), vec![format!("{fold},adelay=250:all=1")]);
+        assert!(args
+            .join(" ")
+            .contains("-c:a aac -ac 2 -b:a 160k -ar 48000"));
+
+        // The copy-video path converting to stereo for a stereo sink.
+        let mut stereo = crate::playback::default_profile().clone();
+        stereo.audio_codecs = vec!["aac".into()];
+        stereo.max_audio_channels = [("aac".to_owned(), 2)].into_iter().collect();
+        stereo.claimed_audio_decoders = ["aac".to_owned()].into_iter().collect();
+        stereo.audio_sink_claims = [(
+            "aac".to_owned(),
+            crate::playback::audio::AudioSink {
+                codec: "aac".into(),
+                max_channels: 2,
+                passthrough: false,
+                sample_rates_hz: vec![48_000],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let audio = resolve_audio(
+            media.audio_streams.first(),
+            &stereo,
+            AudioRoute::Progressive,
+            media.audio_offset_ms,
+        );
+        assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo51));
+        let args = copy_pipe_args_with_audio_delivery(
+            &media,
+            0.0,
+            Some(1),
+            true,
+            Pacing::unpaced(),
+            CopyVideoOptions::new(false, false),
+            Some(&audio),
+        );
+        assert_eq!(filters(&args), vec![format!("{fold},adelay=250:all=1")]);
+
+        // Without an offset the chain is the fold alone; a stereo source
+        // carries no filter at all.
+        media.audio_offset_ms = 0;
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert_eq!(filters(&args), vec![fold]);
+        media.audio_streams[0].channels = Some(2);
+        media.audio_streams[0].channel_layout = Some("stereo".into());
+        let mut plain = TranscodeOptions::default();
+        plain.set_audio_delivery(resolve_audio(
+            media.audio_streams.first(),
+            crate::playback::default_profile(),
+            AudioRoute::RollingHls,
+            0,
+        ));
+        let args = hls_args(
+            &media,
+            Encoder::Software,
+            &plain,
+            Pacing::unpaced(),
+            "/tmp/f",
+        );
+        assert!(filters(&args).is_empty());
     }
 
     /// The `hvc1` tag promises no in-band parameter sets, and a
