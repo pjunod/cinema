@@ -55,6 +55,7 @@ mod reader_formats;
 mod redact;
 mod renditiondir;
 mod rolling_output;
+mod rolling_provenance;
 mod schedule;
 mod scratch_ledger;
 mod scratch_put;
