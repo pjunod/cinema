@@ -29,37 +29,60 @@
       "flow_status": "not_tested"
     },
     "androidtv": {
-      "candidate_version": "0.19.10",
       "source_commit": "984181a3d6ab14e9a6d2dcc850c582e1c138bd95",
       "release_apk_sha256": "8510a517c99927076082917f41bf306dd7a2546c59d492dd11bde18d6e2e4628",
       "sdk_version": "1.7.1",
       "media3_version": "1.8.0",
-      "inventory_status": "no_adb_device",
-      "flow_status": "not_tested",
-      "player_backend": "not_measured"
+      "inventory_status": "connected_physical_adb",
+      "flow_status": "blocked_reference_runtime",
+      "player_backend": "not_measured",
+      "version": "0.19.10",
+      "version_code": 191099,
+      "device_model": "Google TV Streamer",
+      "manufacturer": "Google",
+      "os_version": "14",
+      "api_level": 34,
+      "os_build": "UTTK.260317.003"
     }
   },
   "fixtures": [
     {
       "name": "J0 Direct (2026)-poster.jpg",
+      "relative_path": "Movies/J0 Direct (2026)-poster.jpg",
       "sha256": "20283a6048e5f1815d38b4f96d5bfe9ade74459c5e4127592df4424f21d184bc",
       "bytes": 43525
     },
     {
       "name": "J0 Direct (2026).mp4",
+      "relative_path": "Movies/J0 Direct (2026).mp4",
       "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
       "bytes": 400229792
     },
     {
       "name": "J0 Tracks (2026).en.srt",
+      "relative_path": "Movies/J0 Tracks (2026).en.srt",
       "sha256": "6d6d454f59602e2d56c1e4a5b12e85d76a5b01d5ccb40bc6fd4d6356111e3375",
       "bytes": 210
     },
     {
       "name": "J0 Tracks (2026).mkv",
-      "sha256": "ab3885a1f78ed9fa767629bf0fa7a88f5c4a8e57f44e5e0c78108ac8a7b18ab2",
+      "relative_path": "Movies/J0 Tracks (2026).mkv",
+      "sha256": "3d59fb434c159eba526a773ad40b79e97dfc7bf797c212fa16666777e0dbc2e0",
       "bytes": 410811287
+    },
+    {
+      "name": "J0 Show S01E01.mp4",
+      "relative_path": "TV/J0 Show (2026)/Season 01/J0 Show S01E01.mp4",
+      "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
+      "bytes": 400229792
+    },
+    {
+      "name": "J0 Show S01E02.mp4",
+      "relative_path": "TV/J0 Show (2026)/Season 01/J0 Show S01E02.mp4",
+      "sha256": "a79162652c3924033bd2b4dc55f1656c914f8b540697b43e025847e0611ef7d0",
+      "bytes": 400229792
     }
   ],
-  "evidence_boundary": "Reference setup and source provenance only; no physical playback acceptance. Client version-implied calls and carriers remain unmeasured."
+  "evidence_boundary": "Installed physical Android TV build and bootstrap attempt measured; reference Docker runtime stopped before handshake completed. No physical playback acceptance. Infuse flow, client carriers and version-implied calls remain unmeasured.",
+  "fixtures_revised_at_utc": "2026-10-02T20:47:44.046931+00:00"
 }

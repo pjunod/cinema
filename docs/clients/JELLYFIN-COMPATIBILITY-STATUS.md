@@ -38,7 +38,7 @@ are established separately from interoperability:
 | Reference server | Jellyfin 10.11.11, upstream commit `1fbd8739292cce610231be93daf43368733edf63`; official container index digest and arm64 image ID in manifest | Disposable synthetic library; not a Plurx deployment |
 | Schema | OpenAPI served by that container under `/jellyfin`, 315 paths; SHA-256 in manifest | Raw hash includes the served origin; separate canonical hash removes only `servers` |
 | Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | App/device inventory measured; client flows not tested |
-| Android TV | Candidate official release 0.19.10, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | No physical ADB endpoint detected; installed version and player backend not measured |
+| Android TV | Installed official release 0.19.10 / 191099, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | Physical Google TV Streamer connected; Android 14 / API 34 / UTTK.260317.003 measured; player backend not measured |
 | Android TV dependencies | Kotlin SDK 1.7.1, Media3 1.8.0 from pinned `gradle/libs.versions.toml` | Source provenance, not device capability evidence |
 
 Server provenance is [the official released tag](https://github.com/jellyfin/jellyfin/releases/tag/v10.11.11).
@@ -52,8 +52,10 @@ matching MKV with English/French AAC audio and an English SRT track; external
 SRT cues at 1, 120 and 330 seconds; one local poster. The manifest records file
 hashes and sizes. This corpus supports direct, remux, forced bitrate encode,
 track selection and a pause longer than 300 seconds; it does not satisfy the
-HDR/DV acceptance row. Movie/episode hierarchy, multiple pages and the HDR
-corpus remain to be prepared.
+HDR/DV acceptance row. Two episode aliases of the same synthetic MP4 now form the TV corpus without
+duplicating source bytes; their library scan/browse remains untested. Multiple
+pages and the HDR corpus remain to be prepared. The MKV was regenerated after
+a disk-space cleanup; the current manifest records its new container hash.
 
 **Reference preparation:** dedicated random-password test account, synthetic
 movie library, `/jellyfin` base path, automatic port mapping disabled. A
@@ -71,12 +73,35 @@ scratch after retaining minimized fixtures and findings.
 | Harness authentication | 200; dedicated account authenticated | Reference account only |
 | Harness movie projection | Eleven-minute movie, one media source | Reference library preparation only |
 | Infuse connect/browse/direct/seek/transcode | Not tested | Required J0 client gate |
-| Android TV connect/browse/HLS/remux | Not tested | Required J0 client gate |
+| Android TV connect/browse/HLS/remux | App installed and manual connection attempted; reference Docker runtime failed before bootstrap completed; browse/playback not tested | Required J0 client gate |
 | Both clients' image/subtitle/media credential carriers and version-implied calls | Not measured | Required policy/design evidence before J2 |
 | Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Not tested | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
 | Missing duration, first-minute engine attestation, long-pause real-client resurrection and VOD-only worker/relay propagation | Not exercised through the prototype | Required J0 hard-seam experiments |
+
+### Physical Android TV — connected; first attempt blocked by reference infrastructure
+
+Paul made an idle Android TV available. It is a **Google TV Streamer**, not
+the separate TCL 9445X from the earlier fleet inventory. Its IP responded,
+and a separate J0 ADB server connected to the existing network-debugging
+port without restarting the shared ADB server. Android TV/Leanback hardware
+features, OS/build and installed app version were measured.
+
+Jellyfin was absent, so the pinned official release APK was installed after
+its SHA-256 matched the manifest. The app launched and accepted input of the
+reference URL. Its actual request retained `/jellyfin/System/Info/Public`
+and supplied MediaBrowser client/device metadata. This is one observed
+bootstrap request, not proof of all base-path or credential behavior.
+
+The [sanitized connection observation](jellyfin/androidtv-connection-observation.json)
+records the request and upstream `ECONNREFUSED`. Docker's guest VM had stopped
+and Desktop remained stuck in `stopping`; a normal restart timed out. The
+client displayed unable to connect. Classify this as **reference environment
+blocked**, not a Jellyfin-client incompatibility or successful playback.
+Automatic approval review rejected terminating the stuck shared Docker
+processes because other local builds/containers could be affected. Explicit
+user approval for that recovery is pending; no process kill was performed.
 
 ## 3. Compiler loop — available before Rust changes
 
@@ -119,8 +144,9 @@ syntax passed through the normal tracked hook.
 | J5 | Waiting on J4 | Track, subtitle and observed ancillary completion |
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
-A concrete request for the connected Infuse device and an available Android
-TV has been made to Paul. Hardware absence remains **not tested**. Do not mark
+The Android TV is now physically connected. Its reference runtime needs
+recovery before playback testing; the Infuse flow still needs a device run.
+Unperformed operations remain **not tested**. Do not mark
 J0 complete, start the full facade route build or reduce the required client
 matrix to compensate. No compatibility release, setting graduation or fleet
 deployment has occurred.
