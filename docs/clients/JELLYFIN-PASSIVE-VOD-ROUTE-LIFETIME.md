@@ -25,6 +25,13 @@ stale-settlement path ends the durable route. Public resurrection requires an
 active route. The isolated reader-transition regression bypasses that owner
 integration and cannot prove this scenario.
 
+The physical Infuse transport spike independently confirms the lifetime gap.
+Native fMP4 renders and seeks when each fragment carries its exact native init
+prefix and combined length. After a 353.303-second pause, the native reader was
+idle-reaped; resumed/out-of-buffer fragments return 410, and Infuse displays
+that status. The [Infuse observation](jellyfin/infuse-connection-observation.json)
+retains the transport mutation and recovery refusal separately.
+
 The producer must still relinquish its admission and working set while idle.
 Authentication, terminal release, replacement, drain and owner epochs must
 continue to fence media publication. No foreign progress report proves a
@@ -103,3 +110,23 @@ experiments finish. Do not advance J4 on a document-only disposition.
    decode new bytes under the same native session, then verify terminal 410.
 5. Carry and test the policy through worker start and relay envelopes, update
    the build contract, and retain the focused regression in the task PR.
+
+## Implementation scope — explicit transitions, no automated source sweep
+
+The candidate correction touches the following native boundaries. This is a
+reviewable scope, not evidence that the implementation exists or passes:
+
+| Boundary | Required change and focused proof |
+|---|---|
+| Internal request/worker recipe | Retain service policy in the already trusted request identity; native HTTP stays on its existing policy; actual worker dispatch retains it |
+| VOD create/admission | Reserve metadata quota before rendition/worker allocation; cancellation/refusal drops the exact reservation; replacement never evicts another active grant to admit itself |
+| Session idle maintenance | Detach the reader and rendition/resource references at 300 seconds, retain only bounded grant metadata, invalidate stale response owners |
+| Owner renewal/frontier | Include a live grant without a reader; report only the cached frontier of real successful delivery; expiry omits it and triggers ordinary terminal projection |
+| Authenticated presence | Resolve exact current durable play/owner before touching the grant; recheck native lifecycle identity; no reader touch, Control or rendered-health fabrication |
+| HTTP resurrection/publication | Require the existing live grant and durable active owner; use existing adoption/release fences; no late request mints a successor grant |
+| Stop/replacement/drain/disable/ambiguity | Retire metadata under the same native transition as publication; stale presence and in-flight GETs cannot extend or resurrect it |
+
+Implement and compile explicit patches at these boundaries. First reproduce the
+owner-loop failure with a controllable clock, then prove quota/cancellation and
+fence races before physical recovery verification. A successful policy helper
+alone cannot satisfy the integrated owner-loop or physical acceptance rows.

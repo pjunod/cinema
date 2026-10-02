@@ -3566,7 +3566,62 @@
         }
       }
     ],
-    "long_pause": "In progress; recovery not accepted",
+    "long_pause": {
+      "pause_seconds_at_resume_command": 353.303,
+      "paused_reports": 1,
+      "native_idle_reaped": true,
+      "synthetic_native_controls": false,
+      "progress_to_reader_touch": false,
+      "resume_action": "Companion play, then forward 240 seconds beyond prefetch buffer",
+      "native_responses": [
+        {
+          "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+          "id": 204,
+          "kind": "native_response",
+          "time": 1790982505299,
+          "status": 410,
+          "bytes": 81,
+          "filename": "seg00065.m4s",
+          "probe": "single_fixture_native_vod_init_prefix",
+          "init_prefix_bytes": 1275
+        },
+        {
+          "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+          "id": 205,
+          "kind": "native_response",
+          "time": 1790982505317,
+          "status": 410,
+          "bytes": 81,
+          "filename": "seg00109.m4s",
+          "probe": "single_fixture_native_vod_init_prefix",
+          "init_prefix_bytes": 1275
+        },
+        {
+          "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+          "id": 206,
+          "kind": "native_response",
+          "time": 1790982505335,
+          "status": 410,
+          "bytes": 81,
+          "filename": "seg00185.m4s",
+          "probe": "single_fixture_native_vod_init_prefix",
+          "init_prefix_bytes": 1275
+        },
+        {
+          "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+          "id": 207,
+          "kind": "native_response",
+          "time": 1790982505347,
+          "status": 410,
+          "bytes": 81,
+          "filename": "seg00109.m4s",
+          "probe": "single_fixture_native_vod_init_prefix",
+          "init_prefix_bytes": 1275
+        }
+      ],
+      "physical_result": "Infuse overlays Server responded with status 410; source frame frozen at 130.917 seconds",
+      "boundary": "Same native capability, native init-prefix transport; grant policy absent. Reference progress does not renew native reader/route."
+    },
     "production_adapter": "Not implemented; bounded native publication, range, cancellation and retirement contracts must be proved before promotion."
   }
 }

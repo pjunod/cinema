@@ -288,7 +288,11 @@ Prefixing the exact 1,275-byte native initialization object to each native
 fragment and declaring the exact combined content length renders without a
 second encoder or timestamp rewrite. Physical source times are 2.333 seconds
 at opening, 144.958 after a forward 120-second seek and 114.758 after a backward
-60-second seek. Omitting the combined length instead produces Infuse’s explicit
+60-second seek. After a measured 353.303-second pause, the reader was idle-reaped;
+resume and a seek outside the prefetched window returned 410 for four native
+fragment requests. Infuse displayed “Server responded with status 410”. One
+paused report at/after the final pause boundary was captured; reports reached
+only the reference server and did not touch the native reader. Omitting the combined length instead produces Infuse’s explicit
 “Server didn’t report the size of the file” error. This is a single-fixture
 transport spike; production native publication, range, cancellation and terminal
 fences still need tests. The client-specific capability rule and wrapper must
