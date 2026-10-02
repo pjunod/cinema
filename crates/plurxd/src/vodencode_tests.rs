@@ -393,7 +393,25 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         sessions[&parent].children.iter().map(|child| Arc::clone(&child.rendition)).collect::<Vec<_>>()
     };
     assert_eq!(encoding.admissions.software_in_use(), family_budget);
+    let master = serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(30)).await
+        .expect("continuous parent");
+    let master_bytes = master.result.expect("verified family").expect("master bytes");
+    let master_text = String::from_utf8(master_bytes.clone()).expect("master UTF-8");
+    assert_eq!(master_text.matches("#EXT-X-STREAM-INF:").count(), 2);
+    assert_eq!(master_text.matches("#EXT-X-MEDIA:TYPE=AUDIO").count(), 1);
+    assert!(!master_text.contains("AVERAGE-BANDWIDTH"));
+    assert!(!master_text.contains("INDEPENDENT-SEGMENTS"));
+    for rendition in &owned {
+        let role = if rendition.recipe.encoding.as_ref().expect("recipe").shared_audio.is_some() { "audio" } else { "video" };
+        assert!(master_text.contains(&format!("{role}/{}/index.m3u8", rendition.key)));
+        assert!(serve.child_playlist_before(&parent, role, &rendition.key, Instant::now() + Duration::from_secs(5)).await
+            .expect("parent child").result.expect("verified child").is_some());
+    }
+    assert_eq!(serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(5)).await
+        .expect("same parent").result.expect("stable family").expect("master"), master_bytes);
+    assert!(serve.commit_resolved_media(&parent, &master.owner, None).await);
     assert!(serve.end(&parent, Terminal::Deleted).await);
+    assert!(!serve.commit_resolved_media(&parent, &master.owner, None).await, "ended master cannot commit");
     for rendition in owned {
         rendition.gen_epoch.fetch_add(1, Relaxed);
         let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;

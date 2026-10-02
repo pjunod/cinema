@@ -894,6 +894,17 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let audio_args = audio.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
     assert!(audio_args.iter().any(|arg| arg == "-vn"));
     assert!(audio_args.iter().any(|arg| arg == "aac"));
+    for encoding in [&video, &audio] {
+        let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
+        let peak = encoding.continuous_peak_bps(&plan).expect("container-inclusive ceiling");
+        assert!(peak > 0);
+        for (index, entry) in plan.entries.iter().enumerate() {
+            let bound = u64::try_from(u128::from(peak) * u128::from(entry.duration_ticks)
+                / (8 * u128::from(plan.timescale))).expect("entry bytes");
+            assert_eq!(encoding.continuous_object_fits(&plan, index as u32, bound), Some(true));
+            assert_eq!(encoding.continuous_object_fits(&plan, index as u32, bound + 1), Some(false));
+        }
+    }
     request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::Video;
     request.candidate_context = None;
     let mut incumbent_request = request.clone();

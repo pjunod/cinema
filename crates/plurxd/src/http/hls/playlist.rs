@@ -153,6 +153,50 @@ pub(super) async fn master_playlist_response_local_before(
     request_deadline: Instant,
 ) -> Result<Response, ApiError> {
     let deadline = response_publication_deadline_before(request_deadline);
+    if let Some(answer) = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(playlist_deadline),
+        state
+            .transcode
+            .vod_continuous_master_before(session, playlist_deadline),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?
+    {
+        let (bytes, owner) = admitted_vod_publication(
+            state,
+            session,
+            answer,
+            "continuous-master",
+            Some("master.m3u8"),
+            deadline,
+        )
+        .await?;
+        let Some(bytes) = bytes else {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                "continuous-master",
+                Some("master.m3u8"),
+                deadline,
+            )
+            .await?;
+            return Err(vod_resurrection_unavailable());
+        };
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "continuous-master",
+                Some("master.m3u8"),
+            ),
+            true,
+            playlist_response(bytes),
+            deadline,
+        )
+        .await;
+    }
     let (context, file, owner) = session_file(state, session, deadline).await?;
     let context = exact_hls_context_before(state, session, context, &owner, deadline).await?;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC

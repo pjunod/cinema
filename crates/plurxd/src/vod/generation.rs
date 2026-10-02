@@ -885,6 +885,21 @@ impl vodgen::Sink for RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
+        if self
+            .rendition
+            .recipe
+            .encoding
+            .as_ref()
+            .is_some_and(|encoding| {
+                encoding.continuous_object_fits(&self.rendition.plan, entry, bytes.len() as u64)
+                    == Some(false)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "continuous object exceeds its advertised container-inclusive delivery budget",
+            ));
+        }
         let dependency_guard = self
             .shared
             .rendition_build_gate(&self.rendition.key)

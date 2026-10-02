@@ -396,6 +396,223 @@ impl VodServe {
         self.segment_before(session_id, name, None).await
     }
 
+    /// Resolve a master only for an owned continuous graph. Every advertised
+    /// init is verified before exposure; waiting never holds a build gate.
+    pub(crate) async fn continuous_master_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodPublication<Option<Vec<u8>>>> {
+        let is_continuous = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            session
+                .live_rendition()?
+                .recipe
+                .encoding
+                .as_ref()
+                .is_some_and(|encoding| {
+                    encoding.shared_audio.is_none()
+                        && !encoding.plan.options().input_has_audio
+                        && encoding.options.video_sample_envelope
+                            == plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50
+                })
+        };
+        if !is_continuous {
+            return None;
+        }
+        let publication = self.session_rendition(session_id).await?;
+        let owner = publication.owner;
+        let result =
+            async {
+                let (_, _, _) = publication.result?;
+                let children = {
+                    let sessions = self.shared.sessions.lock().await;
+                    let Some(session) = sessions.get(session_id) else {
+                        return Ok(None);
+                    };
+                    if !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+                        || !session.owns_response_media(&owner)
+                        || session
+                            .children
+                            .iter()
+                            .any(|child| child._reservation.is_none())
+                    {
+                        return Ok(None);
+                    }
+                    session
+                        .children
+                        .iter()
+                        .map(|child| Arc::clone(&child.rendition))
+                        .collect::<Vec<_>>()
+                };
+                let mut verified = Vec::new();
+                for rendition in &children {
+                    let Some(lookup) = self
+                        .session_media_rendition(session_id, Some(&rendition.key))
+                        .await
+                    else {
+                        return Ok(None);
+                    };
+                    let Some(found) = lookup.result? else {
+                        return Ok(None);
+                    };
+                    if !Arc::ptr_eq(&lookup.owner.incarnation, &owner.incarnation)
+                        || !Arc::ptr_eq(&found.rendition, rendition)
+                    {
+                        return Ok(None);
+                    }
+                    let budget = found
+                        .block_budget
+                        .min(deadline.saturating_duration_since(Instant::now()));
+                    let mut ready = self.serve_init(rendition, budget, found.delivery).await?;
+                    let expected = rendition
+                        .identity
+                        .lock()
+                        .await
+                        .identity
+                        .as_ref()
+                        .map(|identity| identity.served_init.clone());
+                    let Some(expected) = expected else {
+                        return Ok(None);
+                    };
+                    let Some(bytes) = read_child_init(&mut ready, &expected).await? else {
+                        return Ok(None);
+                    };
+                    let mut reader = FragmentReader::new();
+                    reader.push(&bytes);
+                    let init = match reader.next_unit() {
+                        Ok(Some(Unit::Init(init))) if reader.buffered() == 0 => init,
+                        _ => {
+                            return Err(VodError::ProducerFailed(
+                                "family init is not one verified record".into(),
+                            ))
+                        }
+                    };
+                    verified.push((Arc::clone(rendition), expected, init));
+                }
+                let mut keys = children
+                    .iter()
+                    .map(|rendition| rendition.key.as_str())
+                    .collect::<Vec<_>>();
+                keys.sort_unstable();
+                keys.dedup();
+                if keys.len() != children.len() {
+                    return Ok(None);
+                }
+                let mut guards = Vec::new();
+                for key in keys {
+                    guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
+                }
+                for (rendition, expected, _) in &verified {
+                    if rendition.closed.load(Relaxed)
+                        || rendition.failure().is_some()
+                        || self.source_changed(rendition)
+                        || rendition
+                            .identity
+                            .lock()
+                            .await
+                            .identity
+                            .as_ref()
+                            .is_none_or(|identity| identity.served_init != *expected)
+                    {
+                        return Err(VodError::ProducerFailed(
+                            "family source or init changed during verification".into(),
+                        ));
+                    }
+                }
+                let mut audio = None;
+                let mut audio_budget = None;
+                let mut rungs = Vec::new();
+                let mut video_budgets = Vec::new();
+                let fail = |error: plurx_core::fmp4::Fmp4Error| {
+                    VodError::ProducerFailed(error.to_string())
+                };
+                for (rendition, _, init) in &verified {
+                    let encoding =
+                        rendition.recipe.encoding.as_ref().ok_or_else(|| {
+                            VodError::ProducerFailed("family recipe missing".into())
+                        })?;
+                    if let Some(recipe) = &encoding.shared_audio {
+                        if audio.is_some() {
+                            return Err(VodError::ProducerFailed(
+                                "family has multiple soundtracks".into(),
+                            ));
+                        }
+                        audio = Some(
+                            plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
+                                &encoding.plan,
+                                recipe,
+                                init,
+                                &rendition.key,
+                                &encoding.source_object_version,
+                            )
+                            .map_err(fail)?,
+                        );
+                        audio_budget = Some(plurx_core::transcode::VodRenditionBandwidth {
+                            rendition_id: rendition.key.clone(),
+                            average_bps: None,
+                            peak_bps: encoding.continuous_peak_bps(&rendition.plan).ok_or_else(
+                                || VodError::ProducerFailed("audio delivery budget missing".into()),
+                            )?,
+                        });
+                    }
+                }
+                for (rendition, _, init) in &verified {
+                    let encoding = rendition.recipe.encoding.as_ref().expect("verified recipe");
+                    if encoding.shared_audio.is_some() {
+                        continue;
+                    }
+                    rungs.push(
+                        plurx_core::transcode::VodVideoRung::from_verified_init(
+                            &rendition.recipe.file,
+                            &encoding.plan,
+                            init,
+                            encoding.grid,
+                            &rendition.key,
+                            &encoding.source_object_version,
+                            audio.as_ref().map(|audio| audio.recipe_id()),
+                        )
+                        .map_err(fail)?,
+                    );
+                    video_budgets.push(plurx_core::transcode::VodRenditionBandwidth {
+                        rendition_id: rendition.key.clone(),
+                        average_bps: None,
+                        peak_bps: encoding.continuous_peak_bps(&rendition.plan).ok_or_else(
+                            || VodError::ProducerFailed("video delivery budget missing".into()),
+                        )?,
+                    });
+                }
+                let family = plurx_core::transcode::VodPresentationFamily::new(
+                    plurx_core::transcode::VodVideoFamily::new(rungs).map_err(fail)?,
+                    audio,
+                )
+                .map_err(fail)?;
+                let bytes = family
+                    .master_playlist(&video_budgets, audio_budget.as_ref())
+                    .map_err(fail)?
+                    .into_bytes();
+                let sessions = self.shared.sessions.lock().await;
+                let Some(session) = sessions.get(session_id) else {
+                    return Ok(None);
+                };
+                if !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+                    || !session.owns_response_media(&owner)
+                    || session.children.len() != children.len()
+                    || children.iter().any(|rendition| {
+                        !session.children.iter().any(|child| {
+                            Arc::ptr_eq(&child.rendition, rendition) && child._reservation.is_some()
+                        })
+                    })
+                {
+                    return Ok(None);
+                }
+                Ok(Some(bytes))
+            }
+            .await;
+        Some(VodPublication { result, owner })
+    }
+
     pub(crate) async fn child_playlist_before(
         &self,
         session_id: &str,
@@ -639,19 +856,34 @@ impl VodServe {
             });
         }
         let reader_id = &owner.media_child.as_ref()?.reader_id;
-        Some(VodPublication {
-            result: self
-                .serve_segment_for(
-                    &found.rendition,
-                    (reader_id, session_id),
-                    index,
-                    budget,
-                    found.delivery,
-                )
-                .await
-                .map(Some),
-            owner,
-        })
+        let result = self
+            .serve_segment_for(
+                &found.rendition,
+                (reader_id, session_id),
+                index,
+                budget,
+                found.delivery,
+            )
+            .await
+            .and_then(|ready| {
+                if found
+                    .rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| {
+                        encoding.continuous_object_fits(&found.rendition.plan, index, ready.len)
+                            == Some(false)
+                    })
+                {
+                    Err(VodError::ProducerFailed(
+                        "cached child exceeds its delivery budget".into(),
+                    ))
+                } else {
+                    Ok(Some(ready))
+                }
+            });
+        Some(VodPublication { result, owner })
     }
 
     /// Resolve a segment without allowing its blocked-GET allowance to run

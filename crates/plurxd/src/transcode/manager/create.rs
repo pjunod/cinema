@@ -1558,6 +1558,20 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_continuous_master_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+        self.vod
+            .continuous_master_before(session_id, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
     pub(crate) async fn vod_child_playlist_before(
         &self,
         session_id: &str,

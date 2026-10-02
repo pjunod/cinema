@@ -1897,3 +1897,33 @@ strict-wire coverage checks companion identity and context omission. Pinned
 compilation and normal hooks apply; unit execution remains deferred.
 Verified master exposure, controlled scheduling and client switching remain
 unfinished, so continuous capability is still not advertised.
+
+
+### 10.49 Verified autonomous master delivery
+
+The existing capability-authenticated master route and typed peer relay now
+resolve continuous parents from their owned reader graph. Each actual init
+is opened and hash-checked before constructing the exact two-rung AVC family
+and shared AAC pairing. Init waits hold no build gates; final verification
+uses sorted gates and rechecks source, init identities, parent incarnation,
+reader membership and retained admission before publishing. An incomplete
+family cannot fall through to an ordinary single-video wrapper.
+
+Bandwidth is a conservative server delivery ceiling, including container
+bytes and the shortest planned tail. Video allows three nominal rates plus
+two nominal-rate seconds of burst and 256 KiB of container allowance; AAC
+allows twice the nominal rate plus 64 KiB of container allowance. Burst and
+container allowances are divided by the shortest planned interval. These
+are enforced on full objects before production publication and again on
+cached child delivery. They are not measured averages or evidence of an
+encoder's peak behavior; JIT masters omit average bandwidth. Tail-heavy
+plans may advertise a large conservative ceiling and still need ABR
+qualification. Oversized objects fail explicitly instead of violating the
+advertised budget.
+
+The existing AAC campaign now authors actual master and all child-playlist
+verification, stable repeated master bytes, and stale-owner refusal after
+End. The manager regression covers exact byte-boundary acceptance/refusal
+for video and AAC. Pinned compilation and normal hooks apply; unit execution
+remains deferred. Durable family descriptors, controlled scheduling and
+production client integration remain unfinished.

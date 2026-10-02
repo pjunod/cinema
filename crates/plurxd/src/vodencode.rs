@@ -628,6 +628,54 @@ impl Encoding {
         }
     }
 
+    /// Container-inclusive delivery ceiling, enforced before publication and
+    /// again on cached child delivery. Average rate stays unknown for JIT media.
+    pub(crate) fn continuous_peak_bps(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+    ) -> Option<u64> {
+        if self.shared_audio.is_none()
+            && (self.plan.options().input_has_audio
+                || self.options.video_sample_envelope
+                    != plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50)
+        {
+            return None;
+        }
+        let shortest = plan
+            .entries
+            .iter()
+            .map(|entry| entry.duration_ticks)
+            .min()?;
+        if shortest == 0 || plan.timescale == 0 {
+            return None;
+        }
+        let (rate, burst) = if self.shared_audio.is_some() {
+            (
+                u128::from(self.options.audio_bitrate_kbps) * 2_000,
+                64 * 1024 * 8,
+            )
+        } else {
+            let nominal = u128::from(self.options.video_bitrate_kbps) * 1_000;
+            (nominal * 3, nominal * 2 + 256 * 1024 * 8)
+        };
+        u64::try_from(rate + (burst * u128::from(plan.timescale)).div_ceil(u128::from(shortest)))
+            .ok()
+    }
+
+    pub(crate) fn continuous_object_fits(
+        &self,
+        plan: &plurx_core::segplan::SegmentPlan,
+        index: u32,
+        bytes: u64,
+    ) -> Option<bool> {
+        let peak = self.continuous_peak_bps(plan)?;
+        let entry = plan.entry(index)?;
+        Some(
+            u128::from(bytes) * 8 * u128::from(plan.timescale)
+                <= u128::from(peak) * u128::from(entry.duration_ticks),
+        )
+    }
+
     pub fn args(&self, file: &MediaFile, start_seconds: f64, duration_seconds: f64) -> Vec<String> {
         let mut options = self.options.clone();
         options.start_seconds = start_seconds;
