@@ -810,6 +810,12 @@ whose question a daily read can answer. If the reads prove impractical in
 practice, persisting the 56 cells is the next step — not closing the row on a
 partial window.
 
+**2026-10-02: the reads proved impractical, and the 56 cells are now
+persisted — see §8.7.** The rule above stays correct for
+`plurx_plex_requests_total`, which keeps its in-process meaning; §8.7's
+durable census replaces the daily-read procedure, and its closing rule is the
+one to use.
+
 ### 8.6 The C9 appendix (M5, M6) was not opened
 
 M5 is measure-only and independent of this census, so it was available. It was
@@ -826,6 +832,109 @@ half supplied: §6.4 is written out as a ready-to-paste prompt for the session
 that has fleet access, at the end of the Execution log, so the instrumentation
 lands with the reading that gives it a purpose. M6 still waits on that
 reading.
+
+### 8.7 The durable census (2026-10-02)
+
+**Why the reads could not work.** §8.5 needs seven consecutive, gap-free days
+on every node, and a restart between two reads is a gap. The fleet redeploys
+near-daily. On 2026-10-02 all four nodes restarted between 05:11 and 05:21
+UTC; the 05:31 UTC read found **0 Plex façade requests on every node**, with
+8–20 minutes of uptime each — ten to twenty minutes of coverage, not a week.
+No schedule of reads survives that cadence, so the in-process counter could
+never close the row however carefully it was read.
+
+**What was built.** Each node now keeps a durable census of the same 56
+cells:
+
+- **Where.** One JSON file, `plex-census.json`, in the node's data directory,
+  beside `node.id` and the credential key — the other node-local state that
+  must survive a restart. It is written with the repository's atomic
+  child-file publish (`fs_secure::atomic_write_child`: write, fsync, rename,
+  directory fsync), so a reader sees the old file or the new one, never half
+  of either. It is deliberately **not** in the Store: a census of one node's
+  requests must not be replicated, and the node-local telemetry sidecar is
+  reached through the Store on both backends, so 57 integers there would cost
+  a schema bump on each backend and new Store methods, and would make a
+  measure-only instrument depend on the store being writable. About 2.5 KiB;
+  a file over 16 KiB is refused as not a census file.
+- **When.** Never on the request path: a request is still one relaxed atomic
+  add. A background loop writes the file every **60 s**; restoring at startup
+  writes it at once; and the daemon writes it once more **after its HTTP
+  server has stopped**, marking the stop clean. That last write is final, so a
+  periodic write cannot overwrite the clean mark.
+- **Crash.** A crash, `SIGKILL` or power loss skips the clean-stop write. The
+  next start sees that, counts an unclean stop, and adds the window from the
+  last successful write to its own start to `gap_seconds`. Only the requests
+  inside that window can be missing, so the persisted counts are a **lower
+  bound** on façade usage — never an over-count — and `gap_seconds` is an
+  upper bound on the uncounted time (it includes the downtime after the crash,
+  because the crash instant is not recorded). A lower bound is exactly what
+  this question needs: it asks whether any cell is non-zero.
+- **Corrupt or missing.** A missing file starts a census (logged at INFO). An
+  oversized, unreadable, malformed or wrong-version file starts a new census
+  with the reason logged at WARN, and the bad file is kept aside as
+  `plex-census.json.corrupt`. The daemon never refuses to start over it. Cells
+  a newer build wrote for a handler this build does not know are carried and
+  written back (at most 64), never exposed, so a rollback and roll-forward
+  cannot erase a non-zero count.
+
+**What `/metrics` now shows, beside the unchanged
+`plurx_plex_requests_total`:**
+
+| Series | Type | Meaning |
+|---|---|---|
+| `plurx_plex_requests_since_census_total{handler,outcome}` | counter | Requests since this node's census began, across every restart. Exactly the 56 cells of §8.4, same labels. |
+| `plurx_plex_census_started_seconds` | gauge | Unix time the census began. Moves only when the file was missing or unusable at a start. |
+| `plurx_plex_census_last_flush_seconds` | gauge | Unix time of the last successful write. More than about two minutes old on a running node means writes are failing. |
+| `plurx_plex_census_unclean_stops_total` | counter | Stops that skipped the clean-stop write since the census began. |
+| `plurx_plex_census_gap_seconds` | gauge | Sum, over those stops, of last write → next start: the census time whose requests may be missing. |
+| `plurx_plex_census_flush_failures_total` | counter | Failed writes in this process. The counts stay in memory and the next write retries them. |
+
+61 fixed series in all; no id, path, token or title in any label.
+
+**Operator procedure — one read closes it.**
+
+```sh
+for host in <every plurxd node in the fleet>; do
+  printf '%s %s ' "$host" "$(date -u +%s)"
+  curl -s "http://$host:32400/metrics" \
+    | grep -E '^plurx_plex_(census_|requests_since_census_total)' \
+    | grep -v '^plurx_plex_requests_since_census_total.* 0$' | tr '\n' ' '
+  echo
+done
+```
+
+Read every node at least seven days after the build carrying this census
+first started on it, and record every line in the execution log. For each
+node, its **census time** at read time *t* is
+*t* − `plurx_plex_census_started_seconds` − `plurx_plex_census_gap_seconds`.
+
+- **Any non-zero `plurx_plex_requests_since_census_total` cell, on any node,
+  is a caller** — whatever the census time. §8.5's three outcome readings
+  (`unauthorized` = a pairing problem; `section_all`/`children` with `ok` =
+  re-open at M1) apply unchanged.
+- **All zero on every node, with at least 604,800 s (seven days) of census
+  time on every node → close C-07 as `abandoned: no façade traffic`.** Keep
+  this plan.
+- A node short of seven days of census time is **inconclusive**, not zero:
+  read it again later. If `plurx_plex_census_started_seconds` moved between
+  two reads, that node began a new census (the WARN line says why) and its
+  earlier counts are gone; its seven days restart from the new value.
+- `plurx_plex_census_flush_failures_total` above zero or a stale
+  `plurx_plex_census_last_flush_seconds` means the node's counts are in memory
+  only; fix the data directory before relying on that node.
+- §8.5's one remaining blind spot still holds: `cluster_capacity_gate`
+  refuses before routing, so a node in maintenance, fenced, or a learner did
+  not count the façade requests it refused. If a node spent census time in any
+  of those states, subtract that time from its census time too.
+
+**The 2026-10-02 05:31 UTC sample** (all four nodes, 8–20 min after the
+05:11–05:21 restarts): every `plurx_plex_requests_total` cell was 0 on every
+node. The same read showed the M5 route-cache families moving on **lab6 only**
+— 100 cache hits against 96 Store reads, every lock wait in the ≤ 10 µs
+bucket — and on no other node. That is a hint about which node HLS clients
+actually reach, not the §6.4 measurement: M6 still owes §6.4 run on the
+actual ingress node, under its protocol.
 
 ---
 
@@ -849,6 +958,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — route-cache instrumentation | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | Measure-only, on a per-coordinator `RouteCacheMetrics` (atomics, rendered into `/metrics` beside the takeover families; no scrape-time lock or Store read). `plurx_media_session_route_lookups_total{result="cache_hit"\|"single_flight_hit"\|"store"}` replaces the test-only counter; `plurx_media_session_route_lock_seconds{site="lookup"\|"insert"\|"queried_insert"\|"generation_insert"}` (buckets 10 µs, 100 µs, 1 ms, 10 ms, 100 ms, +Inf) times the wait at each of the four lock sites, recorded on drop so a wait abandoned by a caller's `timeout_at` still counts; `plurx_media_session_route_prune_entries` (buckets 0, 16, 64, 256, 1,024, 2,048, 4,096, +Inf) records the entries each sweep walks; `plurx_media_session_route_cache_entries` is the map size after its last change. 46 fixed series; no id, path or node in any label. `ROUTE_CACHE_TTL`, `MAX_ROUTE_CACHE_ENTRIES`, every `lock()` site and its order are unchanged: each site calls one `lock_routes(site)` that takes the same mutex at the same point. Tests: `a_cache_hit_and_a_store_read_are_counted_separately`, `concurrent_lookups_of_one_session_produce_one_store_read` (a test-only gate holds the first Store read open while eight lookups run; mutation results in the PR body), `route_cache_exposition_is_bounded_and_its_labels_match_their_bounds`, and `metrics_render_the_media_session_route_cache_families` through the router's `/metrics`. **M6 not built.** |
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — review of PR #598 | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | The single adversarial review ([comment 6123](http://192.168.4.7:3000/noirr/plurx/pulls/598#issuecomment-6123)) raised two P2 findings, both answered. (1) The prompt below divided store reads by all four playbacks, but a direct play (`/direct`, `stream.mp4`) never reaches the route cache; only `http/hls/` requests do, through `relay_if_remote`. That could halve the rate §3.5 asks for (per active **HLS** session) and bias M6 toward "nothing to fix". The prompt now requires every playback to be HLS (rolling or encoded VOD), records each playback's mode and start and end times in `playbacks.csv`, and has the script divide by HLS session-seconds clipped to the window, leaving out anything recorded as direct. §6.4 step 4 says the same. The script was dry-run on synthetic scrapes with a direct play and a mid-window stop. (2) No test separated entries *walked* from entries *left*, so counting after `retain` survived. `each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge` (paused time) runs all three sweep sites over expired entries and covers the gauge falling when `cached_route` removes an expired entry. The reviewer's mutation (count after `retain` at all three sites) fails it; the result is in the PR thread. The lookups HELP text and OPERATIONS.md now name every cached caller: HLS media and status GETs, and session DELETEs. |
 | | | | | | `needs:` the §6.4 measurement on `media1` with the M5 build deployed — the prompt below — then M6 (§5.5) decides from its table. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 — the durable census | — | §8.5's daily reads cannot close the row on this deploy cadence: all four nodes restarted 2026-10-02 05:11–05:21 UTC, and the 05:31 UTC read found 0 Plex requests on every node with 8–20 min of uptime. The 56 cells are now persisted per node (§8.7): `plex-census.json` in the data directory, written every 60 s, at startup and after the HTTP server stops (marked clean); an unclean stop is counted and its window added to `plurx_plex_census_gap_seconds`, so the persisted counts are a lower bound. New series `plurx_plex_requests_since_census_total{handler,outcome}` (the same 56 cells), `plurx_plex_census_started_seconds`, `_last_flush_seconds`, `_unclean_stops_total`, `_gap_seconds` and `_flush_failures_total`; `plurx_plex_requests_total` keeps its in-process meaning. Nothing on the request path changed. Tests: clean-restart round trip and monotonicity, crash-loss bound (exactly the counts after the last write are lost, and the gap persists across a second crash), the final clean-stop write, four unusable-file shapes (each a new census, kept aside, never a failure), and the exposition (exactly the 56 known cells; a carried unknown cell is written back but never exposed). Same read: the M5 route-cache families moved on lab6 only (100 cache hits / 96 Store reads, lock waits ≤ 10 µs). |
+| | | | | | `needs:` one read of every node per §8.7 once each has seven days of census time on the build carrying it; and, separately, §6.4 on the actual ingress node before M6. |
 
 ### M5 → M6: the §6.4 measurement — GPT prompt
 
