@@ -34,7 +34,8 @@ pub struct ServerInfo {
     pub version: &'static str,
     /// Git description of the exact build ("v0.1.0-14-gc0ffee"), for support.
     pub build: &'static str,
-    /// Compile time, always present — the fallback when `build` is "unknown".
+    /// Source date (SOURCE_DATE_EPOCH, else commit time, else compile time),
+    /// always present — the fallback when `build` is "unknown".
     pub built_at: &'static str,
     pub instance_id: String,
     /// Stable local identity used to distinguish this node's LAN records.
