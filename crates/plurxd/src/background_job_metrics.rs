@@ -49,6 +49,7 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::ArtworkDerivative => 7,
         JobKind::SemanticEmbedding => 8,
         JobKind::MediaProbe => 9,
+        JobKind::CopyOutputPrepare => 10,
     }
 }
 
@@ -94,10 +95,14 @@ impl Histogram {
     }
 }
 
-static COUNTERS: [[AtomicU64; 11]; 10] = [const { [const { AtomicU64::new(0) }; 11] }; 10];
-static CLAIM_LATENCY: [Histogram; 10] = [const { Histogram::new() }; 10];
-static QUEUE_WAIT: [Histogram; 10] = [const { Histogram::new() }; 10];
-static EXECUTION: [Histogram; 10] = [const { Histogram::new() }; 10];
+static COUNTERS: [[AtomicU64; 11]; JOB_METRIC_KINDS.len()] =
+    [const { [const { AtomicU64::new(0) }; 11] }; JOB_METRIC_KINDS.len()];
+static CLAIM_LATENCY: [Histogram; JOB_METRIC_KINDS.len()] =
+    [const { Histogram::new() }; JOB_METRIC_KINDS.len()];
+static QUEUE_WAIT: [Histogram; JOB_METRIC_KINDS.len()] =
+    [const { Histogram::new() }; JOB_METRIC_KINDS.len()];
+static EXECUTION: [Histogram; JOB_METRIC_KINDS.len()] =
+    [const { Histogram::new() }; JOB_METRIC_KINDS.len()];
 
 pub(super) fn event(kind: JobKind, event: Event) {
     COUNTERS[kind_slot(kind)][event as usize].fetch_add(1, Ordering::Relaxed);

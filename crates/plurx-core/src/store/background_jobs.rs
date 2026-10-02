@@ -7,6 +7,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use super::background_jobs_copy_output::PUBLISH_COPY_OUTPUT_SQL;
+pub use super::background_jobs_copy_output::{CopyOutputJobOutput, PublishCopyOutputJob};
 pub use super::background_jobs_delivery::{
     hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
@@ -74,6 +76,8 @@ pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
     include_str!("background_jobs_receipt_pressure.sql");
 /// Replicated v65 / SQLite v87: exact viewer interest and source reservations.
 pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
+/// Replicated v67 / SQLite v91: source cancellation for full copy preparation.
+pub(crate) const COPY_OUTPUT_SCHEMA: &str = include_str!("background_jobs_copy_output.sql");
 
 // Scheduled full-library ticks reuse an equivalent pending request inside this
 // same admission statement. Reads on individual schedulers cannot deduplicate
@@ -579,6 +583,7 @@ WHERE id = json_extract($1, '$.token.job_id')
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
     TranscodePrepare,
+    CopyOutputPrepare,
     FragmentIndexBuild,
     ArtifactHydrate,
     SubtitleExtract,
@@ -596,6 +601,7 @@ impl JobKind {
     pub const fn permits_artifact_execution(self) -> bool {
         match self {
             Self::TranscodePrepare
+            | Self::CopyOutputPrepare
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
             | Self::SubtitleExtract
@@ -608,10 +614,76 @@ impl JobKind {
     }
 }
 
+/// Bounded logical copy inputs, never a SessionRequest or execution authority.
+/// The worker re-resolves these against its held physical source before work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CopyOutputProfile {
+    H264Sdr1440P30V1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CopyOutputIntent {
+    pub target_node_id: String,
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub audio_claim: Option<crate::playback::audio::AudioClaim>,
+    pub audio_delivery: crate::playback::audio::AudioDelivery,
+    pub aac: bool,
+    pub preserve_dolby_vision: bool,
+    pub convert_dolby_vision: bool,
+    pub hdr10_requested: bool,
+    pub grade: crate::transcode::OutputGrade,
+    pub normalized_geometry: bool,
+    pub profile: Option<CopyOutputProfile>,
+    pub width: u32,
+    pub height: u32,
+    pub video_identity: String,
+    pub pipeline_identity: String,
+}
+
+impl CopyOutputIntent {
+    pub fn valid(&self) -> bool {
+        identifier(&self.target_node_id)
+            && self.audio_index.is_none_or(|index| index >= 0)
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && self
+                .audio_claim
+                .as_ref()
+                .is_none_or(|claim| claim.valid_snapshot())
+            && self.audio_delivery.valid_snapshot()
+            && (!self.convert_dolby_vision || self.preserve_dolby_vision)
+            && (1..=16_384).contains(&self.width)
+            && (1..=16_384).contains(&self.height)
+            // segplan::argv_fingerprint is a 16-hex FNV identity, not SHA256.
+            // Keep the original 64-hex accepted shape for v1 callers; neither
+            // is authority: the worker recomputes the actual video identity.
+            && (digest(&self.video_identity)
+                || (self.video_identity.len() == 16
+                    && self.video_identity.bytes().all(|byte| {
+                        byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+                    })))
+            && digest(&self.pipeline_identity)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 /// Closed payloads contain identifiers, never executable text or caller-selected paths.
 pub enum JobPayload {
+    CopyOutputPrepare {
+        copy_output_version: u16,
+        file_id: i64,
+        source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
+        source_object_version: String,
+        policy_generation: String,
+        intent: CopyOutputIntent,
+        scratch_bytes: i64,
+        reason: String,
+    },
     TranscodePrepare {
         file_id: i64,
         source_generation: String,
@@ -677,6 +749,7 @@ pub enum JobPayload {
 impl JobPayload {
     pub const fn kind(&self) -> JobKind {
         match self {
+            Self::CopyOutputPrepare { .. } => JobKind::CopyOutputPrepare,
             Self::TranscodePrepare { .. } => JobKind::TranscodePrepare,
             Self::FragmentIndexBuild { .. } => JobKind::FragmentIndexBuild,
             Self::ArtifactHydrate { .. } => JobKind::ArtifactHydrate,
@@ -692,6 +765,7 @@ impl JobPayload {
 
     pub fn target_node_id(&self) -> Option<&str> {
         match self {
+            Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
             | Self::ArtifactVerify { target_node_id, .. } => Some(target_node_id),
             _ => None,
@@ -707,6 +781,34 @@ impl JobPayload {
 
     pub fn validate(&self) -> Result<(), StoreError> {
         let valid = match self {
+            Self::CopyOutputPrepare {
+                copy_output_version,
+                file_id,
+                source_generation,
+                source_size,
+                source_mtime: _,
+                source_object_version,
+                policy_generation,
+                intent,
+                scratch_bytes,
+                reason,
+            } => {
+                ((*copy_output_version == 1 && intent.normalized_geometry)
+                    || (*copy_output_version == 2
+                        && !intent.normalized_geometry
+                        && intent.profile.is_none()))
+                    && *file_id > 0
+                    && *source_size > 0
+                    && identifier(source_generation)
+                    && identifier(source_object_version)
+                    && identifier(policy_generation)
+                    && *scratch_bytes > 0
+                    && intent.valid()
+                    && matches!(
+                        reason.as_str(),
+                        "recent_demand" | "next_up" | "recent" | "channel_next"
+                    )
+            }
             Self::TranscodePrepare {
                 file_id,
                 source_generation,
@@ -1502,6 +1604,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishTranscodeJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_copy_output_job(
+        &self,
+        request: PublishCopyOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
     async fn publish_fragment_job(
         &self,
         request: PublishFragmentJob,
@@ -2140,10 +2246,50 @@ LIMIT 1
         )
     }
 
+    async fn publish_copy_output_job(
+        &self,
+        request: PublishCopyOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        if request.now_ms < 0
+            || !request.intent.valid()
+            || uuid::Uuid::parse_str(&request.output.artifact_id).is_err()
+            || !digest(&request.output.output_identity)
+            || !identifier(&request.output.source_object_version)
+            || request.output.wire_bytes <= 0
+            || request.output.duration_micros <= 0
+            || request.output.average_bps == 0
+            || (request.output.wire_bytes > 0
+                && request.output.duration_micros > 0
+                && u128::from(request.output.average_bps)
+                    != (request.output.wire_bytes as u128 * 8_000_000)
+                        .div_ceil(request.output.duration_micros as u128))
+            || request.output.peak_bps < request.output.average_bps
+            || request.output.peak_bps > i64::MAX as u64
+        {
+            return Err(invalid("invalid completed copy publication"));
+        }
+        // Match the canonical Value encoding used by enqueue; field order is
+        // not a second identity scheme for the closed logical tuple.
+        let body = serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let rows = self
+            .queue_sql(
+                PUBLISH_COPY_OUTPUT_SQL.to_owned(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("copy publication returned no verdict"))?,
+        )
+    }
+
     async fn job_candidates(&self, query: CandidateQuery) -> Result<CandidatePage, StoreError> {
         if !identifier(&query.node_id)
             || query.kinds.is_empty()
-            || query.kinds.len() > 10
+            || query.kinds.len() > JOB_METRIC_KINDS.len()
             || query.now_ms < 0
             || query.limit == 0
             || query.limit > MAX_PAGE_SIZE

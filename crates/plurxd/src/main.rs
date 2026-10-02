@@ -54,6 +54,7 @@ mod progressive;
 mod reader_formats;
 mod redact;
 mod renditiondir;
+mod rolling_output;
 mod schedule;
 mod scratch_ledger;
 mod scratch_put;
