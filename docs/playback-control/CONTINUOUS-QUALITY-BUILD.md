@@ -3466,3 +3466,23 @@ main integration and is not qualification evidence for the integrated branch.
 The next source archive refreshes that isolated build before playback probes.
 Native Safari's UI action again reported a locked Mac; its local fixture server
 was closed. Physical Android, Apple display and audio evidence remain pending.
+
+
+### 10.113 Exact current-code startup refusal exposed derived-role evidence
+
+The full twenty-switch Chrome case started against Linux build 649687dc3,
+verified by its system response. It failed before the first frame: zero VOD
+session creates and continuous-role incompatibility. The failed receipt is
+retained as continuous-chrome-full-linux-649687dc3.json; it is not a partial
+pass. The launcher closed its isolated daemon and removed its browser runtime.
+
+A standalone companion-video or shared-AAC request cleared its parent companion
+identity and local context but retained the newly serialized companion catalog.
+Both recipe derivations and the later VOD AAC attachment now clear that
+parent-only evidence together. AAC also drops video-only candidate context
+and the parent family descriptor. The existing
+real worker-role regression also constructs a canonical two-video/AAC family
+and verifies it reaches the deliberately denied capacity result, preserving
+the incumbent, rather than failing recipe validation. Its source is compiled
+by the normal hook; unit execution remains deferred to final review. The next
+probe starts a fresh fully identified series after the source rebuild.

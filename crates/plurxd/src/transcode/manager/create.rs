@@ -1212,6 +1212,7 @@ impl TranscodeManager {
             .as_mut()
             .expect("continuous video");
         role.autonomous_companion = None;
+        role.companion_catalog = None;
         role.companion_context = None;
         role.family_descriptor = None;
         companion.kind = SessionKind::Transcode {
@@ -1255,6 +1256,7 @@ impl TranscodeManager {
             .as_mut()
             .expect("shared soundtrack role");
         role.autonomous_companion = None;
+        role.companion_catalog = None;
         role.companion_context = None;
         role.family_descriptor = None;
         let mut soundtrack = self.prepare_vod_encoding(&audio, file).await?;

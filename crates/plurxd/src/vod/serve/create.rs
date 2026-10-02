@@ -692,10 +692,13 @@ impl VodServe {
         // Prepare independently, then reacquire all build gates in key order.
         // No public reader exists until the exact cached objects are rechecked.
         let mut audio_request = req.clone();
+        audio_request.candidate_context = None;
         if let Some(media) = audio_request.continuous_media.as_mut() {
             media.role = crate::transcode::ContinuousMediaRole::SharedAudio;
             media.autonomous_companion = None;
+            media.companion_catalog = None;
             media.companion_context = None;
+            media.family_descriptor = None;
         }
         let audio_rendition = match prepared.soundtrack.as_ref() {
             Some(soundtrack) => {

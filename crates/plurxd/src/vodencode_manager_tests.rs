@@ -931,6 +931,22 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     assert!(refused.contains("vod_family_capacity"));
     assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent remains registered").result.is_ok(),
         "failed family admission must not run the legacy supersession sweep");
+    let companion = catalog.iter().find(|row| row.id != candidate.id && row.normalized_geometry
+        && row.target_height != candidate.target_height && row.grade == OutputGrade::Sdr
+        && row.route == plurx_core::playback::candidate::CandidateRoute::Encode)
+        .expect("second canonical video recipe");
+    let mut family = request.clone();
+    family.request_id = Some(uuid::Uuid::new_v4().to_string());
+    family.candidate_context = Some(Box::new(TranscodeManager::candidate_context(candidate)));
+    let media = family.continuous_media.as_mut().expect("family role");
+    media.autonomous_companion = Some(companion.id);
+    media.companion_catalog = Some(Box::new(companion.clone()));
+    media.companion_context = Some(Box::new(ContinuousCompanionContext {
+        height: i64::from(companion.target_height), candidate: TranscodeManager::candidate_context(companion),
+    }));
+    let refused = manager.create_session(&family, "test").await.err().expect("three-role capacity denial");
+    assert!(refused.contains("vod_family_capacity"), "both derived video and AAC roles validate before admission: {refused}");
+    assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent survives family denial").result.is_ok());
     manager.vod.end(&incumbent.session_id, crate::vodserve::Terminal::Deleted).await;
     request.continuous_media.as_mut().expect("continuous role").version = 2;
     assert!(manager.prepare_vod_encoding(&request, &file).await.is_err());
