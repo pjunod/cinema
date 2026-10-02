@@ -246,17 +246,22 @@ impl DeviceProfile {
         // through. A client that decodes the codec mixes and resamples for its
         // own route, as every direct play always has, and a codec the claim
         // does not mention keeps the codec-list answer.
-        let Some(sink) = self.audio_sink_claims.get(&codec) else {
-            return self.allows_audio(&stream.codec);
-        };
-        if self.claimed_audio_decoders.contains(&codec) {
-            return true;
-        }
         let channels = stream
             .channels
             .and_then(|channels| u8::try_from(channels).ok())
             .filter(|channels| *channels > 0)
             .unwrap_or(2);
+        let Some(sink) = self.audio_sink_claims.get(&codec) else {
+            return self.allows_audio(&stream.codec);
+        };
+        // A sink that lists no rates is the flat `achannels` ceiling: no
+        // decoder or route evidence beyond a channel count.
+        if sink.sample_rates_hz.is_empty() {
+            return self.allows_audio(&stream.codec) && channels <= sink.max_channels;
+        }
+        if self.claimed_audio_decoders.contains(&codec) {
+            return true;
+        }
         sink.passthrough
             && channels <= sink.max_channels
             && stream.sample_rate.is_some_and(|rate| {
