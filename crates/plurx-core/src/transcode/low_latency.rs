@@ -10,6 +10,8 @@ pub enum LowLatencyError {
     InvalidTarget,
     #[error("part duration must be positive and no longer than its fixed target")]
     InvalidPartDuration,
+    #[error("muxed track duration skew exceeds the frozen audio-frame allowance")]
+    InvalidTrackSkew,
     #[error("a short dependent part must finish its parent")]
     ShortDependentPart,
     #[error("published parents must be contiguous, with only the last unfinished")]
@@ -22,6 +24,7 @@ pub enum LowLatencyError {
 pub struct PartPolicy {
     target: Duration,
     parent_target: Duration,
+    max_track_skew: Duration,
 }
 
 impl PartPolicy {
@@ -32,7 +35,51 @@ impl PartPolicy {
         Ok(Self {
             target,
             parent_target,
+            max_track_skew: Duration::ZERO,
         })
+    }
+
+    /// Derive a conservative target from integer video clocks and at most one
+    /// audio-frame duration of muxing skew. The manifest duration is the longer
+    /// track's actual span; neither span is rounded down to a nominal half second.
+    pub fn from_sample_clocks(
+        video_frames: u32,
+        video_frame_ticks: u32,
+        video_timescale: u32,
+        audio_frame: Duration,
+        parent_target: Duration,
+    ) -> Result<Self, LowLatencyError> {
+        if video_frames == 0 || video_frame_ticks == 0 || video_timescale == 0 {
+            return Err(LowLatencyError::InvalidTarget);
+        }
+        let nanos = (u128::from(video_frames) * u128::from(video_frame_ticks) * 1_000_000_000)
+            .div_ceil(u128::from(video_timescale));
+        let video =
+            Duration::from_nanos(u64::try_from(nanos).map_err(|_| LowLatencyError::InvalidTarget)?);
+        let target = video
+            .checked_add(audio_frame)
+            .ok_or(LowLatencyError::InvalidTarget)?;
+        let mut policy = Self::new(target, parent_target)?;
+        policy.max_track_skew = audio_frame;
+        Ok(policy)
+    }
+
+    pub fn validate_muxed_part(
+        self,
+        video: Duration,
+        audio: Duration,
+        independent: bool,
+        final_part: bool,
+    ) -> Result<Duration, LowLatencyError> {
+        if video.is_zero() || audio.is_zero() {
+            return Err(LowLatencyError::InvalidPartDuration);
+        }
+        if video.abs_diff(audio) > self.max_track_skew {
+            return Err(LowLatencyError::InvalidTrackSkew);
+        }
+        let duration = video.max(audio);
+        self.validate_part(duration, independent, final_part)?;
+        Ok(duration)
     }
 
     pub fn target(self) -> Duration {
@@ -91,7 +138,8 @@ pub enum ReloadDecision {
     BadRequest,
 }
 
-/// Counts refer only to parts whose complete bytes have been published.
+/// Counts mean parts ever published for each retained parent, including parts
+/// whose tags were trimmed. They never count incomplete bytes or decrease.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ParentAvailability {
     pub media_sequence: u64,
@@ -124,6 +172,9 @@ impl<'a> ReloadFrontier<'a> {
     }
 
     pub fn classify(&self, request: ReloadRequest, policy: PartPolicy) -> ReloadDecision {
+        if self.ended {
+            return ReloadDecision::Ready;
+        }
         let Some(mut sequence) = request.media_sequence else {
             return if request.part.is_some() {
                 ReloadDecision::BadRequest
@@ -131,15 +182,20 @@ impl<'a> ReloadFrontier<'a> {
                 ReloadDecision::Ready
             };
         };
-        if self.ended {
-            return ReloadDecision::Ready;
-        }
         let first = &self.parents[0];
         let last = &self.parents[self.parents.len() - 1];
         if sequence < first.media_sequence {
             return ReloadDecision::Ready;
         }
-        if sequence > last.media_sequence.saturating_add(2) {
+        // An unfinished parent is not a Media Segment for the MSN bound.
+        // With initial sequence zero and no complete parent, the virtual
+        // predecessor is -1, so the furthest acceptable sequence is one.
+        let max_sequence = if last.complete {
+            last.media_sequence.saturating_add(2)
+        } else {
+            last.media_sequence.saturating_add(1)
+        };
+        if sequence > max_sequence {
             return ReloadDecision::BadRequest;
         }
         let mut part = request.part;
@@ -169,13 +225,24 @@ impl<'a> ReloadFrontier<'a> {
             .iter()
             .find(|parent| parent.media_sequence == sequence);
         if let Some(index) = part {
+            // Future parent lengths are unknown. Do not park requests across
+            // an unfinished boundary: only its own parts can be bounded from
+            // this inventory. A completed parent can roll to its next part 0.
+            if sequence > last.media_sequence && !last.complete {
+                return ReloadDecision::BadRequest;
+            }
             let count = parent.map_or(0, |parent| parent.parts);
             if index < count {
                 return ReloadDecision::Ready;
             }
             // Compare using a count so an empty parent's conceptual last
             // index (-1) needs neither signed casts nor unsigned subtraction.
-            if u64::from(index) >= u64::from(count).saturating_add(policy.advance_part_limit()) {
+            let missing_parents = sequence
+                .saturating_sub(last.media_sequence)
+                .saturating_sub(1);
+            if u64::from(index).saturating_add(missing_parents)
+                >= u64::from(count).saturating_add(policy.advance_part_limit())
+            {
                 return ReloadDecision::BadRequest;
             }
         }
@@ -252,7 +319,7 @@ mod tests {
         ] {
             assert_eq!(frontier.classify(req, policy()), ReloadDecision::Ready);
         }
-        for req in [request(8, None), request(8, Some(2)), request(9, Some(0))] {
+        for req in [request(8, None), request(8, Some(2))] {
             assert_eq!(frontier.classify(req, policy()), ReloadDecision::Wait);
         }
         assert_eq!(
@@ -308,7 +375,7 @@ mod tests {
         let frontier = ReloadFrontier::new(&parents, false).expect("valid protocol fixture");
         assert_eq!(
             frontier.classify(request(9, Some(5)), policy()),
-            ReloadDecision::Wait
+            ReloadDecision::BadRequest
         );
         for req in [
             request(10, None),
@@ -342,6 +409,81 @@ mod tests {
                 .expect("valid protocol fixture")
                 .classify(request(u64::MAX, Some(u32::MAX)), policy()),
             ReloadDecision::Ready
+        );
+    }
+
+    #[test]
+    fn eof_ignores_part_without_msn_and_future_bounds_use_complete_parents() {
+        let parents = [
+            ParentAvailability {
+                media_sequence: 6,
+                parts: 4,
+                complete: true,
+            },
+            ParentAvailability {
+                media_sequence: 7,
+                parts: 2,
+                complete: false,
+            },
+        ];
+        let frontier = ReloadFrontier::new(&parents, false).expect("valid fixture");
+        assert_eq!(
+            frontier.classify(request(9, None), policy()),
+            ReloadDecision::BadRequest
+        );
+        assert_eq!(
+            frontier.classify(request(8, None), policy()),
+            ReloadDecision::Wait
+        );
+        assert_eq!(
+            frontier.classify(request(8, Some(5)), policy()),
+            ReloadDecision::BadRequest
+        );
+        assert_eq!(
+            frontier.classify(request(7, Some(7)), policy()),
+            ReloadDecision::Wait
+        );
+        assert_eq!(
+            frontier.classify(request(7, Some(8)), policy()),
+            ReloadDecision::BadRequest
+        );
+        let ended = ReloadFrontier::new(&parents[..1], true).expect("complete fixture");
+        assert_eq!(
+            ended.classify(
+                ReloadRequest {
+                    media_sequence: None,
+                    part: Some(0)
+                },
+                policy()
+            ),
+            ReloadDecision::Ready
+        );
+    }
+
+    #[test]
+    fn fractional_video_cadence_and_aac_skew_fit_the_derived_target() {
+        let audio_frame = Duration::from_nanos(21_333_334); // ceil(1024 / 48000 s)
+        let policy =
+            PartPolicy::from_sample_clocks(12, 1001, 24000, audio_frame, Duration::from_secs(16))
+                .expect("valid clocks");
+        let video = Duration::from_micros(500_500);
+        assert_eq!(policy.target(), video + audio_frame);
+        assert_eq!(
+            policy.validate_muxed_part(video, video + audio_frame, false, false),
+            Ok(video + audio_frame)
+        );
+        assert_eq!(
+            policy.validate_muxed_part(
+                video,
+                video + audio_frame + Duration::from_nanos(1),
+                true,
+                true
+            ),
+            Err(LowLatencyError::InvalidTrackSkew)
+        );
+        assert!(
+            PartPolicy::from_sample_clocks(12, 1001, 0, audio_frame, Duration::from_secs(16))
+                .is_err()
         );
     }
 

@@ -1,6 +1,6 @@
-# Few-second startup — publish parts while the steady buffer grows
+# Few-second startup — review of shorter targets and partial delivery
 
-**Status:** review packet; protocol primitives implemented locally, runtime path not implemented ·
+**Status:** changes requested; protocol corrections in progress, runtime blocked on control experiments ·
 **Date:** 2026-10-02 · **Decision:** Paul explicitly authorized building the
 few-second startup path, including Low-Latency HLS, in the playback repair chat.
 
@@ -17,6 +17,10 @@ Do not approve runtime activation based on passing primitive tests or on part
 requests alone. Sections 7–10 identify the exact changes, evidence and decisions
 that need review.
 
+Hostnames and local paths in this committed packet are privacy aliases:
+`media1`, `forge.lan` and `~/plurx-*` stand for the captured host, forge and
+temporary evidence/worktree locations. They do not relocate the evidence.
+
 ## 1. Outcome and scope
 
 Start rolling playback with a few seconds of playable media after the requested
@@ -25,7 +29,7 @@ buffer. A successful first frame followed by an avoidable startup stall fails
 acceptance. Four seconds at 1× is an initial experiment, not a measured guarantee.
 Record click-to-first-frame separately from the amount of media buffered.
 
-The immediate reproduction is Wicked in nynuc's web UI on native Safari.
+The immediate reproduction is Wicked in media1's web UI on native Safari.
 The user approved a three-minute local excerpt for testing. That media and raw
 private logs stay outside Git in the existing temporary evidence directory.
 The preparation-starvation repair in PR #745 remains a separate change; merge
@@ -34,16 +38,16 @@ its reviewed candidate after its required gate and integrate main here later.
 Use one integration branch, `effort/few-second-startup`. Task branches start
 from its current head and target it. No file-disjoint exception applies.
 The user's original checkout is untouched. The working checkout is
-`/private/tmp/plurx-few-second-startup-20261002`; Rust 1.97.1 all-target daemon
+`~/plurx-few-second-startup-20261002`; Rust 1.97.1 all-target daemon
 check passed on main `772b9cf23` before Rust edits.
 
 ## 2. Decision and alternatives
 
 | Approach | Decision and reason |
 |---|---|
-| Lower only the current 48-second publication gate | Rejected for this requirement: the fixed 16-second discovery cadence can exhaust a few-second buffer. |
-| Shorten every ordinary segment and its target | Rejected as the general solution: unknown GOPs and open-GOP leading pictures cannot be fixed by changing a duration constant. |
-| Publish bounded fMP4 parts and support blocking reload | Selected for implementation and actual Safari qualification; retains larger parent segments and steady buffer. |
+| Lower only the current 48-second publication gate | Insufficient alone: native buffering and holdback scale with the declared target. Keep the current gate until an alternative is measured. |
+| Short target per attempt with verified maximum GOP and decodable boundaries | Reopened; evaluate classic two-second control before P2. Unknown sources retain the existing target. Packet keyframe flags and the three-minute excerpt do not establish whole-source closed-GOP safety. |
+| Publish bounded fMP4 parts and support blocking reload | Authorized scope, but runtime construction waits for transport and position-continuity qualification. Parts alone have not enabled advancing native playback. |
 | Re-encode video to force short GOPs | Rejected as a latency shortcut; preserving source quality is part of the request. |
 
 Protocol references: [Apple's LL-HLS overview](https://developer.apple.com/documentation/http-live-streaming/enabling-low-latency-http-live-streaming-hls)
@@ -100,7 +104,9 @@ duplication. Retention must keep promised parts readable for the required grace.
 | Task | Owned work | Required focused evidence |
 |---|---|---|
 | P1: protocol and feasibility | New core LL-HLS types/tests; this contract and docs index; isolated local transport experiment | Part geometry, sequence rollover, bounded future requests and EOF; actual Safari requests and advancing frames establish transport behavior |
-| P2: producer and delivery | fMP4/copy producer, rolling publication/flow/scratch, HLS HTTP and peer relay | Same samples through parts and parents; bounded waits, cancellation, ownership changes, retention and accounting |
+| S1: source-qualified short target (priority before P2) | Exact source/recipe boundary proof, immutable per-attempt target, copy limits and publication bootstrap | Whole-source clean-boundary coverage, unchanged decoded samples and audio/DV behavior; no proof retains existing target. Fragment-index presence alone is insufficient if boundaries are dirty. |
+| S2: short-target native acceptance | Real daemon and shipped Safari on existing HTTP LAN transport | Repeated cold/resumed Wicked or explicitly refused eligibility; advancing-frame TTFF, no added missing samples, no post-start stall, honest fallback |
+| P2: producer and delivery (experimental, deferred) | fMP4/copy producer, rolling publication/flow/scratch, HLS HTTP and peer relay | Same samples through parts and parents; bounded waits, cancellation, ownership changes, retention and accounting |
 | P3: client and settings | Startup mode selection, web native/hls.js handling, Developer switch and readiness text | Shipped client starts at requested position, keeps playing while reserve grows, reports actual readiness; switch never blocked by advisory readiness |
 | P4: acceptance and promotion | Integration tests, retained measurements, current status and final review fixes | Repeated native Safari Wicked starts, continuity, rate/resume/pause/seek, throttled production and network, ordinary-client compatibility |
 
@@ -122,7 +128,7 @@ client-buffered coverage and part requests separately. Cover startup at zero
 and a resumed position, stop during a blocked request, replacement, pause,
 rate changes, EOF, slow production and a refused scratch grant. The source
 sample is a local proof only; physical Apple/Android and fleet claims require
-their own observations. Production deployment and observed nynuc playback are
+their own observations. Production deployment and observed media1 playback are
 separate from merging source. Do not call the original ten-second complaint
 fixed before measuring the deployed result.
 
@@ -130,19 +136,23 @@ fixed before measuring the deployed result.
 
 - 2026-10-02: scope expansion authorized; isolated effort checkout created.
   Rust 1.97.1 `cargo check -p plurxd --all-targets --offline` passed on its base.
-- P1 in progress on `codex/ll-hls-startup-contract`. Six pure protocol tests
+- P1 in progress on `codex/ll-hls-startup-contract`. Eight pure protocol tests
   pass locally; the module is not called by production. The loopback Safari
   prototype requests parts and blocking reloads but fails early continuous
   playback. No production activation, LL-HLS PR, or deployment exists.
 
 ## 7. Existing preparation repair — separate reviewed change
 
-[PR #745](http://192.168.4.7:3000/noirr/plurx/pulls/745) targets main. Its
+[PR #745](http://forge.lan:3000/noirr/plurx/pulls/745) targets main. Its
 reviewed/tested tree is `b49a28731c13ad55c9e6f3aed5614efe16a2f6a8`; pushed
 head `f6c74feef47df4a2d9a1e925122c092279a53da4` has the identical tree after
 preserving a remote main merge. Its base is `772b9cf236e989fbb75ac4d1aa760c0ad632395d`.
 At this packet's preparation, policy preflight passed; required Rust/Windows
 and aggregate gates were still pending. This is not a merge or deploy receipt.
+
+Review follow-up head `8d87d286095ef3d3f2ec3b24297c474b09eb79c6` is pushed
+with B1/B2 fixes; its remote gates are pending. Sections below describing the
+original review tree are historical evidence, not qualification of this head.
 
 **Problem proved:** Wicked's current-engine preparation request stayed queued
 with `foreground_preempted` while its live viewer was playing. The daemon
@@ -154,7 +164,7 @@ required an idle node before claiming or hashing that viewer's source.
 | `plurx-core/src/store/sqlite/fragment_index_cluster.rs` | Busy claims require an unexpired pending playback-analysis waiter in both candidate selection and fenced update. |
 | `plurx-core/src/store/hiqlite_fragment_index_cluster.rs` | Same admission rule on the replicated Store. |
 | `plurx-core/src/store/background_jobs.rs` | Authoritative preparation observation includes whether live viewer interest remains. |
-| `plurxd/src/state.rs` | Busy nodes can claim and continue source attestation for their live viewer; cancellation and loss of interest stop that exception. |
+| `plurxd/src/state.rs` | Busy nodes can claim and continue source attestation for any unexpired playback waiter on the request; cancellation and loss of interest stop that exception. |
 | `plurx-core/tests/store_contract.rs` | SQLite and three-voter Hiqlite regression for live-viewer admission, expiry, engine compatibility and maintenance attempt accounting. |
 
 Existing source-I/O reservations, leases, claim fences and feature cancellation
@@ -182,7 +192,7 @@ The LL-HLS branch currently has only these source changes, based on main
 
 | File | Current change and status |
 |---|---|
-| [transcode/low_latency.rs](../../crates/plurx-core/src/transcode/low_latency.rs) | New pure types and six tests. Local implementation, not wired into a daemon route. |
+| [transcode/low_latency.rs](../../crates/plurx-core/src/transcode/low_latency.rs) | New pure types and eight tests. Local implementation, not wired into a daemon route. |
 | [transcode/mod.rs](../../crates/plurx-core/src/transcode/mod.rs) | Exposes the new module; no FFmpeg arguments or production duration constants changed. |
 | This document and [docs index](../README.md) | Build/review contract and its index row. |
 
@@ -194,7 +204,10 @@ its parent. It deliberately does not choose a production part target.
 invalid ordering or a non-final unfinished parent. `ReloadRequest` distinguishes
 whole-parent requests from part requests. Classification returns ready, wait or
 bad request; it handles evicted requests, completed-parent rollover, finite
-lookahead and completed presentations. It owns no tasks, timers, media bytes or
+lookahead and completed presentations. Unknown future part requests beyond an
+unfinished parent fail promptly because this inventory cannot establish their
+cross-parent distance; this is a conservative admission policy, not a claim
+that the protocol forbids every such request. It owns no tasks, timers, media bytes or
 mutable runtime catalog. The daemon must still implement identity fencing,
 bounded waits, HTTP parsing and final response admission. Those protections
 are not proved by these tests.
@@ -205,9 +218,9 @@ Executed on Rust 1.97.1:
 cargo test -p plurx-core --lib transcode::low_latency::tests --offline
 ```
 
-Six passed, zero failed. This is a protocol-only test and does not claim
+Eight passed, zero failed. This is a protocol-only test and does not claim
 replicated-storage coverage. Workspace Clippy with `--all-targets -- -D warnings` passed on the new
-tree. The six tests were rerun after lint corrections and passed again.
+tree. The eight tests were rerun after lint corrections and passed again.
 The four documentation-index tests also passed.
 
 The next runtime changes are proposed, not present:
@@ -215,7 +228,7 @@ The next runtime changes are proposed, not present:
 | Existing owner | Proposed integration |
 |---|---|
 | `crates/plurx-core/src/fmp4.rs` and `transcode/mod.rs` | Produce/assemble bounded parts while preserving encoded samples, init transforms, timing and parent boundaries. |
-| `crates/plurxd/src/copyseg.rs` | Atomically write parts, charge writes and notify the publication owner; never expose a half-written fragment. |
+| `crates/plurxd/src/copyseg.rs` | Atomically write append-only parent byte ranges, charge writes and notify the publication owner; never expose a half-written fragment. |
 | `crates/plurxd/src/transcode/rolling/{publication,session,segment_index,flow}.rs` | Attempt-bound part inventory, separate startup/steady coverage, legal publication and retention, exact byte accounting. |
 | `crates/plurxd/src/http/hls/{playlist,response}.rs` and media-serving owner | Parse delivery directives, bounded blocking reload/preload, capability auth, part GETs and exact response admission. |
 | `crates/plurxd/src/media_sessions.rs` and `http/internal_media_sessions.rs` | Preserve directives, part identity, cancellation and deadlines through peer relay. |
@@ -242,7 +255,7 @@ Runtime sequence to review:
 The production Wicked attempt took **11,019 ms** to first frame. Its live create
 request took 2,520 ms; the initial rolling snapshot waited for 48 seconds of
 post-position media. The complete phase breakdown is in the
-[PR #745 version of the measurements](http://192.168.4.7:3000/noirr/plurx/src/commit/f6c74feef47df4a2d9a1e925122c092279a53da4/docs/streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md),
+[PR #745 version of the measurements](http://forge.lan:3000/noirr/plurx/src/commit/f6c74feef47df4a2d9a1e925122c092279a53da4/docs/streaming/PLAYBACK-STARTUP-LATENCY-MEASUREMENTS.md),
 not reconstructed from the synthetic probe.
 
 On this Mac, the approved three-minute excerpt and real daemon/shipped Safari
@@ -270,12 +283,16 @@ request behavior only. The static first frame followed by a long pause fails
 the intended outcome. The probe logger also reported a temporary no-space-left
 error later in the session; these retained exploratory traces are not a clean
 end-to-end environment qualification. Changing byte-range handling or the start-offset tag did
-not remove it; the remaining cause is unresolved. HTTP/2/profile qualification,
+not remove it. Review of the request trace shows Safari consumed one parent of
+parts, then switched to `_HLS_msn` without `_HLS_part`, correctly waiting for
+a complete parent. The first advancing frames coincide with the opening
+coverage plus twice the declared target. This is an observed correlation, not
+proof of Safari internals. HTTP/2/profile qualification,
 packaging, native buffer heuristics and prototype correctness must be isolated
 before claiming a production design works. These results do not prove LL-HLS
 itself cannot meet the goal, nor prove HTTP/1.1 caused the pause.
 
-Local evidence root: `/private/tmp/plurx-startup-evidence-20261002`.
+Local evidence root: `~/plurx-startup-evidence-20261002`.
 The synthetic probe and event files are under `ll-hls-probe/`; core test output
 is `ll-hls-core-tests.log`. The probe has exploratory simplifications and must
 not be shipped as the production server. No private media is in this document.
@@ -307,3 +324,170 @@ unimplemented requirement or an experiment that has not yet passed.
 7. Are the task boundaries and acceptance matrix sufficient before activating
    the Developer switch or graduating it? Identify required physical/client
    evidence explicitly rather than accepting a synthetic run as fleet proof.
+
+## 11. External review response — 2026-10-02
+
+Claude's review requests changes to P1 and blocks P2. The recommended order is
+B1/B2 on PR #745, protocol correction and branch backup, classic HLS control,
+then a transport decision. No new LL-HLS PR is requested.
+
+| Finding | Disposition and evidence required |
+|---|---|
+| B1: contention consumes timeout attempts | Repair follow-up tracks observed playback contention for the entire hash. Its timeout becomes uncharged, including after playback ends. Idle-only timeouts remain charged. Production bandwidth and stall impact remain unmeasured. |
+| B2: viewer wording | Corrected to any unexpired pending playback waiter on the request, without asserting node/playback affinity. |
+| L1: parts fetched without advancing playback | Accepted. Initial static frames track the synthetic four-second publication gate. Run classic target/parent 2 s, trusted TLS+h2 LL, then declared 16 s/actual 6 s. Retain per-run free space and server errors. |
+| L2: short target dismissed too early | Reopened before P2. An index must prove full-source boundary coverage; MKV Cues alone require coverage and random-access validation. Preserve leading pictures and sample identity. |
+| L3: missing phase budget | Proposed allocations below. Attribute Store calls on media1 separately; current measurements overlap and must not be added as disjoint phases. |
+| L4: moving edge can skip content | Runtime blocked on an explicit edge/position contract and physical-client acceptance below. |
+| L5: transport choice | Paul selected verified short-segment startup on the existing LAN URL; native LL-HLS stays experimental. Trusted TLS+h2 testing and production transport changes are deferred. |
+| L6: protocol and clock geometry | Correct ENDLIST precedence and last-complete-parent bound; reject unknown future part geometry across unfinished parents. Derive part targets from integer video clocks plus a bounded audio-frame allowance; validate actual muxed spans. |
+| L7: byte-range representation | Prefer append-only parent bytes. Publish a part range only when complete; parent finalization cannot rewrite advertised bytes or offsets. Use complete moof/mdat fragments and prove sample/decoder continuity. |
+| L8: temporary-only branches | Push the protocol and effort branches after local validation, without opening a PR. |
+
+**Retry recovery.** Existing terminal analysis generations are not reopened by
+ordinary repeated playback. Explicit forced preparation creates a fresh
+generation; source/pipeline identity changes can create new work. PR #745 must
+prevent contention from spending the allowance rather than relying on recovery.
+It does not silently reset existing terminal rows. The existing
+`analysis_admin_retry_resets_attempt_budget_through_dyn_store` regression was
+executed against the previously built SQLite/three-voter Hiqlite contract
+binary and passed: five charged attempts reach `attempt_limit`, admin retry
+creates a successor at zero attempts, and its first claim succeeds. The Store
+code is unchanged by the follow-up. Store observation errors
+remain fail-closed until a separate bounded tolerance design is justified.
+
+**Holdback precision.** The specified minimum for HOLD-BACK is three target
+durations; initial-position guidance is a client SHOULD. Neither statement by
+itself mandates a universal server gate of exactly 48 seconds before any
+playlist can be served. The existing 48-second gate is conservative policy for
+a 16-second target. Changing it requires measured continuity, not just a spec
+interpretation. The excerpt's 0.876-second maximum packet-keyframe gap is local
+sample evidence only.
+
+### 11.1 Proposed end-to-end budget — acceptance, not a measurement
+
+Target: click to continuously advancing video at or below 4.0 seconds for the
+qualified local-network case. Record p50 and p95 over repeated cold and warm
+starts; do not substitute a single successful run.
+
+| Non-overlapping boundary | Proposed allocation |
+|---|---:|
+| Click to route/create complete, including Store and control transport | 1.0 s |
+| Create complete to first usable manifest, including remaining producer work | 1.0 s |
+| Manifest attach to continuously advancing native video | 2.0 s |
+
+Production work may overlap create; trace spans must retain their causal
+boundaries. The measured 2,520 ms create request (33 local reads, 6 mutations),
+3,574 ms gated-inventory-to-snapshot wait, and about 2.3 s attach-to-frame are
+separate diagnostics. Do not add the create interval to an overlapping route
+interval. Instrument each Store operation's count, elapsed time and phase
+before attributing the live/local gap to a particular database or network hop.
+
+### 11.2 Position and resource requirements before P2
+
+The current rolling movie is not a wall-clock live broadcast. An LL client must
+never seek forward or increase playback rate just because production reaches
+2× or the server's steady reserve grows. Runtime design must freeze playlist
+type and the requested start position at creation. Investigate an append-only
+EVENT presentation with `EXT-X-START` bound to the requested position; this is
+an experiment, not yet an approved production choice.
+
+While advertising LL parts, provisionally cap the published edge ahead of the
+observed playhead to the selected startup runway plus one part target. Produced
+bytes beyond that edge belong to the charged private reserve. Pause or stale
+playhead observation must freeze edge advancement. Prove that this bound works
+with native holdback/start behavior before committing it to runtime. Define a
+legal transition to ordinary parents; do not remove PART-INF mid-attempt without
+client and protocol evidence. Restarting or skipping content is not an exit plan.
+
+Blocking reload and preload requests have explicit per-attempt and per-host
+limits, share cancellation/owner fences and return 503 after at most three
+parent target durations. Capacity rejection and cancellation never spend a media
+preparation retry. Measure control/telemetry responsiveness with two players.
+
+Acceptance includes continuous frame timestamps and requested-position error,
+actual playback rate, no omitted source intervals under 2× production, pause,
+seek and replacement. Test native Safari, hls.js with LL enabled, a physical
+Apple TV or iPad over the selected transport, and ExoPlayer on Android. The
+Mac synthetic probe cannot qualify those other clients.
+
+### 11.3 Classic control result
+
+A clean HTTP/1.1 run of the same generated H.264/AAC media with no PART-INF,
+PART, SERVER-CONTROL or PRELOAD-HINT tags used target 2 s and actual parents
+2 s. The unchanged synthetic initial gate released four seconds of media at
+1.2× production. The first static frame arrived at 3.409 s; the first advancing
+frame arrived at 5.459 s with [0, 6] buffered. Playback ended at 65.398 s for the
+60-second source, with no recorded waiting event after advancement began.
+Reported playback rate stayed 1.0. The server error log was empty and free
+space was recorded before the run (21.7 GB decimal) and checked afterward.
+
+This agrees with opener + 2×target coverage for this fixture, independently of
+parts. It supports evaluating short-target native startup. It does not prove a
+universal Safari buffering rule or qualify Wicked's copy/open-GOP path. The
+four-second publication gate and simulated production rate remain experiment
+inputs, so 5.459 s is not a production latency estimate.
+
+### 11.4 Create-path attribution from retained production timestamps
+
+The existing counter records total handler time, not per-operation Store
+latency. Therefore 33 local reads and six mutations do not prove that Store
+round trips consumed 2.52 seconds. No authority reads were counted.
+
+| Handler interval, UTC 19:16 | Elapsed | What is measured |
+|---|---:|---|
+| 22.166 inferred handler start → 22.473 catalog start | ~307 ms | Setup before catalog discovery; individual call timings absent |
+| 22.473 → 22.614 | 141 ms | Catalog discovery |
+| 22.614 → 23.008 inferred transcode-create start | ~394 ms | Selection, admission and placement work; individual timings absent |
+| 23.008 → 24.231 | 1,223 ms | Transcode create, including the 448 ms refused VOD attempt and rolling fallback |
+| 24.231 → 24.686 handler completion | ~455 ms | Remaining ownership/publication/response work; individual timings absent |
+
+The inferred starts subtract logged elapsed durations from their endpoint;
+rounding applies. These adjacent intervals partition the 2,520 ms request.
+The 448 ms VOD refusal is nested within create and must not be counted twice.
+Attributing the remaining 1,156 ms outside transcode create requires finer
+phase timing on the live host; current logs cannot identify one slow Store
+operation. This packet does not claim a database root cause or a deployed fix.
+
+### 11.5 Wicked boundary qualification — the short target is not yet safe
+
+After Paul selected the existing-LAN short-target direction, a read-only
+`ffmpeg -bsf:v trace_headers` pass classified the approved excerpt's HEVC
+packets. It found 4,325 packets, 222 IRAP packets, 39 IDR packets and 366
+RASL packets. The largest IDR-to-IDR timestamp gap was 28,821 ms. The packet
+clock is milliseconds; the first trace records duration 41. There were two
+null-muxer non-monotonic-DTS warnings near the excerpt origin, so this pass is
+NAL/boundary evidence, not a decode-continuity certificate.
+
+The earlier maximum keyframe gap of 0.876 s therefore does not establish a
+0.876 s gap between clean random-access boundaries. The existing copy segmenter
+explicitly avoids open-GOP cuts to preserve leading pictures; its ceiling cuts
+are already a known compromise. A two-second ceiling would need proof that it
+does not introduce additional loss. Cues or packet keyframe flags cannot alone
+supply that proof. This is source-quality evidence against blindly applying the
+short target to Wicked, not a reason to reject short targets for qualified
+sources.
+
+Next qualification must use the segmenter's actual clean-boundary semantics,
+including CRA/RASL relationships, and compare output sample/decode continuity
+through each proposed cut. Sources without sufficient complete-source proof
+retain the current target. Native LL remains experimental as Paul requested;
+no certificate setup, production target change or deployment occurred.
+
+### 11.6 Review follow-up validation
+
+The corrected pure module passes eight focused tests on Rust 1.97.1, including
+EOF precedence, completed-parent MSN limits, conservative rejection beyond an
+unfinished parent, 24000/1001 cadence and AAC skew. The duration constructor
+accepts source clocks; it does not select a production target or establish
+variable-frame-rate bounds. Four documentation-index checks pass. No new tasks,
+waiters, timers or runtime activation were introduced in this branch.
+
+PR #745's follow-up passes the focused timeout-policy test, busy/idle wake and
+hash cancellation regressions, pinned all-target daemon check, workspace
+Clippy, seven ownership checks and four documentation-index checks. Independent
+review found no Rust correctness issue. The timeout test covers sticky policy
+classification; a complete resolver timeout and durable attempt-refund cycle
+was not newly exercised. Host/path privacy aliases are explicitly labeled to
+preserve provenance. Remote gate results and merge status must be checked on
+the updated head; the earlier head's success cannot qualify this follow-up.
