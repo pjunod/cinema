@@ -2123,3 +2123,20 @@ changed elementary payload, signed composition, truncated/out-of-mdat data,
 and failed-init context isolation. Syntax and source compilation apply; unit
 execution remains deferred. The loader and completed SourceBuffer receipts
 still need wiring.
+
+
+### 10.59 Bounded web schedule protocol
+
+The served continuous protocol helper validates exact family membership,
+clocks, identities, bounded ledger dependencies and canonical receipts.
+Responses are read as bounded streams under an absolute request timer.
+Mutations are serialized; lost acknowledgements retry the identical sequence,
+transaction and operation before any newer request can run. A failed pending
+exchange remains owned rather than turning uncertainty into cancellation or
+absence. Inputs are copied when queued so later caller mutation cannot change
+an outstanding command. The queue itself is bounded.
+
+Regressions cover a lost receipt followed by newer work, immutable queued
+commands, contradictory append facts and wrong attachment/owner responses.
+Syntax and compiler checks apply without unit execution. Loader, completed
+append, disposal and decoded-frame observers remain in progress.
