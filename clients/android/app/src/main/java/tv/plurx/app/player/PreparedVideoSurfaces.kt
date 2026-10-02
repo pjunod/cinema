@@ -123,12 +123,32 @@ internal class PreparedVideoSurfaces private constructor() {
         SurfaceControl.Transaction().use { change ->
             old?.let { change.setVisibility(it.control, false) }
             change.setVisibility(next.control, true).setLayer(next.control, 1)
-            change.addTransactionCompletedListener(executor) {
-                if (!closed && epoch == expectedEpoch && visible === player &&
-                    outputs[player] === next && ready(player) && receipts.presented(receipt)) {
-                    exposurePending = false
-                    presented()
+            change.addTransactionCompletedListener(executor) { stats ->
+                val fence = stats.presentFence
+                val deadline = android.os.SystemClock.elapsedRealtime() + PREPARED_OVERLAP_BOUND_MS
+                val observe = object : Runnable {
+                    override fun run() {
+                        if (closed || epoch != expectedEpoch || visible !== player ||
+                            outputs[player] !== next || !ready(player) || !receipts.presented(receipt)) {
+                            fence.close()
+                            return
+                        }
+                        // A valid present fence must signal. Polling uses a
+                        // zero timeout and never blocks the application looper.
+                        // On devices without fences the completed transaction
+                        // callback itself is the platform's presented receipt.
+                        if (!fence.isValid || fence.await(java.time.Duration.ZERO)) {
+                            fence.close()
+                            exposurePending = false
+                            presented()
+                        } else if (android.os.SystemClock.elapsedRealtime() < deadline) {
+                            handler.postDelayed(this, 8)
+                        } else {
+                            fence.close()
+                        }
+                    }
                 }
+                observe.run()
             }
             change.apply()
         }

@@ -35760,6 +35760,177 @@ async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup()
 }
 
 #[tokio::test]
+async fn shared_continuous_artifacts_remain_reserved_until_each_consumer_disposes() {
+    use plurx_core::playback::continuous_quality::{
+        QualityAttachment, QualityInterval, QualityLedger, QualityOperation,
+        QualityTransitionRequest,
+    };
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("shared-quality-consumers", "hash", false)
+            .await
+            .expect("user");
+        let video = QualityInterval {
+            artifact_id: "c".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 0,
+            through_tick: 48048,
+            byte_length: 500000,
+        };
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48000,
+            from_tick: 0,
+            through_tick: 96256,
+            byte_length: 40000,
+        };
+        let transaction = "00000000-0000-4000-8000-00000000cf05";
+        let mut consumers = Vec::new();
+        for index in 0..2 {
+            let generation = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 10);
+            let session = format!("00000000-0000-4000-8000-00000000cf{:02}", index + 20);
+            let playback = format!("shared-quality-{index}");
+            current_media_session(
+                store.as_ref(),
+                user.id,
+                &playback,
+                &generation,
+                &session,
+                backend,
+            )
+            .await;
+            let mut ledger = QualityLedger::new(
+                generation,
+                1,
+                QualityAttachment {
+                    client_instance_id: "00000000-0000-4000-8000-00000000cf03".into(),
+                    lifetime_id: playback,
+                    attachment_id: "00000000-0000-4000-8000-00000000cf04".into(),
+                    family_id: "a".repeat(64),
+                },
+            )
+            .expect("independent consumer");
+            let request = |ledger: &QualityLedger, sequence, operation| QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation,
+            };
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        1,
+                        QualityOperation::Prepare {
+                            intent_revision: 1,
+                            target_rendition_id: video.rendition_id.clone(),
+                        },
+                    ),
+                    1500,
+                )
+                .expect("prepare");
+            ledger
+                .ready(transaction, vec![video.clone()])
+                .expect("ready");
+            ledger
+                .reserve_shared_audio(std::slice::from_ref(&audio))
+                .expect("AAC");
+            ledger
+                .apply(
+                    &request(
+                        &ledger,
+                        2,
+                        QualityOperation::Scheduled {
+                            intervals: vec![video.clone()],
+                        },
+                    ),
+                    1600,
+                )
+                .expect("scheduled");
+            assert!(
+                store
+                    .write_quality_ledger(&ledger, "staged-node", 0, 1700)
+                    .await
+                    .expect("publish consumer"),
+                "{backend}"
+            );
+            consumers.push(ledger);
+        }
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&video.rendition_id)
+                .await
+                .expect("one physical video"),
+            vec![video.clone()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("one physical AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        for (index, ledger) in consumers.iter_mut().enumerate() {
+            let disposed = QualityTransitionRequest {
+                version: 1,
+                generation: ledger.generation.clone(),
+                control_epoch: 1,
+                sequence: 3,
+                attachment: ledger.attachment.clone(),
+                transaction_id: transaction.into(),
+                operation: QualityOperation::Disposed {
+                    artifacts: vec![video.artifact_id.clone(), audio.artifact_id.clone()],
+                },
+            };
+            ledger
+                .apply(&disposed, 1800 + index as i64)
+                .expect("this consumer removed media");
+            assert!(
+                store
+                    .write_quality_ledger(ledger, "staged-node", 1, 1900 + index as i64)
+                    .await
+                    .expect("dispose consumer"),
+                "{backend}"
+            );
+            let expected_video = if index == 0 {
+                vec![video.clone()]
+            } else {
+                vec![]
+            };
+            let expected_audio = if index == 0 {
+                vec![audio.clone()]
+            } else {
+                vec![]
+            };
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&video.rendition_id)
+                    .await
+                    .expect("remaining video consumer"),
+                expected_video,
+                "{backend}"
+            );
+            assert_eq!(
+                store
+                    .quality_reserved_intervals(&audio.rendition_id)
+                    .await
+                    .expect("remaining AAC consumer"),
+                expected_audio,
+                "{backend}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependencies() {
     use plurx_core::playback::continuous_quality::{
         QualityAttachment, QualityInterval, QualityLedger, QualityOperation,

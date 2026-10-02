@@ -2261,3 +2261,27 @@ Production and regression-source compilation passed. Authored receipt
 regressions cover hidden rendering, rollback overtaking exposure, seek and
 surface recreation, stale callbacks and the two-output bound. Unit execution
 remains deferred until final main-readiness review and the fast lane.
+
+
+### 10.64 Shared cache dependencies keep each consumer's authority
+
+The existing SQLite/replicated query already deduplicates physical interval
+JSON while retaining each parent's separate ledger. Typed dependency decoding
+now also deduplicates equivalent field order and refuses contradictory facts
+for one immutable artifact. An unknown or conflicting dependency remains a
+retention refusal, never permission to evict. No consumer's disposal can
+release another consumer's reservation.
+
+A cross-backend regression publishes two independent parent video/AAC ledgers,
+checks one physical dependency per artifact, disposes each consumer in turn,
+and verifies the shared bytes stay reserved until both settle. The existing
+private reader and retained-admission ownership remains in place. Physical
+consumer accounting is implemented; pressure and lifecycle qualification
+still remain. A typed decoder regression covers duplicate and contradictory
+artifact facts. Pinned all-target compilation applies without unit execution.
+
+Android warm exposure additionally checks a valid present fence without
+blocking the application looper, closes every acquired fence, and bounds
+pending observation by the same physical overlap allowance. An invalid fence
+uses the platform's completed-transaction receipt on devices that do not
+supply present fences. No committed-only callback is accepted as presentation.

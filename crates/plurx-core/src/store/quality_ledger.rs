@@ -184,20 +184,59 @@ pub(crate) fn decode_reserved_intervals(
             "continuous dependency lookup exceeds its interval allowance".into(),
         ));
     }
-    json.into_iter()
-        .map(|value| {
-            if value.len() > 1024 {
-                return Err(StoreError::Task("oversized continuous dependency".into()));
-            }
-            let interval: crate::playback::continuous_quality::QualityInterval =
-                serde_json::from_str(&value)
-                    .map_err(|error| StoreError::Task(error.to_string()))?;
-            if !interval.valid() || interval.rendition_id != rendition_id {
+    let mut artifacts = std::collections::BTreeMap::new();
+    for value in json {
+        if value.len() > 1024 {
+            return Err(StoreError::Task("oversized continuous dependency".into()));
+        }
+        let interval: crate::playback::continuous_quality::QualityInterval =
+            serde_json::from_str(&value).map_err(|error| StoreError::Task(error.to_string()))?;
+        if !interval.valid() || interval.rendition_id != rendition_id {
+            return Err(StoreError::Task(
+                "invalid continuous dependency projection".into(),
+            ));
+        }
+        if let Some(existing) = artifacts.get(&interval.artifact_id) {
+            if existing != &interval {
                 return Err(StoreError::Task(
-                    "invalid continuous dependency projection".into(),
+                    "conflicting continuous artifact dependencies".into(),
                 ));
             }
-            Ok(interval)
-        })
-        .collect()
+        } else {
+            artifacts.insert(interval.artifact_id.clone(), interval);
+        }
+    }
+    Ok(artifacts.into_values().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_dependencies_deduplicate_consumers_and_refuse_conflicting_artifacts() {
+        let interval = crate::playback::continuous_quality::QualityInterval {
+            artifact_id: "a".repeat(64),
+            rendition_id: "b".repeat(64),
+            timescale: 24000,
+            from_tick: 0,
+            through_tick: 48048,
+            byte_length: 500000,
+        };
+        let wire = serde_json::to_string(&interval).expect("wire");
+        let reordered = serde_json::to_string(&serde_json::to_value(&interval).expect("value"))
+            .expect("reordered wire");
+        assert_eq!(
+            decode_reserved_intervals(vec![wire.clone(), reordered], &interval.rendition_id)
+                .expect("shared consumers"),
+            vec![interval.clone()]
+        );
+        let mut conflict = interval.clone();
+        conflict.byte_length += 1;
+        assert!(decode_reserved_intervals(
+            vec![wire, serde_json::to_string(&conflict).expect("conflict")],
+            &interval.rendition_id
+        )
+        .is_err());
+    }
 }
