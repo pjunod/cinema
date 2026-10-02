@@ -272,7 +272,7 @@
         // And the mint precedes placement, because the session that carries it
         // is built by the task the placement loop spawns.
         let placement = source
-            .find("let mut start_task = tokio::spawn(async move {")
+            .find("let mut start_task = crate::media_pool::spawn_create_worker(async move {")
             .expect("the placement task");
         let mint = source
             .find("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")

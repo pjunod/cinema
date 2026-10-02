@@ -3021,7 +3021,7 @@
             (false, false, Some(720), StatusCode::OK),
             (true, true, None, StatusCode::OK),
         ] {
-            let body = CreateSession { caps: Some(caps.clone()), quality_auto: Some(auto), copy: Some(copy), height, ..bare_create() };
+            let body = CreateSession { playback_id: "legacy-catalog-contract".into(), caps: Some(caps.clone()), quality_auto: Some(auto), copy: Some(copy), height, ..bare_create() };
             let result = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: source.id, source: Some(&source), network_prior: None }, None, body).await;
             assert_eq!(result.map(|_| StatusCode::OK).unwrap_or_else(|error| error.into_response().status()), expected);
         }

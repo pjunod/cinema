@@ -161,8 +161,7 @@ into an accounting wrapper, a joined background-read fixture adds one task,
 awaited deadline bounds account for the net two timer sites, and the legacy
 admission fixture adds Response::status(), not a process. The inventory records
 those owners. Reran only that failing test; it passed. Rust and platform jobs
-were skipped, not executed. The workflow's automatic full-preflight rerun on
-each push conflicts with failed-only reruns; user reconciliation is pending.
+were skipped, not executed. Static preflight may rerun; the user clarified that unit evidence is retained.
 
 2026-10-02 continuation: user clarified that unit tests need to pass once on
 the merged code. Automatic static preflight may run again; retain unit passes
@@ -180,3 +179,24 @@ failed cases are rerun locally before the next candidate.
 
 The five failed operations cases all passed in the targeted rerun (5 tests,
 zero failures). Previously passing unit and focused client evidence is retained.
+
+
+Run 3845: preflight, Windows, web, Apple and Android passed. Rust compilation
+and Clippy passed; the first unit allocation found the Store method inventory
+omitted the new snapshot (451 versus 452), then aborted core and daemon
+binaries on stack overflow. The Store inventory and a backend-neutral frozen
+snapshot contract now pass (two focused cases). LLDB identified the actual
+overflow frames: the replicated migration dispatcher and nested task-local
+create-worker scope polling. The v69 migration now owns a separate boxed state
+machine; task-local scopes retain boxed payloads without changing ownership or
+cancellation. Both formerly aborting tests pass on the default thread stack.
+Eight focused playback cases pass, including the corrected legacy fixture's
+valid playback identity and the real catalog fixture. Passing unit results are
+retained; cases that never executed are being run separately. A source contract
+for recovery-epoch ordering is updated to recognize the owned-worker wrapper.
+
+Main advanced to `dd304bf99` with native readiness/reserve changes during this
+validation; integration and exact-candidate compile checks remain required.
+The existing main workflow unconditionally reruns the whole unit suite on a
+push; the user has been asked to reconcile that concrete conflict with the
+failed-only unit policy. No green aggregate gate or merged PR is claimed.

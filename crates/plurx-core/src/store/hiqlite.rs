@@ -3139,18 +3139,7 @@ impl HiqliteAuthStore {
                     .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
-                    let now = self.now()?;
-                    for result in
-                        timeout_store(self.client().batch(super::PLAYBACK_INPUT_SCHEMA)).await?
-                    {
-                        result.map_err(database_error)?;
-                    }
-                    let attempt = self.client().txn(vec![(
-                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
-                        params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
-                    )]).await;
-                    self.settle_migration_attempt(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE, attempt)
-                        .await?;
+                    Box::pin(self.migrate_playback_inputs()).await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -3159,6 +3148,21 @@ impl HiqliteAuthStore {
                 }
             }
         }
+    }
+
+    // Isolate each new migration state machine from the large version dispatcher.
+    async fn migrate_playback_inputs(&self) -> Result<(), StoreError> {
+        let now = self.now()?;
+        for result in timeout_store(self.client().batch(super::PLAYBACK_INPUT_SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
+        let attempt = self.client().txn(vec![(
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
+                    )]).await;
+        self.settle_migration_attempt(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE, attempt)
+            .await?;
+        Ok(())
     }
 
     /// A second voter can observe the same predecessor before the first

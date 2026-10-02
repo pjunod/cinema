@@ -5432,11 +5432,12 @@ pub fn current_http_store_operations() -> Option<HttpStoreOperationCounts> {
 
 /// Scope one HTTP request so replicated Store operations can be attributed
 /// after its response is ready without putting route labels in `plurx-core`.
-pub async fn scope_http_store_operations<T>(
+pub fn scope_http_store_operations<T>(
     counts: HttpStoreOperationCounts,
     future: impl std::future::Future<Output = T>,
-) -> T {
-    HTTP_STORE_OPERATION_COUNTS.scope(counts, future).await
+) -> impl std::future::Future<Output = T> {
+    // Keep task-local polling from placing the request state machine on the stack.
+    HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
 pub(super) fn record_http_store_operation(class_index: usize) {

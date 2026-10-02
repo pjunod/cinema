@@ -326,8 +326,11 @@ impl CreateStartupBudget {
     pub(crate) fn calls(&self) -> u32 {
         self.calls.load(std::sync::atomic::Ordering::Relaxed)
     }
-    pub(crate) async fn scope<T>(&self, future: impl std::future::Future<Output = T>) -> T {
-        CREATE_STARTUP_BUDGET.scope(self.clone(), future).await
+    pub(crate) fn scope<T>(
+        &self,
+        future: impl std::future::Future<Output = T>,
+    ) -> impl std::future::Future<Output = T> {
+        CREATE_STARTUP_BUDGET.scope(self.clone(), Box::pin(future))
     }
 }
 /// A local worker is owned past HTTP cancellation, but its critical-path
@@ -337,6 +340,7 @@ pub(crate) fn spawn_create_worker<T: Send + 'static>(
 ) -> tokio::task::JoinHandle<T> {
     let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
     let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    let future = Box::pin(future);
     tokio::spawn(async move {
         let work = plurx_core::store::scope_http_store_operations(counts, future);
         if let Some(budget) = budget {

@@ -421,6 +421,7 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
+    "playback_planning_snapshot",
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "merge_file_probe_hevc_parameter_sets",
@@ -18183,11 +18184,123 @@ fn contract_inventory_matches_every_store_method() {
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
     // Media info adds the source-aware preparation history projection.
-    assert_eq!(declared.len(), 451, "review the Store method count");
+    // +1: coherent playback file/probe/settings/generation snapshot, covered
+    // by playback_planning_snapshot_retains_one_source_and_settings_revision.
+    assert_eq!(declared.len(), 452, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn playback_planning_snapshot_retains_one_source_and_settings_revision() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "planning".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/planning".into()],
+                anime: false,
+            })
+            .await
+            .expect("planning library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "planning".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("planning item");
+        let probe = ProbeResult {
+            video_codec: Some("hevc".into()),
+            raw_json: Some(r#"{"revision":1}"#.into()),
+            ..Default::default()
+        };
+        let file = store
+            .upsert_file(item, "/planning/movie.mkv", 100, 42, &probe)
+            .await
+            .expect("planning file");
+        store
+            .put_setting("playback.fixture", "before")
+            .await
+            .expect("planning setting");
+        store
+            .put_setting("transcode.fixture", "encoder")
+            .await
+            .expect("encoder setting");
+        let keys = ["playback.fixture", "transcode.fixture", "playback.missing"];
+        let before = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("planning snapshot")
+            .expect("known source");
+        assert_eq!(before.file.id, file, "{backend}");
+        assert_eq!(before.probe_json, probe.raw_json, "{backend}");
+        assert_eq!(
+            before.settings.len(),
+            2,
+            "{backend}: missing settings are omitted"
+        );
+        assert_eq!(before.settings["playback.fixture"], "before", "{backend}");
+        assert_eq!(before.settings["transcode.fixture"], "encoder", "{backend}");
+        store
+            .put_setting("jobs.fixture", "history")
+            .await
+            .expect("unrelated setting");
+        let unrelated = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("unrelated snapshot")
+            .expect("known source");
+        assert_eq!(
+            unrelated.generation, before.generation,
+            "{backend}: jobs do not invalidate planning"
+        );
+        store
+            .put_setting("playback.fixture", "after")
+            .await
+            .expect("changed setting");
+        let probe = ProbeResult {
+            video_codec: Some("h264".into()),
+            raw_json: Some(r#"{"revision":2}"#.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            store
+                .upsert_file(item, "/planning/movie.mkv", 100, 42, &probe)
+                .await
+                .expect("same-stamp probe revision"),
+            file
+        );
+        let after = store
+            .playback_planning_snapshot(file, &keys)
+            .await
+            .expect("new snapshot")
+            .expect("known source");
+        assert!(after.generation > before.generation, "{backend}");
+        assert_eq!(after.probe_json, probe.raw_json, "{backend}");
+        assert_eq!(after.file.video_codec.as_deref(), Some("h264"), "{backend}");
+        assert_eq!(after.settings["playback.fixture"], "after", "{backend}");
+        assert_eq!(
+            before.settings["playback.fixture"], "before",
+            "{backend}: retained snapshots stay frozen"
+        );
+        assert!(
+            store
+                .playback_planning_snapshot(i64::MAX, &keys)
+                .await
+                .expect("unknown source")
+                .is_none(),
+            "{backend}"
+        );
+    })
+    .await;
 }
 
 /// The Dolby Vision columns round-trip, and the backfill can find the rows it
