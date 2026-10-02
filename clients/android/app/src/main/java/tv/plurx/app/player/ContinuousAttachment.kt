@@ -100,22 +100,24 @@ internal class ContinuousAttachment(
             ContinuousReservedDataSource(owner, upstream, profile.origin, start.schedulePath, start.family,
                 media, reservations::reserve, loads, mediaCalls::cancel,
                 { resource -> disposalBarriers.await(resourceKey(resource)) },
-                { authorization ->
+                { load ->
+                    val authorization = load.authorized
                     val live = transactions().mapNotNull { it.text("transaction_id") }.toSet()
                     if (!live.containsAll(authorization.transactionIds)) throw ContinuousStaleVideoLoad()
                     exposure.publish(authorization.transactionIds)
+                    queues.opened(load)
                 }, { resource ->
                     val result = reservations.retainUnexposed(resource)
                     if (result != null) retained(result.failedRow, result.request)
                     result != null
-                })
+                }, { resource, bytes -> disposalBarriers.await(artifactKey(resource, ContinuousQualityMedia.digest(bytes))) })
         }
         val extractor = ContinuousHlsExtractorFactory(owner, queues::accepted, { verified ->
             queues.completed(verified)?.let { append ->
                 if (!pending.trySend(append).isSuccess) throw IOException("Continuous append observation bound")
                 wake.trySend(Unit)
             }
-        })
+        }, writing = { load -> output.allocations.writing(owner, ContinuousAllocator.artifactKey(load)) })
         val hls = HlsMediaSource.Factory(sources).setExtractorFactory(extractor)
             .setLoadErrorHandlingPolicy(ContinuousLoadErrorPolicy())
             .createMediaSource(MediaItem.fromUri(profile.origin + start.playback.playlist_url))
@@ -266,14 +268,16 @@ internal class ContinuousAttachment(
         for (load in queues.queuedArtifacts()) {
             val interval = load.authorized.interval
             val artifact = requireNotNull(interval.text("artifact_id"))
-            if (!queues.queueRetired(load.resource.rendition, artifact)) continue
+            if (!output.allocations.artifactReleased(owner, ContinuousAllocator.artifactKey(load))) continue
+            val untouched = queues.noAcceptedSamples(load)
+            if (!untouched && !queues.queueRetired(load.resource.rendition, artifact)) continue
             val through = requireNotNull(interval.number("through_tick"))
             val reset = queues.retiredByReset(load)
             val sink = sinkRelease.get()
             val resetReleased = reset != null && if (load.resource.role == "video") videoReleaseEpoch.get() > reset.first
                 else audioDecoderReleaseEpoch.get() > reset.first && sink.epoch > reset.second &&
                     output.audioOutputs.releasedThrough(owner, sink.allocation)
-            val retired = resetReleased || if (load.resource.role == "video") frame.get()?.let {
+            val retired = untouched || resetReleased || if (load.resource.role == "video") frame.get()?.let {
                 frameTick(load.resource.row, it.positionUs)?.let { tick -> tick >= through }
             } == true else audioHead.get()?.let { head ->
                 frameTick(load.resource.row, head)?.let { tick -> tick >= through + 1024 }
@@ -286,7 +290,8 @@ internal class ContinuousAttachment(
             loads.whenQuiescent {
                 // A loader could have reentered since the first queue check.
                 // Recheck while new loader admission is excluded.
-                if (queues.queueRetired(load.resource.rendition, artifact) && disposalBarriers.begin(resourceKey))
+                if ((queues.noAcceptedSamples(load) || queues.queueRetired(load.resource.rendition, artifact)) &&
+                    output.allocations.artifactReleased(owner, ContinuousAllocator.artifactKey(load)) && beginDisposal(resourceKey, artifactKey(load.resource, artifact)))
                     disposing[resourceKey] = Disposal(load, ids)
             }
         }
@@ -306,12 +311,18 @@ internal class ContinuousAttachment(
                     val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
                     val resource = ContinuousQualityMedia.Resource("video", row, false, entry)
                     val resourceKey = resourceKey(resource)
-                    if (disposalBarriers.begin(resourceKey)) disposing[resourceKey] = Disposal(
+                    if (beginDisposal(resourceKey, artifactKey(resource, requireNotNull(pin.text("artifact_id"))))) disposing[resourceKey] = Disposal(
                         ContinuousLoadContext.Verified(owner, resource, ContinuousQualityMedia.Authorized(pin, setOf(id))), setOf(id))
                 }
             }
         }
         finishDisposals()
+    }
+
+    private fun beginDisposal(resource: String, artifact: String): Boolean {
+        if (!disposalBarriers.begin(resource)) return false
+        if (!disposalBarriers.begin(artifact)) { disposalBarriers.retired(resource); return false }
+        return true
     }
 
     private suspend fun finishDisposals() {
@@ -326,6 +337,7 @@ internal class ContinuousAttachment(
             }
             queues.disposed(load.resource.rendition, artifact)
             disposing.remove(resourceKey)
+            disposalBarriers.retired(artifactKey(load.resource, artifact))
             disposalBarriers.retired(resourceKey)
         }
     }
@@ -364,7 +376,7 @@ internal class ContinuousAttachment(
                     protocol.reconcileTerminal()
                     while (true) {
                         output.audioOutputs.collectReleased()
-                        if ((periodReleaseRequested.get() || !registry.owns(selection)) && loads.isQuiescent() && mediaCalls.isQuiescent() && queues.queuesEmpty() &&
+                        if ((periodReleaseRequested.get() || !registry.owns(selection)) && loads.isQuiescent() && mediaCalls.isQuiescent() && queues.queuesEmpty() && output.allocations.ownerReleased(owner) &&
                             !videoOwned.get() && !audioDecoderOwned.get() && output.audioOutputs.isReleased(owner)) break
                         delay(10)
                     }
@@ -394,6 +406,7 @@ internal class ContinuousAttachment(
 
     private fun transactions(): List<JsonObject> = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().map { it.jsonObject }
     private fun transaction(id: String): JsonObject? = transactions().singleOrNull { it.text("transaction_id") == id }
+    private fun artifactKey(resource: ContinuousQualityMedia.Resource, artifact: String) = "artifact:${resource.role}:${resource.rendition}:$artifact"
     private fun resourceKey(resource: ContinuousQualityMedia.Resource) = "${resource.role}:${resource.rendition}:${resource.segment}"
     private fun key(interval: JsonObject) = "${interval.text("rendition_id")}:${interval.text("artifact_id")}"
     private fun contains(interval: JsonObject, tick: Long) = requireNotNull(interval.number("from_tick")) <= tick && tick < requireNotNull(interval.number("through_tick"))

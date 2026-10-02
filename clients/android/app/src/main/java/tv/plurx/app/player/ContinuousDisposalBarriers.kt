@@ -9,7 +9,7 @@ internal class ContinuousDisposalBarriers {
     private val pending = LinkedHashMap<String, CompletableDeferred<Unit>>()
     @Synchronized fun begin(key: String): Boolean {
         if (key in pending) return false
-        if (pending.size >= 128) throw IOException("Continuous disposal barrier bound")
+        if (pending.size >= 256) throw IOException("Continuous disposal barrier bound")
         pending[key] = CompletableDeferred()
         return true
     }

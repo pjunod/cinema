@@ -41,8 +41,9 @@ internal class ContinuousReservedDataSource(
     private val loads: ContinuousLoads = ContinuousLoads(),
     private val cancelNetwork: (() -> Unit)? = null,
     private val beforeReserve: suspend (ContinuousQualityMedia.Resource) -> Unit = {},
-    private val publish: (ContinuousQualityMedia.Authorized) -> Unit = {},
+    private val publish: (ContinuousLoadContext.Verified) -> Unit = {},
     private val retainFailure: suspend (ContinuousQualityMedia.Resource) -> Boolean = { false },
+    private val beforeAuthorize: suspend (ContinuousQualityMedia.Resource, ByteArray) -> Unit = { _, _ -> },
 ) : BaseDataSource(false) {
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
@@ -105,12 +106,13 @@ internal class ContinuousReservedDataSource(
             source.close()
             upstream.compareAndSet(source, null)
             val retained = bytes.toByteArray()
+            if (resource != null && !resource.initialization) blocking(job) { beforeAuthorize(resource, retained) }
             if (resource?.role == "audio" && !resource.initialization) blocking(job) { reserve(resource, retained) }
             val authorization = resource?.let { media.authorize(it, retained) }
             val slice = ContinuousVerifiedRange.resolve(retained.size, dataSpec.position, dataSpec.length)
             synchronized(lifetime) {
                 if (!job.isActive || !loads.isAlive() || opening.get() !== job) throw IOException("Continuous media request cancelled")
-                if (authorization != null) publish(authorization)
+                if (resource != null && authorization != null) publish(ContinuousLoadContext.Verified(owner, resource, authorization))
                 payload = retained
                 position = slice.first
                 end = slice.second

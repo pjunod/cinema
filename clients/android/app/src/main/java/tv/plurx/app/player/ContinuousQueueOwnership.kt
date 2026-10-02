@@ -14,11 +14,16 @@ internal class ContinuousQueueOwnership(private val owner: Any, private val rele
     data class Appended(val interval: JsonObject, val transactions: Set<String>, val video: Boolean)
     private data class Span(val queue: SampleQueue, val epoch: Long, var from: Int, var through: Int, var samples: Long)
     private data class Record(val load: ContinuousLoadContext.Verified, val expected: Long,
-        val spans: IdentityHashMap<SampleQueue, Span> = IdentityHashMap(), var accepted: Long = 0,
+        val spans: IdentityHashMap<SampleQueue, Span> = IdentityHashMap(), var accepted: Long = 0, var physicalAccepted: Long = 0,
+        val verifiedQueues: IdentityHashMap<SampleQueue, Unit> = IdentityHashMap(),
         var contiguous: Boolean = true, var complete: Boolean = false, var credited: Boolean = false,
         var decoderEpoch: Long = 0, var sinkEpoch: Long = 0)
     private val records = LinkedHashMap<String, Record>()
     private val epochs = ContinuousQueueEpochs()
+
+    @Synchronized fun opened(load: ContinuousLoadContext.Verified) { if (load.owner === owner) record(load) }
+    @Synchronized fun noAcceptedSamples(load: ContinuousLoadContext.Verified): Boolean =
+        records[key(load)]?.physicalAccepted == 0L
 
     @Synchronized fun accepted(sample: ContinuousHlsExtractorFactory.AcceptedSample) {
         if (sample.load.owner !== owner) return
@@ -27,6 +32,8 @@ internal class ContinuousQueueOwnership(private val owner: Any, private val rele
         if (record.spans.isNotEmpty() && record.spans.values.all { it.epoch < epochs.current(it.queue) }) {
             record.spans.clear()
             record.accepted = 0
+            record.physicalAccepted = 0
+            record.verifiedQueues.clear()
             record.contiguous = true
             record.complete = false
             record.credited = false
@@ -43,7 +50,8 @@ internal class ContinuousQueueOwnership(private val owner: Any, private val rele
             span.through = sample.after
             span.samples++
         }
-        record.accepted++
+        record.physicalAccepted++
+        if (sample.verifiedFormat) { record.accepted++; record.verifiedQueues[sample.queue] = Unit }
     }
 
     /** Returns once for a complete physical append. A truncated extraction,
@@ -53,7 +61,7 @@ internal class ContinuousQueueOwnership(private val owner: Any, private val rele
         if (load.owner !== owner) return null
         val record = records[key(load)] ?: return null
         record.complete = true
-        if (record.credited || !record.contiguous || record.accepted != record.expected || record.spans.size != 1) return null
+        if (record.credited || !record.contiguous || record.accepted != record.expected || record.verifiedQueues.size != 1) return null
         record.credited = true
         return Appended(record.load.authorized.interval, record.load.authorized.transactionIds, record.load.resource.role == "video")
     }

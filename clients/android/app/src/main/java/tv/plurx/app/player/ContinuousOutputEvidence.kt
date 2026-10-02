@@ -21,6 +21,7 @@ internal class ContinuousOutputEvidence {
     }
     private data class Subscription(val owner: Any, val observe: (Event) -> Unit)
     val audioOutputs = ContinuousAudioOutputs()
+    val allocations = ContinuousAllocationOwnership()
     private val subscription = AtomicReference<Subscription?>(null)
     fun subscribe(owner: Any, observe: (Event) -> Unit) { check(subscription.compareAndSet(null, Subscription(owner, observe))) }
     fun unsubscribe(owner: Any) {

@@ -3381,3 +3381,37 @@ corrected to the existing SDK; no SDK package or license directory was created
 in that cache. Unit execution remains deferred to final review and fast lane.
 Committed mobile counter validation passed against origin/main before these
 source-only changes. The branch is backed up through 0515f1d2a.
+
+
+### 10.110 Android disposal waits for actual compressed-allocation release
+
+The retained load-control wrapper now observes allocation and successful release
+through Media3's public Allocator interface while delegating the original byte
+budget and allocator accounting. A write conservatively associates all live
+allocations of this attachment with its artifact. Shared allocations may delay
+disposal; another attachment's allocation cannot prove retirement. Failed
+single or batch release leaves ownership unknown. The inventory is bounded to
+4096 allocations and 128 artifacts per allocation; the existing player byte
+target remains at most 64 MiB and is unchanged.
+
+Verified byte exposure now creates provenance before extraction. Zero accepted
+samples do not invent an append or queue-front proof. Actual metadata acceptance
+from other output formats is kept as physical provenance, while only verified
+video/AAC samples count toward a complete expected append. An artifact with no
+accepted samples can retire only after loader closure and release of every
+associated allocation. Normal front/reset disposal additionally waits for those
+allocations, and terminal disposal requires all owned allocations released.
+
+A second read barrier is keyed by the verified artifact digest after fetch and
+before reservation/authorization. It protects AAC aliases under different media
+URLs as well as same-URI reentry. Both resource and digest barriers release
+only after exact disposal acknowledgment and old provenance removal. The two
+barriers per artifact are bounded to 256 entries for 128 artifacts.
+
+Authored regressions cover shared allocations, separate owners, reused allocation
+identity, failed single and batch release, unchanged byte accounting, exposed
+bytes with no accepted metadata, and same-digest URL aliases. Production and
+test sources compile in thirteen seconds. No unit tests were executed. Physical
+allocator/codec/audio cleanup and runtime pressure qualification remain pending.
+The Android compiler invocation now uses a temporary script with fixed existing
+SDK and Gradle-cache paths; that script belongs to final task cleanup.

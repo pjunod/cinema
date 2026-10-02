@@ -27,6 +27,7 @@ internal class ContinuousHlsExtractorFactory(
     private val accepted: (AcceptedSample) -> Unit,
     private val completed: (ContinuousLoadContext.Verified) -> Unit,
     private val delegate: HlsExtractorFactory = DefaultHlsExtractorFactory(),
+    private val writing: (ContinuousLoadContext.Verified) -> Unit = {},
 ) : HlsExtractorFactory {
     data class AcceptedSample(
         val load: ContinuousLoadContext.Verified,
@@ -35,6 +36,7 @@ internal class ContinuousHlsExtractorFactory(
         val after: Int,
         val timeUs: Long,
         val flags: Int,
+        val verifiedFormat: Boolean = true,
     )
     override fun createExtractor(uri: Uri, format: Format, muxedCaptionFormats: MutableList<Format>?,
         timestampAdjuster: TimestampAdjuster, responseHeaders: MutableMap<String, MutableList<String>>,
@@ -59,13 +61,21 @@ internal class ContinuousHlsExtractorFactory(
                 return object : TrackOutput by target {
                     private var format: Format? = null
                     override fun format(format: Format) { this.format = format; target.format(format) }
-                    override fun sampleData(input: DataReader, length: Int, allowEndOfInput: Boolean, sampleDataPart: Int): Int =
-                        target.sampleData(input, length, allowEndOfInput, sampleDataPart)
-                    override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) = target.sampleData(data, length, sampleDataPart)
+                    private fun writing() {
+                        ContinuousLoadContext.current()?.takeIf { it.owner === owner }?.let(writing)
+                    }
+                    override fun sampleData(input: DataReader, length: Int, allowEndOfInput: Boolean, sampleDataPart: Int): Int {
+                        writing()
+                        return target.sampleData(input, length, allowEndOfInput, sampleDataPart)
+                    }
+                    override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
+                        writing()
+                        target.sampleData(data, length, sampleDataPart)
+                    }
                     override fun sampleMetadata(timeUs: Long, flags: Int, size: Int, offset: Int, cryptoData: TrackOutput.CryptoData?) {
                         val load = ContinuousLoadContext.current()
                         val queue = target as? SampleQueue
-                        if (queue == null || load?.owner !== owner || !matches(format, load.resource)) {
+                        if (queue == null || load?.owner !== owner) {
                             target.sampleMetadata(timeUs, flags, size, offset, cryptoData)
                             return
                         }
@@ -78,7 +88,7 @@ internal class ContinuousHlsExtractorFactory(
                             before to queue.writeIndex
                         }
                         if (indices.second.toLong() - indices.first.toLong() == 1L) {
-                            accepted(AcceptedSample(load, queue, indices.first, indices.second, timeUs, flags))
+                            accepted(AcceptedSample(load, queue, indices.first, indices.second, timeUs, flags, matches(format, load.resource)))
                         }
                     }
                 }

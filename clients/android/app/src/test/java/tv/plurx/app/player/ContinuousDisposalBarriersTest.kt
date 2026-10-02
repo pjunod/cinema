@@ -18,5 +18,13 @@ class ContinuousDisposalBarriersTest {
         reentry.await()
         assertTrue(barriers.begin("video:a:0"))
         barriers.retired("video:a:0")
+        assertTrue(barriers.begin("artifact:audio:a:hash"))
+        val alias = async(start = CoroutineStart.UNDISPATCHED) { barriers.await("artifact:audio:a:hash") }
+        // A different URI can finish fetching, but the shared digest still
+        // blocks authorization until old physical provenance is retired.
+        barriers.await("audio:a:another-uri")
+        assertFalse(alias.isCompleted)
+        barriers.retired("artifact:audio:a:hash")
+        alias.await()
     }
 }
