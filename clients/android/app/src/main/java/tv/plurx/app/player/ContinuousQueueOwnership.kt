@@ -10,21 +10,34 @@ import kotlinx.serialization.json.JsonObject
 /** Loader-thread inventory. An artifact is appended only after extraction
  * finishes and every expected sample actually advanced its owning queue.
  * Queue retirement and decoder/sink retirement remain separate observations. */
-internal class ContinuousQueueOwnership(private val owner: Any) {
+internal class ContinuousQueueOwnership(private val owner: Any, private val releaseEpochs: (String) -> Pair<Long, Long> = { 0L to 0L }) {
     data class Appended(val interval: JsonObject, val transactions: Set<String>, val video: Boolean)
-    private data class Span(val queue: SampleQueue, var from: Int, var through: Int, var samples: Long)
+    private data class Span(val queue: SampleQueue, val epoch: Long, var from: Int, var through: Int, var samples: Long)
     private data class Record(val load: ContinuousLoadContext.Verified, val expected: Long,
         val spans: IdentityHashMap<SampleQueue, Span> = IdentityHashMap(), var accepted: Long = 0,
-        var contiguous: Boolean = true, var complete: Boolean = false, var credited: Boolean = false)
+        var contiguous: Boolean = true, var complete: Boolean = false, var credited: Boolean = false,
+        var decoderEpoch: Long = 0, var sinkEpoch: Long = 0)
     private val records = LinkedHashMap<String, Record>()
+    private val epochs = ContinuousQueueEpochs()
 
     @Synchronized fun accepted(sample: ContinuousHlsExtractorFactory.AcceptedSample) {
         if (sample.load.owner !== owner) return
+        val epoch = epochs.accepted(sample.queue, sample.before, sample.after)
         val record = record(sample.load)
+        if (record.spans.isNotEmpty() && record.spans.values.all { it.epoch < epochs.current(it.queue) }) {
+            record.spans.clear()
+            record.accepted = 0
+            record.contiguous = true
+            record.complete = false
+            record.credited = false
+        }
+        val release = releaseEpochs(sample.load.resource.role)
+        record.decoderEpoch = maxOf(record.decoderEpoch, release.first)
+        record.sinkEpoch = maxOf(record.sinkEpoch, release.second)
         val span = record.spans[sample.queue]
         if (span == null) {
             if (record.spans.size >= 8) throw IOException("Continuous artifact queue owner bound")
-            record.spans[sample.queue] = Span(sample.queue, sample.before, sample.after, 1)
+            record.spans[sample.queue] = Span(sample.queue, epoch, sample.before, sample.after, 1)
         } else {
             if (span.through != sample.before) record.contiguous = false
             span.through = sample.after
@@ -50,8 +63,24 @@ internal class ContinuousQueueOwnership(private val owner: Any) {
      * pipeline release before they may send a disposed receipt. */
     @Synchronized fun queueRetired(rendition: String, artifact: String): Boolean {
         val record = records["$rendition:$artifact"] ?: return false
-        return record.complete && record.spans.isNotEmpty() && record.spans.values.all { span ->
-            synchronized(span.queue) { span.queue.firstIndex >= span.through && span.queue.writeIndex >= span.through }
+        return record.spans.isNotEmpty() && record.spans.values.all { span ->
+            span.epoch < epochs.current(span.queue) || record.complete && synchronized(span.queue) { span.queue.firstIndex >= span.through && span.queue.writeIndex >= span.through }
+        }
+    }
+
+    /** A reset retires old queue spans, including partial extraction. Codec
+     * and sink release remain independent facts supplied by the caller. */
+    @Synchronized fun retiredByReset(load: ContinuousLoadContext.Verified): Pair<Long, Long>? {
+        val record = records[key(load)] ?: return null
+        return if (record.spans.isNotEmpty() && record.spans.values.all { it.epoch < epochs.current(it.queue) })
+            record.decoderEpoch to record.sinkEpoch else null
+    }
+
+    @Synchronized fun observeResets() {
+        val known = IdentityHashMap<SampleQueue, Unit>()
+        records.values.forEach { record -> record.spans.keys.forEach { known[it] = Unit } }
+        known.keys.forEach { queue ->
+            synchronized(queue) { epochs.empty(queue, queue.firstIndex, queue.readIndex, queue.writeIndex) }
         }
     }
 

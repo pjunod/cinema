@@ -19,7 +19,7 @@ internal class ContinuousCodecAdapterFactory(
     }
     companion object {
         fun observe(adapter: MediaCodecAdapter, video: Boolean, audio: Boolean, evidence: ContinuousOutputEvidence): MediaCodecAdapter = object : MediaCodecAdapter by adapter {
-            private var owner: Any? = null
+            private var owner: Any? = evidence.owner()
             private fun owned() {
                 owner = evidence.owner()
                 if (video) evidence.emit(ContinuousOutputEvidence.Event.VideoOwned, owner)

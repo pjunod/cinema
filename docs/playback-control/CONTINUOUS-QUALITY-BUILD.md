@@ -3140,3 +3140,37 @@ Chrome/Firefox production replay and Apple/Safari qualification also remain.
 The native UI tool was checked again on October 2 and still reports the Mac
 locked. Source transfer to the isolated runtime remains pending the explicit
 approval requested after automatic approval review rejected the transfer.
+
+
+### 10.100 Android keeps pending-quality seeks and discarded queue epochs separate
+
+A compatible quality request no longer changes the controller's executed
+video recipe before hardware presentation. A seek during that request stays
+on the retained source and executes against the quality actually presented;
+the desired quality remains a separate viewer preference. After the owned
+frame receipt, the controller advances the recipe and retained plan. Audio,
+subtitle, Original and out-of-family media changes retain their replacement
+semantics.
+
+The queue inventory now observes actual reset generations. Reading or front
+removal preserves absolute sample indices and cannot establish reset. A zero
+write index after accepted samples, or an observed empty queue with all three
+indices zero, retires the previous generation. Fresh acceptance of the same
+artifact starts a new physical span rather than borrowing earlier append
+counts. Partial extractions can retire after the independently observed
+reset and actual decoder release.
+
+AAC disposal across a seek additionally requires a successful sink flush and
+actual retirement of every AudioTrack allocated before that flush. A new
+active AudioTrack cannot hide that retirement, and cannot be credited as
+released itself. Codec wrappers retain their creating attachment even when
+a successful empty flush happens before the first input; an older wrapper
+cannot credit another subscription. Normal front disposal still requires
+actual rendered video or advancing sink head past the artifact.
+
+Authored regressions distinguish reset from normal front consumption, isolate
+queue generations, reject invalid sample indices, separate old and new audio
+outputs, and retain an empty codec's creating owner. Production and test
+sources compile in 11 seconds. Unit execution remains deferred to the final
+main-ready adversarial review and fast lane. Physical seek/disposal evidence,
+optional observation deadlines and restart races remain unqualified.

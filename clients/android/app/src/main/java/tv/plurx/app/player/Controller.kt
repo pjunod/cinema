@@ -320,6 +320,7 @@ class Controller internal constructor(
     private var continuousUsed = false
     private var continuousFailedRequest: String? = null
     private var continuousAttachment: ContinuousAttachment? = null
+    private var continuousExecutedQuality = activeQuality
     private data class OwnedContinuous(val owner: ContinuousAttachment, val source: androidx.media3.exoplayer.source.MediaSource)
     private val continuousPending = LinkedHashMap<String, OwnedContinuous>()
 
@@ -381,6 +382,12 @@ class Controller internal constructor(
         if (continuousAttachment === attachment) continuousAttachment = null
     }
 
+    private fun continuousOwnsQuality(quality: PlaybackQuality): Boolean {
+        val attachment = continuousAttachment ?: return false
+        if (player !== continuousPlayer) return false
+        return quality == PlaybackQuality.Auto || quality.rungHeight?.let { attachment.rendition(it) != null } == true
+    }
+
     private fun continuousQualityPresented(row: JsonObject) {
         val id = row.text("candidate_id") ?: return
         val pending = playbackIntent.pendingQualityChange
@@ -388,9 +395,11 @@ class Controller internal constructor(
         if (desired.rungHeight != null && row.number("height") != desired.rungHeight?.toLong()) return
         if (desired == PlaybackQuality.Original) return
         if (desired == PlaybackQuality.Auto && autoDesiredCandidate?.id?.let { it != id } == true) return
-        val current = currentRecipe()
+        val requested = currentRecipe().recipe.copy(quality = desired)
         val attached = recipeOwnership.attached ?: return
-        if (!attached.recipe.copy(quality = current.recipe.quality).hasSameMedia(current.recipe)) return
+        if (!attached.recipe.copy(quality = desired).hasSameMedia(requested)) return
+        continuousExecutedQuality = desired
+        val current = currentRecipe()
         autoActiveCandidateId = id
         planReplacement.presented(desired)
         stallReopenBudget.seed(row.number("height")?.toInt())
@@ -470,7 +479,9 @@ class Controller internal constructor(
 
     private fun currentRecipe(): PlaybackRecipeOwnership.Claim = recipeOwnership.request(
         PlaybackMediaRecipe(
-            quality = playbackIntent.qualityForMedia(),
+            quality = playbackIntent.qualityForMedia().let { requested ->
+                if (continuousOwnsQuality(requested)) continuousExecutedQuality else requested
+            },
             mode = planMode,
             requiresHls = attachedRequiresHlsOverride ?: plan.requiresHls,
             audioIndex = selectedAudio,
@@ -1563,7 +1574,7 @@ class Controller internal constructor(
         abandonPreparedReplacement(failed = false)
         mediaMutationEpoch += 1
         attachSurfaceGeneration()
-        if (planReplacement.route(playbackIntent)) return
+        if (!continuousOwnsQuality(playbackIntent.qualityForMedia()) && planReplacement.route(playbackIntent)) return
         val attempt = beginPlaybackAttempt("seek")
         val recipe = currentRecipe()
         if (recipeOwnership.needsMediaReplacement(recipe)) {

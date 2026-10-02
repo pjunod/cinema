@@ -52,6 +52,25 @@ class ContinuousOutputEvidenceTest {
         adapter.flush()
         assertEquals(ContinuousOutputEvidence.Event.VideoFreed, events.last())
     }
+    @Test fun aSuccessfulEmptyCodecFlushRetainsItsCreatingAttachmentOwner() {
+        val evidence = ContinuousOutputEvidence()
+        val owner = Any()
+        val events = mutableListOf<ContinuousOutputEvidence.Event>()
+        evidence.subscribe(owner, events::add)
+        val delegate = java.lang.reflect.Proxy.newProxyInstance(
+            androidx.media3.exoplayer.mediacodec.MediaCodecAdapter::class.java.classLoader,
+            arrayOf(androidx.media3.exoplayer.mediacodec.MediaCodecAdapter::class.java),
+        ) { _, _, _ -> null } as androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
+        val adapter = ContinuousCodecAdapterFactory.observe(delegate, video = true, audio = false, evidence)
+        adapter.flush()
+        assertEquals(listOf(ContinuousOutputEvidence.Event.VideoFreed), events)
+        evidence.unsubscribe(owner)
+        val next = Any()
+        evidence.subscribe(next, events::add)
+        adapter.release()
+        assertEquals(1, events.size)
+    }
+
     @Test fun callbacksCannotBorrowANewAttachmentSubscription() {
         val evidence = ContinuousOutputEvidence()
         val old = Any(); val next = Any()

@@ -4,6 +4,21 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ContinuousAudioOutputsTest {
+    @Test fun aNewActiveTrackCannotHideActualRetirementOfOutputsBeforeTheFlush() {
+        val outputs = ContinuousAudioOutputs()
+        val owner = Any()
+        var oldReleased = false
+        outputs.allocated(Any(), owner) { oldReleased }
+        val flush = outputs.allocationMark()
+        outputs.allocated(Any(), owner) { false }
+        assertFalse(outputs.releasedThrough(owner, flush))
+        oldReleased = true
+        outputs.collectReleased()
+        assertTrue(outputs.releasedThrough(owner, flush))
+        assertFalse(outputs.isReleased(owner))
+        assertFalse(outputs.releasedThrough(owner, outputs.allocationMark()))
+    }
+
     @Test fun releaseCallbacksCannotRetireAnInitializedOrUnknownOutput() {
         val outputs = ContinuousAudioOutputs()
         val owner = Any()

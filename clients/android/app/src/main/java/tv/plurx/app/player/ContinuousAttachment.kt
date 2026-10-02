@@ -8,6 +8,7 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
 import androidx.media3.exoplayer.source.MediaSource
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.*
@@ -40,7 +41,14 @@ internal class ContinuousAttachment(
     private val selection = ContinuousVideoSelection(start.family, protocol)
     private val reservations = ContinuousReservations(start.family, protocol, selection, start.primaryRendition)
     private val media = ContinuousQualityMedia(profile.origin, start.schedulePath, start.family, protocol)
-    private val queues = ContinuousQueueOwnership(owner)
+    private val videoReleaseEpoch = AtomicLong()
+    private val audioDecoderReleaseEpoch = AtomicLong()
+    private data class SinkRelease(val epoch: Long = 0, val allocation: Long = 0)
+    private val sinkRelease = AtomicReference(SinkRelease())
+    private val queues = ContinuousQueueOwnership(owner) { role ->
+        if (role == "video") videoReleaseEpoch.get() to 0L
+        else audioDecoderReleaseEpoch.get() to sinkRelease.get().epoch
+    }
     private val loads = ContinuousLoads()
     private val mediaCalls = ContinuousMediaCalls(profile.http)
     private val closed = AtomicBoolean()
@@ -107,10 +115,13 @@ internal class ContinuousAttachment(
             is ContinuousOutputEvidence.Event.Frame -> frame.set(event)
             is ContinuousOutputEvidence.Event.AudioHead -> audioHead.set(event.positionUs)
             ContinuousOutputEvidence.Event.VideoOwned -> videoOwned.set(true)
-            ContinuousOutputEvidence.Event.VideoFreed -> { videoOwned.set(false); frame.set(null) }
+            ContinuousOutputEvidence.Event.VideoFreed -> { videoReleaseEpoch.incrementAndGet(); videoOwned.set(false); frame.set(null) }
             ContinuousOutputEvidence.Event.AudioDecoderOwned -> audioDecoderOwned.set(true)
-            ContinuousOutputEvidence.Event.AudioDecoderFreed -> { audioDecoderOwned.set(false); audioHead.set(null) }
-            ContinuousOutputEvidence.Event.AudioSinkFlushed -> audioHead.set(null)
+            ContinuousOutputEvidence.Event.AudioDecoderFreed -> { audioDecoderReleaseEpoch.incrementAndGet(); audioDecoderOwned.set(false); audioHead.set(null) }
+            ContinuousOutputEvidence.Event.AudioSinkFlushed -> {
+                sinkRelease.updateAndGet { SinkRelease(it.epoch + 1, output.audioOutputs.allocationMark()) }
+                audioHead.set(null)
+            }
             else -> Unit // AudioTrack state is polled independently of callbacks.
         }
         wake.trySend(Unit)
@@ -118,6 +129,8 @@ internal class ContinuousAttachment(
 
     private suspend fun flushFacts() {
         protocol.settlePending()
+        queues.observeResets()
+        output.audioOutputs.collectReleased()
         while (true) {
             val append = pending.tryReceive().getOrNull() ?: break
             val key = key(append.interval)
@@ -183,7 +196,12 @@ internal class ContinuousAttachment(
             val artifact = requireNotNull(interval.text("artifact_id"))
             if (!queues.queueRetired(load.resource.rendition, artifact)) continue
             val through = requireNotNull(interval.number("through_tick"))
-            val retired = if (load.resource.role == "video") frame.get()?.let {
+            val reset = queues.retiredByReset(load)
+            val sink = sinkRelease.get()
+            val resetReleased = reset != null && if (load.resource.role == "video") videoReleaseEpoch.get() > reset.first
+                else audioDecoderReleaseEpoch.get() > reset.first && sink.epoch > reset.second &&
+                    output.audioOutputs.releasedThrough(owner, sink.allocation)
+            val retired = resetReleased || if (load.resource.role == "video") frame.get()?.let {
                 frameTick(load.resource.row, it.positionUs)?.let { tick -> tick >= through }
             } == true else audioHead.get()?.let { head ->
                 frameTick(load.resource.row, head)?.let { tick -> tick >= through + 1024 }
