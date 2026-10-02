@@ -2983,3 +2983,39 @@ test("VOD attachment census survives console eviction and counts same-session re
  assert.throws(()=>lab.vodAttachmentCensus(Array(2000).fill(event),event.file_id,1000),/truncated/);
  assert.throws(()=>lab.vodAttachmentCensus(null,event.file_id,1000),/unavailable/);
 });
+
+
+test("sampled removal evidence survives a long Auto window and refuses observation gaps", () => {
+  const listeners = new Map();
+  const makeBuffer = () => {
+    const handlers = {};
+    const buffer = { updating: false, remove() {}, addEventListener(name, fn) { handlers[name] = fn; } };
+    listeners.set(buffer, handlers); return buffer;
+  };
+  const video = { currentTime: 1000 };
+  const tracks = { video: { buffer: makeBuffer() }, audio: { buffer: makeBuffer() } };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const snapshot = () => ({ ...lab.continuousTransportSnapshot(player, video, objects),
+    family_id: "family", closed: false, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } });
+  const before = snapshot(), evidence = lab.continuousRemovalEvidence(before);
+  for (let index = 0; index < 300; index++) {
+    for (const { buffer } of Object.values(tracks)) { buffer.remove(index, index + 1); listeners.get(buffer).updateend(); }
+    if (index % 16 === 15) lab.observeContinuousRemovals(evidence, snapshot());
+  }
+  const after = snapshot();lab.observeContinuousRemovals(evidence, after);
+  assert.equal(after.buffers[0].completed_removals.length, 64, "the browser journal stays bounded");
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720).join(";"), /truncated/);
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720, evidence), []);
+  assert.equal(evidence.buffers[0].completed_count, 300);
+  const missed = lab.continuousRemovalEvidence(before);lab.observeContinuousRemovals(missed, after);
+  assert.match(lab.continuousSwitchErrors(before, after, 1000, 720, missed).join(";"), /truncated/);
+  const next = lab.continuousRemovalEvidence(after);
+  tracks.audio.buffer.remove(1001, 1002);listeners.get(tracks.audio.buffer).updateend();
+  const futureRemoval = snapshot();lab.observeContinuousRemovals(next, futureRemoval);
+  assert.match(lab.continuousSwitchErrors(after, futureRemoval, 1000, 720, next).join(";"), /audio removed media ahead/);
+  tracks.video.buffer = makeBuffer();const replaced = snapshot();lab.observeContinuousRemovals(next, replaced);
+  assert.match(lab.continuousSwitchErrors(after, replaced, 1000, 720, next).join(";"), /buffer.*replaced/);
+});

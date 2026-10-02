@@ -3732,3 +3732,30 @@ before a fresh longer-pressure experiment could start; manual unlock was
 requested while independent browser work continues. No production tab,
 profile or security preference was changed. The final adversarial / Fable
 boundary remains pending, with no unit-test execution or merge.
+
+
+### 10.124 Bounded removal evidence across real Auto observation windows
+
+The startup-settled `655b4e884` Chrome receipt completed fifteen manual
+changes and three real Auto presentations (1080p, 720p, 1080p), then failed
+its evidence check before continuing to the fourth Auto decision. The third
+Auto window contained 69 completed video removals and 69 audio removals,
+while the browser observer intentionally retains only the last 64 per buffer.
+Five earlier removals in that window were therefore absent from the final
+snapshot. The complete case stays failed: no evidence gap is treated as a
+pass, despite zero measured waits, reopens, stalls or hitches in that window
+and a 66.7 ms maximum callback gap.
+
+The qualification harness now folds each sampled removal interval into two
+bounded counters, tied to the original SourceBuffer identities and starting
+sequences. It rejects missing or non-contiguous observations, replaced
+buffers, and removal ahead of the playhead. The final check binds those
+counters to both original and final snapshots. The browser's 64-row journal
+is unchanged; no unbounded removal history is retained. Existing callers
+without a sampled proof still fail on a truncated final snapshot.
+
+Authored regression `sampled removal evidence survives a long Auto window
+and refuses observation gaps` drives the actual observer through 300 completed
+removals, checks the journal remains bounded, and covers missed sampling,
+future removal and replacement. Syntax checks passed; no unit test executed.
+The mixed qualification will use this sampled proof on its fresh retry.

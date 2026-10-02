@@ -2097,7 +2097,39 @@ function continuousTransportSnapshot(player, video, objects) {
   };
 }
 
-function continuousSwitchErrors(before, after, requestedAtMs, expectedHeight) {
+// Fold sampled completed removals into two bounded counters. A long Auto
+// observation may outlive the 64-row browser journal; every sampled interval
+// must still be contiguous and bound to the original SourceBuffer identity.
+function continuousRemovalEvidence(snapshot) {
+  return { version: 1, buffers: ["video", "audio"].map((type) => {
+    const buffer = snapshot?.buffers?.find((row) => row.type === type);
+    return { type, identity: buffer?.identity ?? null,
+      from_sequence: buffer?.removal_sequence ?? null,
+      through_sequence: buffer?.removal_sequence ?? null,
+      completed_count: 0, truncated: !buffer, replaced: false, removed_ahead: false };
+  }) };
+}
+
+function observeContinuousRemovals(evidence, snapshot) {
+  for (const observed of evidence.buffers) {
+    const buffer = snapshot?.buffers?.find((row) => row.type === observed.type);
+    if (!buffer || buffer.identity !== observed.identity) { observed.replaced = true; continue; }
+    const prior = observed.through_sequence, next = buffer.removal_sequence;
+    if (!Number.isSafeInteger(prior) || !Number.isSafeInteger(next) || next < prior) {
+      observed.truncated = true; continue;
+    }
+    const completed = buffer.completed_removals.filter((row) => row.sequence > prior);
+    if (completed.length !== next - prior
+        || completed.some((row, index) => row.sequence !== prior + index + 1)) observed.truncated = true;
+    if (completed.some((row) => !Number.isFinite(row.through) || !Number.isFinite(row.playhead)
+        || row.through > row.playhead + 0.001)) observed.removed_ahead = true;
+    observed.completed_count += completed.length;
+    observed.through_sequence = next;
+  }
+  return evidence;
+}
+
+function continuousSwitchErrors(before, after, requestedAtMs, expectedHeight, removalEvidence = null) {
   const errors = [];
   if (!before || !after || !before.family_id || before.family_id !== after.family_id
       || after.closed !== false) errors.push("continuous family identity was absent, changed or closed");
@@ -2111,12 +2143,25 @@ function continuousSwitchErrors(before, after, requestedAtMs, expectedHeight) {
       errors.push(`continuous ${type} buffer was absent or replaced`);
       continue;
     }
-    const completed = current.completed_removals.filter((row) => row.sequence > previous.removal_sequence);
-    if (completed.length !== current.removal_sequence - previous.removal_sequence) {
-      errors.push(`continuous ${type} removal evidence was truncated`);
-    }
-    if (completed.some((row) => row.through > row.playhead + 0.001)) {
-      errors.push(`continuous ${type} removed media ahead of the playhead`);
+    if (removalEvidence) {
+      const observed = removalEvidence.version === 1
+        && removalEvidence.buffers?.find((row) => row.type === type);
+      if (!observed || observed.identity !== previous.identity || observed.replaced
+          || observed.from_sequence !== previous.removal_sequence
+          || observed.through_sequence !== current.removal_sequence || observed.truncated
+          || !Number.isSafeInteger(observed.completed_count)
+          || observed.completed_count !== current.removal_sequence - previous.removal_sequence) {
+        errors.push(`continuous ${type} removal evidence was truncated or replaced`);
+      }
+      if (observed?.removed_ahead) errors.push(`continuous ${type} removed media ahead of the playhead`);
+    } else {
+      const completed = current.completed_removals.filter((row) => row.sequence > previous.removal_sequence);
+      if (completed.length !== current.removal_sequence - previous.removal_sequence) {
+        errors.push(`continuous ${type} removal evidence was truncated`);
+      }
+      if (completed.some((row) => row.through > row.playhead + 0.001)) {
+        errors.push(`continuous ${type} removed media ahead of the playhead`);
+      }
     }
   }
   const tx = after?.transaction;
@@ -5023,6 +5068,8 @@ module.exports = {
   playerSnapshotExpression,
   continuousTransportSnapshot,
   continuousSwitchErrors,
+  continuousRemovalEvidence,
+  observeContinuousRemovals,
   vodAttachmentCensus,
   rungHistory,
   scoreRecovery,
