@@ -3610,3 +3610,13 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetr
 source_anchor = "internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget()"
+
+# D-02 prepared-successor audio focus (claude-opus-5-5). The device re-run of
+# a prepared quality change remains separate physical evidence.
+[[fixes]]
+id = "android.successor-audio-focus-owner"
+commits = ["054dd9c8084647beb455d128fdb02f343dde5569"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
+source_anchor = "internal fun handlesAudioFocus(role: PlayerRole): Boolean = role != PlayerRole.Successor"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "aPreparedSuccessorNeverHoldsAudioFocusBeforeItsSwitch"
