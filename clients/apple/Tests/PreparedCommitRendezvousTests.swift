@@ -71,13 +71,15 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: 1_000, incumbentFilmPositionMs: 10_000, mediaOriginMs: 2_000
         )
-        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720))
-        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.25, width: 1280, height: 720))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 7.749, width: 1280, height: 720))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.251, width: 1280, height: 720))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .nan, width: 1280, height: 720))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .infinity, width: 1280, height: 720))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 0, height: 720))
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8 + 1 / 24, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 7.95, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8 + 1 / 241, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.2, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 0))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .nan, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .infinity, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 0, height: 720, frameDurationSeconds: 1 / 24))
     }
 
     // MARK: The rendezvous itself

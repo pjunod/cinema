@@ -418,10 +418,11 @@ struct PreparedCommitRendezvous: Equatable {
 
     /// A completed seek and a layer's old ready bit do not identify its new
     /// decoded sample. Require finite item-local time and an actual raster.
-    func acceptsDecodedAlignment(displaySeconds: Double, width: Int, height: Int) -> Bool {
+    func acceptsDecodedAlignment(displaySeconds: Double, width: Int, height: Int, frameDurationSeconds: Double) -> Bool {
         displaySeconds.isFinite && displaySeconds >= 0
             && width > 0 && height > 0
-            && abs(displaySeconds * 1_000 - Double(itemPositionMs)) <= 250
+            && frameDurationSeconds.isFinite && frameDurationSeconds > 0 && frameDurationSeconds <= 1
+            && abs(displaySeconds - Double(itemPositionMs) / 1_000) <= frameDurationSeconds + 1e-9
     }
 
     /// What a commit owes when the alignment does not land inside its bound.

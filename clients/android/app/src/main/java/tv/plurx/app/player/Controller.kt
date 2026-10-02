@@ -4220,7 +4220,7 @@ class Controller internal constructor(
         ) return
         // A warm output must have rendered before changing visibility. No
         // prepared output or callback from an old Surface can satisfy this.
-        if (preparedVideoSurfaces != null && !preparedVideoSurfaces.ready(successor, successor.currentPosition)) return
+        if (preparedVideoSurfaces != null && !preparedVideoSurfaces.ready(successor, (commitFilmMs - originMs).coerceAtLeast(0))) return
         // The ledger enters its unabortable state before anything moves. From
         // here the viewer is looking at this pipeline, so a Back press or a
         // seek in the seconds before its first frame must settle the commit

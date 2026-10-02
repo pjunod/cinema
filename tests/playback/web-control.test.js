@@ -4049,7 +4049,8 @@ async function main() {
         // successor is exposed, so a corrective seek can no longer put a
         // blank element in front of the viewer.
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
-        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacementAtFrame"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("preparedFrameCadence"),
+        shippedSource("preparedFramesMeet"), shippedSource("exposePreparedReplacementAtFrame"),
         shippedSource("exposePreparedReplacement"),
         // M3's instruments. Sliced rather than stubbed, so a commit in this
         // harness exercises the real recording and the assertions below can
@@ -4197,10 +4198,12 @@ async function main() {
         const at = successor.currentTime;
         for (let step = 0; step <= 3; step += 1) {
           assert.equal(typeof successor.frameCallback, "function", "successor frame proof is armed");
-          successor.frameCallback(0, { mediaTime: at + step / 30, presentedFrames: step + 1 });
+          incumbent.currentTime += step === 0 ? 0 : 1 / 30;
+          successor.frameCallback(step * 1000 / 30, { mediaTime: at + step / 30,
+            expectedDisplayTime: step * 1000 / 30, presentedFrames: step + 1 });
         }
         assert.equal(typeof incumbent.frameCallback, "function", "incumbent frame rendezvous is armed");
-        incumbent.frameCallback(0, { mediaTime: incumbent.currentTime, presentedFrames: 1 });
+        incumbent.frameCallback(100, { mediaTime: incumbent.currentTime, expectedDisplayTime: 100, presentedFrames: 1 });
         assert.equal(successor.id, "video", "the successor takes the picture after both frame proofs");
         if (firstVisibleFrame)
           successor.frameCallback(0, { mediaTime: at + 4 / 30, presentedFrames: 5 });
@@ -7228,4 +7231,21 @@ test("late control terminal and typed 410 preserve authority retirement before n
     if(exchange.response)assert.strictEqual(h.player.controlVerdict,exchange.response.action,'producer action remains independently recorded');
     h.error();assert.equal(h.reopens.length,1);assert.equal(h.rescues.length,0);
   }
+});
+
+
+test("prepared frame boundary uses decoded cadence and playback-rate display projection",()=>{
+  const scope=new Function([shippedSource("preparedFrameCadence"),shippedSource("preparedFramesMeet"),
+    "return {cadence:preparedFrameCadence,meet:preparedFramesMeet};"].join("\n"));
+  const {cadence,meet}=scope();
+  const interval=cadence({mediaTime:8,presentedFrames:10},{mediaTime:8.125,presentedFrames:13});
+  assert.ok(Math.abs(interval-1/24)<1e-9,"dropped callbacks retain one-frame cadence");
+  const current={filmSeconds:10,displayMs:1000};
+  assert.equal(meet(current,{filmSeconds:9.96,displayMs:1000},interval,1),true);
+  assert.equal(meet(current,{filmSeconds:9.9,displayMs:1000},interval,1),false,
+    "a picture inside the former 250ms allowance is still stale");
+  assert.equal(meet(current,{filmSeconds:9.8,displayMs:900},interval,2),true);
+  assert.equal(meet(current,{filmSeconds:9.8,displayMs:900},interval,0.5),false);
+  assert.equal(cadence({mediaTime:8,presentedFrames:10},{mediaTime:7,presentedFrames:11}),null);
+  assert.equal(meet(current,{filmSeconds:10,displayMs:1000},null,1),false);
 });

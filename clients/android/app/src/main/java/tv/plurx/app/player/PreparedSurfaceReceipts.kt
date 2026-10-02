@@ -4,7 +4,7 @@ import java.util.IdentityHashMap
 
 /** Ownership of actual output frames and asynchronous compositor receipts. */
 internal class PreparedSurfaceReceipts<T : Any> {
-    data class Frame(val positionUs: Long, val width: Int, val height: Int)
+    data class Frame(val positionUs: Long, val width: Int, val height: Int, val frameDurationUs: Double? = null)
     data class Exposure<T>(val output: T, val frame: Frame, val revision: Long)
     private val frames = IdentityHashMap<T, Frame?>()
     private var revision = 0L
@@ -23,8 +23,10 @@ internal class PreparedSurfaceReceipts<T : Any> {
 
     fun ready(output: T, positionMs: Long? = null): Boolean {
         val frame = frames[output] ?: return false
-        return positionMs == null || (positionMs >= 0 &&
-            kotlin.math.abs(frame.positionUs / 1000 - positionMs) <= PREPARED_ALIGNMENT_SLACK_MS)
+        if (positionMs == null) return true
+        val duration = frame.frameDurationUs ?: return false
+        return positionMs >= 0 && duration.isFinite() && duration > 0 && duration <= 1_000_000 &&
+            kotlin.math.abs(frame.positionUs.toDouble() - positionMs.toDouble() * 1000) <= duration
     }
 
     fun expose(output: T): Exposure<T>? {

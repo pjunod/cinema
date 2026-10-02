@@ -197,7 +197,8 @@ internal class PreparedVideoSurfaces private constructor() {
         output.pixelRatio = player.videoSize.pixelWidthHeightRatio
         receipts.attach(output)
         output.metadata = VideoFrameMetadataListener { positionUs, _, format, _ ->
-            output.pendingFrame.set(PreparedSurfaceReceipts.Frame(positionUs, format.width, format.height))
+            val durationUs = format.frameRate.takeIf { it.isFinite() && it > 0 }?.let { 1_000_000.0 / it }
+            output.pendingFrame.set(PreparedSurfaceReceipts.Frame(positionUs, format.width, format.height, durationUs))
         }
         output.observer = object : AnalyticsListener {
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, target: Any, renderTimeMs: Long) {

@@ -10728,6 +10728,12 @@ extension PlayerController: PreparedSuccessorHost {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
+        guard let frameDurationSeconds = await awaitPreparedFrameDuration(of: item),
+              preparedItem === item, preparedPlayer === successor,
+              viewerActionEpoch == commitViewerEpoch, wantsPlayback else {
+            discardPreparedSuccessor()
+            return .failedWithoutReopen
+        }
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
@@ -10750,7 +10756,7 @@ extension PlayerController: PreparedSuccessorHost {
         guard let alignedOutput = preparedVideoOutput,
               await awaitPreparedDecodedAlignment(
                 item: item, successor: successor, output: alignedOutput,
-                rendezvous: rendezvous, viewerEpoch: commitViewerEpoch
+                rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, viewerEpoch: commitViewerEpoch
               ) else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
@@ -10768,7 +10774,7 @@ extension PlayerController: PreparedSuccessorHost {
             discardPreparedSuccessor()
             return automaticTrial ? .failedWithoutReopen : .refused
         }
-        guard abs(realPositionMs() - rendezvous.filmPositionMs) <= Self.preparedFirstFrameToleranceMs else {
+        guard Double(abs(realPositionMs() - rendezvous.filmPositionMs)) <= frameDurationSeconds * 1_000 else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
@@ -10879,7 +10885,7 @@ extension PlayerController: PreparedSuccessorHost {
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
         let firstFrameUnixMs = selectionsReady
-            ? await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs)
+            ? await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs, frameDurationSeconds: frameDurationSeconds)
             : nil
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
@@ -11016,11 +11022,38 @@ extension PlayerController: PreparedSuccessorHost {
         return landed ?? false
     }
 
+    /// Load cadence from the actual successor track, within the original
+    /// overlap. Unknown cadence retains the incumbent rather than inventing fps.
+    private func awaitPreparedFrameDuration(of item: AVPlayerItem) async -> Double? {
+        let remaining = min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)
+        guard remaining > 0 else { return nil }
+        var result: Double?
+        let task = Task { @MainActor in
+            do {
+                let tracks = try await item.asset.loadTracks(withMediaType: .video)
+                let duration = try await tracks.first?.load(.minFrameDuration)
+                guard !Task.isCancelled else { return }
+                let seconds = duration?.seconds ?? 0
+                result = seconds.isFinite && seconds > 0 && seconds <= 1 ? seconds : 0
+            } catch {
+                if !Task.isCancelled { result = 0 }
+            }
+        }
+        let cadence = await awaitBoundedValue(
+            boundMs: remaining, pollMs: PreparedReplacementBounds.pollMs,
+            now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { result }
+        )
+        task.cancel()
+        return cadence.flatMap { $0 > 0 ? $0 : nil }
+    }
+
     /// Check the parked item's decoded output after its alignment seek.
     /// A hidden layer ready bit from before the seek cannot satisfy this proof.
     private func awaitPreparedDecodedAlignment(
         item: AVPlayerItem, successor: AVPlayer, output: AVPlayerItemVideoOutput,
-        rendezvous: PreparedCommitRendezvous, viewerEpoch: Int
+        rendezvous: PreparedCommitRendezvous, frameDurationSeconds: Double, viewerEpoch: Int
     ) async -> Bool {
         let startedAt = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         while Int(ProcessInfo.processInfo.systemUptime * 1_000) - startedAt < PreparedReplacementBounds.alignmentMs,
@@ -11038,7 +11071,8 @@ extension PlayerController: PreparedSuccessorHost {
                displayTime.isValid,
                rendezvous.acceptsDecodedAlignment(
                 displaySeconds: displayTime.seconds,
-                width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels)
+                width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels),
+                frameDurationSeconds: frameDurationSeconds
                ), playbackSurface?.canPromote(successor) == true {
                 return true
             }
@@ -11055,7 +11089,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// changed. `AVPlayerItemVideoOutput` does not acknowledge physical
     /// display by `AVPlayerLayer` — the same caveat the seek monitor carries —
     /// so device qualification still has to verify the final boundary.
-    private func awaitPreparedFirstFrame(boundaryMs: Int, overlapStartedAtMs: Int) async -> Int? {
+    private func awaitPreparedFirstFrame(boundaryMs: Int, overlapStartedAtMs: Int, frameDurationSeconds: Double) async -> Int? {
         guard let output = preparedSeekVideoOutput(), let item = player.currentItem else {
             return nil
         }
@@ -11085,7 +11119,7 @@ extension PlayerController: PreparedSuccessorHost {
                displayTime.isValid,
                displayTime.seconds.isFinite {
                 let presentedMs = baseMs + max(0, Int(displayTime.seconds * 1_000))
-                if presentedMs + Self.preparedFirstFrameToleranceMs >= boundaryMs {
+                if Double(presentedMs) + frameDurationSeconds * 1_000 >= Double(boundaryMs) {
                     return Int(Date().timeIntervalSince1970 * 1_000)
                 }
             }
@@ -11094,11 +11128,6 @@ extension PlayerController: PreparedSuccessorHost {
             )
         }
     }
-
-    /// A frame may legitimately land a keyframe's worth before the boundary
-    /// after a seek within the successor; the tolerance is small enough that a
-    /// buffer from before the switch cannot satisfy it.
-    static var preparedFirstFrameToleranceMs: Int { 250 }
 
     private func preparedSeekVideoOutput() -> AVPlayerItemVideoOutput? {
         // An audio-only source produces no pixel buffer, ever, so waiting for

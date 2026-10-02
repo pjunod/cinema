@@ -2708,3 +2708,54 @@ compilation and iOS production/test compilation passed. Exact-tree replay
 remains required. Source transfer to nuc3 is pending explicit destination
 authorization requested after automatic approval review rejected it; no new
 private source was sent there. Unit execution stays deferred until final review.
+
+
+### 10.85 Final handoff alignment uses successor frame cadence
+
+Web exposure now compares the decoded incumbent and successor media PTS in
+film time, projecting to the incumbent's expected display time using the
+actual playback rate. Adjacent callback PTS and presented-frame counts derive
+one frame's duration even when callbacks skip frames. Missing cadence,
+non-advancing timestamps or differing player rates cannot establish alignment.
+The earlier 250 ms seek heuristic remains a coarse preparation aid; it no
+longer earns final exposure. A regression covers 24 fps, skipped callbacks,
+a stale picture inside the old quarter-second allowance and rate projection.
+
+Apple loads the actual successor asset track's minimum frame duration within
+the original physical overlap deadline. Decoded post-seek alignment, incumbent
+position revalidation and first-frame acceptance use that interval. Unknown
+cadence retains the incumbent; it does not invent a frame rate. Android's
+owned warm output records frame duration from the rendered Media3 format and
+compares its frame PTS with the film rendezvous mapped into successor time,
+rather than checking against the successor's own playhead with 250 ms slack.
+Unknown format cadence cannot establish alignment. Raster readiness remains
+separate from the frame alignment receipt.
+
+Pinned iOS production and test-source compilation, tvOS production compilation
+and Android production and test-source compilation passed. JavaScript syntax
+passed. The focused regressions are authored and unexecuted, following the
+user's final-review-first fast lane. These changes do not establish physical
+display or audio continuity. Apple's incumbent comparison still uses its item
+clock; Android's older single-surface fallback and the native continuous
+adapter still require their remaining work and device qualification.
+
+### 10.86 Diagnostic asset identity survives navigation
+
+The attempted reinstall-after-reload diagnostic also sampled the older retry
+implementation during playback: CDP's reload returned while the old document
+was still complete, so replacement could precede the actual navigation. Its
+failed receipt is retained with an explicit source-attribution correction.
+The diagnostic now fulfills only its owned Chrome tab's continuous-quality
+script request with the local committed asset. No repository source goes to
+the Linux host. All 133 sampled states in this run identified the delayed
+retry code as active, with one intercepted asset response.
+
+This mixed-source run uses the unchanged `6462b41e3` Linux daemon and the local
+`be001d003` client asset. It remains failed: the first target presented, the
+second selection did not commit, the durable census counted two attachments
+and a final schedule request returned 503. It does not qualify the isolated
+rate-budget server fix or the legacy-dispatch ownership correction. Exact
+candidate replay remains pending the requested source-transfer authorization.
+Earlier attempted local-client receipts preserve their original metrics and
+claims, with the correction recorded alongside them rather than becoming
+successful evidence.

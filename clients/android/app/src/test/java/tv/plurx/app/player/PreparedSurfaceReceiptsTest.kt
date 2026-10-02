@@ -9,8 +9,8 @@ class PreparedSurfaceReceiptsTest {
         val previous = Any(); val next = Any()
         owner.attach(previous); owner.attach(next)
         assertNull(owner.expose(next))
-        owner.rendered(previous, PreparedSurfaceReceipts.Frame(10_000_000, 1280, 720))
-        owner.rendered(next, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080))
+        owner.rendered(previous, PreparedSurfaceReceipts.Frame(10_000_000, 1280, 720, 1_000_000.0 / 24))
+        owner.rendered(next, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080, 1_000_000.0 / 24))
         assertFalse(owner.ready(next, 11_000))
         assertTrue(owner.ready(next, 10_000))
         val commit = owner.expose(next)!!
@@ -22,18 +22,28 @@ class PreparedSurfaceReceiptsTest {
     @Test fun seekAndSurfaceRecreationRejectOldFramesAndCompositorCallbacks() {
         val owner = PreparedSurfaceReceipts<Any>()
         val old = Any(); owner.attach(old)
-        owner.rendered(old, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080))
+        owner.rendered(old, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080, 1_000_000.0 / 24))
         val beforeSeek = owner.expose(old)!!
         owner.invalidate(old)
         assertFalse(owner.presented(beforeSeek)); assertFalse(owner.ready(old, 10_000))
-        owner.rendered(old, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080))
+        owner.rendered(old, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080, 1_000_000.0 / 24))
         val beforeDestroy = owner.expose(old)!!
         owner.remove(old)
         val new = Any(); owner.attach(new)
-        owner.rendered(old, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080))
+        owner.rendered(old, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080, 1_000_000.0 / 24))
         assertFalse(owner.ready(new)); assertFalse(owner.presented(beforeDestroy))
-        owner.rendered(new, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080))
+        owner.rendered(new, PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080, 1_000_000.0 / 24))
         assertTrue(owner.presented(owner.expose(new)!!))
+    }
+
+    @Test fun alignmentRequiresOneDecodedFrameRatherThanQuarterSecondSlack() {
+        val owner = PreparedSurfaceReceipts<Any>(); val output = Any(); owner.attach(output)
+        owner.rendered(output, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080, 1_000_000.0 / 24))
+        assertTrue(owner.ready(output, 10_041)); assertFalse(owner.ready(output, 10_042))
+        assertFalse(owner.ready(output, 10_200))
+        owner.rendered(output, PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080))
+        assertFalse(owner.ready(output, 10_000))
+        assertTrue(owner.ready(output)) // Raster readiness is separate from alignment proof.
     }
 
     @Test fun outputOverlapIsBoundedAndRetirementAllowsTheNextPreparation() {
@@ -42,7 +52,7 @@ class PreparedSurfaceReceiptsTest {
         owner.attach(first); owner.attach(second)
         assertThrows(IllegalStateException::class.java) { owner.attach(third) }
         owner.remove(first); owner.attach(third)
-        owner.rendered(third, PreparedSurfaceReceipts.Frame(-1, 1920, 1080))
+        owner.rendered(third, PreparedSurfaceReceipts.Frame(-1, 1920, 1080, 1_000_000.0 / 24))
         assertFalse(owner.ready(third))
     }
 }
