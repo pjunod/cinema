@@ -220,6 +220,34 @@ class CapsPolicyTest {
     }
 
     @Test
+    fun theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink() {
+        // A handset: stereo PCM, software E-AC-3 decode, no receiver.
+        val phone = audioSinkClaims(setOf("audio/eac3"), emptySet(), pcmChannels = 2)
+        assertEquals(listOf("aac", "mp3", "flac", "eac3"), phone.map { it.codec })
+        assertTrue(phone.all { it.max_channels == 2 && !it.passthrough })
+        assertTrue(phone.first { it.codec == "aac" }.sample_rates_hz.contains(48_000))
+
+        // A television on a 5.1 HDMI receiver that takes AC-3 and E-AC-3.
+        val receiver = audioSinkClaims(
+            setOf("audio/ac3", "audio/eac3"),
+            setOf(AudioSinkEncoding.AC3, AudioSinkEncoding.E_AC3_JOC),
+            pcmChannels = 6,
+        ).associateBy { it.codec }
+        assertEquals(6, receiver.getValue("aac").max_channels)
+        assertTrue(receiver.getValue("eac3").passthrough)
+        assertEquals(8, receiver.getValue("eac3").max_channels)
+        assertTrue(receiver.getValue("ac3").passthrough)
+        assertEquals(6, receiver.getValue("ac3").max_channels)
+
+        // Neither decoder nor sink: no Dolby claim at all; out-of-range route
+        // counts clamp, never a guessed surround claim.
+        val bare = audioSinkClaims(emptySet(), emptySet(), pcmChannels = 0)
+        assertEquals(listOf("aac", "mp3", "flac"), bare.map { it.codec })
+        assertTrue(bare.all { it.max_channels == 2 })
+        assertEquals(8, audioSinkClaims(emptySet(), emptySet(), 16).first().max_channels)
+    }
+
+    @Test
     fun audioIsClaimedFromADecoderOrFromTheSink() {
         val base = listOf("aac", "mp3", "opus", "flac")
 
