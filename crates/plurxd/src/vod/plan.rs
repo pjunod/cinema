@@ -119,6 +119,18 @@ pub(super) fn planned_index(name: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
+/// Parent film coordinates project independently onto video and AAC clocks.
+/// Integer cross-products preserve exact boundary ownership and clamp EOS.
+pub(super) fn media_entry_containing_ms(plan: &SegmentPlan, position_ms: i64) -> u32 {
+    let tick_product = u128::from(position_ms.max(0) as u64) * u128::from(plan.timescale);
+    let after = plan
+        .entries
+        .partition_point(|entry| u128::from(entry.start_ticks) * 1_000 <= tick_product);
+    plan.entries
+        .get(after.saturating_sub(1))
+        .map_or(0, |entry| entry.index)
+}
+
 /// The plan entry containing `start_seconds` — where the session's first
 /// demand points, not where the plan starts. Always a VIDEO entry: a start
 /// inside the audio tail positions at the last video entry instead, because

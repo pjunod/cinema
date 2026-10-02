@@ -1740,3 +1740,15 @@ identity aliases, role refusal and deadline ceilings. Pinned compiler and
 normal hooks apply; no unit execution. Family construction, durable restoration
 and playlist exposure remain unfinished, so continuous playback is not yet
 advertised or qualified.
+
+### 10.40 Parent control projects to private media clocks
+
+Accepted nonterminal parent control now advances every owned private reader
+on its own immutable plan, including AAC-only entries and a private reader
+sharing the root rendition. All reader maps are acquired before sequence
+acceptance; cancellation while a child map is unavailable cannot partially
+accept a seek. Replays leave the graph unchanged, and later child downloads
+cannot override an accepted playback anchor. End retains the existing detached
+cleanup path. The existing seek regression now includes shared AAC and root
+private readers, forward/backward seeks and late audio delivery. Pinned
+compilation and normal hooks apply; no unit execution.

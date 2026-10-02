@@ -770,6 +770,22 @@
         let serve = local_serve(base.path().to_path_buf(), store);
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, VIEWER, Arc::clone(&rendition), Instant::now()).await;
+        let mut soundtrack = synthetic_rendition(&base.path().join("soundtrack")).await;
+        let audio = Arc::get_mut(&mut soundtrack).expect("exclusive soundtrack");
+        audio.key = "parent-soundtrack".into();
+        audio.plan = plurx_core::transcode::vod_shared_audio_plan(plan_duration_ms(&rendition.plan), 128);
+        audio.timescale = audio.plan.timescale;
+        audio.manifest = Mutex::new(Manifest::new(audio.plan.clone()));
+        soundtrack.attach_reader("private-audio", 0).await;
+        rendition.attach_reader("private-root", 0).await;
+        {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut(VIEWER).expect("parent");
+            session.children.push(ParentMediaReader { reader_id: "private-audio".into(),
+                rendition: Arc::clone(&soundtrack), _reservation: None });
+            session.children.push(ParentMediaReader { reader_id: "private-root".into(),
+                rendition: Arc::clone(&rendition), _reservation: None });
+        }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
             session_id: VIEWER,
             generation: GENERATION,
@@ -813,6 +829,12 @@
             .await
             .expect("VOD session")
             .expect("accepted seek");
+        let forward_anchor = snapshot.buffer_anchor_ms();
+        let expected_audio = media_entry_containing_ms(&soundtrack.plan, forward_anchor);
+        assert!(expected_audio > 0, "AAC-only entries must advance beyond zero");
+        assert_eq!(soundtrack.readers.lock().await["private-audio"].frontier, expected_audio);
+        assert_eq!(soundtrack.readers.lock().await["private-audio"].control_sequence, Some(1));
+        assert_eq!(rendition.readers.lock().await["private-root"].frontier, 45);
         let position = Position {
             produced_through: None,
             positioned_at: None,
@@ -854,6 +876,16 @@
                 .expect("VOD session");
         }
         rewind.expect("accepted rewind");
+        let rewind_anchor = (rendition.plan.entry(3).expect("rewind").start_ticks * 1000
+            / u64::from(rendition.timescale)) as i64 + 1;
+        let expected_audio = media_entry_containing_ms(&soundtrack.plan, rewind_anchor);
+        let mut audio_readers = soundtrack.readers.lock().await;
+        audio_readers.get_mut("private-audio").expect("private reader").served(70);
+        assert_eq!(audio_readers["private-audio"].frontier, expected_audio,
+            "late soundtrack delivery cannot undo the parent seek");
+        assert_eq!(audio_readers["private-audio"].control_sequence, Some(2));
+        drop(audio_readers);
+        assert_eq!(rendition.readers.lock().await["private-root"].frontier, 3);
         drop(prefetch);
         let near_prefetch = serve
             .shared
