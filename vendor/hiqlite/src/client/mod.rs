@@ -86,6 +86,8 @@ pub(crate) struct DbClient {
     pub(crate) tx_shutdown: Option<watch::Sender<bool>>,
     pub(crate) stream_shutdown: watch::Sender<bool>,
     pub(crate) background_handles: Mutex<Vec<JoinHandle<()>>>,
+    pub(crate) startup_listeners: Mutex<Option<crate::startup_cleanup::StartupListenerOwner>>,
+    pub(crate) startup_drain: tokio::sync::Mutex<()>,
     #[cfg(feature = "listen_notify_local")]
     pub(crate) app_start: i64,
     #[cfg(feature = "listen_notify_local")]

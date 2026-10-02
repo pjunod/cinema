@@ -32,6 +32,7 @@ pub(crate) enum StartupPhase {
 struct StartupTaskOwner {
     enabled: bool,
     tasks: Vec<tokio::task::AbortHandle>,
+    listeners: crate::startup_cleanup::StartupListenerOwner,
 }
 
 impl StartupTaskOwner {
@@ -41,8 +42,24 @@ impl StartupTaskOwner {
         }
     }
 
-    fn handoff(&mut self) {
+    fn track_listener(
+        &mut self,
+        task: tokio::task::JoinHandle<()>,
+        handle: axum_server::Handle<std::net::SocketAddr>,
+    ) {
+        self.track(&task);
+        self.listeners.track(task, handle);
+    }
+
+    fn handoff(&mut self, client: &Client) {
         self.tasks.clear();
+        if self.enabled {
+            *client
+                .inner
+                .startup_listeners
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(std::mem::take(&mut self.listeners));
+        }
     }
 }
 
@@ -70,6 +87,7 @@ where
     let mut startup_tasks = StartupTaskOwner {
         enabled: phase == StartupPhase::ClockObservation,
         tasks: Vec::new(),
+        listeners: Default::default(),
     };
     if phase == StartupPhase::ClockObservation {
         node_config.learner_only = true;
@@ -246,7 +264,8 @@ where
     let shutdown = shutdown_signal(rx_shutdown.clone());
     if let Some(config) = &node_config.tls_raft {
         let config = config.server_config(&node_config.listen_addr_raft).await;
-        let server = axum_server::from_tcp_rustls(listener_raft, config)?;
+        let handle = axum_server::Handle::new();
+        let server = axum_server::from_tcp_rustls(listener_raft, config)?.handle(handle.clone());
         let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
@@ -255,7 +274,17 @@ where
                 .await
                 .unwrap();
         }));
-        startup_tasks.track(&task);
+        startup_tasks.track_listener(task, handle);
+    } else if startup_tasks.enabled {
+        let handle = axum_server::Handle::new();
+        let server = axum_server::from_tcp(listener_raft)?.handle(handle.clone());
+        let task = task::spawn(async move {
+            server
+                .serve(router_internal.into_make_service())
+                .await
+                .unwrap();
+        });
+        startup_tasks.track_listener(task, handle);
     } else {
         let listener = TcpListener::from_std(listener_raft)?;
         let task = task::spawn(Box::pin(async move {
@@ -337,13 +366,21 @@ where
     info!("api external listening on {api_addr}");
     if let Some(config) = &node_config.tls_api {
         let config = config.server_config(&node_config.listen_addr_api).await;
-        let server = axum_server::from_tcp_rustls(listener_api, config)?;
+        let handle = axum_server::Handle::new();
+        let server = axum_server::from_tcp_rustls(listener_api, config)?.handle(handle.clone());
         let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
             server.serve(router_api.into_make_service()).await.unwrap();
         }));
-        startup_tasks.track(&task);
+        startup_tasks.track_listener(task, handle);
+    } else if startup_tasks.enabled {
+        let handle = axum_server::Handle::new();
+        let server = axum_server::from_tcp(listener_api)?.handle(handle.clone());
+        let task = task::spawn(async move {
+            server.serve(router_api.into_make_service()).await.unwrap();
+        });
+        startup_tasks.track_listener(task, handle);
     } else {
         let listener = TcpListener::from_std(listener_api)?;
         let task = task::spawn(Box::pin(async move {
@@ -439,7 +476,7 @@ where
             tls_api_no_verify,
         );
     }
-    startup_tasks.handoff();
+    startup_tasks.handoff(&client);
     startup_storage.handoff();
 
     // TODO fix that and also start backup cron jobs with no S3 config
