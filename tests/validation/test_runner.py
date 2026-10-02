@@ -244,6 +244,8 @@ class CatalogCase(unittest.TestCase):
         for build_only_path in (
             ".github/actions/buildx-cache/action.yml",
             "crates/plurxd/build.rs",
+            "crates/plurxd/build_support/source_date.rs",
+            "scripts/build-static-ffprobe",
             "scripts/ci-buildkit-prune",
             "scripts/ci-execution-mode",
             "vendor/hiqlite/Cargo.toml",
