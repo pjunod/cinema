@@ -443,6 +443,7 @@ paths = [
   "crates/plurx-core/src/store/telemetry.rs",
   "crates/plurx-core/src/store/fragindex.rs",
   "crates/plurx-core/src/store/fragment_index_cluster.rs",
+  "crates/plurx-core/src/store/analysis_reconcile.sql",
   "crates/plurx-core/src/store/hiqlite_fragment_index_cluster.rs",
   "crates/plurx-core/src/store/hiqlite_timeline_annotations.rs",
   "crates/plurx-core/src/store/timeline_annotations.rs",
@@ -679,7 +680,7 @@ paths = [
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
-  "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,preparation,publication,reading,system}.rs",
+  "crates/plurxd/src/http/{analysis,analysis_reconcile,developer,dto,error,extract,mod,network,preparation,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
   # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local

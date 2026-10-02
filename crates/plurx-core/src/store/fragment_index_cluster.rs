@@ -1385,6 +1385,38 @@ pub struct AnalysisRequest {
     pub updated_at_ms: i64,
 }
 
+pub(super) const ANALYSIS_RECONCILE_SQL: &str = include_str!("analysis_reconcile.sql");
+
+pub(super) fn reconciliation_parameters(
+    old: &AnalysisRequest,
+    new: &NewAnalysisRequest,
+) -> Result<(String, String), StoreError> {
+    if old.component != "fragment_index"
+        || old.requested_generation.starts_with("predict:")
+        || new.component != old.component
+        || new.file_id != old.file_id
+        || new.video_identity != old.video_identity
+        || new.force_rebuild != old.force_rebuild
+        || new.request_id == old.request_id
+        || new.request_id.is_empty()
+        || new.request_id.len() > 64
+        || new.priority != old.priority
+        || new.trigger != old.trigger
+        || new.target_node_id.is_empty()
+        || new.target_node_id.len() > 128
+        || new.pipeline_version.is_empty()
+        || new.pipeline_version.len() > 128
+        || new.requested_generation.is_empty()
+        || new.requested_generation.len() > 128
+    {
+        return Err(StoreError::Task("invalid analysis reconciliation".into()));
+    }
+    Ok((
+        serde_json::to_string(old).map_err(|error| StoreError::Task(error.to_string()))?,
+        serde_json::to_string(new).map_err(|error| StoreError::Task(error.to_string()))?,
+    ))
+}
+
 /// Portable source identity for a cluster subtitle extraction request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubtitleSourceStamp {
@@ -1933,6 +1965,29 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// Complete keyset inventory of active requests, including older work.
+    async fn analysis_reconciliation_page(
+        &self,
+        after: &str,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// The globally unique active forced slot for this source, engine and video.
+    async fn analysis_reconciliation_forced_slot(
+        &self,
+        replacement: &NewAnalysisRequest,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Secure a current successor before retiring the exact queued predecessor.
+    /// Running work, worker-owned retries and live playback interests are fenced
+    /// out. Publication and historical attempts are never deleted.
+    async fn reconcile_analysis_request(
+        &self,
+        expected: &AnalysisRequest,
+        replacement: &NewAnalysisRequest,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Terminal requests that a bulk reopen should actually act on.
     ///

@@ -1493,6 +1493,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
+	@node --test tests/web/analysis-reconciliation.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.
