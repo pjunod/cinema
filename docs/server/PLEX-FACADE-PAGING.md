@@ -860,23 +860,44 @@ cells:
 - **When.** Never on the request path: a request is still one relaxed atomic
   add. A background loop writes the file every **60 s**; restoring at startup
   writes it at once; and the daemon writes it once more **after its HTTP
-  server has stopped**, marking the stop clean. That last write is final, so a
+  server has stopped**. That last write is marked clean **only if every
+  connection drained** inside the 5 s window: a connection still open could
+  still be counted after the write, so a timed-out drain (or a serving error)
+  writes an unclean final record instead. The clean write is final, so a
   periodic write cannot overwrite the clean mark.
-- **Crash.** A crash, `SIGKILL` or power loss skips the clean-stop write. The
-  next start sees that, counts an unclean stop, and adds the window from the
-  last successful write to its own start to `gap_seconds`. Only the requests
-  inside that window can be missing, so the persisted counts are a **lower
-  bound** on façade usage — never an over-count — and `gap_seconds` is an
-  upper bound on the uncounted time (it includes the downtime after the crash,
-  because the crash instant is not recorded). A lower bound is exactly what
-  this question needs: it asks whether any cell is non-zero.
-- **Corrupt or missing.** A missing file starts a census (logged at INFO). An
-  oversized, unreadable, malformed or wrong-version file starts a new census
-  with the reason logged at WARN, and the bad file is kept aside as
-  `plex-census.json.corrupt`. The daemon never refuses to start over it. Cells
-  a newer build wrote for a handler this build does not know are carried and
-  written back (at most 64), never exposed, so a rollback and roll-forward
-  cannot erase a non-zero count.
+- **Unobserved time.** At **every** start, clean stop or not, the stretch from
+  the file's last write to the new start is added to `gap_seconds`: the time
+  this node was not counting. That covers clean downtime (six days stopped and
+  one day running is one day of census time, not seven), a crash window, and
+  a whole process lifetime whose writes all failed (its time runs from the
+  last write that did land). Census time is *t* − started − gap.
+- **Crash.** A crash, `SIGKILL`, power loss, a startup that exits on an error
+  after the restore, or a timed-out drain leaves no clean mark. The next start
+  counts an unclean stop in `unclean_stops`; its window is already in
+  `gap_seconds` by the rule above. Only requests after the last write can be
+  missing, so the persisted counts are a **lower bound** on façade usage —
+  never an over-count — which is exactly what this question needs: it asks
+  whether any cell is non-zero.
+- **Clock floor.** A clock that cannot be read, or reads earlier than the
+  running build's source date (`version::BUILT_AT`, from `SOURCE_DATE_EPOCH`
+  or the commit time), is not trusted. Until the clock reaches that floor a
+  new census has no start time (`plurx_plex_census_started_seconds` reads 0),
+  no unobserved time is added, and nothing is written; the counts wait in
+  memory. A census started near 1970 would otherwise fake its seven days.
+- **Corrupt or missing.** A missing file starts a census (logged at INFO). A
+  file that does not parse, is over the 16 KiB cap, names another format
+  version or carries an unknown field starts a new census with the reason
+  logged at WARN. Any other read error (EIO, EMFILE, something that is not a
+  regular file) is retried once and, if it persists, does the same. Either
+  way whatever was at the path is kept aside as
+  `plex-census.json.corrupt-<unix seconds>` (with a `-1`, `-2` … suffix if
+  that name is taken), so no earlier copy is ever overwritten. The daemon
+  never refuses to start over it.
+- **Rollback.** Cells for a handler a *later* build added are carried and
+  written back by an earlier build (at most 64), never exposed, so rolling
+  back across a new handler keeps its count. That is the only rollback this
+  covers: a later build that changes the file's format version is read by an
+  earlier one as unusable, and the rollback starts a new census.
 
 **What `/metrics` now shows, beside the unchanged
 `plurx_plex_requests_total`:**
@@ -884,10 +905,10 @@ cells:
 | Series | Type | Meaning |
 |---|---|---|
 | `plurx_plex_requests_since_census_total{handler,outcome}` | counter | Requests since this node's census began, across every restart. Exactly the 56 cells of §8.4, same labels. |
-| `plurx_plex_census_started_seconds` | gauge | Unix time the census began. Moves only when the file was missing or unusable at a start. |
+| `plurx_plex_census_started_seconds` | gauge | Unix time the census began; 0 until the clock reaches the running build's source date. Moves only when the file was missing or unusable at a start. |
 | `plurx_plex_census_last_flush_seconds` | gauge | Unix time of the last successful write. More than about two minutes old on a running node means writes are failing. |
-| `plurx_plex_census_unclean_stops_total` | counter | Stops that skipped the clean-stop write since the census began. |
-| `plurx_plex_census_gap_seconds` | gauge | Sum, over those stops, of last write → next start: the census time whose requests may be missing. |
+| `plurx_plex_census_unclean_stops_total` | counter | Stops without a clean final write since the census began: a crash, a kill, an error exit, a failed final write, or a drain that timed out. |
+| `plurx_plex_census_gap_seconds` | gauge | Seconds since the census began that the node was not counting: for every start, last write → that start, clean downtime and crash windows alike. |
 | `plurx_plex_census_flush_failures_total` | counter | Failed writes in this process. The counts stay in memory and the next write retries them. |
 
 61 fixed series in all; no id, path, token or title in any label.
@@ -920,6 +941,17 @@ node, its **census time** at read time *t* is
   read it again later. If `plurx_plex_census_started_seconds` moved between
   two reads, that node began a new census (the WARN line says why) and its
   earlier counts are gone; its seven days restart from the new value.
+- A `plurx_plex_census_started_seconds` of 0, or earlier than
+  2026-10-02T00:00:00Z (before any build carried the census), is **invalid**:
+  that node's clock was wrong when its census began, so its census time cannot
+  be computed. The daemon never starts a census earlier than the source date
+  of the build that starts it; the date is on the System page.
+- Do not apply `increase()` or `rate()` to
+  `plurx_plex_requests_since_census_total` across an unclean stop: a crash
+  loses the counts after the last write, so the series can come back lower
+  than the last scrape, and Prometheus reads that as a counter reset. For
+  rates use `plurx_plex_requests_total`; read `_since_census_total` as a
+  level, once.
 - `plurx_plex_census_flush_failures_total` above zero or a stale
   `plurx_plex_census_last_flush_seconds` means the node's counts are in memory
   only; fix the data directory before relying on that node.
@@ -958,7 +990,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — route-cache instrumentation | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | Measure-only, on a per-coordinator `RouteCacheMetrics` (atomics, rendered into `/metrics` beside the takeover families; no scrape-time lock or Store read). `plurx_media_session_route_lookups_total{result="cache_hit"\|"single_flight_hit"\|"store"}` replaces the test-only counter; `plurx_media_session_route_lock_seconds{site="lookup"\|"insert"\|"queried_insert"\|"generation_insert"}` (buckets 10 µs, 100 µs, 1 ms, 10 ms, 100 ms, +Inf) times the wait at each of the four lock sites, recorded on drop so a wait abandoned by a caller's `timeout_at` still counts; `plurx_media_session_route_prune_entries` (buckets 0, 16, 64, 256, 1,024, 2,048, 4,096, +Inf) records the entries each sweep walks; `plurx_media_session_route_cache_entries` is the map size after its last change. 46 fixed series; no id, path or node in any label. `ROUTE_CACHE_TTL`, `MAX_ROUTE_CACHE_ENTRIES`, every `lock()` site and its order are unchanged: each site calls one `lock_routes(site)` that takes the same mutex at the same point. Tests: `a_cache_hit_and_a_store_read_are_counted_separately`, `concurrent_lookups_of_one_session_produce_one_store_read` (a test-only gate holds the first Store read open while eight lookups run; mutation results in the PR body), `route_cache_exposition_is_bounded_and_its_labels_match_their_bounds`, and `metrics_render_the_media_session_route_cache_families` through the router's `/metrics`. **M6 not built.** |
 | 2026-09-28 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M5 — review of PR #598 | [PR #598](http://192.168.4.7:3000/noirr/plurx/pulls/598) | The single adversarial review ([comment 6123](http://192.168.4.7:3000/noirr/plurx/pulls/598#issuecomment-6123)) raised two P2 findings, both answered. (1) The prompt below divided store reads by all four playbacks, but a direct play (`/direct`, `stream.mp4`) never reaches the route cache; only `http/hls/` requests do, through `relay_if_remote`. That could halve the rate §3.5 asks for (per active **HLS** session) and bias M6 toward "nothing to fix". The prompt now requires every playback to be HLS (rolling or encoded VOD), records each playback's mode and start and end times in `playbacks.csv`, and has the script divide by HLS session-seconds clipped to the window, leaving out anything recorded as direct. §6.4 step 4 says the same. The script was dry-run on synthetic scrapes with a direct play and a mid-window stop. (2) No test separated entries *walked* from entries *left*, so counting after `retain` survived. `each_route_sweep_counts_the_entries_it_walked_and_an_expired_lookup_lowers_the_gauge` (paused time) runs all three sweep sites over expired entries and covers the gauge falling when `cached_route` removes an expired entry. The reviewer's mutation (count after `retain` at all three sites) fails it; the result is in the PR thread. The lookups HELP text and OPERATIONS.md now name every cached caller: HLS media and status GETs, and session DELETEs. |
 | | | | | | `needs:` the §6.4 measurement on `media1` with the M5 build deployed — the prompt below — then M6 (§5.5) decides from its table. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 — the durable census | — | §8.5's daily reads cannot close the row on this deploy cadence: all four nodes restarted 2026-10-02 05:11–05:21 UTC, and the 05:31 UTC read found 0 Plex requests on every node with 8–20 min of uptime. The 56 cells are now persisted per node (§8.7): `plex-census.json` in the data directory, written every 60 s, at startup and after the HTTP server stops (marked clean); an unclean stop is counted and its window added to `plurx_plex_census_gap_seconds`, so the persisted counts are a lower bound. New series `plurx_plex_requests_since_census_total{handler,outcome}` (the same 56 cells), `plurx_plex_census_started_seconds`, `_last_flush_seconds`, `_unclean_stops_total`, `_gap_seconds` and `_flush_failures_total`; `plurx_plex_requests_total` keeps its in-process meaning. Nothing on the request path changed. Tests: clean-restart round trip and monotonicity, crash-loss bound (exactly the counts after the last write are lost, and the gap persists across a second crash), the final clean-stop write, four unusable-file shapes (each a new census, kept aside, never a failure), and the exposition (exactly the 56 known cells; a carried unknown cell is written back but never exposed). Same read: the M5 route-cache families moved on lab6 only (100 cache hits / 96 Store reads, lock waits ≤ 10 µs). |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 — the durable census | [PR #739](http://192.168.4.7:3000/noirr/plurx/pulls/739) | §8.5's daily reads cannot close the row on this deploy cadence: all four nodes restarted 2026-10-02 05:11–05:21 UTC, and the 05:31 UTC read found 0 Plex requests on every node with 8–20 min of uptime. The 56 cells are now persisted per node (§8.7): `plex-census.json` in the data directory, written every 60 s, at startup and after the HTTP server stops (marked clean); an unclean stop is counted and its window added to `plurx_plex_census_gap_seconds`, so the persisted counts are a lower bound. New series `plurx_plex_requests_since_census_total{handler,outcome}` (the same 56 cells), `plurx_plex_census_started_seconds`, `_last_flush_seconds`, `_unclean_stops_total`, `_gap_seconds` and `_flush_failures_total`; `plurx_plex_requests_total` keeps its in-process meaning. Nothing on the request path changed. Tests: clean-restart round trip and monotonicity, crash-loss bound (exactly the counts after the last write are lost, and the gap persists across a second crash), the final clean-stop write, four unusable-file shapes (each a new census, kept aside, never a failure), and the exposition (exactly the 56 known cells; a carried unknown cell is written back but never exposed). Same read: the M5 route-cache families moved on lab6 only (100 cache hits / 96 Store reads, lock waits ≤ 10 µs). |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M0 — review of PR #739 | [PR #739](http://192.168.4.7:3000/noirr/plurx/pulls/739) | The sole adversarial review (review 74, REQUEST_CHANGES: two P2, six P3), all repaired. **P2-1:** downtime after a clean stop, and a lifetime whose writes all failed, read as census time; every start now adds last write → start to `gap_seconds`, redefined as time not counting (`plex_census_downtime_after_a_clean_stop_is_unobserved_time`: six days cleanly stopped is six days of gap). **P2-2:** nothing tested the daemon wiring; `a_drained_boot_records_a_clean_plex_census_stop` boots, drains and reboots through `boot()`, and fails with the restore or the final write removed. **P3:** the final write is clean only when `serve_http` reports `HttpDrain::Complete` (a timed-out drain is now reported and writes unclean); `increase()`/`rate()` across unclean stops documented; the build's source date is the clock floor, an unreadable clock is never 0, and nothing is written below it (`a_plex_census_trusts_no_clock_below_the_build_source_date`); only parse, cap, version and unknown-field failures are "unusable", other read errors retry once, and the aside name carries the unix time and never overwrites (`plex_census_read_errors_are_retried_and_nothing_kept_aside_is_overwritten`); the rollback claim narrowed to new handlers. |
 | | | | | | `needs:` one read of every node per §8.7 once each has seven days of census time on the build carrying it; and, separately, §6.4 on the actual ingress node before M6. |
 
 ### M5 → M6: the §6.4 measurement — GPT prompt
