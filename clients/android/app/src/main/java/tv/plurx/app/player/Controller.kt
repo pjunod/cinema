@@ -1802,6 +1802,7 @@ class Controller internal constructor(
         disarmVideoPresentation()
         if (plan.isAudioOnly) PlaybackService.detach(context, mediaSession)
         mediaSession.release()
+        preparedVideoSurfaces?.release()
         player.release()
     }
 
@@ -3772,6 +3773,11 @@ class Controller internal constructor(
 
     // ------------------------------------------------ prepared replacement
 
+    private val preparedVideoSurfaces = PreparedVideoSurfaces.create(!plan.isAudioOnly)
+    internal val keepsWarmVideoOutputs: Boolean get() = preparedVideoSurfaces != null
+    internal val presentationPlayer: Player
+        get() = preparedVideoSurfaces?.presenter(player) ?: player
+
     private val preparedLedger = PreparedReplacementLedger()
     private var preparedPlayer: ExoPlayer? = null
 
@@ -3873,6 +3879,8 @@ class Controller internal constructor(
      */
     fun collectRetiredPlayer() {
         val retired = retiredPlayer ?: return
+        if (preparedVideoSurfaces?.exposurePending == true &&
+            monotonicNowMs() - retiredParkedAtMs < PREPARED_OVERLAP_BOUND_MS) return
         if (awaitingCommitFrameSinceMs != null && preparedPredecessor?.player === retired) {
             // The surface moved, but the successor has not proved a frame. A
             // timeout must still be able to put this exact pipeline back.
@@ -3881,6 +3889,7 @@ class Controller internal constructor(
         retiredPlayer = null
         retiredParkedAtMs = 0L
         if (preparedPredecessor?.player === retired) preparedPredecessor = null
+        preparedVideoSurfaces?.remove(retired)
         retired.release()
         val reopen = preparedRollbackReopen ?: return
         preparedRollbackReopen = null
@@ -3945,6 +3954,14 @@ class Controller internal constructor(
         }
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
+        try {
+            preparedVideoSurfaces?.stage(built.player)
+        } catch (_: Exception) {
+            releaseSuccessor()
+            publishAcknowledgement(preparedLedger.failed())
+            fallBackAfterPreparedFailure()
+            return
+        }
         autoTransfersByPlayer[built.player] = built.autoTransfers
         rendezvousJob?.cancel()
         rendezvousJob = null
@@ -4061,6 +4078,7 @@ class Controller internal constructor(
         // Parked, not chasing. Everything else about this handoff follows from
         // this one assignment being `false`.
         successor.playWhenReady = park.playWhenReady
+        preparedVideoSurfaces?.invalidate(successor)
         successor.seekTo(successorAttachPositionMs(originMs, park.rendezvousFilmMs))
     }
 
@@ -4178,6 +4196,9 @@ class Controller internal constructor(
         if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
             !successorIsBuffered(bufferedThrough, commitFilmMs)
         ) return
+        // A warm output must have rendered before changing visibility. No
+        // prepared output or callback from an old Surface can satisfy this.
+        if (preparedVideoSurfaces != null && !preparedVideoSurfaces.ready(successor, successor.currentPosition)) return
         // The ledger enters its unabortable state before anything moves. From
         // here the viewer is looking at this pipeline, so a Back press or a
         // seek in the seconds before its first frame must settle the commit
@@ -4313,22 +4334,24 @@ class Controller internal constructor(
         retiredParkedAtMs = monotonicNowMs()
         retiredPlayer = previous
         preparedPredecessor = predecessor
-        // The commit is owed a `first_frame_unix_ms`, and the honest source is
-        // the successor's own first render — which cannot have happened yet,
-        // because a prepared successor has no surface and a surfaceless player
-        // renders nothing. So the acknowledgement waits for
-        // `onRenderedFirstFrame` on the pipeline that is now the incumbent;
-        // [pollPreparedReplacement] fails and takes the ordinary reopen if no
-        // frame arrives within [PREPARED_COMMIT_FRAME_BOUND_MS]. Only this
-        // callback may claim that a successor actually rendered.
+        preparedVideoSurfaces?.expose(successor) {
+            if (player === successor && awaitingCommitFrameSinceMs != null && presentationForeground &&
+                !controlObservationIsClosed) settleCommitOnFirstFrame(System.currentTimeMillis(), warmPresented = true)
+        }
+        // Warm outputs settle only after their visibility transaction is
+        // actually presented. A hidden render is readiness, never delivery.
+        // The ordinary older-platform path still waits for the successor's
+        // onRenderedFirstFrame after PlayerView moves its surface. Both paths
+        // keep the finite first-frame and physical-overlap budgets.
     }
 
     /**
      * The successor rendered its first frame after taking the surface, so the
      * commit can name the moment the viewer actually saw it.
      */
-    private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
+    private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long, warmPresented: Boolean = false) {
         if (awaitingCommitFrameSinceMs == null) return
+        if (preparedVideoSurfaces != null && !warmPresented) return
         awaitingCommitFrameSinceMs = null
         preparedCommitFrameBudget = null
         preparedSwitch.noteFirstFrame(monotonicNowMs())
@@ -4402,6 +4425,7 @@ class Controller internal constructor(
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player
         mediaSession.setPlayer(predecessor.player)
+        preparedVideoSurfaces?.expose(predecessor.player) { collectRetiredPlayer() }
         return true
     }
 
@@ -4486,6 +4510,7 @@ class Controller internal constructor(
         rendezvousJob = null
         rendezvous = null
         rendezvousSeekObserved = false
+        preparedVideoSurfaces?.remove(successor)
         successor.release()
         // Nothing to restore. The incumbent was never stopped: the rendezvous
         // is the successor waiting for it, not the other way round, so a

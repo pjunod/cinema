@@ -1410,24 +1410,25 @@ private fun PlayerContent(
         AndroidView(
             factory = {
                 PlayerView(it).apply {
-                    player = controller.player
+                    player = controller.presentationPlayer
                     useController = false
                     resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                     setShutterBackgroundColor(android.graphics.Color.BLACK)
+                    // Warm promotion has already rendered offscreen; it must
+                    // not wait for a second first-frame event to drop a shutter.
+                    setKeepContentOnPlayerReset(controller.keepsWarmVideoOutputs)
                     screenOn.sync(this)
                     playerView = this
                 }
             },
-            // `controller.player` is read here as well as in `factory` so a
-            // committed prepared replacement re-attaches the surface to the
-            // successor: the read makes this recompose when the instance
-            // changes, and `PlayerView.setPlayer` moves the surface across.
+            // The presentation delegate follows the actual player for cues
+            // and tracks. Warm outputs keep their application-owned Surfaces;
+            // older platforms use PlayerView's ordinary SurfaceView binding.
             update = { view ->
-                if (view.player !== controller.player) {
-                    view.player = controller.player
-                    // The surface has moved, so the player it moved off can go.
-                    // This is the only place that knows that; the controller
-                    // parks the predecessor and waits to be told.
+                if (view.player !== controller.presentationPlayer) {
+                    view.player = controller.presentationPlayer
+                    // Collection waits for warm exposure and first-frame
+                    // ownership when either receipt is still outstanding.
                     controller.collectRetiredPlayer()
                 }
                 screenOn.sync(view)

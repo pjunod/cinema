@@ -2226,3 +2226,38 @@ under the unchanged 90-second, 128-receipt and 128 KiB bounds. Web regressions
 cover batching, first presentation and disposal-before-reload ordering.
 Pinned compilation and normal hooks apply; these tests are authored and
 remain deferred until the final review and fast lane.
+
+
+### 10.63 Android keeps application-owned warm video outputs
+
+Android API 35 and newer now stage the successor on its own SurfaceControl
+child beneath the existing PlayerView SurfaceView. The SurfaceView's control
+is used only as a parent; visibility, geometry and lifetime changes apply to
+application-owned children. PlayerView receives a presentation delegate for
+tracks and cues, so changing its player does not rebind either decoder output.
+The two-output bound applies across preparation, promotion and rollback.
+
+Actual output-specific rendered-frame evidence and sample time must match
+the parked rendezvous before promotion. A visibility transaction's presented
+callback then settles the warm commit. A hidden rendered frame, an old seek,
+a removed output, or a later rollback cannot satisfy that receipt. The
+predecessor keeps its Surface until settlement; rollback changes visibility
+on the retained output. Sample pixel aspect ratio survives geometry changes.
+Surface destruction drains owned controls, clears decoder bindings and
+invalidates outstanding exposure receipts. Release and failed preparation
+also drain owned controls. Existing pause, transport and finite physical
+12-second overlap ownership still apply.
+
+The platform boundary is an actual API dependency, not qualification status:
+[transaction completion](https://developer.android.com/reference/android/view/SurfaceControl.Transaction#addTransactionCompletedListener(java.util.concurrent.Executor,%20java.util.function.Consumer))
+reports presentation starting at API 35. A committed callback only reports
+readiness for presentation. Older systems retain their ordinary handoff;
+this implementation makes no continuity claim for that path. The
+[SurfaceView parent contract](https://developer.android.com/reference/android/view/SurfaceView#getSurfaceControl())
+forbids mutating the SurfaceView's own control. Physical screen, audio,
+HDR/tunneling, PiP and older-Android qualification remain open.
+
+Production and regression-source compilation passed. Authored receipt
+regressions cover hidden rendering, rollback overtaking exposure, seek and
+surface recreation, stale callbacks and the two-output bound. Unit execution
+remains deferred until final main-readiness review and the fast lane.
