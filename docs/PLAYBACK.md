@@ -136,7 +136,7 @@ one.
 | `web.hls-transport` | Native HLS vs hls.js | Native capability counts only with WebKit's playback-target API, or when hls.js/MSE is unavailable. Even on Safari, native HLS is reserved for copied HEVC; other HLS uses hls.js so plurx keeps its controls and timeline. | Node native/MSE matrix |
 | `web.manual-quality` | Force and session height | Cold Auto omits height unless a burn/refused remux must preserve a direct/remux resolution promise. Once Auto knows the active rung, later transcode opens carry it across seeks and track changes. Original and `nomse` preserve source height; every numbered choice requests its server rung. | Node force/height matrix |
 | `web.auto-rung` | Auto transcode rung | The menu and controller consume the source-filtered server ladder. Every 5 s Auto samples hls.js bandwidth, runway, stalls, and server speed; emergencies jump directly to the highest sustainable lower rung, while voluntary moves pay the 60 s dwell and restart-cost gates. Upgrades move one rung, never exceed the player height, and remain pinned across later session opens. | Node Auto-policy matrix |
-| `web.compatibility-fallback` | Rejection to rescue | A direct/remux media rejection before real playback gets one H.264/AAC transcode. A transcode failure, a repeated failure, established playback, or an hls.js network failure does not loop into another encode. | Node fallback matrix |
+| `web.compatibility-fallback` | Rejection to rescue | Direct/progressive media rejection before real playback gets one H.264/AAC transcode. Native HLS first waits for current master/child readiness, then allows one same-session reload; persistent rejection requires a current compatible encode candidate and keeps ambiguous causes unverified. A transcode failure, a repeated failure, established playback, or an hls.js network failure does not loop into another encode. | Node fallback matrix |
 | `web.hdr-subtitle-guard` | Burn-only subtitle on HDR | PGS, VobSub, and styled text require the SDR burn pipeline. While HDR is on the wire, the selection is refused with a visible notice and the current stream is untouched; SDR playback may still burn it. | Node subtitle/dynamic-range matrix |
 | `web.decode-rescue` | Accepted-but-choppy original | On Auto, after ≥150 s and ≥15 lost frames at ≥6/min, switch the copy/direct route to transcode. Pipeline latency is diagnostic only. Unless buffer quota explains the loss, remember the exact versioned media-load identity. | Node threshold/boundary unit |
 | `web.learned-decode-limit` | Remembered client evidence to Auto route | Only an exact v2 codec/profile/resolution/bit-depth/dynamic-range/bitrate-bucket match may steer Auto to transcode. Legacy broad keys are discarded; Original, exact forget, and the weekly re-test restore the ordinary route. An HDR-to-SDR result names the learned client-performance cause and range loss. | Node identity, applicability, attribution, and reset units |
@@ -999,6 +999,29 @@ Three details, each load-bearing:
     limit, and its completion expectation is bounded with it: an `init.mp4`
     larger than the bound returns every byte that was asked for, and is
     reported as a skipped inspection rather than as a truncated response.
+
+**Native startup and web bootstrap candidate (2026-10-02).** Native web HLS
+assigns its source only after bounded current master/selected-child readiness.
+Temporary HTTP publication failures retain the same preparation and do not
+consume decode rescue. The episode shares the 40-second cold/20-second seek
+attachment clock, 16 application manifest sends, and 1/2/4-second backoff.
+Persistent pre-presentation rejection spends one same-session reload, then
+verifies a current compatible encode route before the existing fallback.
+Init transfer is not sample decode proof; ambiguous refusal is labelled
+unverified and learns no decoder limit. Pause, replacement and retirement
+retain exact attachment/execution/intent ownership and the original deadline.
+
+The candidate `WebFixedHlsV1` policy freezes the explicit web transport class
+at create. Accepted explicit demand uses ceil(32 seconds × rate), clamped to
+32–124 media seconds, for the first snapshot. At the ceiling, whole-cut
+rounding selects the largest in-grant endpoint within one maximum segment
+of the target, rather than exposing the first tiny object. Existing steady production and
+scratch bounds remain intact; all eligible completed endpoints publish while
+reserve grows. Only actor-proved presentation promotes ActiveLowReserve, which
+has no renewed startup deadline. Prefix removal retains at least 48 seconds
+in a non-final snapshot. Unknown transports and legacy demand keep the
+conservative policy. This is pending transport qualification, not a deployed
+latency guarantee; see [the decision receipt](streaming/PLAYBACK-STARTUP-LATENCY-M2-20261002.json).
 
 **Rolling playlist contract (2026-09-15).** Retention removes old segment
 entries, so a served rolling movie playlist cannot promise append-only EVENT

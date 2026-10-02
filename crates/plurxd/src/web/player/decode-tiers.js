@@ -1646,7 +1646,8 @@ function parseSegTimes(text){
 }
 async function refreshSegTimes(){
   const p=PLAYER;
-  if(!playbackOwnsAttachedMedia(p) || !p.segSrc || p.hls) return;
+  if(!playbackOwnsAttachedMedia(p) || !p.segSrc || p.hls
+    ||(p.hlsStartup?.transport==='native'&&p.hlsStartup.state!=='presenting')) return;
   const source=p.segSrc, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&p.segSrc===source&&p.mediaAttachment===attachment;
   const now=performance.now();
