@@ -921,7 +921,52 @@ impl vodgen::Sink for RenditionSink {
         .map_err(|error| {
             io::Error::other(format!("reserved media verification failed: {error}"))
         })?;
-        verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
+        let retained = {
+            let manifest = self.rendition.manifest.lock().await;
+            if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            manifest
+                .state(entry)
+                .filter(|state| state.is_materialized())
+                .map(|state| state.bytes())
+        };
+        let planned = self.rendition.plan.entry(entry).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "publication is outside the media plan",
+            )
+        })?;
+        let retain_reserved = retained.is_some()
+            && dependencies.iter().any(|dependency| {
+                dependency.from_tick < planned.end_ticks()
+                    && planned.start_ticks < dependency.through_tick
+            });
+        if retain_reserved {
+            // A restarted encoder may traverse a cached interval with different
+            // rate-control history. Keep its original physical artifact, never
+            // publish these new bytes under the reserved URI/digest.
+            let expected = retained.expect("materialized reserved interval");
+            let cached = super::vod_serve_serve::read_quality_artifact(
+                &self
+                    .rendition
+                    .dir
+                    .path()
+                    .join(segment_name(u64::from(entry))),
+                expected.min(plurx_core::playback::continuous_quality::MAX_QUALITY_PINNED_BYTES),
+            )
+            .await
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if cached.len() as u64 != expected {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "reserved artifact differs from its manifest",
+                ));
+            }
+            verify_reserved_publication(&self.rendition.plan, entry, &cached, &dependencies)?;
+        } else {
+            verify_reserved_publication(&self.rendition.plan, entry, &bytes, &dependencies)?;
+        }
         if self
             .rendition
             .source
@@ -936,6 +981,22 @@ impl vodgen::Sink for RenditionSink {
                 cause.clone(),
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
+        }
+        if retain_reserved {
+            {
+                let _manifest = self.rendition.manifest.lock().await;
+                if self.rendition.gen_epoch.load(Relaxed) != self.epoch {
+                    return Err(io::Error::from(io::ErrorKind::NotFound));
+                }
+                self.rendition.clear_demand(entry);
+            }
+            drop(dependency_guard);
+            // This is process progress through existing bytes, not a fresh
+            // publication, working-set charge or marker-prewarm credit.
+            self.rendition.slot.produced(entry).await;
+            self.shared.pool.satisfy(&self.rendition.key, entry);
+            self.rendition.kick();
+            return Ok(());
         }
         let len = bytes.len() as u64;
         {

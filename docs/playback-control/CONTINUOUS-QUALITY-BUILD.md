@@ -3900,3 +3900,39 @@ checks a running target inside the ordinary restart horizon. Pinned
 workspace/all-target compilation of the scheduling change passed in 21.99s;
 the extended wait-pool test source is compiling through the normal hook. No
 unit tests executed. Runtime qualification remains open.
+
+
+### 10.130 Retain verified reserved artifacts when an encoder traverses them
+
+Source `6b524dc4d` passed its normal hook and built on Linux in 3m17s.
+The warmed sequential experiment reached the return to 1080p, but failed
+continuity with a 516.6 ms callback gap. That failed receipt remains failed.
+A targeted transport probe initially used an invalid empty quality-cycle;
+its setup error was preserved, and the corrected probe used plain playback
+as its precondition rather than repeating the sequential pair.
+
+The corrected probe parked the presentation clock through pause and retained
+the pending 720p target, which became Ready while paused. It then stalled at
+15.9 s and destructively reopened, so rapid-change qualification failed and
+the pending-quality cold seek was not reached. The first causal server fault
+was `regenerated media differs from its reserved immutable artifact`: a
+restarted encoder traversed an already cached interval with a different
+rate-control history, and the guard correctly refused replacement bytes.
+
+The sink now retains an existing materialized artifact only when its cached
+bytes reverify against the exact live reservations and manifest byte count.
+Those original bytes stay at the original URI. Traversing them advances the
+process without another publication identity, marker credit or working-set
+charge. New publication still verifies incoming bytes; missing or corrupted
+reserved media fails closed. Source, engine, epoch and exact-key reservation
+fences remain enforced. Authored actual sink / SQLite regression
+`restarted_sink_keeps_verified_reserved_bytes_and_refuses_corruption` checks
+changed regeneration leaves the original bytes, accounting and publication
+identity intact, then checks corruption and deletion are refused. Pinned
+workspace/all-target compilation passed in 17.16s; no unit tests executed.
+
+The failed targeted case nevertheless completed a narrower End experiment:
+owned FFmpeg children were absent at the immediate, one-, three- and
+five-second samples, with the same daemon PID and executable identity verified
+at every sample. This is process-census cleanup evidence, not physical audio,
+display or queue-retirement qualification. The complete case remains failed.

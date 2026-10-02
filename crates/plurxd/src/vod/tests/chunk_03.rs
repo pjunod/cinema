@@ -3769,6 +3769,56 @@
         assert!(serve.frontier_ms("sess-x").await.is_none());
     }
 
+    #[tokio::test]
+    async fn restarted_sink_keeps_verified_reserved_bytes_and_refuses_corruption() {
+        use crate::vodgen::Sink;
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger,
+            QualityInterval, QualityOperation, QualityTransitionRequest};
+        let base = crate::test_tempdir().expect("reserved traversal");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(&store, "reserved-traversal", &generation).await;
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        let original = b"original-immutable-media";
+        sink.materialize(0, original.to_vec()).await.expect("first publication");
+        let entry = rendition.plan.entry(0).expect("entry");
+        let interval = QualityInterval { artifact_id: hex::encode(Sha256::digest(original)),
+            rendition_id: rendition.key.clone(), timescale: rendition.timescale,
+            from_tick: entry.start_ticks, through_tick: entry.end_ticks(), byte_length: original.len() as u64 };
+        let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(),
+            lifetime_id: "reserved-traversal".into(), attachment_id: uuid::Uuid::new_v4().to_string(),
+            family_id: "c".repeat(64) };
+        let mut ledger = QualityLedger::new(generation.clone(), 1, attachment.clone()).expect("ledger");
+        let transaction = uuid::Uuid::new_v4().to_string();
+        let mut request = QualityTransitionRequest { version: 1, generation, control_epoch: 1,
+            sequence: 1, attachment, transaction_id: transaction.clone(),
+            operation: QualityOperation::Prepare { intent_revision: 1, target_rendition_id: rendition.key.clone() } };
+        ledger.apply(&request, now_ms()).expect("prepare");
+        ledger.ready(&transaction, vec![interval.clone()]).expect("ready");
+        request.sequence = 2; request.operation = QualityOperation::Scheduled { intervals: vec![interval.clone()] };
+        ledger.apply(&request, now_ms()).expect("scheduled");
+        assert!(store.write_quality_ledger(&ledger, "node-a", 0, now_ms()).await.expect("reserve"));
+        assert_eq!(store.quality_reserved_intervals(&rendition.key).await.expect("dependencies"), vec![interval]);
+        let charged = serve.shared.working_set.load(Relaxed);
+        let publication = rendition.publication_serial.load(Relaxed);
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        restarted.materialize(0, b"different-regenerated-media".to_vec()).await.expect("traverse cached reserved interval");
+        let path = rendition.dir.path().join(segment_name(0));
+        assert_eq!(tokio::fs::read(&path).await.expect("original bytes"), original);
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+        assert_eq!(rendition.publication_serial.load(Relaxed), publication, "no false publication credit");
+        tokio::fs::write(&path, vec![0; original.len()]).await.expect("corrupt cached bytes");
+        assert!(restarted.materialize(0, original.to_vec()).await.is_err(), "corruption cannot be repaired under a live reservation");
+        tokio::fs::remove_file(&path).await.expect("remove cached bytes");
+        assert!(restarted.materialize(0, original.to_vec()).await.is_err(), "a missing reserved artifact cannot be silently replaced");
+    }
+
     #[test]
     fn reserved_publication_refuses_changed_bytes_before_materialization() {
         let grid = plurx_core::transcode::VodFrameGrid::new(24_000, 1_001).expect("grid");
