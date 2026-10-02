@@ -4,6 +4,49 @@ use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+/// Actual staged listeners and their spawned connections survive Client handoff.
+#[derive(Default)]
+pub(crate) struct StartupListenerOwner {
+    listeners: Vec<(
+        tokio::task::JoinHandle<()>,
+        axum_server::Handle<std::net::SocketAddr>,
+    )>,
+}
+
+impl StartupListenerOwner {
+    pub(crate) fn track(
+        &mut self,
+        task: tokio::task::JoinHandle<()>,
+        handle: axum_server::Handle<std::net::SocketAddr>,
+    ) {
+        self.listeners.push((task, handle));
+    }
+
+    pub(crate) fn stop_admitting(&self) {
+        for (_, handle) in &self.listeners {
+            handle.graceful_shutdown(None);
+        }
+    }
+
+    pub(crate) async fn finish(&mut self) -> Result<(), crate::Error> {
+        for (_, handle) in &self.listeners {
+            // Durable work has drained before residual idle transports close.
+            handle.shutdown();
+        }
+        for (task, handle) in &mut self.listeners {
+            task.await
+                .map_err(|error| crate::Error::Error(error.to_string().into()))?;
+            // Server shutdown may return before its connection tasks. The
+            // actual watcher count, including bounded TLS handshakes, is the fence.
+            while handle.connection_count() != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        self.listeners.clear();
+        Ok(())
+    }
+}
+
 pub(crate) struct StartupStorageOwner {
     enabled: bool,
     cleanup: Vec<Pin<Box<dyn Future<Output = ()> + Send>>>,
@@ -289,6 +332,158 @@ where
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn k06_handed_off_tls_drain_retains_lease_until_real_writer_and_connections_stop() {
+        use crate::store::state_machine::sqlite::writer::WriterRequest;
+        use std::fs::OpenOptions;
+        use std::net::TcpListener;
+        use std::time::Duration;
+        let root = std::env::temp_dir().join(format!("k06-client-drain-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir(&root).unwrap();
+        let lease_path = root.join("daemon.lock");
+        let lease = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lease_path)
+            .unwrap();
+        lease.lock().unwrap();
+        let reserve = || {
+            TcpListener::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+        };
+        let raft = reserve();
+        let mut api = reserve();
+        while api == raft {
+            api = reserve();
+        }
+        let config = crate::NodeConfig {
+            node_id: 1,
+            nodes: vec![crate::Node {
+                id: 1,
+                addr_raft: raft.to_string(),
+                addr_api: api.to_string(),
+            }],
+            data_dir: root.join("db").to_string_lossy().into_owned().into(),
+            listen_addr_api: "127.0.0.1".into(),
+            listen_addr_raft: "127.0.0.1".into(),
+            secret_raft: "k06-drain-raft-secret".into(),
+            secret_api: "k06-drain-api-secret".into(),
+            tls_api: Some(crate::tls::ServerTlsConfig::TlsAutoCertificates),
+            tls_raft: Some(crate::tls::ServerTlsConfig::TlsAutoCertificates),
+            ..Default::default()
+        };
+        // This private factory fixture proves resource ownership, not clock
+        // admission. No observer, fabricated sample or promotion is supplied.
+        let client = crate::start::start_node_inner::<crate::empty::Empty>(
+            Box::new(config),
+            None,
+            crate::start::StartupPhase::ClockObservation,
+        )
+        .await
+        .unwrap();
+        client.wait_until_healthy_db().await;
+        assert!(client.has_retained_startup_resources());
+        let state = client.inner.state.as_ref().unwrap();
+        let wal = state.raft_db.wal_status.clone();
+        let membership = client
+            .local_db_raft_metrics()
+            .unwrap()
+            .membership_snapshot();
+        let http = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .unwrap();
+        assert!(
+            http.get(format!("https://{api}/ping"))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        // Real socket accepted by the TLS listener; its handshake is unfinished.
+        let pending_tls = tokio::net::TcpStream::connect(api).await.unwrap();
+        let (entered, accepted) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = tokio::sync::oneshot::channel();
+        state
+            .raft_db
+            .sql_writer
+            .send_async(WriterRequest::HoldForStartupDrain {
+                entered,
+                release: release_rx,
+            })
+            .await
+            .unwrap();
+        accepted.await.unwrap();
+        let (done, drained) = tokio::sync::oneshot::channel();
+        let cleanup_client = client.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_client.shutdown_retained_startup().await.unwrap();
+            drop(lease);
+            let _ = done.send(());
+        });
+        let requester = tokio::spawn(async move { cleanup.await });
+        requester.abort();
+        assert!(requester.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if tokio::net::TcpStream::connect(api).await.is_err()
+                    && tokio::net::TcpStream::connect(raft).await.is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let probe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lease_path)
+            .unwrap();
+        assert!(
+            probe.try_lock().is_err(),
+            "directory lease released while accepted writer work is held"
+        );
+        assert_eq!(
+            client
+                .local_db_raft_metrics()
+                .unwrap()
+                .membership_snapshot()
+                .members,
+            membership.members,
+            "cleanup must not remove membership"
+        );
+        release.send(()).unwrap();
+        drop(pending_tls);
+        tokio::time::timeout(Duration::from_secs(15), drained)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            wal.snapshot().state,
+            hiqlite_wal::WalRuntimeState::Stopped,
+            "WAL must be terminal before lease release"
+        );
+        assert!(
+            state.raft_db.sql_writer.is_disconnected(),
+            "SQL writer must be terminal before lease release"
+        );
+        assert!(!client.has_retained_startup_resources());
+        probe.try_lock().unwrap();
+        let _raft = TcpListener::bind(raft).unwrap();
+        let _api = TcpListener::bind(api).unwrap();
+        drop(probe);
+        drop(http);
+        drop(client);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn k06_cancelled_wal_constructor_retains_real_writer_until_drained() {
         use crate::store::state_machine::sqlite::TypeConfigSqlite;

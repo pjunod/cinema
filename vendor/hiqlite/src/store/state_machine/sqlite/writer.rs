@@ -40,6 +40,11 @@ pub enum WriterRequest {
     MetadataApplied((Option<LogId<NodeId>>, oneshot::Sender<()>)),
     Backup(BackupRequest),
     Shutdown(oneshot::Sender<()>),
+    #[cfg(test)]
+    HoldForStartupDrain {
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    },
     #[allow(clippy::upper_case_acronyms)]
     RTT(RTTRequest),
 }
@@ -794,6 +799,11 @@ CREATE TABLE IF NOT EXISTS _metadata
                 WriterRequest::Shutdown(ack) => {
                     shutdown_ack = Some(ack);
                     break;
+                }
+                #[cfg(test)]
+                WriterRequest::HoldForStartupDrain { entered, release } => {
+                    let _ = entered.send(());
+                    let _ = release.blocking_recv();
                 }
             }
         }
