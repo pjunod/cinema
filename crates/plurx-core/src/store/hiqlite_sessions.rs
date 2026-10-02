@@ -3524,6 +3524,37 @@ impl MediaSessionStore for HiqliteAuthStore {
             == 1)
     }
 
+    async fn write_terminal_quality_transition(
+        &self,
+        expected: &crate::store::QualityLedgerSnapshot,
+        request: &crate::playback::continuous_quality::QualityTransitionRequest,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>
+    {
+        let reduced = crate::store::quality_ledger::reduce_terminal_write(
+            expected,
+            request,
+            owner_node_id,
+            now_ms,
+        )?;
+        let applied = timeout_store(self.client().execute(
+            crate::store::quality_ledger::TERMINAL_WRITE,
+            params!(
+                request.generation.as_str(),
+                owner_node_id,
+                reduced.epoch,
+                expected.revision,
+                request.attachment.attachment_id.as_str(),
+                reduced.json,
+                now_ms,
+                reduced.previous_json
+            ),
+        ))
+        .await?;
+        Ok((applied == 1).then_some(reduced.receipt))
+    }
+
     async fn request_quality_cancellation(
         &self,
         receipt: &crate::store::QualityCancellationReceipt,

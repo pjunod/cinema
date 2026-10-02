@@ -36035,6 +36035,35 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
             vec![audio.clone()],
             "{backend}"
         );
+        let terminal_snapshot = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal baseline")
+            .expect("ledger");
+        store
+            .end_media_session(session, "deleted", takeover_at + 3)
+            .await
+            .expect("End before disposal acknowledgement");
+        let illegal = request(
+            &ledger,
+            2,
+            QualityOperation::Prepare {
+                intent_revision: 2,
+                target_rendition_id: "f".repeat(64),
+            },
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &illegal,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .is_err(),
+            "{backend}: End cannot restart preparation"
+        );
         let dispose_audio = request(
             &ledger,
             2,
@@ -36046,10 +36075,92 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
             .apply(&dispose_audio, takeover_at + 3)
             .expect("named AAC disposal");
         assert!(
-            store
+            !store
                 .write_quality_ledger(&ledger, "replacement-node", 4, takeover_at + 3)
                 .await
-                .expect("persist AAC disposal"),
+                .expect("active writer after End"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "wrong-owner",
+                    takeover_at + 3
+                )
+                .await
+                .expect("wrong terminal owner")
+                .is_none(),
+            "{backend}"
+        );
+        let mut forged = terminal_snapshot.clone();
+        forged
+            .ledger
+            .reserve_shared_audio(
+                &[plurx_core::playback::continuous_quality::QualityInterval {
+                    artifact_id: "e".repeat(64),
+                    rendition_id: audio.rendition_id.clone(),
+                    timescale: 48000,
+                    from_tick: 1,
+                    through_tick: 2,
+                    byte_length: 1,
+                }],
+            )
+            .expect("forged snapshot remains structurally valid");
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &forged,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 3
+                )
+                .await
+                .expect("compare exact old JSON")
+                .is_none(),
+            "{backend}"
+        );
+        let terminal_receipt = store
+            .write_terminal_quality_transition(
+                &terminal_snapshot,
+                &dispose_audio,
+                "replacement-node",
+                takeover_at + 3,
+            )
+            .await
+            .expect("late terminal disposal")
+            .expect("terminal CAS");
+        let settled = store
+            .quality_ledger(generation)
+            .await
+            .expect("terminal ledger")
+            .expect("persisted");
+        assert_eq!(
+            terminal_receipt,
+            store
+                .write_terminal_quality_transition(
+                    &settled,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("terminal replay")
+                .expect("same receipt"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .write_terminal_quality_transition(
+                    &terminal_snapshot,
+                    &dispose_audio,
+                    "replacement-node",
+                    takeover_at + 4
+                )
+                .await
+                .expect("stale terminal revision")
+                .is_none(),
             "{backend}"
         );
         assert!(
@@ -36063,12 +36174,12 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
 
         assert_eq!(
             store
-                .media_session_route_for_playback(user.id, "continuous-ledger")
+                .media_session_route(session)
                 .await
-                .expect("current")
-                .expect("incumbent")
-                .incarnation_id,
-            generation,
+                .expect("terminal route")
+                .expect("retained receipt owner")
+                .state,
+            "ended",
             "{backend}"
         );
     })

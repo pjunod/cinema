@@ -2070,3 +2070,21 @@ preserving the original intent/sequence and pins, and refusing a renewed window
 after lost-append cancellation. Source and normal-hook compilation apply;
 unit execution remains deferred. Production append acknowledgements and
 presentation integration remain unfinished.
+
+
+### 10.56 Late transport facts after End
+
+End does not prove that a client's buffered fragments were disposed. The
+schedule route now accepts bounded late completed append, presentation,
+cancellation and named disposal facts under the exact terminal generation,
+owner epoch and attachment. It cannot Prepare, renew readiness or schedule
+new media. A distinct SQLite/Hiqlite CAS reducer applies only those operations
+and compares the old canonical ledger JSON as well as its revision: even a
+forged snapshot cannot introduce terminal dependencies. Ordinary active
+reservation writes remain refused after End.
+
+The existing backend contract covers End winning before shared AAC disposal,
+wrong-owner refusal, forged-snapshot refusal, exact replay and stale revision.
+This closes the acknowledgement race without interpreting End as absence of
+client media. Pinned compilation and normal hooks apply without unit execution.
+Client disposal and presentation acknowledgements remain unfinished.

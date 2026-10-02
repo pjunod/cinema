@@ -2824,6 +2824,43 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn write_terminal_quality_transition(
+        &self,
+        expected: &crate::store::QualityLedgerSnapshot,
+        request: &crate::playback::continuous_quality::QualityTransitionRequest,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>
+    {
+        let reduced = crate::store::quality_ledger::reduce_terminal_write(
+            expected,
+            request,
+            owner_node_id,
+            now_ms,
+        )?;
+        let generation = request.generation.clone();
+        let attachment = request.attachment.attachment_id.clone();
+        let revision = expected.revision;
+        let owner = owner_node_id.to_owned();
+        self.with_conn(move |conn| {
+            let applied = conn.execute(
+                crate::store::quality_ledger::TERMINAL_WRITE,
+                params![
+                    generation,
+                    owner,
+                    reduced.epoch,
+                    revision,
+                    attachment,
+                    reduced.json,
+                    now_ms,
+                    reduced.previous_json
+                ],
+            )?;
+            Ok((applied == 1).then_some(reduced.receipt))
+        })
+        .await
+    }
+
     async fn request_quality_cancellation(
         &self,
         receipt: &crate::store::QualityCancellationReceipt,

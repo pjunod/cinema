@@ -29,6 +29,64 @@ pub(crate) const WRITE: &str = "INSERT INTO continuous_quality_ledgers
       AND continuous_quality_ledgers.attachment_id = $5
       AND continuous_quality_ledgers.owner_epoch <= $3";
 
+pub(crate) const TERMINAL_WRITE: &str = "UPDATE continuous_quality_ledgers SET
+    owner_node_id = $2, owner_epoch = $3, revision = $4 + 1, ledger_json = $6, updated_at_ms = $7
+    WHERE generation = $1 AND revision = $4 AND attachment_id = $5 AND owner_epoch <= $3
+      AND ledger_json = $8
+      AND EXISTS (SELECT 1 FROM media_sessions parent WHERE parent.incarnation_id = $1
+        AND parent.owner_node_id = $2 AND parent.owner_epoch = $3 AND parent.state = 'ended')";
+
+pub(crate) struct TerminalQualityWrite {
+    pub json: String,
+    pub previous_json: String,
+    pub epoch: i64,
+    pub receipt: crate::playback::continuous_quality::QualityTransitionReceipt,
+}
+
+/// Terminal writes accept only client-completed facts for existing immutable
+/// dependencies. SQL additionally compares the exact old ledger, so even a
+/// forged snapshot cannot introduce a terminal reservation.
+pub(crate) fn reduce_terminal_write(
+    expected: &QualityLedgerSnapshot,
+    request: &crate::playback::continuous_quality::QualityTransitionRequest,
+    owner: &str,
+    now_ms: i64,
+) -> Result<TerminalQualityWrite, StoreError> {
+    use crate::playback::continuous_quality::QualityOperation;
+    if expected.revision <= 0
+        || !expected.ledger.valid()
+        || !request.valid()
+        || matches!(
+            request.operation,
+            QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
+        )
+    {
+        return Err(StoreError::Task(
+            "terminal quality writes require existing transport facts".into(),
+        ));
+    }
+    let mut ledger = expected.ledger.clone();
+    if ledger.control_epoch < request.control_epoch {
+        ledger
+            .adopt_epoch(request.control_epoch)
+            .map_err(|error| StoreError::Task(error.to_string()))?;
+    }
+    let receipt = ledger
+        .apply(request, now_ms)
+        .map_err(|error| StoreError::Task(error.to_string()))?;
+    let json = encode_write(&ledger, owner, expected.revision, now_ms)?;
+    let previous_json = serde_json::to_string(&expected.ledger)
+        .map_err(|error| StoreError::Task(error.to_string()))?;
+    let epoch =
+        i64::try_from(ledger.control_epoch).map_err(|error| StoreError::Task(error.to_string()))?;
+    Ok(TerminalQualityWrite {
+        json,
+        previous_json,
+        epoch,
+        receipt,
+    })
+}
+
 pub(crate) const COLUMNS: &str = "owner_node_id, owner_epoch, revision, ledger_json, updated_at_ms";
 
 #[derive(Clone, Debug, PartialEq, Eq)]

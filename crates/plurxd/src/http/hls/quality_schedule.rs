@@ -97,14 +97,30 @@ async fn quality_schedule_routed(
     {
         return StatusCode::CONFLICT.into_response();
     }
-    if route.state != "active" || route.lease_expires_at_ms <= unix_ms() {
-        return StatusCode::GONE.into_response();
-    }
-    if let Some(refusal) = library_channel_control_refusal(state, &route).await {
-        return refusal;
-    }
-    if let Some(refusal) = control_owner_refusal(&route, Some(request.control_epoch)) {
-        return refusal;
+    let terminal = route.state == "ended";
+    if terminal {
+        use plurx_core::playback::continuous_quality::QualityOperation;
+        if request.window.is_some()
+            || request.frontier.is_some()
+            || request.transition.as_ref().is_none_or(|transition| {
+                matches!(
+                    transition.operation,
+                    QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
+                )
+            })
+        {
+            return StatusCode::GONE.into_response();
+        }
+    } else {
+        if route.state != "active" || route.lease_expires_at_ms <= unix_ms() {
+            return StatusCode::GONE.into_response();
+        }
+        if let Some(refusal) = library_channel_control_refusal(state, &route).await {
+            return refusal;
+        }
+        if let Some(refusal) = control_owner_refusal(&route, Some(request.control_epoch)) {
+            return refusal;
+        }
     }
     if state.media_sessions.admit_control(session).is_err() {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
@@ -124,6 +140,9 @@ async fn quality_schedule_routed(
             Ok(response) => response,
             Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
         };
+    }
+    if terminal {
+        return terminal_quality_schedule(state, &route, &request).await;
     }
     let remaining = deadline_unix_ms.saturating_sub(unix_ms()).min(12_000);
     if remaining <= 0 {
@@ -148,4 +167,58 @@ async fn quality_schedule_routed(
             StatusCode::CONFLICT.into_response()
         }
     }
+}
+
+async fn terminal_quality_schedule(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: &QualityScheduleRequest,
+) -> Response {
+    let Some(transition) = &request.transition else {
+        return StatusCode::GONE.into_response();
+    };
+    for _ in 0..4 {
+        let expected = match state.store.quality_ledger(&request.generation).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return StatusCode::GONE.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let receipt = match state
+            .store
+            .write_terminal_quality_transition(
+                &expected,
+                transition,
+                &route.owner_node_id,
+                unix_ms(),
+            )
+            .await
+        {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => continue,
+            Err(_) => return StatusCode::CONFLICT.into_response(),
+        };
+        let snapshot = match state.store.quality_ledger(&request.generation).await {
+            Ok(Some(snapshot)) => snapshot,
+            _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        let reply = crate::vodserve::QualityScheduleResponse {
+            version: 1,
+            generation: request.generation.clone(),
+            control_epoch: request.control_epoch,
+            attachment: request.attachment.clone(),
+            revision: snapshot.revision,
+            receipt: Some(receipt),
+            ledger: snapshot.ledger,
+        };
+        if !reply.valid_for(request) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        let mut response = Json(reply).into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        return response;
+    }
+    StatusCode::CONFLICT.into_response()
 }

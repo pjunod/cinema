@@ -4987,6 +4987,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<bool, StoreError>;
 
+    /// Reduce late completed append/presentation/disposal facts after End.
+    /// Cannot create a ledger, Prepare, schedule new media, or replace old pins.
+    /// The exact old JSON/revision and terminal parent owner fence the write.
+    async fn write_terminal_quality_transition(
+        &self,
+        expected: &QualityLedgerSnapshot,
+        request: &crate::playback::continuous_quality::QualityTransitionRequest,
+        owner_node_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<crate::playback::continuous_quality::QualityTransitionReceipt>, StoreError>;
+
     /// Record independent target cancellation under the exact current owner.
     /// At most 128 receipts belong to a generation. Replays preserve the first
     /// timestamps and outcome; no parent session or cache pin is changed.
