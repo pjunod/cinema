@@ -331,7 +331,12 @@ async fn probe_with_threads(
     // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
     // but that label must not suppress the bounded frame observation.
     if result.luminance_source.as_deref() == Some("none") {
-        if let Some(frame) = probe_first_frame_luminance(path, threads).await {
+        // A failed frame read leaves the stream observation (`none`) in place:
+        // the scan's job is the stream document, and a later probe document
+        // is what earns the file another look.
+        if let Ok(frame) =
+            probe_first_frame_luminance(path, threads, "library scan luminance probe").await
+        {
             apply_frame_luminance(&mut result, &frame);
         }
     }
@@ -345,7 +350,45 @@ async fn probe_with_threads(
     Ok(result)
 }
 
-async fn probe_first_frame_luminance(path: &Path, threads: Option<usize>) -> Option<Value> {
+/// Peak luminance read from the first decoded frame's side data — the only
+/// place an HEVC stream that carries MDCV/CLL as SEI exposes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLuminance {
+    pub max_cll: Option<i64>,
+    pub max_fall: Option<i64>,
+    pub mastering_max_luminance: Option<i64>,
+}
+
+/// The scanner's bounded first-frame luminance read, for a file already in
+/// the catalog: one frame of the first playable video, one thread, the same
+/// 30 s / 256 KiB bounds and the background child class.
+///
+/// `Ok(None)` is an observation — the frame carries no luminance record.
+/// `Err` means the read did not happen (the file could not be opened or
+/// decoded, or the child did not finish), which is not the same claim.
+pub async fn first_frame_luminance(
+    path: &Path,
+    purpose: &'static str,
+) -> Result<Option<FrameLuminance>, ProbeError> {
+    let document = probe_first_frame_luminance(path, Some(1), purpose).await?;
+    Ok(frame_luminance_from(&document))
+}
+
+fn frame_luminance_from(document: &Value) -> Option<FrameLuminance> {
+    let mut observed = ProbeResult::default();
+    apply_frame_luminance(&mut observed, document);
+    (observed.luminance_source.as_deref() == Some("frame")).then_some(FrameLuminance {
+        max_cll: observed.max_cll,
+        max_fall: observed.max_fall,
+        mastering_max_luminance: observed.mastering_max_luminance,
+    })
+}
+
+async fn probe_first_frame_luminance(
+    path: &Path,
+    threads: Option<usize>,
+    purpose: &'static str,
+) -> Result<Value, ProbeError> {
     let output = crate::process::bounded::output(
         ffprobe_bin(),
         &[
@@ -368,14 +411,25 @@ async fn probe_first_frame_luminance(path: &Path, threads: Option<usize>) -> Opt
         ],
         FRAME_LUMINANCE_PROBE_TIMEOUT,
         FRAME_LUMINANCE_PROBE_MAX_BYTES,
-        crate::process::ChildWork::background("library scan luminance probe"),
+        crate::process::ChildWork::background(purpose),
     )
     .await
-    .ok()?;
+    .map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => ProbeError::Spawn(error.to_string()),
+        _ => ProbeError::Transient {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        },
+    })?;
     if !output.status.success() {
-        return None;
+        return Err(ProbeError::Failed {
+            path: path.display().to_string(),
+            code: output.status.code(),
+            reason: probe_failure_reason(&output.stderr),
+        });
     }
-    serde_json::from_slice(&output.stdout).ok()
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| ProbeError::Parse(format!("ffprobe frame json: {error}")))
 }
 
 /// Pure parser over ffprobe JSON — unit-testable without spawning anything.
@@ -1148,6 +1202,39 @@ pub(crate) mod tests {
         assert_eq!(result.max_cll, Some(1000));
         assert_eq!(result.max_fall, Some(400));
         assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn a_catalogued_file_frame_read_reports_only_what_the_frame_carries() {
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "Mastering display metadata",
+                 "max_luminance": "40000000/10000"},
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 2008, "max_average": 612}
+            ]}]})),
+            Some(FrameLuminance {
+                max_cll: Some(2008),
+                max_fall: Some(612),
+                mastering_max_luminance: Some(4000),
+            })
+        );
+        // A frame with only unrelated side data, a zero CLL (which the
+        // scanner ignores) or no frame at all is an observation of nothing.
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "H.26[45] User Data Unregistered SEI message"}
+            ]}]})),
+            None
+        );
+        assert_eq!(
+            frame_luminance_from(&json!({"frames": [{"side_data_list": [
+                {"side_data_type": "Content light level metadata",
+                 "max_content": 0, "max_average": 0}
+            ]}]})),
+            None
+        );
+        assert_eq!(frame_luminance_from(&json!({"frames": []})), None);
     }
 
     #[test]
