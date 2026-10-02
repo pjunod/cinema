@@ -2620,7 +2620,10 @@ mod tests {
             .await;
             assert!(
                 details.iter().any(|detail| {
-                    detail.contains("analysis_requests_result_history")
+                    // The cleanup index is also a covering result-key/target probe.
+                    // Either index bounds this lookup after the append-only upgrade.
+                    (detail.contains("analysis_requests_result_history")
+                        || detail.contains("analysis_requests_result_target_force"))
                         && detail.contains("result_cache_key=?")
                 }),
                 "{name} must probe standalone jobs by result cache key: {details:?}"

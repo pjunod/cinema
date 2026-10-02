@@ -16147,6 +16147,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS live_tv_resource_revision;
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP INDEX IF EXISTS analysis_requests_result_target_force;
              DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
              DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
              DROP INDEX IF EXISTS analysis_requests_one_active_source;
