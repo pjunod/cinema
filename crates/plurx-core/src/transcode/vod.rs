@@ -1050,6 +1050,21 @@ pub fn vod_pipe_args(
             "aac_low".to_owned(),
         ]);
     }
+    if media.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50 {
+        // The verified continuous family promises limited-range BT.709 SDR.
+        // Do not inherit absent container tags from an otherwise valid source:
+        // the encoder and MP4 muxer must publish the explicit output record.
+        args.extend([
+            "-color_primaries".to_owned(),
+            "bt709".to_owned(),
+            "-color_trc".to_owned(),
+            "bt709".to_owned(),
+            "-colorspace".to_owned(),
+            "bt709".to_owned(),
+            "-color_range".to_owned(),
+            "tv".to_owned(),
+        ]);
+    }
     if let Some(index) = args.iter().position(|arg| arg == "-force_key_frames") {
         args[index + 1] = format!("expr:eq(mod(n,{}),0)", grid.frames_per_segment);
     }
@@ -1326,6 +1341,17 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["-level:v", "5.0"]));
         assert!(continuous_args.iter().any(|arg| arg == "-an"));
+        for (option, value) in [
+            ("-color_primaries", "bt709"),
+            ("-color_trc", "bt709"),
+            ("-colorspace", "bt709"),
+            ("-color_range", "tv"),
+        ] {
+            assert!(continuous_args
+                .windows(2)
+                .any(|pair| pair == [option, value]));
+            assert!(!args.iter().any(|argument| argument == option));
+        }
         assert_ne!(continuous_plan.plan_digest(), plan.plan_digest());
         assert_eq!(
             continuous_plan.output_contract().effective_width(),

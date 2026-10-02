@@ -2435,3 +2435,22 @@ uses its server dependency injection to own a remote daemon, isolated data and
 three ephemeral listeners, with Chrome on the Mac connected through an SSH
 tunnel. Its bootstrap uses the same setup, scan and index API sequence. No
 unit suite has run; final review and the single-pass fast lane remain deferred.
+
+
+### 10.72 Production AVC emits its required explicit color record
+
+The isolated Linux probe indexed the fixture and created the continuous parent,
+but family verification refused the AVC init because FFmpeg inherited missing
+source color tags. The continuous envelope already promises limited-range
+BT.709 SDR and verifies that exact `nclx` record; its VOD encoder now explicitly
+sets primaries, transfer, matrix and range on the output. Ordinary VOD recipes
+retain their existing arguments. This sets output signaling, not a new color
+conversion or evidence for arbitrary source color layouts.
+
+The continuous semantic fingerprint advances to `continuous-avc-high50-bt709-v2`
+so old material cannot share the changed immutable encode recipe. The existing
+VOD argument regression now requires all four scoped output values and their
+absence from the ordinary recipe. The strict media verifier is unchanged.
+The failed Linux receipt remains `continuous-chrome-partial-linux.json`; it
+contains no successful continuity claim. Source compilation and the tracked
+hook precede a new exact-source production probe; unit execution is deferred.
