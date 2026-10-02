@@ -16361,6 +16361,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE IF EXISTS library_channel_generations;
              DROP TABLE IF EXISTS library_channels;
              ALTER TABLE transcode_cache_locations DROP COLUMN publication_generation;
+             -- v88 adds this column; leaving it on a stamped-v14 fixture
+             -- makes the actual ordinary upgrade repeat ADD COLUMN.
+             ALTER TABLE offline_packages DROP COLUMN audio_recipe;
              ALTER TABLE offline_packages DROP COLUMN alternate_recipe_hash;
              ALTER TABLE offline_packages DROP COLUMN decoder_recovery_state;
              ALTER TABLE offline_packages DROP COLUMN claim_generation;
