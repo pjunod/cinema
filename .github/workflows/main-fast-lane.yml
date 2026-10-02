@@ -252,6 +252,8 @@ jobs:
         run: |
           scripts/js-check
           git ls-files -z 'crates/plurxd/src/web/*.js' | xargs -0 -n1 node --check
+      - name: Check media preparation and track containment
+        run: node --test tests/web/media-preparation.test.js tests/web/layout-containment.test.js
       # TypeScript's checker over the same rows, against tests/web/
       # tsc-baseline.tsv: the counts must match exactly, so a new or raised
       # diagnostic fails and so does one that fell without the baseline being
