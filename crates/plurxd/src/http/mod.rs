@@ -363,6 +363,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}/control"
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/{kind}/{object}"
         | "/api/v1/live-tv/readiness"
         | "/api/v1/live-tv/readiness/refresh"
         | "/api/v1/live-tv/channels"
@@ -1718,6 +1719,10 @@ pub fn router(state: AppState) -> Router {
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
         .route("/hls/{session}/{segment}", get(hls::segment))
+        .route(
+            "/hls/{session}/{role}/{rendition}/{kind}/{object}",
+            get(hls::child_segment),
+        )
         .route("/images/{filename}", get(images::serve));
 
     let api = Router::new()

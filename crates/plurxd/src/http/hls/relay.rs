@@ -206,6 +206,16 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             )
             .await
         }
+        RelayResource::ChildSegment { child } => {
+            child_segment_local_before(
+                state,
+                &request.session_id,
+                &child,
+                &request.headers,
+                request_deadline,
+            )
+            .await
+        }
         RelayResource::Delete => {
             // Mixed-version peers may still send this compatibility shape.
             // It must join the same durable first-writer transaction as the

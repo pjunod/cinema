@@ -1415,6 +1415,21 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_child_segment_before(
+        &self,
+        session_id: &str,
+        request: &crate::vodserve::ChildMediaRequest,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
+        self.vod
+            .child_segment_before(session_id, request, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
     /// True for an attached VOD capability or one still in the slow
     /// resurrection preparation window. Lease loss uses this classification
     /// to close the stable release generation before a late attachment.

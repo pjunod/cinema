@@ -1538,6 +1538,9 @@ pub(crate) enum RelayResource {
     Segment {
         segment: String,
     },
+    ChildSegment {
+        child: crate::vodserve::ChildMediaRequest,
+    },
     Delete,
 }
 
@@ -1634,6 +1637,7 @@ impl RelayResource {
                 (0..=1_024).contains(index) && valid_resource_name(segment)
             }
             Self::Segment { segment } => valid_resource_name(segment),
+            Self::ChildSegment { child } => child.is_valid(),
         }
     }
 
@@ -1643,7 +1647,7 @@ impl RelayResource {
             | Self::Master { .. }
             | Self::VideoPlaylist
             | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
-            Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
+            Self::Segment { .. } | Self::ChildSegment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
             Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
         }
     }
@@ -6071,6 +6075,59 @@ mod tests {
             deadline_unix_ms,
             headers: RelayHeaders::default(),
         }
+    }
+
+    #[test]
+    fn private_media_relay_refuses_path_and_identity_aliases() {
+        let mut child = crate::vodserve::ChildMediaRequest {
+            role: "video".into(),
+            rendition: "a".repeat(64),
+            kind: "segment".into(),
+            object: "12.m4s".into(),
+        };
+        assert!(RelayResource::ChildSegment {
+            child: child.clone()
+        }
+        .is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("seg00012.m4s"));
+        for object in [
+            "../12.m4s",
+            "012.m4s",
+            "-1.m4s",
+            "12.m4s/extra",
+            "9999999999.m4s",
+        ] {
+            child.object = object.into();
+            assert!(!RelayResource::ChildSegment {
+                child: child.clone()
+            }
+            .is_valid());
+            assert!(child.media_name().is_none());
+        }
+        child.kind = "init".into();
+        child.object = format!("{}.mp4", "b".repeat(64));
+        assert!(child.is_valid());
+        assert_eq!(child.media_name().as_deref(), Some("init.mp4"));
+        child.object = format!("{}.mp4", "B".repeat(64));
+        assert!(!child.is_valid());
+        child.object = format!("{}.mp4", "b".repeat(64));
+        child.role = "subtitles".into();
+        assert!(!child.is_valid());
+        child.role = "audio".into();
+        child.rendition = "../cached".into();
+        assert!(!child.is_valid());
+        assert!(!RelayResource::Segment {
+            segment: "video/child/12.m4s".into()
+        }
+        .is_valid());
+        let now = 1_700_000_000_000_i64;
+        child.rendition = "a".repeat(64);
+        let request = relay_request(RelayResource::ChildSegment { child }, now + 90_000);
+        assert_eq!(
+            request.owner_budget_at(now),
+            Some(RELAY_SEGMENT_MAX_LIFETIME)
+        );
+        assert!(!request.deadline_is_plausible_at(now));
     }
 
     #[test]

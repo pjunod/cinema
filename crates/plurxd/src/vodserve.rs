@@ -50,7 +50,7 @@ use plurx_core::transcode::{
     COPY_SEGMENT_MAX_BYTES, COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
@@ -347,6 +347,51 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+/// A bounded, typed child resource; never interpreted as a filesystem path.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ChildMediaRequest {
+    pub role: String,
+    pub rendition: String,
+    pub kind: String,
+    pub object: String,
+}
+
+impl ChildMediaRequest {
+    pub(crate) fn is_valid(&self) -> bool {
+        let hash = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        matches!(self.role.as_str(), "video" | "audio")
+            && hash(&self.rendition)
+            && match self.kind.as_str() {
+                "init" => self.object.strip_suffix(".mp4").is_some_and(hash),
+                "segment" => self.object.strip_suffix(".m4s").is_some_and(|digits| {
+                    !digits.is_empty()
+                        && digits.len() <= 9
+                        && digits.bytes().all(|byte| byte.is_ascii_digit())
+                        && (digits == "0" || !digits.starts_with('0'))
+                        && digits.parse::<u32>().is_ok()
+                }),
+                _ => false,
+            }
+    }
+
+    pub(crate) fn media_name(&self) -> Option<String> {
+        if !self.is_valid() {
+            return None;
+        }
+        if self.kind == "init" {
+            return Some(INIT_NAME.to_owned());
+        }
+        let index = self.object.strip_suffix(".m4s")?.parse::<u32>().ok()?;
+        Some(segment_name(u64::from(index)))
     }
 }
 

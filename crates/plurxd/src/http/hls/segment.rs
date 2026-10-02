@@ -30,6 +30,76 @@ pub async fn segment(
     .await
 }
 
+/// Child media retains the public parent's capability and response fences.
+pub async fn child_segment(
+    State(state): State<AppState>,
+    AxPath((session, role, rendition, kind, object)): AxPath<(
+        String,
+        String,
+        String,
+        String,
+        String,
+    )>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let child = crate::vodserve::ChildMediaRequest {
+        role,
+        rendition,
+        kind,
+        object,
+    };
+    if !child.is_valid() {
+        return Err(ApiError::NotFound("segment"));
+    }
+    let deadline = segment_request_deadline();
+    let headers = RelayHeaders::from_http(&headers);
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::ChildSegment {
+            child: child.clone(),
+        },
+        headers.clone(),
+        deadline,
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    child_segment_local_before(&state, &session, &child, &headers, deadline).await
+}
+
+pub(super) async fn child_segment_local_before(
+    state: &AppState,
+    session: &str,
+    child: &crate::vodserve::ChildMediaRequest,
+    headers: &RelayHeaders,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let name = child.media_name().ok_or(ApiError::NotFound("segment"))?;
+    let answer = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state
+            .transcode
+            .vod_child_segment_before(session, child, deadline),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let Some(answer) = answer else {
+        return Err(
+            match vod_resurrected_before(state, session, deadline).await {
+                VodResurrection::Absent => ApiError::NotFound("session"),
+                VodResurrection::Ended => media_session_ended(),
+                VodResurrection::OwnerLost(resume) => media_owner_lost(resume),
+                VodResurrection::Unavailable | VodResurrection::Resurrected => {
+                    vod_resurrection_unavailable()
+                }
+            },
+        );
+    };
+    resolved_vod_segment_response(state, session, &name, headers, answer, deadline).await
+}
+
 pub(super) fn requested_byte_range(
     value: Option<&str>,
     len: u64,

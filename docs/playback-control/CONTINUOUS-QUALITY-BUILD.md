@@ -1724,3 +1724,19 @@ remain independent. The authored regression exercises cross-parent refusal,
 frontier isolation and stale responses after rebinding. Pinned compiler checks
 apply; unit execution remains deferred. This is serving ownership integration;
 the family constructor and HTTP/peer child routes remain to be connected.
+
+### 10.39 Parent-owned child HTTP and peer media
+
+Typed child media routes now dispatch only through the exact parent's private
+reader graph, share its delivery meter and response-publication fences, and
+attribute blocked demand to the private reader. Audio and continuous video
+roles cannot alias each other. Init URIs require the frozen served-init SHA
+and rehash the opened bytes before publication; segment ordinals are bounded
+and canonical. Peer relay carries a separate strict child-resource variant
+with the existing segment deadline; the legacy flat-resource path remains
+unchanged. Older strict peers refuse the new variant rather than interpreting
+it as another resource. The authored relay regression covers traversal,
+identity aliases, role refusal and deadline ceilings. Pinned compiler and
+normal hooks apply; no unit execution. Family construction, durable restoration
+and playlist exposure remain unfinished, so continuous playback is not yet
+advertised or qualified.
