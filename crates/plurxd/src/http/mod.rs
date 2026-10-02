@@ -8224,8 +8224,28 @@ mod tests {
         let admin = setup_admin(&app).await;
         let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(initial["transcode_rate_mode"], "bitrate");
+        assert!(
+            initial["transcode_rate_mode"].is_null(),
+            "an unset pair must read back as unset, not as the family default a client \
+             would then write back as an explicit bitrate pin: {initial}"
+        );
         assert!(initial["transcode_quality"].is_null(), "{initial}");
+        let family = state.transcode.encoder_for_preference("");
+        assert_eq!(
+            initial["transcode_rate_mode_default"],
+            family.default_rate_mode().as_str(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_rate_mode_default_encoder"],
+            family.family_name(),
+            "{initial}"
+        );
+        assert_eq!(
+            initial["transcode_quality_default"],
+            family.default_quality(),
+            "{initial}"
+        );
 
         let (status, bad) = call(
             &app,
@@ -8298,6 +8318,83 @@ mod tests {
             state.transcode.effective_rate_control(Encoder::Software),
             EffectiveRateControl::Vbr
         );
+        assert_eq!(
+            state
+                .store
+                .get_setting_pair(
+                    plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                    plurx_core::store::keys::TRANSCODE_QUALITY,
+                )
+                .await
+                .expect("settings pair")
+                .0
+                .as_deref(),
+            Some("bitrate"),
+            "an explicit bitrate persists as an explicit choice"
+        );
+
+        // An unrelated Save must not touch the pair.
+        let (status, unrelated) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "stream_readrate": "4" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{unrelated}");
+        assert_eq!(unrelated["transcode_rate_mode"], "bitrate");
+
+        // JSON null is the explicit "return to each family's default".
+        let (status, cleared) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({
+                    "transcode_rate_mode": null,
+                    "transcode_quality": null
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(cleared["transcode_rate_mode"].is_null(), "{cleared}");
+        assert!(cleared["transcode_quality"].is_null(), "{cleared}");
+        let (stored_mode, stored_quality) = state
+            .store
+            .get_setting_pair(
+                plurx_core::store::keys::TRANSCODE_RATE_MODE,
+                plurx_core::store::keys::TRANSCODE_QUALITY,
+            )
+            .await
+            .expect("settings pair");
+        assert_eq!(
+            crate::transcode::normalize_rate_control_request(
+                stored_mode.as_deref(),
+                stored_quality.as_deref(),
+            ),
+            (None, None, false),
+            "the cleared pair must read back as unset, not as an explicit bitrate"
+        );
+        assert_eq!(
+            state.transcode.effective_rate_control(Encoder::Software),
+            EffectiveRateControl::Vbr,
+            "every family default is still Bitrate"
+        );
+
+        // A null mode still travels as one complete pair.
+        let (status, half) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({ "transcode_rate_mode": null }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{half}");
     }
 
     #[tokio::test]
