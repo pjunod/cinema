@@ -1780,3 +1780,15 @@ init bytes/ETag, wrong-role refusal and cross-parent refusal without creating
 another media fixture campaign.
 Pinned compilation and normal hooks apply; no unit execution. Parent family
 construction, admission and durable restoration still precede master exposure.
+
+### 10.43 Catalog contexts for continuous workers
+
+Continuous workers accept trusted normalized SDR catalog contexts, including
+the existing 1440p profile only on its matching rung. Legacy geometry and HDR
+contexts remain incompatible with the AVC family contract. The context stays
+out of worker JSON and must be reconstructed from the retained catalog
+envelope. Video-only and shared-AAC production cannot publish a speed proof
+for the ordinary muxed catalog recipe. The existing strict-wire regression
+covers these combinations. Compiler checks and normal hooks apply; unit
+execution remains deferred to final qualification. Family attachment and
+client switching remain unfinished.

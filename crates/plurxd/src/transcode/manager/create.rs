@@ -1069,9 +1069,12 @@ impl TranscodeManager {
             admissions: self.admissions.clone(),
             store: Arc::clone(&self.store),
             nonpreemptive_trial: req.automatic && req.candidate_context.is_some(),
+            // A video-only worker or shared soundtrack is not the muxed
+            // catalog recipe whose production speed this proof measures.
             candidate_recipe: req
                 .candidate_context
                 .as_ref()
+                .filter(|_| req.continuous_media.is_none())
                 .map(|context| context.recipe_digest),
             production_proofs: Arc::clone(&self.candidate_production_proofs),
             active_production: std::sync::Mutex::new(

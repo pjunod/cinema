@@ -2683,6 +2683,31 @@ scope = "test"
         }));
         assert!(request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
         assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context = Some(CandidateExecutionContext {
+            owner_node_id: None,
+            candidate_id: plurx_core::playback::candidate::CandidateId([7; 16]),
+            recipe_digest: [8; 32],
+            normalized_geometry: true,
+            grade: OutputGrade::Sdr,
+            profile: None,
+        });
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        let trusted_wire = serde_json::to_value(&request).expect("trusted context stays local");
+        assert!(trusted_wire.get("candidate_context").is_none());
+        let decoded: SessionRequest = serde_json::from_value(trusted_wire).expect("worker wire");
+        assert!(decoded.candidate_context.is_none());
+        request.candidate_context.as_mut().expect("context").normalized_geometry = false;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context.as_mut().expect("context").normalized_geometry = true;
+        request.candidate_context.as_mut().expect("context").grade = OutputGrade::Hdr10;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.candidate_context.as_mut().expect("context").grade = OutputGrade::Sdr;
+        request.candidate_context.as_mut().expect("context").profile = Some(transcode::AutoQualityRateProfile::H264Sdr1440P30V1);
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.kind = SessionKind::Transcode { height: 1440 };
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        request.kind = SessionKind::Transcode { height: 360 };
+        request.candidate_context = None;
         let video_identity = request.intent_fingerprint("viewer");
         assert_ne!(video_identity, legacy_identity);
         let mut wire = serde_json::to_value(&request).expect("continuous request");

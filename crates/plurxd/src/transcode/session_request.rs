@@ -515,7 +515,14 @@ impl ContinuousMediaRequest {
             && matches!(request.kind, SessionKind::Transcode { .. })
             && !request.hdr10
             && request.subtitle_burn.is_none()
-            && request.candidate_context.is_none()
+            && request.candidate_context.as_ref().is_none_or(|context| {
+                context.normalized_geometry
+                    && context.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && context.profile.is_none_or(|profile| {
+                        profile == plurx_core::transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && matches!(request.kind, SessionKind::Transcode { height: 1440 })
+                    })
+            })
     }
 }
 
