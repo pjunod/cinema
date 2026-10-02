@@ -3153,7 +3153,7 @@ impl HiqliteAuthStore {
     // Isolate each new migration state machine from the large version dispatcher.
     async fn migrate_playback_inputs(&self) -> Result<(), StoreError> {
         let now = self.now()?;
-        for result in timeout_store(self.client().batch(super::PLAYBACK_INPUT_SCHEMA)).await? {
+        for result in self.client().batch(super::PLAYBACK_INPUT_SCHEMA).await? {
             result.map_err(database_error)?;
         }
         let attempt = self.client().txn(vec![(

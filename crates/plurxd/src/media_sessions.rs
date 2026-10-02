@@ -6716,7 +6716,40 @@ mod tests {
         assert!(!missing_grade.is_valid());
         missing_grade.request.presentation = crate::transcode::Presentation::Live;
         assert!(!takeover_recipe_is_valid(&missing_grade));
-        request.candidate_id = Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
+        let recipe_digest = [0x12; 32];
+        let candidate_id =
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest(recipe_digest);
+        request.candidate_id = Some(candidate_id);
+        assert!(
+            !request.is_valid(),
+            "an identity and decoder snapshot alone cannot authorize a candidate"
+        );
+        request.candidate_catalog = Some(CandidateCatalogContext {
+            caps: serde_json::from_value(serde_json::json!({
+                "v": 2, "video": [{"codec":"h264", "present":["sdr"]}],
+                "audio":["aac"], "containers":["mp4"], "transports":["hls"]
+            }))
+            .expect("retained capabilities"),
+            candidate: plurx_core::playback::candidate::QualityCandidate {
+                id: candidate_id,
+                recipe_digest,
+                route: plurx_core::playback::candidate::CandidateRoute::Encode,
+                normalized_geometry: true,
+                width: 1920,
+                height: 1080,
+                target_height: 1080,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            },
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "0".repeat(64),
+            },
+        });
         request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
             width_px: 2400,
             height_px: 1600,

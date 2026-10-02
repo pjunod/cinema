@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`c63859963`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+(`dd304bf99`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -24,7 +24,7 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Android compaction and shared contract | done | No legacy blanket 400 |
 | Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
 | Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
-| Review and fast lane | post-review tests running | Five findings fixed; focused Android, Apple and generation evidence passed |
+| Review and fast lane | targeted validation complete; CI policy choice pending | Five review findings fixed; all reported unit failures corrected; CI policy choice pending |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
 
 ## 2. Decisions — evidence required before dependent changes
@@ -200,3 +200,31 @@ validation; integration and exact-candidate compile checks remain required.
 The existing main workflow unconditionally reruns the whole unit suite on a
 push; the user has been asked to reconcile that concrete conflict with the
 failed-only unit policy. No green aggregate gate or merged PR is claimed.
+
+
+Continuation results: remaining daemon cases ran once with prior passes
+excluded: 2,581 passed, five failed, 16 ignored. The scratch lane failure
+passed in isolation. The four remaining failures were addressed: recovery
+epoch ordering recognizes the owned worker; protocol fixture carries the
+full candidate context; the pending-start ledger includes catalog-unavailable;
+and four new diagnostic events retain the parent HLS log target. Those four
+failed cases now pass. The extended retry-ledger scenario passes and demonstrates
+that catalog-unavailable and a later successful retry remain one attempt.
+
+Remaining core cases: 1,066 passed, six failed, one ignored. Only the six
+failed cases were rerun; all six pass. Corrections record the single authority
+snapshot read without raising the unannotated ceiling, keep SQLite bindings
+in the same expression for static arity validation, remove a redundant
+outer timeout around the already timed client, and drop the v91 generation
+objects in both historical downgrade fixtures. These are contract and
+architecture corrections, not timeout increases or watchdogs.
+
+Integrated main `dd304bf99` in `794e3d815`. All eight new native readiness /
+reserve regressions pass on the combined candidate, including the exact-init
+six-second wait. Both serial FFmpeg restart checks pass (2 cases). Combined
+ownership census passes at 685 task, 1129 timer and 413 method sites.
+Local verification uses pinned Rust 1.97.1; local FFmpeg is newer than the
+CI-pinned FFmpeg 6, so the evidence does not claim a green current-head CI run.
+The previous seven non-unit gates remain recorded at `8ff4d6997`. The original
+checkout remains untouched. No physical playback acceptance or deployment is
+claimed. The main workflow policy conflict is the remaining merge decision.

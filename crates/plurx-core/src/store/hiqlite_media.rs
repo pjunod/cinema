@@ -2938,8 +2938,9 @@ impl MediaStore for HiqliteAuthStore {
         keys: &[&str],
     ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
         let keys = super::selected_settings_json(keys)?;
+        let rows = self.client()
         // authority: all planning inputs and generation share one committed read.
-        let rows = self.client().query_consistent_map::<PlanningSnapshotRow, _>(
+        .query_consistent_map::<PlanningSnapshotRow, _>(
             format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
                 (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
                 (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings \

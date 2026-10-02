@@ -1222,7 +1222,7 @@ pub(crate) async fn resolve_plan(
                     },
                 )
                 .await;
-            tracing::info!(file_id, purpose = "selection", complete = catalogue_result.complete,
+            tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
                 catalogue_result.causes.first()
@@ -1538,7 +1538,7 @@ async fn create_with_purpose(
         ))
         .await;
     let after = counts.snapshot();
-    tracing::info!(
+    tracing::info!(target: "plurxd::http::hls",
         file_id = id,
         catalog_calls = budget.calls(),
         authority_reads = after[0].saturating_sub(before[0]),
@@ -1699,7 +1699,7 @@ async fn create_with_purpose_inner(
                 .map_or(1, |target| target.revision),
         )
         .map_err(|cause| {
-            tracing::warn!(
+            tracing::warn!(target: "plurxd::http::hls",
                 file_id = id,
                 video_entries = caps.video.len(),
                 cause,
@@ -2039,7 +2039,7 @@ async fn create_with_purpose_inner(
                     )
                     .await,
             );
-            tracing::info!(
+            tracing::info!(target: "plurxd::http::hls",
                 file_id = id,
                 purpose = "optional_metadata",
                 "create catalog accounting"

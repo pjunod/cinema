@@ -16160,6 +16160,15 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
     queue_fixture::remove_common_queue_schema(&connection);
+    connection
+        .execute_batch(
+            "DROP TRIGGER IF EXISTS playback_settings_insert;
+             DROP TRIGGER IF EXISTS playback_settings_update;
+             DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TABLE IF EXISTS playback_input_generation;
+             ",
+        )
+        .expect("remove v91 planning generation");
     // Recreate the exact post-v14 schema differences so this is also a valid
     // input to ordinary SQLite startup migration, not merely a current-schema
     // database carrying an older user_version. The activation coordinator now
