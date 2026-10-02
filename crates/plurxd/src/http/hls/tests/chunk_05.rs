@@ -453,9 +453,13 @@
             incarnation_id,
         ));
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        // Cleanup may retry for its entire settlement budget. Allow scheduling
+        // slack on a busy runner instead of imposing a shorter test deadline.
+        let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET * 2;
         loop {
-            let retry_now_ms = unix_ms();
+            // Keep the original lease live regardless of wall-clock delays:
+            // only guard cleanup, never lease expiry, may enable this retry.
+            let retry_now_ms = now_ms;
             match state
                 .store
                 .claim_media_session_request(
