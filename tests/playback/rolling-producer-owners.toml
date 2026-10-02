@@ -3500,7 +3500,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 100-ms timeout while holding the manifest lock, proving Activity does not
 # acquire that lock or renew idle life. This is a test-only assertion bound,
 # owned by the fixture; no production timer or recovery owner is added.
-expected_occurrences = 1126
+# +1 Activity analysis reconciliation: the admin request awaits a two-second
+# source-inspection deadline before admitting reassignment to this node. The
+# request owns and drops the inspection future on timeout; it starts no media
+# producer, claims no job, and leaves full attestation to the existing worker.
+expected_occurrences = 1127
 
 [[module_structures]]
 id = "bare-time-constructor"
