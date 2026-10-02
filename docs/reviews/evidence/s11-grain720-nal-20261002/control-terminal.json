@@ -1,0 +1,47 @@
+{
+  "controls_sha256": "132a1e910f645715af611871100e1c9dd87db9783c885239c9055c0df0f322c9",
+  "elapsed_seconds": 0.10636554198572412,
+  "outcome": {
+    "complete": true,
+    "controls_sha256": "132a1e910f645715af611871100e1c9dd87db9783c885239c9055c0df0f322c9",
+    "errors": [],
+    "failures": [],
+    "input_bytes": 15050,
+    "input_cases": 25,
+    "input_manifest_sha256": "8ce03df821f89218d68932a3a5b65471a7a71c02d6b2365fc5ee5374038bbac6",
+    "kind": "NEW-tiny-syntax-controls-only",
+    "parser_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80",
+    "successful_ids": [
+      "__main__.S11NALNewControls.test_new_idr_headers_cross_ts_and_pes_without_frame_inference",
+      "__main__.S11NALNewControls.test_new_non_idr_i_slice_and_sei_65_byte_are_not_idr",
+      "__main__.S11NALNewControls.test_new_transport_truncation_continuity_crc_and_program_ambiguity_refuse",
+      "__main__.S11NALNewControls.test_new_missing_aud_multiple_pictures_and_shared_pes_pts_refuse",
+      "__main__.S11NALNewControls.test_new_parameter_references_and_invalid_idr_prefix_refuse",
+      "__main__.S11NALNewControls.test_new_missing_marker_duplicate_and_continuation_pts_refuse",
+      "__main__.S11NALNewControls.test_new_two_auds_two_independent_pts_have_two_actual_access_units",
+      "__main__.S11NALNewControls.test_new_held_root_hash_symlink_traversal_and_path_swap_refuse",
+      "__main__.S11NALNewControls.test_new_exclusive_output_root_and_duplicate_json_refuse"
+    ],
+    "tests_run": 9
+  },
+  "parser_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80",
+  "peak_child_rss_bytes_observed": 901120,
+  "pid": 45467,
+  "process_group": 45467,
+  "process_group_absent": true,
+  "returncode": 0,
+  "selected_new_ids": [
+    "S11NALNewControls.test_new_idr_headers_cross_ts_and_pes_without_frame_inference",
+    "S11NALNewControls.test_new_non_idr_i_slice_and_sei_65_byte_are_not_idr",
+    "S11NALNewControls.test_new_transport_truncation_continuity_crc_and_program_ambiguity_refuse",
+    "S11NALNewControls.test_new_missing_aud_multiple_pictures_and_shared_pes_pts_refuse",
+    "S11NALNewControls.test_new_parameter_references_and_invalid_idr_prefix_refuse",
+    "S11NALNewControls.test_new_missing_marker_duplicate_and_continuation_pts_refuse",
+    "S11NALNewControls.test_new_two_auds_two_independent_pts_have_two_actual_access_units",
+    "S11NALNewControls.test_new_held_root_hash_symlink_traversal_and_path_swap_refuse",
+    "S11NALNewControls.test_new_exclusive_output_root_and_duplicate_json_refuse"
+  ],
+  "source_hashes_unchanged": true,
+  "stopped": null,
+  "watchdog_sha256": "918ce1b064bcce7f08026118df8b53b97b1aea20fc714f81f41762e938ed5485"
+}
