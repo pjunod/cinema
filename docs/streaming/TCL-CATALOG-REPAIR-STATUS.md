@@ -153,3 +153,13 @@ Before the next push, regenerated the surface embed and documentation from
 the shared fixture (`node scripts/player-contract-table --embed` and `--write`).
 The web values are unchanged; the generated formatting and documented retry
 code now match the fixture. Current-base all-target Clippy passed.
+
+At `1142de82b`, history and regression-field audits passed. Validation ran 253
+tests: 252 passed; the module-wide ownership census test failed three count
+subtests. Reviewed the exact source delta: the production worker spawn moves
+into an accounting wrapper, a joined background-read fixture adds one task,
+awaited deadline bounds account for the net two timer sites, and the legacy
+admission fixture adds Response::status(), not a process. The inventory records
+those owners. Reran only that failing test; it passed. Rust and platform jobs
+were skipped, not executed. The workflow's automatic full-preflight rerun on
+each push conflicts with failed-only reruns; user reconciliation is pending.

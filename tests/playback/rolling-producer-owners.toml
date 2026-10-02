@@ -2362,7 +2362,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 cluster probe-batch regression in source_probe.rs: test-only Tokio
 # tasks each retain their Arc admission and await the cancellable probe.
 # The test joins both tasks after lease-loss/playback cancellation.
-expected_occurrences = 684
+# +1 TCL catalog repair: create.rs moves its existing owned worker spawn into
+# media_pool::spawn_create_worker (net zero), carrying the enclosing deadline
+# and Store accounting. chunk_06's unrelated-background-read fixture adds one
+# task, immediately awaited, to prove background reads remain unscoped.
+expected_occurrences = 685
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3504,7 +3508,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # source-inspection deadline before admitting reassignment to this node. The
 # request owns and drops the inspection future on timeout; it starts no media
 # producer, claims no job, and leaves full attestation to the existing worker.
-expected_occurrences = 1127
+# +2 net TCL catalog repair: create.rs awaits its enclosing request timeout;
+# manager/create.rs awaits binding validation within that same remaining
+# allowance. Internal v1 inspection delegates its existing timeout to the
+# shared catalog collector (net zero). media_pool's deadline fixture adds one
+# awaited sleep while replacing the old local collector wait (net zero).
+# All futures stay owned by the request/test; no watchdog or timer task exists.
+expected_occurrences = 1129
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4294,7 +4304,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # and public-ingress remote-owner fixtures. Both assert HTTP response codes;
 # neither creates a process/task or changes producer lifecycle ownership.
 # Combined current-main 409 plus the queued-publication test child = 410.
-expected_occurrences = 410
+# +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
+# overflow versus ordinary copy/manual admission. This does not launch a child.
+expected_occurrences = 411
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
