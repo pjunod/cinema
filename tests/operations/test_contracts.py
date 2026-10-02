@@ -1065,6 +1065,35 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
+    def test_runtime_assets_layer_drops_build_time_state(self):
+        """P-02 M6: the media runtime layer must not carry build-time state.
+
+        Two cold builds of one commit differed in that layer only by apt,
+        dpkg and alternatives logs, ldconfig's aux-cache, fontconfig's caches,
+        the static probe's `config.log` and (across days) the account's
+        last-change day. Each is either removed or given a fixed input.
+        """
+        dockerfile = read("Dockerfile")
+        assets = dockerfile.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
+        run = assets[assets.index("\nRUN ") :]
+        removal = run.index("rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache")
+        self.assertIn("/var/cache/fontconfig/*.cache-*", run[removal : removal + 200])
+        # Removal comes after the last package operation in the layer.
+        self.assertLess(run.rindex("apt-get autoremove -y"), removal)
+        self.assertIn(
+            'SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \\\n'
+            "        useradd -r -g plurx -d /var/lib/plurx plurx",
+            run,
+        )
+        self.assertIn("snapshot_day=$(printf '%s' \"$DEBIAN_SNAPSHOT\" | cut -c1-8)", run)
+        # The commit's time would rebuild this layer on every commit.
+        self.assertNotRegex(assets, r"(?m)^ARG SOURCE_DATE_EPOCH")
+
+        probe = read("scripts/build-static-ffprobe")
+        self.assertNotIn('"$documentation/config.log"', probe)
+        self.assertIn('cp config.h "$documentation/config.h"', probe)
+        self.assertIn('cp ffbuild/config.mak "$documentation/config.mak"', probe)
+
     def test_image_builds_pass_the_commit_time_as_source_date_epoch(self):
         """P-02 M6: two builds of one commit must be the same binary.
 
