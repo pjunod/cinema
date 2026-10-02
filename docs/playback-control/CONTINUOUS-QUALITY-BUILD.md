@@ -2620,3 +2620,22 @@ actual landing tree. The standing user workflow defers unit execution until
 main readiness and adversarial review, retains each passing fast-lane test,
 and reruns only failed tests. That overrides the older document's whole-suite
 retry convention; no passing qualification receipt is fabricated for a new tree.
+
+
+### 10.81 Logical fragment abort releases hls.js loading state
+
+The AAC-corrected replay no longer reported missing pins but stalled after
+selection. Inspection of the vendored hls.js abort handling identified a
+separate boundary: it resets fragment loading only when `stats.aborted` is
+true. The underlying XHR sets that flag only while its network request is
+unfinished. Our wrapper can still be waiting on durable authorization after
+the XHR reaches done, so aborting that logical fragment emitted an abort
+callback with false network stats and left the controller in `FRAG_LOADING`.
+
+Explicit wrapper abort now marks the logical stats before delegating the
+transport notification. Normal successful destruction stays silent and does
+not mark successful fragments aborted. The authored regression queues a
+completed network payload behind selection and models hls.js's stats-based
+loading reset, requiring Idle and no outgoing exposure or current error.
+The failed receipt is `continuous-chrome-full-linux-aac.json`; it is retained
+without a continuity claim. Final replay will use the current integrated tree.

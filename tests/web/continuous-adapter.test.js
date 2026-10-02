@@ -248,3 +248,28 @@ test('AAC just beyond a video boundary reserves a forward owner window',async()=
  assert.equal(f.adapter.protocol.ledger.shared_audio_reserved.some(row=>row.artifact_id===f.audioIntervals[2].artifact_id),true);
  assert.equal(f.player.continuousQualityObservation,undefined);
 });
+
+
+test('completed network awaiting authorization still aborts the hls fragment state',async()=>{
+ const f=fixture();await f.load(f.prefix+`video/${f.primary.rendition_id}/init/${f.primary.init_id}.mp4`);
+ await f.load(f.prefix+`video/${f.primary.rendition_id}/segment/0.m4s`);
+ let callbacks,ctx,loader,streamState='frag_loading',exposed=false;
+ class FinishedNetwork {
+  constructor(){this.stats={aborted:false,loading:{end:10}};}
+  load(context,config,handlers){ctx=context;callbacks=handlers;}
+  // A completed XHR abort does not set network stats. hls.js nevertheless
+  // needs the wrapper's logical fragment abort to release FRAG_LOADING.
+  abort(){callbacks.onAbort(this.stats,ctx);}
+  destroy(){}
+ }
+ const Loader=f.adapter.loader(FinishedNetwork);loader=new Loader({});
+ loader.load({url:f.prefix+`video/${f.primary.rendition_id}/segment/1.m4s`},{},{
+  onAbort(stats){if(stats.aborted)streamState='idle';loader.destroy();},
+  onSuccess(){exposed=true;},onError(){assert.fail('aborted authorization cannot fail the stream');},
+ });
+ const choosing=f.adapter.choose(f.target.candidate_id);
+ callbacks.onSuccess({data:bytes(f.firstMedia)},loader.stats,ctx,{});
+ assert.equal(await choosing,'continuous');await pause();await pause();
+ assert.equal(streamState,'idle');assert.equal(exposed,false);
+ assert.equal(f.player.continuousQualityObservation,undefined);
+});

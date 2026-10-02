@@ -494,7 +494,13 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         }};
         this.base.load(context,config,guarded);
       }
-      abort(){if(this.aborted||this.destroyed)return;this.aborted=true;this.base.abort();}
+      abort(){
+        if(this.aborted||this.destroyed)return;this.aborted=true;
+        // The XHR may have finished while authorization is still queued.
+        // hls.js leaves FRAG_LOADING only when the logical fragment stats say
+        // it was aborted, even when there is no remaining network to cancel.
+        this.base.stats.aborted=true;this.base.abort();
+      }
       destroy(){
         if(this.destroyed)return;this.destroyed=true;this.aborted=true;loaders.delete(this);
         // hls.js resets a loader from its abort callback. Base destruction
