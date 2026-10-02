@@ -7283,3 +7283,49 @@ test("continuous Auto settlement waits for the exact current durable presentatio
   assert.equal(p.autoRequestedHeight,null);assert.equal(committed.length,1);assert.equal(released.length,1);
   assert.equal(settle(p),false);assert.equal(committed.length,1);
 });
+
+
+test("pause and resume preserve only the attached manual continuous quality intent",()=>{
+  const harness=new Function([
+    "function clearPlaybackControlWaiters(){}",
+    "function abandonPreparedReplacement(p){p.abandoned=true;}",
+    "function settleDirectedChange(p,change,outcome){change.settled=true;change.outcome=outcome;}",
+    shippedSource("supersedePlaybackControlIntent"),
+    "return supersedePlaybackControlIntent;",
+  ].join("\n"))();
+  function player(){
+    const owner={},attachment={};
+    return {controlIntentGeneration:4,sessionId:"incumbent",mediaAttachment:attachment,
+      continuousQuality:owner,directedChange:{intentGeneration:4,reason:"manual",
+        settled:false,incumbentSessionId:"incumbent",continuousOwner:owner,
+        continuousAttachment:attachment}};
+  }
+  const p=player(),change=p.directedChange;
+  const live=()=>p.directedChange===change&&p.controlIntentGeneration===change.intentGeneration;
+  harness(p,{preserveContinuousManualQuality:true});
+  assert.equal(p.controlIntentGeneration,5);
+  assert.equal(live(),true,"pause retains the exact pending quality ask");
+  harness(p,{preserveContinuousManualQuality:true});
+  assert.equal(p.controlIntentGeneration,6);
+  assert.equal(live(),true,"resume retains that same ask");
+  harness(p);
+  assert.equal(live(),false,"seek and other superseding commands still fence the ask");
+  for(const mutate of [
+    p=>p.mediaAttachment={},p=>p.continuousQuality={},p=>p.sessionId="successor",
+    p=>p.directedChange.intentGeneration=3,p=>p.directedChange.settled=true,
+    p=>p.directedChange.continuousOwner=null,p=>p.directedChange.reason="automatic",
+  ]){
+    const other=player();mutate(other);
+    const generation=other.directedChange.intentGeneration;
+    harness(other,{preserveContinuousManualQuality:true});
+    assert.equal(other.directedChange.intentGeneration,generation,"an unrelated or fenced ask is never revived");
+  }
+  const automatic=player();automatic.directedChange.autoMove={};
+  harness(automatic,{preserveContinuousManualQuality:true});
+  assert.equal(automatic.abandoned,true);
+  assert.equal(automatic.directedChange.outcome,"superseded");
+  assert.equal(automatic.directedChange.intentGeneration,4);
+  assert.match(shippedSource("togglePlay"),/supersedePlaybackControlIntent\(PLAYER,\{preserveContinuousManualQuality:true\}\)/);
+  assert.match(shippedSource("requestQualityChange"),/change\.continuousOwner=p\.continuousQuality/);
+  assert.match(shippedSource("requestQualityChange"),/change\.continuousAttachment=p\.mediaAttachment/);
+});

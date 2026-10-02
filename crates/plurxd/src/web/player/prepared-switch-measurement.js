@@ -669,10 +669,22 @@ function controlVerdictText(message){
 // A terminal answer belongs to the intent that earned it. Automatic recovery
 // may carry it across a replacement of that same intent; any viewer command
 // retires it and every ask that was waiting on the previous action epoch.
-function supersedePlaybackControlIntent(p,{preserveHlsStartup=false}={}){
+function supersedePlaybackControlIntent(p,{preserveHlsStartup=false,preserveContinuousManualQuality=false}={}){
   if(!p) return 0;
   const previous=p.controlIntentGeneration||0;
   p.controlIntentGeneration=previous+1;
+  // Pause/resume changes transport intent without replacing the attached
+  // quality recipe. Carry only the immediately preceding manual request
+  // owned by this exact continuous adapter and media attachment.
+  const quality=p.directedChange;
+  if(preserveContinuousManualQuality&&quality&&!quality.settled
+    &&quality.reason==='manual'&&!quality.autoMove
+    &&quality.intentGeneration===previous
+    &&quality.incumbentSessionId===p.sessionId
+    &&quality.continuousOwner&&quality.continuousOwner===p.continuousQuality
+    &&quality.continuousAttachment===p.mediaAttachment){
+    quality.intentGeneration=p.controlIntentGeneration;
+  }
   if(p.directedChange&&p.directedChange.autoMove&&!p.directedChange.settled){
     abandonPreparedReplacement(p,"aborted","viewer intent superseded automatic trial");
     settleDirectedChange(p,p.directedChange,"superseded");

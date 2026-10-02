@@ -3793,3 +3793,29 @@ after preparation settles. The earlier heartbeat regression now expects an
 active preparation wait rather than an idle hint. Pinned all-target Rust
 compilation passed in 15.83 s; no unit tests executed. Runtime qualification
 of this scheduling repair remains open.
+
+
+### 10.126 Pause/resume preserves the attached manual quality request
+
+Exact-source Chrome `63e56e3ef` passed both sequential manual changes,
+including the repaired return to 1080p. The following rapid-choice experiment
+failed after pause/resume: the pending target was superseded and the incumbent
+was restored. Pause and resume each advanced the shared control generation,
+invalidating the manual quality callback despite the retained attachment and
+saved preference. The cold pending-quality seek was not reached.
+
+Transport pause/resume now carries forward only an unsettled manual continuous
+request from the immediately preceding generation, bound to the exact adapter,
+media attachment and incumbent session. Other commands retain their existing
+fences; automatic trials still cancel. The adapter and attachment are captured
+when the continuous request starts. Authored regression
+`pause and resume preserve only the attached manual continuous quality intent`
+covers repeated transport changes, seek fencing, stale generations, adapter /
+attachment / session replacement, settled and legacy requests, and automatic
+trial cancellation. JavaScript syntax checks passed; no unit test executed.
+Runtime qualification of this repair remains open.
+
+The previous End census found no FFmpeg children five seconds after End,
+but did not prove that the daemon remained alive. That result is incomplete
+cleanup evidence. The next probe must verify the daemon identity throughout
+that interval and preserve failed-stage snapshots before returning a verdict.

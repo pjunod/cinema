@@ -189,6 +189,8 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
   const selection=playbackControlSelection(p);
   if(p.continuousQuality&&continuousQualitySelectionCompatible(p,selection)){
     const candidate=continuousQualityCandidate(p,selection);
+    change.continuousOwner=p.continuousQuality;
+    change.continuousAttachment=p.mediaAttachment;
     const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
       &&(p.controlIntentGeneration||0)===change.intentGeneration);
     if(p.directedChange!==change)return "superseded";

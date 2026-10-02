@@ -516,7 +516,7 @@ function togglePlay(origin="viewer_control"){
   }
   queuePlaybackTransportCommand(v,PLAYER,playerWantsPlayback(v)?"pause":"play",origin,"explicit_transport");
   endWait(false);
-  supersedePlaybackControlIntent(PLAYER);
+  supersedePlaybackControlIntent(PLAYER,{preserveContinuousManualQuality:true});
   const pending=typeof play==='function'&&play.pendingIntent;
   if(pending&&PLAY_OPEN_GATE.current(pending.attempt)){
     pending.wantsPlayback=!pending.wantsPlayback;
