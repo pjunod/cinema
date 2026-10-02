@@ -57,6 +57,22 @@ pub struct LocalDbRaftSnapshot {
     pub last_applied_index: Option<u64>,
 }
 
+/// Address-free membership identity from one local Raft watch borrow.
+/// Effective membership can precede application: `committed` is false until
+/// the corresponding log entry is covered by this node's applied watermark.
+/// A changed log identity matters even when member IDs are unchanged (ABA).
+#[cfg(feature = "sqlite")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalDbMembershipSnapshot {
+    pub running: bool,
+    pub node_id: NodeId,
+    /// Membership entry (leader term, leader node ID, log index).
+    pub membership_log: Option<(u64, NodeId, u64)>,
+    pub members: std::collections::BTreeSet<NodeId>,
+    pub voters: std::collections::BTreeSet<NodeId>,
+    pub committed: bool,
+}
+
 /// A leader-issued database commit watermark backed by a quorum heartbeat.
 ///
 /// The term and leader identity describe the leadership proof, not the term
@@ -92,6 +108,30 @@ pub struct LocalDbRaftMetrics {
 
 #[cfg(feature = "sqlite")]
 impl LocalDbRaftMetrics {
+    /// Observe the exact local membership without SQL, management IO or awaits.
+    /// Initial/closed/unapplied observations cannot establish a committed
+    /// empty-remote roster merely because an old peer directory is empty.
+    #[must_use]
+    pub fn membership_snapshot(&self) -> LocalDbMembershipSnapshot {
+        let metrics = self.receiver.borrow();
+        let membership = &metrics.membership_config;
+        let log = membership.log_id().as_ref();
+        let running = metrics.running_state.is_ok() && self.receiver.has_changed().is_ok();
+        let committed = running
+            && log
+                .zip(metrics.last_applied.as_ref())
+                .is_some_and(|(entry, applied)| entry.index < applied.index || entry == applied);
+        LocalDbMembershipSnapshot {
+            running,
+            node_id: metrics.id,
+            membership_log: log
+                .map(|entry| (entry.leader_id.term, entry.leader_id.node_id, entry.index)),
+            members: membership.nodes().map(|(id, _)| *id).collect(),
+            voters: membership.voter_ids().collect(),
+            committed,
+        }
+    }
+
     /// Copy the latest in-process Raft observation without Store or network IO.
     #[must_use]
     pub fn snapshot(&self) -> LocalDbRaftSnapshot {
@@ -985,6 +1025,62 @@ mod tests {
             RAFT_SHUTDOWN_TIMEOUT >= deliberate_waits + Duration::from_secs(10),
             "shutdown must retain time for Raft and durable-writer drains after cluster waits"
         );
+    }
+
+    #[test]
+    fn local_membership_watch_preserves_commit_boundary_joint_members_and_aba() {
+        let mut metrics = RaftMetrics::<u64, Node>::new_initial(1);
+        let (sender, receiver) = tokio::sync::watch::channel(metrics.clone());
+        let watch = super::LocalDbRaftMetrics { receiver };
+        assert!(!watch.membership_snapshot().committed);
+        let nodes = BTreeMap::from_iter((1..=4).map(|id| {
+            (
+                id,
+                Node {
+                    id,
+                    addr_raft: format!("private-raft-{id}"),
+                    addr_api: format!("private-api-{id}"),
+                },
+            )
+        }));
+        let log = openraft::LogId::new(openraft::CommittedLeaderId::new(2, 1), 7);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            Some(log),
+            Membership::new(vec![BTreeSet::from([1, 2]), BTreeSet::from([2, 3])], nodes),
+        ));
+        sender.send_replace(metrics.clone());
+        let pending = watch.membership_snapshot();
+        assert_eq!(pending.members, BTreeSet::from([1, 2, 3, 4]));
+        assert_eq!(pending.voters, BTreeSet::from([1, 2, 3]));
+        assert_eq!(pending.membership_log, Some((2, 1, 7)));
+        assert!(!pending.committed);
+        metrics.last_applied = Some(log);
+        sender.send_replace(metrics.clone());
+        let committed = watch.membership_snapshot();
+        assert!(committed.committed);
+        let newer = openraft::LogId::new(openraft::CommittedLeaderId::new(3, 2), 9);
+        metrics.membership_config = Arc::new(StoredMembership::new(
+            Some(newer),
+            metrics.membership_config.membership().clone(),
+        ));
+        sender.send_replace(metrics.clone());
+        let aba = watch.membership_snapshot();
+        assert_eq!(aba.members, committed.members);
+        assert_ne!(aba.membership_log, committed.membership_log);
+        assert!(!aba.committed);
+        metrics.last_applied = Some(newer);
+        sender.send_replace(metrics.clone());
+        assert!(watch.membership_snapshot().committed);
+        // The same index from a different leader is not this applied entry.
+        metrics.last_applied = Some(openraft::LogId::new(
+            openraft::CommittedLeaderId::new(3, 1),
+            9,
+        ));
+        sender.send_replace(metrics);
+        assert!(!watch.membership_snapshot().committed);
+        drop(sender);
+        let closed = watch.membership_snapshot();
+        assert!(!closed.running && !closed.committed);
     }
 
     #[test]

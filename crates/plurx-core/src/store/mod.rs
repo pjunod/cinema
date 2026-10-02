@@ -25,6 +25,11 @@ pub use downloaded_subtitles::{
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
 mod candidate_link;
+mod candidate_recovery;
+pub use candidate_recovery::{
+    CandidateRecoveryCause, CandidateRecoveryMemory, CandidateRecoveryObservation,
+    CandidateRecoveryScope,
+};
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
@@ -4556,6 +4561,20 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
 /// client-controlled rows before inserting them.
 #[async_trait]
 pub trait MediaSessionStore: Send + Sync + 'static {
+    /// Optional failure attribution cannot create another recovery budget.
+    async fn observe_candidate_recovery(
+        &self,
+        _observation: &CandidateRecoveryObservation,
+        _now_ms: i64,
+    ) -> Result<Option<CandidateRecoveryMemory>, StoreError> {
+        Ok(None)
+    }
+    async fn candidate_recovery_memory(
+        &self,
+        _scope: &CandidateRecoveryScope,
+    ) -> Result<CandidateRecoveryMemory, StoreError> {
+        Ok(CandidateRecoveryMemory::default())
+    }
     #[allow(clippy::too_many_arguments)]
     async fn claim_media_session_request(
         &self,

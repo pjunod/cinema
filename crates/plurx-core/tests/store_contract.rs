@@ -1234,6 +1234,153 @@ fn analysis_queue_slot(component: &str, state: &str, priority: &str, trigger: &s
         + trigger
 }
 
+#[tokio::test]
+async fn a05_candidate_decode_memory_is_exact_lifetime_and_replay_cannot_rearm() {
+    use plurx_core::store::{
+        CandidateRecoveryCause, CandidateRecoveryObservation, CandidateRecoveryScope,
+    };
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "a05-candidate-memory").await;
+        let activation = MediaSessionActivation {
+            expected_desired_revision: None,
+            recovery_epoch: "b3000000-1111-4111-8111-111111111111".into(),
+            incarnation_id: "b1000000-1111-4111-8111-111111111111".into(),
+            session_id: "b2000000-1111-4111-8111-111111111111".into(),
+            user_id,
+            playback_id: "a05-exact-player".into(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "local-owner".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 900_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("actual active route");
+        let route = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        let scope = CandidateRecoveryScope {
+            user_id,
+            playback_id: route.playback_id.clone(),
+            recovery_epoch: route.recovery_epoch.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_object_version: "actual-fixture-object-v1".into(),
+            credential_generation: "c".repeat(64),
+            client_class: "android".into(),
+        };
+        let observation = CandidateRecoveryObservation {
+            scope: scope.clone(),
+            route: route.clone(),
+            recipe_digest: [3; 32],
+            event_id: "bounded-public-request-id".into(),
+            cause: CandidateRecoveryCause::Decode,
+            quality_step: true,
+        };
+        assert!(
+            scope.valid(),
+            "{backend}: scope epoch {:?}",
+            scope.recovery_epoch
+        );
+        let actual_file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture file");
+        assert_eq!(
+            (actual_file.size, actual_file.mtime),
+            (scope.source_size, scope.source_mtime)
+        );
+        assert_eq!(route.state, "active");
+        assert_eq!(route.publication_ready_at_ms, 0);
+        let first = store
+            .observe_candidate_recovery(&observation, 2_000)
+            .await
+            .expect("fold")
+            .unwrap_or_else(|| panic!("{backend}: actual route must qualify"));
+        assert_eq!(first.decode_step_recipe, Some([3; 32]));
+        assert!(store
+            .observe_candidate_recovery(&observation, 3_000)
+            .await
+            .expect("replay")
+            .is_none());
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("memory"),
+            first
+        );
+        let mut other = scope.clone();
+        other.credential_generation = "d".repeat(64);
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other credential")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.source_object_version = "replacement-object".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other physical source")
+            .rejected_recipes
+            .is_empty());
+        other = scope.clone();
+        other.playback_id = "other-player".into();
+        assert!(store
+            .candidate_recovery_memory(&other)
+            .await
+            .expect("other player")
+            .rejected_recipes
+            .is_empty());
+        let mut stale = observation.clone();
+        stale.route.owner_epoch += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("foreign owner")
+            .is_none());
+        stale = observation.clone();
+        stale.scope.source_mtime += 1;
+        stale.recipe_digest = [4; 32];
+        assert!(store
+            .observe_candidate_recovery(&stale, 4_000)
+            .await
+            .expect("changed source")
+            .is_none());
+        let mut hold = observation.clone();
+        hold.cause = CandidateRecoveryCause::Hold;
+        hold.quality_step = false;
+        hold.recipe_digest = [5; 32];
+        assert_eq!(
+            store
+                .observe_candidate_recovery(&hold, 5_000)
+                .await
+                .expect("hold"),
+            Some(first.clone())
+        );
+        assert_eq!(
+            store
+                .candidate_recovery_memory(&scope)
+                .await
+                .expect("decode stays spent"),
+            first
+        );
+    })
+    .await;
+}
+
 fn analysis_lifecycle_slot(event: &str, reason: &str) -> usize {
     ANALYSIS_LIFECYCLE_METRICS
         .iter()

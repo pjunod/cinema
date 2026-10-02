@@ -101,6 +101,17 @@ This extends preparatory source beyond E0 only; successful identified
 measurement evidence remains mandatory before enforcement effort integration.
 There is no new switch, reduced acceptance or deployment authorization.
 
+**2026-10-02 private applied-membership binding:** the same preparatory
+branch now binds clock coverage to the address-free local Raft watch's applied
+membership log identity, complete member set and joint voter set. UUID mapping
+and fanout compare this identity before/after awaits; acquisition and final
+revalidation consult the in-process watch synchronously, so raw-membership
+ABA cannot borrow the prior probe's proof. Unknown/unapplied/stopped watches
+never establish empty-remote coverage. The new vendor-watch and core binding
+regressions passed once; this is private source preparation, not E1 integration
+or replicated-fleet acceptance. Startup/leader and fenced-target work and the
+identified measurement prerequisites remain unchanged.
+
 Board id **K-06**. A node that steps its clock must not be able to steal
 every session in the fleet, and an operator must be able to see the offset
 before it does. Concretely: each node continuously measures its clock offset

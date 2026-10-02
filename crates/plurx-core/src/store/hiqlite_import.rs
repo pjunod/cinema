@@ -906,9 +906,29 @@ const TABLES: &[TablePlan] = &[
             "discontinuity_sequence",
             "updated_at_ms",
             "drain_deadline_ms",
+            "recovery_epoch",
         ],
         order_by: "incarnation_id",
         minimum_schema: 25,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "candidate_recovery",
+        columns: &[
+            "scope",
+            "recipe",
+            "cause",
+            "event_id",
+            "user_id",
+            "playback_id",
+            "recovery_epoch",
+            "created_ms",
+            "quality_step",
+        ],
+        order_by: "scope, recipe, cause",
+        minimum_schema: 92,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -2846,6 +2866,11 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
             {
                 "0".to_owned()
             } else if table.name == "media_sessions"
+                && *column == "recovery_epoch"
+                && schema_version < 53
+            {
+                "''".to_owned()
+            } else if table.name == "media_sessions"
                 && *column == "drain_deadline_ms"
                 && schema_version < 51
             {
@@ -3535,6 +3560,127 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn a05_recovery_import_preserves_spent_scope_and_legacy_epoch_projection() {
+        let sessions = TABLES
+            .iter()
+            .find(|t| t.name == "media_sessions")
+            .copied()
+            .expect("recovery import fixture");
+        let memory = TABLES
+            .iter()
+            .find(|t| t.name == "candidate_recovery")
+            .copied()
+            .expect("recovery import fixture");
+        assert_eq!(memory.minimum_schema, 92);
+        for version in [51_i64, 53, 92] {
+            let dir = tempfile::tempdir().expect("recovery import fixture");
+            let path = dir.path().join("source.db");
+            let source = Connection::open(&path).expect("recovery import fixture");
+            crate::store::sqlite::SqliteStore::apply_migrations_for_test(&source, version)
+                .expect("recovery import fixture");
+            source
+                .execute(
+                    "INSERT INTO settings(key,value,updated_at) VALUES(?1,?2,1)",
+                    rusqlite::params![keys::INSTANCE_ID, "a05-import"],
+                )
+                .expect("recovery import fixture");
+            source.execute("INSERT INTO media_sessions(incarnation_id,session_id,user_id,playback_id,request_fingerprint,owner_node_id,owner_epoch,lease_expires_at_ms,state,recipe_json,response_json,updated_at_ms) VALUES('incarnation','session',42,'player','request','owner',7,9000,'active','{}','{}',1)", []).expect("recovery import fixture");
+            if version >= 53 {
+                source.execute("UPDATE media_sessions SET recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028'", []).expect("recovery import fixture");
+            }
+            if version >= 92 {
+                for (recipe, step) in [("11".repeat(32), 1_i64), ("22".repeat(32), 0)] {
+                    source.execute("INSERT INTO candidate_recovery(scope,recipe,cause,event_id,user_id,playback_id,recovery_epoch,created_ms,quality_step) VALUES('exact-authenticated-scope',?1,'decode','original-event',42,'player','d23b2032-2910-469a-bf76-3c0b12735028',1234,?2)", rusqlite::params![recipe,step]).expect("recovery import fixture");
+                }
+            }
+            drop(source);
+            let hash = sha256_file(&path).expect("recovery import fixture");
+            let (reader, _) = SourceReader::open(&path, &hash, version)
+                .await
+                .expect("recovery import fixture");
+            let rows = reader
+                .import_chunk(sessions, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].last(),
+                Some(&Param::Text(if version < 53 {
+                    String::new()
+                } else {
+                    "d23b2032-2910-469a-bf76-3c0b12735028".to_owned()
+                }))
+            );
+            if version < memory.minimum_schema {
+                // Production import_table skips before asking an older source
+                // for a table it cannot contain; parity uses an empty digest.
+                let source = Connection::open(&path).expect("recovery import fixture");
+                assert_eq!(
+                    source_digest(&source, version, memory).expect("recovery import fixture"),
+                    OrderedRowsHasher::new().finish()
+                );
+                continue;
+            }
+            assert_eq!(
+                reader
+                    .count(memory, true)
+                    .await
+                    .expect("recovery import fixture"),
+                2
+            );
+            let recovered = reader
+                .import_chunk(memory, version, SourceChunk::Offset(0))
+                .await
+                .expect("recovery import fixture");
+            assert_eq!(recovered.len(), 2);
+            let target = Connection::open_in_memory().expect("recovery import fixture");
+            target
+                .execute_batch(crate::store::candidate_recovery::SCHEMA)
+                .expect("recovery import fixture");
+            for row in recovered {
+                let values: Vec<rusqlite::types::Value> = row
+                    .into_iter()
+                    .map(|value| match value {
+                        Param::Text(text) => rusqlite::types::Value::Text(text),
+                        Param::Integer(number) => rusqlite::types::Value::Integer(number),
+                        _ => panic!("unexpected recovery import type"),
+                    })
+                    .collect();
+                let sql = format!(
+                    "INSERT INTO candidate_recovery({}) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                    memory.columns.join(",")
+                );
+                target
+                    .execute(&sql, rusqlite::params_from_iter(values))
+                    .expect("recovery import fixture");
+            }
+            let original = Connection::open(&path).expect("recovery import fixture");
+            assert_eq!(
+                source_digest(&original, version, memory).expect("recovery import fixture"),
+                source_digest(&target, version, memory).expect("recovery import fixture")
+            );
+            let spent: i64 = target.query_row("SELECT SUM(quality_step) FROM candidate_recovery WHERE recovery_epoch='d23b2032-2910-469a-bf76-3c0b12735028' AND created_ms=1234 AND event_id='original-event'", [], |row| row.get(0)).expect("recovery import fixture");
+            assert_eq!(
+                spent, 1,
+                "import preserves original spent admission without replay or timestamp refresh"
+            );
+            let mut statement = target
+                .prepare("SELECT recipe FROM candidate_recovery ORDER BY recipe")
+                .expect("recovery import fixture");
+            let recipes = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("recovery import fixture")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("recovery import fixture");
+            assert_eq!(
+                recipes,
+                vec!["11".repeat(32), "22".repeat(32)],
+                "full recipe identities survive import"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn media_session_import_reads_real_legacy_schema_boundaries() {
         let table = TABLES
             .iter()
@@ -3738,7 +3884,7 @@ mod tests {
                 .await
                 .expect("read source import chunk");
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].len(), 20, "media session import parameter count");
+            assert_eq!(rows[0].len(), 21, "media session import parameter count");
             let expected_terminal = if schema_version < 34 {
                 Param::Null
             } else {
@@ -3776,6 +3922,7 @@ mod tests {
                     } else {
                         Param::Integer(9_876)
                     },
+                    Param::Text(String::new()),
                 ],
                 "schema v{schema_version} import row",
             );

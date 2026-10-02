@@ -1,6 +1,6 @@
 //! Node-local clock evidence and typed consumer admission. No HTTP or Store calls.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -8,6 +8,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const CLOCK_OFFSET_REFUSAL_MS: i64 = 2_000;
 pub const CLOCK_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(25);
 pub const CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS: i64 = 250;
+
+/// Address-free identity of a locally applied Raft membership entry. Log
+/// identity is part of coverage even when an ABA change restores the same IDs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClockMembershipIdentity {
+    pub local_node: u64,
+    pub log: (u64, u64, u64),
+    pub members: BTreeSet<u64>,
+    pub voters: BTreeSet<u64>,
+}
+
+/// A synchronous in-process watch only: implementations must not perform
+/// network/Store IO or await. Unknown, stopped and unapplied return None.
+pub trait ClockMembershipSource: Send + Sync {
+    fn current(&self) -> Option<ClockMembershipIdentity>;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerClockOffset {
@@ -508,6 +524,93 @@ mod tests {
             "plurx_cluster_clock_refusals_total{decision=\"takeover\",cause=\"offset\"} 0"
         ));
     }
+
+    #[test]
+    fn applied_membership_watch_invalidates_aba_proofs_without_a_probe_tick() {
+        struct Source(Mutex<Option<ClockMembershipIdentity>>);
+        impl ClockMembershipSource for Source {
+            fn current(&self) -> Option<ClockMembershipIdentity> {
+                self.0.lock().expect("fixture watch").clone()
+            }
+        }
+        let source = Arc::new(Source(Mutex::new(None)));
+        let guard = ClusterClockGuard::with_membership_source(source.clone());
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        let unknown_empty = guard.roster(&[]);
+        assert!(!guard.publish(unknown_empty, BTreeMap::new()));
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: BTreeSet::from([1, 2]),
+            voters: BTreeSet::from([1, 2]),
+        };
+        *source.0.lock().expect("fixture watch") = Some(identity.clone());
+        assert_eq!(
+            guard.roster_for_membership(&[], Some(&identity)),
+            Err(ClockRefusal::Unknown),
+            "remote coverage cannot be silently shortened"
+        );
+        let roster = ["peer".into()];
+        let round = guard
+            .roster_for_membership(&roster, Some(&identity))
+            .expect("mapped applied roster");
+        assert!(guard.publish(round, bounded(Instant::now())));
+        let original = guard.acquire().expect("original bounded proof");
+        let original_time = original.now_ms();
+        let pending = guard
+            .roster_for_membership(&roster, Some(&identity))
+            .expect("original pending round");
+        let newer = ClockMembershipIdentity {
+            log: (3, 2, 9),
+            ..identity.clone()
+        };
+        *source.0.lock().expect("fixture watch") = Some(newer.clone());
+        // No prober ran: the actual consumer's local check catches raw ABA.
+        assert_eq!(
+            guard.revalidate(&original),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert_eq!(original.now_ms(), original_time);
+        assert!(!guard.publish(pending, bounded(Instant::now())));
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        assert_eq!(
+            guard.roster_for_membership(&roster, Some(&identity)),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        let round = guard
+            .roster_for_membership(&roster, Some(&newer))
+            .expect("new mapped applied roster");
+        assert!(guard.publish(round, bounded(Instant::now())));
+        let accepted = guard.acquire().expect("new bounded proof");
+        let learner = ClockMembershipIdentity {
+            voters: BTreeSet::from([1]),
+            ..newer.clone()
+        };
+        *source.0.lock().expect("fixture watch") = Some(learner);
+        assert_eq!(
+            guard.revalidate(&accepted),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        *source.0.lock().expect("fixture watch") = None;
+        assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
+        assert!(guard.roster_for_membership(&[], None).is_err());
+        let singleton = ClockMembershipIdentity {
+            log: (4, 1, 11),
+            members: BTreeSet::from([1]),
+            voters: BTreeSet::from([1]),
+            ..identity
+        };
+        *source.0.lock().expect("fixture watch") = Some(singleton.clone());
+        let empty = guard
+            .roster_for_membership(&[], Some(&singleton))
+            .expect("proved applied singleton");
+        assert!(guard.publish(empty, BTreeMap::new()));
+        assert!(guard.acquire().is_ok());
+        assert_eq!(
+            guard.revalidate(&original),
+            Err(ClockRefusal::GenerationChanged)
+        );
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -673,10 +776,12 @@ struct ClockInner {
     anchor_mono: Instant,
     standalone: bool,
     roster_observed_at: Option<Instant>,
+    membership: Option<ClockMembershipIdentity>,
 }
 
 pub struct ClusterClockGuard {
     inner: Mutex<ClockInner>,
+    membership_source: Option<Arc<dyn ClockMembershipSource>>,
     authority_reads: AtomicU64,
     refusals: [[AtomicU64; 4]; 3],
 }
@@ -693,6 +798,7 @@ impl ClusterClockGuard {
     pub fn new(replicated: bool) -> Self {
         let mono = Instant::now();
         Self {
+            membership_source: None,
             authority_reads: AtomicU64::new(0),
             refusals: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
             inner: Mutex::new(ClockInner {
@@ -717,7 +823,36 @@ impl ClusterClockGuard {
                 anchor_mono: mono,
                 standalone: !replicated,
                 roster_observed_at: None,
+                membership: None,
             }),
+        }
+    }
+
+    /// Share this exact watch-backed guard with all node-local consumers.
+    /// A closed or newly changed watch immediately invalidates prior coverage;
+    /// it never establishes an empty roster from an absent directory.
+    #[must_use]
+    pub fn with_membership_source(source: Arc<dyn ClockMembershipSource>) -> Self {
+        let mut guard = Self::new(true);
+        guard.membership_source = Some(source);
+        guard
+    }
+
+    fn refresh_membership(&self, inner: &mut ClockInner) {
+        let Some(source) = &self.membership_source else {
+            return;
+        };
+        let current = source.current();
+        if current != inner.membership || (current.is_none() && inner.roster_proved) {
+            inner.membership = current;
+            inner.roster_proved = false;
+            inner.roster_observed_at = None;
+            inner.snapshot.state_generation += 1;
+            inner.snapshot.readiness = ClockReadiness::default();
+            for peer in inner.snapshot.peers.values_mut() {
+                *peer = PeerClockOffset::Unknown;
+            }
+            Self::recompute(inner);
         }
     }
 
@@ -728,6 +863,7 @@ impl ClusterClockGuard {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         let before = Instant::now();
         let wall = wall_ms();
         let after = Instant::now();
@@ -743,6 +879,7 @@ impl ClusterClockGuard {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         let generation = inner.snapshot.clock_generation;
         let before = Instant::now();
         let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
@@ -766,6 +903,7 @@ impl ClusterClockGuard {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         let before = Instant::now();
         let current = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
         if current.clock_generation != ticket.decision.clock_generation {
@@ -948,13 +1086,43 @@ impl ClusterClockGuard {
 
     /// Install the exact committed roster before starting fanout. New members are Unknown.
     pub fn roster(&self, peers: &[String]) -> ClockDecisionTicket {
+        self.roster_for_membership(peers, None).unwrap_or_else(|_| {
+            self.roster_failed();
+            self.ticket()
+        })
+    }
+
+    /// UUID mapping must have been resolved against this exact applied watch
+    /// entry, including an after-await comparison by the membership adapter.
+    pub fn roster_for_membership(
+        &self,
+        peers: &[String],
+        membership: Option<&ClockMembershipIdentity>,
+    ) -> Result<ClockDecisionTicket, ClockRefusal> {
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         let before = Instant::now();
         let wall = wall_ms();
         let ticket = Self::continuity(&mut inner, before, wall, Instant::now());
+        if self.membership_source.is_some()
+            && (inner.membership.is_none() || membership != inner.membership.as_ref())
+        {
+            // A caller cannot prove coverage with a bare empty UUID directory
+            // or refresh evidence for an older membership after an ABA change.
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        if self.membership_source.is_some()
+            && membership.is_some_and(|identity| {
+                !identity.members.contains(&identity.local_node)
+                    || !identity.voters.is_subset(&identity.members)
+                    || peers.len() != identity.members.len().saturating_sub(1)
+            })
+        {
+            return Err(ClockRefusal::Unknown);
+        }
         let changed = !inner.roster_proved || inner.snapshot.peers.keys().ne(peers.iter());
         if changed {
             inner.snapshot.peers.retain(|id, _| peers.contains(id));
@@ -971,10 +1139,10 @@ impl ClusterClockGuard {
         }
         inner.roster_observed_at = Some(Instant::now());
         Self::recompute(&mut inner);
-        ClockDecisionTicket {
+        Ok(ClockDecisionTicket {
             state_generation: inner.snapshot.state_generation,
             ..ticket
-        }
+        })
     }
 
     /// A round publishes atomically only if continuity and roster remained identical.
@@ -987,10 +1155,12 @@ impl ClusterClockGuard {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         let before = Instant::now();
         let wall = wall_ms();
         let current = Self::continuity(&mut inner, before, wall, Instant::now());
-        if current.clock_generation != ticket.clock_generation
+        if !inner.roster_proved
+            || current.clock_generation != ticket.clock_generation
             || current.state_generation != ticket.state_generation
             || inner.snapshot.clock_generation != ticket.clock_generation
             || inner.snapshot.state_generation != ticket.state_generation
@@ -1060,6 +1230,7 @@ impl ClusterClockGuard {
             .inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
         Self::expire(&mut inner, Instant::now());
         Self::recompute(&mut inner);
         inner.snapshot.clone()
@@ -1070,7 +1241,8 @@ impl ClusterClockGuard {
         self.authority_reads.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Passive scrape: no continuity sampling, membership lookup or Store.
+    /// Passive scrape: no continuity sampling or Store/network IO. At most
+    /// an in-process Raft watch read invalidates obsolete membership coverage.
     #[must_use]
     pub fn prometheus(&self) -> String {
         let snapshot = self.snapshot();
