@@ -846,6 +846,20 @@ generation and producer attempt fence callbacks; absolute origin is applied
 once at server control ingestion. Missing callbacks, stalls, refusal or changed
 source preserve partial evidence, never a completed cell.
 
+**2026-10-02 reporting-cadence repair candidate:** the bridge's existing
+450ms acceptance floor starts when a control exchange settles, not when the
+browser's preceding500ms interval tick fired. A delayed accepted response can
+therefore make the next interval arrive too early. The page now waits at least
+500ms after the previous response/error settles before reporting again; busy,
+stale, paused, seeking and non-advancing observations still refuse. An actual
+409 remains a terminal failed cell, not an automatic retry or synthetic pass.
+One new synthetic contract executes the actual page with delayed responses
+and checks the cadence, single in-flight exchange and retained refusal. It
+passed once0.127s; this is not real-browser/corpus qualification. The prior
+codec-capable diagnostic preserved one actual accepted frame observation,
+then failed409 with no complete/bridge-final receipt. Its old5eb binary and
+new38026 launcher retain separate attribution; no current-tree pass is claimed.
+
 Supply an existing hash-pinned browser and reviewed feature-enabled test
 binary; no build/download/install occurs in this controller. Its manifest pins
 source, FFmpeg, ffprobe, browser, test binary and vendored hls.js. Source must

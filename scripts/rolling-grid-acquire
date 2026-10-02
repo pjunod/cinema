@@ -21,7 +21,7 @@ MAX_MEDIA = 512 * 1024 * 1024
 PAGE = r'''<!doctype html><meta charset="utf-8"><video id="v" muted autoplay width="640" height="360"></video><script src="/hls.js"></script><script>
 const ready=READY, v=document.querySelector('#v');
 const attachment=Object.freeze({session:ready.session,generation:ready.generation,attempt:ready.producer_attempt});
-let last=null,sentFrames=0,sentMedia=-1,busy=false,failed=null;
+let last=null,sentFrames=0,sentMedia=-1,busy=false,failed=null,nextReportAt=0;
 const hls=new Hls({startPosition:0,maxBufferLength:20,maxMaxBufferLength:30,backBufferLength:5});
 hls.on(Hls.Events.ERROR,(_,e)=>{if(e.fatal)failed=e.details;});
 hls.attachMedia(v);hls.loadSource('/media/'+ready.nonce+'/index.m3u8');
@@ -33,12 +33,14 @@ function frame(now,m){if(document.querySelector('#v')!==v||hls.media!==v)return;
  v.requestVideoFrameCallback(frame);}
 v.requestVideoFrameCallback(frame);
 setInterval(async()=>{
- if(busy||failed||!last||performance.now()-last.at>750||v.paused||v.seeking||v.playbackRate!==1||last.frames<=sentFrames||last.media<=sentMedia||hls.media!==v)return;
+ // The bridge's 450ms floor starts at accepted-response completion, not the
+ // previous interval tick. A slow exchange must not make the next tick early.
+ if(busy||failed||performance.now()<nextReportAt||!last||performance.now()-last.at>750||v.paused||v.seeking||v.playbackRate!==1||last.frames<=sentFrames||last.media<=sentMedia||hls.media!==v)return;
  let range=null;for(let i=0;i<v.buffered.length;i++)if(v.buffered.start(i)<=v.currentTime&&v.buffered.end(i)>=v.currentTime)range=[v.buffered.start(i),v.buffered.end(i)];
  if(!range)return;const observed={...last};busy=true;
  try{const r=await fetch('/frame',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({nonce:ready.nonce,generation:attachment.generation,session:attachment.session,producer_attempt:attachment.attempt,presented_frames:observed.frames,media_time:observed.media,current_time:v.currentTime,buffered_from:range[0],buffered_through:range[1]})});
  if(r.ok){sentFrames=observed.frames;sentMedia=observed.media;}else failed='control_refused_'+r.status;
- }catch(e){failed=e.name;}finally{busy=false;}
+ }catch(e){failed=e.name;}finally{nextReportAt=performance.now()+500;busy=false;}
 },500);
 window.labStatus=()=>({failed,presented_frames:last?.frames||0,media_time:last?.media??null,accepted_frames:sentFrames,playback_rate:v.playbackRate});
 </script>'''
