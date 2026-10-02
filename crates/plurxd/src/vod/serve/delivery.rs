@@ -531,7 +531,13 @@ impl VodServe {
         let reader_id = &owner.media_child.as_ref()?.reader_id;
         Some(VodPublication {
             result: self
-                .serve_segment(&found.rendition, reader_id, index, budget, found.delivery)
+                .serve_segment_for(
+                    &found.rendition,
+                    (reader_id, session_id),
+                    index,
+                    budget,
+                    found.delivery,
+                )
                 .await
                 .map(Some),
             owner,

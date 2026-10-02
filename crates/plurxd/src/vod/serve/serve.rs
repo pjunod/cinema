@@ -742,6 +742,18 @@ impl VodServe {
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
     ) -> Result<SegmentReady, VodError> {
+        self.serve_segment_for(rendition, (session_id, session_id), index, budget, delivery)
+            .await
+    }
+
+    pub(super) async fn serve_segment_for(
+        &self,
+        rendition: &Arc<Rendition>,
+        reader: (&str, &str),
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+    ) -> Result<SegmentReady, VodError> {
         // Materialized → serve immediately: the overwhelmingly common case,
         // and until now the invisible one. It never reaches the wait pool, so
         // nothing counted it: a node serving a hundred concurrent cache hits
@@ -758,16 +770,29 @@ impl VodServe {
         if let Some(cause) = rendition.failure_cause() {
             return Err(VodError::ProducerFailed(cause));
         }
-        self.blocked_wait(rendition, session_id, index, budget, delivery)
+        self.blocked_wait_for(rendition, reader, index, budget, delivery)
             .await
     }
 
     /// The blocking half of a segment GET: register on the wait pool, close
     /// the lost-wakeup window, and sleep until one of the four named ends.
+    #[cfg(test)]
     pub(super) async fn blocked_wait(
         &self,
         rendition: &Arc<Rendition>,
         session_id: &str,
+        index: u32,
+        budget: Duration,
+        delivery: Arc<crate::meter::Meter>,
+    ) -> Result<SegmentReady, VodError> {
+        self.blocked_wait_for(rendition, (session_id, session_id), index, budget, delivery)
+            .await
+    }
+
+    async fn blocked_wait_for(
+        &self,
+        rendition: &Arc<Rendition>,
+        reader: (&str, &str),
         index: u32,
         budget: Duration,
         delivery: Arc<crate::meter::Meter>,
@@ -788,11 +813,9 @@ impl VodServe {
             let wait = self
                 .shared
                 .pool
-                .register(key, session_id)
-                // The class travels with the refusal. `blocked_wait` is the only
-                // production caller of `register`, so this line is the whole
-                // seam between the pool knowing which cap fired and a client
-                // or an operator ever finding out.
+                .register_reader(key, reader.0, reader.1)
+                // Preserve the parent-cap refusal class for HTTP and operator
+                // diagnostics; a refused child creates no persistent demand.
                 .map_err(VodError::Busy)?;
             let demand = self
                 .shared

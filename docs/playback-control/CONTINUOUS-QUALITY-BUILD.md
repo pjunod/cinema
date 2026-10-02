@@ -1752,3 +1752,14 @@ cannot override an accepted playback anchor. End retains the existing detached
 cleanup path. The existing seek regression now includes shared AAC and root
 private readers, forward/backward seeks and late audio delivery. Pinned
 compilation and normal hooks apply; no unit execution.
+
+### 10.41 Child downloads share parent admission
+
+Private video/audio downloads now spend the public parent's single blocked
+GET allowance and fairness reserve, including retained requests whose bytes
+arrived but whose file is not yet opened. Scheduler demand and retirement
+remain attributed to the exact private reader. Activity diagnostics aggregate
+the parent's child waits. The authored regression covers shared caps, another
+parent's independent allowance, exact retirement, and capacity release after
+notification/cancellation. The real child HTTP serving path supplies both
+identities. Pinned compilation and normal hooks apply; no unit execution.
