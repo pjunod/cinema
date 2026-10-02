@@ -2677,6 +2677,8 @@ scope = "test"
         assert!(legacy.get("continuous_media").is_none());
         let legacy_identity = request.intent_fingerprint("viewer");
         request.continuous_media = Some(Box::new(ContinuousMediaRequest {
+            autonomous_companion: None,
+            companion_context: None,
             version: 1,
             family_generation: uuid::Uuid::new_v4().to_string(),
             role: ContinuousMediaRole::Video,
@@ -2710,6 +2712,33 @@ scope = "test"
         request.candidate_context = None;
         let video_identity = request.intent_fingerprint("viewer");
         assert_ne!(video_identity, legacy_identity);
+        let plain_role_wire = serde_json::to_value(&request).expect("plain role wire");
+        assert!(plain_role_wire["continuous_media"].get("autonomous_companion").is_none());
+        let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        let media = request.continuous_media.as_mut().expect("continuous role");
+        media.autonomous_companion = Some(companion_id);
+        media.companion_context = Some(Box::new(ContinuousCompanionContext {
+            height: 720,
+            candidate: CandidateExecutionContext {
+                owner_node_id: None, candidate_id: companion_id, recipe_digest: [10; 32],
+                normalized_geometry: true, grade: OutputGrade::Sdr, profile: None,
+            },
+        }));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        assert_ne!(request.intent_fingerprint("viewer"), video_identity);
+        let companion_wire = serde_json::to_value(&request).expect("companion wire");
+        assert!(companion_wire["continuous_media"].get("companion_context").is_none());
+        let decoded: SessionRequest = serde_json::from_value(companion_wire).expect("companion worker wire");
+        assert_eq!(decoded.continuous_media.as_ref().expect("role").autonomous_companion, Some(companion_id));
+        assert!(decoded.continuous_media.as_ref().expect("role").companion_context.is_none());
+        request.continuous_media.as_mut().expect("role").role = ContinuousMediaRole::SharedAudio;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        let media = request.continuous_media.as_mut().expect("role");
+        media.role = ContinuousMediaRole::Video;
+        media.autonomous_companion = None;
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        request.continuous_media.as_mut().expect("role").companion_context = None;
+        assert_eq!(request.intent_fingerprint("viewer"), video_identity);
         let mut wire = serde_json::to_value(&request).expect("continuous request");
         wire["continuous_media"]["ignored_role"] = true.into();
         assert!(serde_json::from_value::<SessionRequest>(wire).is_err());

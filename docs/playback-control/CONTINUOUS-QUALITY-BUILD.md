@@ -1874,3 +1874,26 @@ cover stale epochs, replay, attached-recipe eligibility and explicit retry.
 iOS production/test-source and tvOS production compilation apply; unit
 execution remains deferred. Warm player/layer ownership and actual device
 continuity evidence still remain unfinished.
+
+
+### 10.48 Autonomous companion registration
+
+A continuous video request can name one additional catalog candidate. The
+owning worker reconstructs both contexts from the same source and retained
+decoder snapshot; companion contexts stay out of JSON. The companion must
+be a distinct normalized SDR encode rung, and its derived immutable recipe
+must share the source, soundtrack selection and video grid with the primary.
+Same-node durable reconstruction now restores the catalog context first.
+Standalone role fingerprints and wire omissions remain unchanged.
+
+Creation prepares each media role independently and rechecks all cache
+objects under sorted build gates. It reserves both videos and optional AAC
+as one group before registering any private reader, with every foreground
+credit retained for the attachment lifetime. Missing contexts, mismatched
+roles and recipe aliases fail explicitly. Existing End and reap ownership
+covers all three roles. The existing AAC fixture now includes a three-role
+one-credit-short refusal, successful attachment, and full release after reap;
+strict-wire coverage checks companion identity and context omission. Pinned
+compilation and normal hooks apply; unit execution remains deferred.
+Verified master exposure, controlled scheduling and client switching remain
+unfinished, so continuous capability is still not advertised.

@@ -330,6 +330,14 @@ impl TranscodeManager {
         envelope: &mut crate::media_sessions::RemoteStartRequest,
     ) -> Result<(), String> {
         let Some(id) = envelope.candidate_id else {
+            if envelope
+                .request
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.autonomous_companion.is_some())
+            {
+                return Err("autonomous family primary catalog identity missing".to_owned());
+            }
             return Ok(());
         };
         let snapshot = envelope
@@ -375,6 +383,31 @@ impl TranscodeManager {
                     && envelope.request.hdr10 == (candidate.grade == OutputGrade::Hdr10) => {}
             SessionKind::Copy { .. } if candidate.route != CandidateRoute::Encode => {}
             _ => return Err("candidate delivery mismatch".to_owned()),
+        }
+        if let Some(media) = envelope.request.continuous_media.as_mut() {
+            media.companion_context = match media.autonomous_companion {
+                Some(companion_id) => {
+                    let companion = candidates
+                        .iter()
+                        .find(|row| {
+                            row.id == companion_id
+                                && row.id != candidate.id
+                                && row.decoder_compatible
+                                && row.route == CandidateRoute::Encode
+                                && row.normalized_geometry
+                                && row.grade == OutputGrade::Sdr
+                                && row.target_height != candidate.target_height
+                        })
+                        .ok_or_else(|| {
+                            "autonomous companion recipe or decoder changed".to_owned()
+                        })?;
+                    Some(Box::new(ContinuousCompanionContext {
+                        height: i64::from(companion.target_height),
+                        candidate: Self::candidate_context(companion),
+                    }))
+                }
+                None => None,
+            };
         }
         envelope.request.candidate_context = Some(Self::candidate_context(candidate));
         Ok(())

@@ -853,6 +853,8 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let manager = TranscodeManager::new(store, base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu);
     let mut request = SessionRequest {
         continuous_media: Some(Box::new(ContinuousMediaRequest {
+            autonomous_companion: None,
+            companion_context: None,
             version: 1,
             family_generation: uuid::Uuid::new_v4().to_string(),
             role: ContinuousMediaRole::Video,

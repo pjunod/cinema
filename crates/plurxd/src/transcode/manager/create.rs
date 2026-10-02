@@ -1139,6 +1139,50 @@ impl TranscodeManager {
         })))
     }
 
+    async fn prepare_vod_companion(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Option<(SessionRequest, Arc<crate::vodencode::Encoding>)>, String> {
+        let Some(media) = request
+            .continuous_media
+            .as_ref()
+            .filter(|media| media.autonomous_companion.is_some())
+        else {
+            return Ok(None);
+        };
+        let context = media.companion_context.as_ref().ok_or_else(|| {
+            vod_refusal_error(
+                "vod_family_catalog_missing",
+                "the autonomous companion has no restored worker catalog context",
+            )
+        })?;
+        if media.autonomous_companion != Some(context.candidate.candidate_id) {
+            return Err(vod_refusal_error(
+                "vod_family_invalid",
+                "the companion context does not match its requested catalog identity",
+            ));
+        }
+        let mut companion = request.clone();
+        let role = companion
+            .continuous_media
+            .as_mut()
+            .expect("continuous video");
+        role.autonomous_companion = None;
+        role.companion_context = None;
+        companion.kind = SessionKind::Transcode {
+            height: context.height,
+        };
+        companion.candidate_context = Some(context.candidate.clone());
+        let encoding = self
+            .prepare_vod_encoding(&companion, file)
+            .await?
+            .ok_or_else(|| {
+                vod_refusal_error("vod_family_invalid", "the companion has no video recipe")
+            })?;
+        Ok(Some((companion, encoding)))
+    }
+
     async fn prepare_vod_soundtrack(
         &self,
         request: &SessionRequest,
@@ -1162,6 +1206,12 @@ impl TranscodeManager {
         // Video has already validated its catalog context. AAC uses its own
         // CPU-only recipe and borrows only the selected video's end grid.
         audio.candidate_context = None;
+        let role = audio
+            .continuous_media
+            .as_mut()
+            .expect("shared soundtrack role");
+        role.autonomous_companion = None;
+        role.companion_context = None;
         let mut soundtrack = self.prepare_vod_encoding(&audio, file).await?;
         if let (Some(soundtrack), Some(video)) = (soundtrack.as_mut(), video) {
             Arc::get_mut(soundtrack)
@@ -1245,7 +1295,9 @@ impl TranscodeManager {
         let soundtrack = self
             .prepare_vod_soundtrack(req, &file, encoding.as_ref())
             .await?;
+        let companion = self.prepare_vod_companion(req, &file).await?;
         let prepared = crate::vodserve::VodRecipeRequest {
+            companion,
             request: req,
             encoding,
             soundtrack,
@@ -1605,11 +1657,14 @@ impl TranscodeManager {
             return false;
         }
         tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
-            let Ok(remote) =
+            let Ok(mut remote) =
                 serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
             else {
                 return false;
             };
+            if self.restore_candidate_context(&mut remote).await.is_err() {
+                return false;
+            }
             let req = remote.request;
             if req.presentation != Presentation::Vod {
                 return false;
@@ -1634,7 +1689,13 @@ impl TranscodeManager {
             else {
                 return false;
             };
+            let Ok(companion) = self.prepare_vod_companion(&req, &file).await else {
+                return false;
+            };
             if speculative {
+                if let Some((_, encoding)) = companion.as_ref() {
+                    encoding.mark_speculative();
+                }
                 if let Some(soundtrack) = soundtrack.as_ref() {
                     soundtrack.mark_speculative();
                 }
@@ -1663,6 +1724,7 @@ impl TranscodeManager {
                 .vod
                 .try_create_before_release(
                     crate::vodserve::VodRecipeRequest {
+                        companion,
                         request: &req,
                         encoding,
                         soundtrack,

@@ -478,7 +478,7 @@ pub struct SessionRecoveryIdentity {
 /// repeated create safe to answer with the session that already exists.
 /// Reconstructed from the retained worker envelope and validated recipe.
 /// Never emitted inside the strict legacy request envelope.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateExecutionContext {
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
@@ -498,6 +498,19 @@ pub struct ContinuousMediaRequest {
     pub version: u32,
     pub family_generation: String,
     pub role: ContinuousMediaRole,
+    /// One additional catalog rung for a capacity-reserved autonomous master.
+    /// Omitted for a standalone role or the controlled active video/audio pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomous_companion: Option<plurx_core::playback::candidate::CandidateId>,
+    /// Reconstructed from the same worker catalog and retained decoder caps.
+    #[serde(skip)]
+    pub companion_context: Option<Box<ContinuousCompanionContext>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinuousCompanionContext {
+    pub height: i64,
+    pub candidate: CandidateExecutionContext,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -515,6 +528,23 @@ impl ContinuousMediaRequest {
             && matches!(request.kind, SessionKind::Transcode { .. })
             && !request.hdr10
             && request.subtitle_burn.is_none()
+            && self.autonomous_companion.is_none_or(|id| {
+                self.role == ContinuousMediaRole::Video
+                    && request
+                        .candidate_context
+                        .as_ref()
+                        .is_none_or(|primary| primary.candidate_id != id)
+            })
+            && self.companion_context.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.candidate.candidate_id)
+                    && companion.height >= 2
+                    && companion.candidate.normalized_geometry
+                    && companion.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                    && companion.candidate.profile.is_none_or(|profile| {
+                        profile == transcode::AutoQualityRateProfile::H264Sdr1440P30V1
+                            && companion.height == 1440
+                    })
+            })
             && request.candidate_context.as_ref().is_none_or(|context| {
                 context.normalized_geometry
                     && context.grade == plurx_core::transcode::OutputGrade::Sdr
@@ -921,10 +951,14 @@ impl SessionRequest {
                 ContinuousMediaRole::Video => "video",
                 ContinuousMediaRole::SharedAudio => "shared_audio",
             };
-            format!(
+            let role_identity = format!(
                 "{kind}+continuous:{}:{}:{role}",
                 media.version, media.family_generation
-            )
+            );
+            match media.autonomous_companion {
+                Some(id) => format!("{role_identity}:autonomous:{}", id.to_hex()),
+                None => role_identity,
+            }
         } else {
             kind
         };

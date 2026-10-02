@@ -1217,7 +1217,10 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.request.continuous_media.is_none() || request.library_channel.is_none())
+    request.request.continuous_media.as_ref().is_none_or(|media| {
+        media.autonomous_companion.is_none_or(|companion| request.candidate_id.is_some_and(|primary| primary != companion))
+    })
+        && (request.request.continuous_media.is_none() || request.library_channel.is_none())
         && (request.candidate_id.is_none() || request.decoder_caps.is_some())
         // An explicit snapshot is a current capability constraint, including
         // on ordinary negotiated routes. Empty/all-unavailable is decoder

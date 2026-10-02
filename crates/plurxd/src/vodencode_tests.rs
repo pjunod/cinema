@@ -307,9 +307,11 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let mut parent_request = request(&parent, 0.0);
     parent_request.kind = SessionKind::Transcode { height: video.options.target_height };
     parent_request.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+            autonomous_companion: None,
+            companion_context: None,
         version: 1, family_generation: uuid::Uuid::new_v4().to_string(), role: crate::transcode::ContinuousMediaRole::Video,
     }));
-    let attach = || VodRecipeRequest { request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
+    let attach = || VodRecipeRequest { companion: None, request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
     let attribution = VodAttribution { user_name: "test", item_title: "paired continuous attachment", supersession_user: "test" };
     assert!(serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.is_err());
     assert!(!serve.shared.sessions.lock().await.contains_key(&parent));
@@ -360,6 +362,44 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         assert!(rendition.readers.lock().await.is_empty());
     }
     assert_eq!(encoding.admissions.software_in_use(), 0, "End and confirmed reap release the whole group");
+    // Reuse the existing AAC campaign to exercise the real three-role parent.
+    let mut companion = video.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    let mutable = Arc::get_mut(&mut companion).expect("new companion recipe");
+    mutable.options.target_height = 72;
+    refresh_encoded_plan(&file, mutable);
+    let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+    let mut companion_request = parent_request.clone();
+    companion_request.kind = SessionKind::Transcode { height: 72 };
+    companion_request.candidate_context = Some(crate::transcode::CandidateExecutionContext {
+        owner_node_id: None, candidate_id: companion_id, recipe_digest: [10; 32],
+        normalized_geometry: true, grade: plurx_core::transcode::OutputGrade::Sdr, profile: None,
+    });
+    let media = parent_request.continuous_media.as_mut().expect("role");
+    media.autonomous_companion = Some(companion_id);
+    let family_budget = budget + companion.resources().cpu_threads;
+    let autonomous = || VodRecipeRequest { request: &parent_request,
+        encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)),
+        companion: Some((companion_request.clone(), Arc::clone(&companion))) };
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &(family_budget - 1).to_string()).await.expect("one short family budget");
+    assert!(serve.try_create(autonomous(), &file, &settings(), attribution, parent.clone()).await.is_err());
+    assert_eq!(encoding.admissions.software_in_use(), 0, "three-role refusal is atomic");
+    assert!(soundtrack.readers.lock().await.is_empty());
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &family_budget.to_string()).await.expect("whole family budget");
+    serve.try_create(autonomous(), &file, &settings(), attribution, parent.clone()).await.expect("autonomous parent attachment");
+    let owned = {
+        let sessions = serve.shared.sessions.lock().await;
+        assert_eq!(sessions[&parent].children.len(), 3);
+        assert!(sessions[&parent].children.iter().all(|child| child._reservation.is_some()));
+        sessions[&parent].children.iter().map(|child| Arc::clone(&child.rendition)).collect::<Vec<_>>()
+    };
+    assert_eq!(encoding.admissions.software_in_use(), family_budget);
+    assert!(serve.end(&parent, Terminal::Deleted).await);
+    for rendition in owned {
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+        assert!(rendition.readers.lock().await.is_empty());
+    }
+    assert_eq!(encoding.admissions.software_in_use(), 0, "every autonomous credit releases after reap");
     let mut cached_reader = FragmentReader::new();
     cached_reader.push(&cached_init);
     let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else { panic!("init first"); };
@@ -640,6 +680,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+            companion: None,
                 soundtrack: None,
             request: &req,
             encoding: Some(Arc::clone(&encoding)),
@@ -688,6 +729,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
+            companion: None,
                 soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(&encoding)),
@@ -739,6 +781,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+            companion: None,
                 soundtrack: None,
             request: &req,
             encoding: Some(fresh),
@@ -1288,6 +1331,7 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
+            companion: None,
                 soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(encoding)),
@@ -1624,6 +1668,7 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
+            companion: None,
                 soundtrack: None,
                     request: &req,
                     encoding: Some(Arc::clone(&encoding)),
