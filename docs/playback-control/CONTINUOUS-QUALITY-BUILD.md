@@ -3251,3 +3251,21 @@ timed out creating a session. The next native action reported a locked Mac
 again. No media evidence was obtained; the isolated fixture server was closed.
 Production replay, physical native qualification and source-transfer approval
 remain outstanding.
+
+
+### 10.104 Android requires operation-specific receipt evidence
+
+Receipt validation now checks the requested operation's durable result in
+addition to identity and bounds. Scheduled intervals must be reserved;
+appended intervals must be appended; presentation requires a durable first
+tick and the requested artifact covering its observed tick. Cancellation must
+be acknowledged with completed intervals preserved. Disposal must list the
+artifact as disposed and remove its ready, reserved and appended entries.
+Malformed acknowledgments remain pending and cannot advance the ledger.
+
+The new regression supplies correctly identified but unperformed operation
+receipts and verifies rejection, then supplies actual operation facts. Source
+inspection also corrected the restoration fixture's simulated presentation to
+include its accepted append, observed timestamp and ever-appended flag; a
+first tick alone is not a valid presentation receipt. Production and test
+sources compile in twelve seconds. No unit tests were executed.

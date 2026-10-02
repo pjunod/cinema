@@ -202,8 +202,37 @@ internal object ContinuousQualityWire {
         val settled = receipt.obj("transaction") ?: return false
         if (!transaction(settled) || settled["transaction_id"] != transition["transaction_id"]) return false
         val operation = transition.obj("operation") ?: return false
-        return operation.text("kind") != "prepare" || (settled["intent_revision"] == operation["intent_revision"] &&
-            settled["target_rendition_id"] == operation["target_rendition_id"])
+        fun acceptedIntervals(field: String, destination: String): Boolean {
+            val intervals = operation.rows(field, 128) ?: return false
+            val accepted = settled.rows(destination, 128) ?: return false
+            return intervals.all { interval(it) && accepted.any { pin -> sameInterval(pin, it) } }
+        }
+        fun disposed(field: String): Boolean {
+            val artifacts = operation[field] as? JsonArray ?: return false
+            if (artifacts.size > 128 || !artifacts.all(::hash)) return false
+            return artifacts.all { artifact -> artifact in settled.getValue("disposed").jsonArray &&
+                listOf("ready", "reserved", "appended").all { key -> settled.getValue(key).jsonArray.none {
+                    it.jsonObject["artifact_id"] == artifact
+                } } }
+        }
+        return when (operation.text("kind")) {
+            "prepare" -> settled["intent_revision"] == operation["intent_revision"] &&
+                settled["target_rendition_id"] == operation["target_rendition_id"]
+            "scheduled" -> acceptedIntervals("intervals", "reserved")
+            "appended" -> acceptedIntervals("intervals", "appended")
+            "presented" -> {
+                val tick = operation.number("film_tick") ?: return false
+                settled.number("first_presented_tick") != null && settled.getValue("appended").jsonArray.any {
+                    val pin = it.jsonObject
+                    pin["artifact_id"] == operation["artifact_id"] && requireNotNull(pin.number("from_tick")) <= tick &&
+                        tick < requireNotNull(pin.number("through_tick"))
+                }
+            }
+            "cancel_unappended" -> settled["cancel_requested"]?.wireBoolean() == true && acceptedIntervals("completed", "appended")
+            "disposed" -> disposed("artifacts")
+            "recovery_owned" -> disposed("disposed_artifacts")
+            else -> false
+        }
     }
 
     fun family(value: JsonObject): Boolean {

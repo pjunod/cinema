@@ -165,4 +165,47 @@ class ContinuousQualityProtocolTest {
         assertFalse(ContinuousQualityWire.response(JsonObject(valid + ("ledger" to badLedger)), request))
     }
 
+    @Test fun receiptIdentityAloneCannotAcknowledgeUnperformedOperations() {
+        val pin = buildJsonObject {
+            put("artifact_id", "c".repeat(64)); put("rendition_id", "b".repeat(64)); put("timescale", 24)
+            put("from_tick", 0); put("through_tick", 48); put("byte_length", 1000)
+        }
+        fun request(kind: String) = JsonObject(identity + ("transition" to buildJsonObject {
+            identity.forEach { (key, value) -> put(key, value) }
+            put("sequence", 1); put("transaction_id", transaction)
+            put("operation", buildJsonObject {
+                put("kind", kind)
+                when (kind) {
+                    "scheduled", "appended" -> put("intervals", JsonArray(listOf(pin)))
+                    "cancel_unappended" -> put("completed", JsonArray(emptyList()))
+                    "disposed" -> put("artifacts", JsonArray(listOf(pin.getValue("artifact_id"))))
+                    "presented" -> { put("artifact_id", pin.getValue("artifact_id")); put("film_tick", 0); put("observed_at_ms", 1) }
+                }
+            })
+        }))
+        fun receipt(request: JsonObject, fields: Map<String, JsonElement>): JsonObject {
+            val original = reply(request)
+            val tx = JsonObject(requireNotNull(original.obj("receipt")?.obj("transaction")) + fields)
+            return JsonObject(original + mapOf(
+                "receipt" to JsonObject(requireNotNull(original.obj("receipt")) + ("transaction" to tx)),
+                "ledger" to JsonObject(requireNotNull(original.obj("ledger")) + ("transactions" to JsonArray(listOf(tx))))))
+        }
+        for (kind in listOf("scheduled", "appended", "presented", "cancel_unappended", "disposed")) {
+            val request = request(kind)
+            assertFalse(kind, ContinuousQualityWire.response(reply(request), request))
+        }
+        val scheduled = request("scheduled")
+        assertTrue(ContinuousQualityWire.response(receipt(scheduled, mapOf("reserved" to JsonArray(listOf(pin)))), scheduled))
+        val appended = request("appended")
+        val committed = mapOf("reserved" to JsonArray(listOf(pin)), "appended" to JsonArray(listOf(pin)), "ever_appended" to JsonPrimitive(true))
+        assertTrue(ContinuousQualityWire.response(receipt(appended, committed), appended))
+        val presented = request("presented")
+        assertTrue(ContinuousQualityWire.response(receipt(presented, committed + mapOf(
+            "first_presented_tick" to JsonPrimitive(0), "first_presented_at_ms" to JsonPrimitive(1))), presented))
+        val disposed = request("disposed")
+        assertFalse(ContinuousQualityWire.response(receipt(disposed, mapOf("disposed" to JsonArray(listOf(pin.getValue("artifact_id"))),
+            "reserved" to JsonArray(listOf(pin)))), disposed))
+        assertTrue(ContinuousQualityWire.response(receipt(disposed, mapOf("disposed" to JsonArray(listOf(pin.getValue("artifact_id"))))), disposed))
+    }
+
 }

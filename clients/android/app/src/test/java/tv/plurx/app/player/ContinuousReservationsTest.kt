@@ -72,7 +72,9 @@ class ContinuousReservationsTest {
         assertEquals(before, requests.size)
         // Only an actually presented incumbent can be restored on a cold
         // optional load failure. Refresh its durable presentation receipt.
-        tx = JsonObject(requireNotNull(tx) + mapOf("first_presented_tick" to JsonPrimitive(0)))
+        tx = JsonObject(requireNotNull(tx) + mapOf("first_presented_tick" to JsonPrimitive(0),
+            "first_presented_at_ms" to JsonPrimitive(1), "ever_appended" to JsonPrimitive(true),
+            "appended" to requireNotNull(tx).getValue("reserved"), "state" to JsonPrimitive("presented")))
         protocol.snapshot()
         assertTrue(reservations.change("c".repeat(64), 48, true, setOf("b".repeat(64), "c".repeat(64))))
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
