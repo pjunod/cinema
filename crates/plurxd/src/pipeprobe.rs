@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use plurx_core::transcode::{Encoder, Pipeline, PIPELINE_CANDIDATES};
+use plurx_core::transcode::{zscale_tone_map_filter, Encoder, Pipeline, PIPELINE_CANDIDATES};
 
 use crate::ffmpeg::{ffmpeg_bin, ffprobe_bin};
 
@@ -587,14 +587,13 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
 
     let mut vf = match candidate.filters(None, PROBE_HEIGHT, Some("hdr10")) {
         Some(g) => g,
-        // The CPU reference: the exact chain `video_filters` builds for an
-        // HDR10 source, spelled here because a probe that measured a
+        // The CPU reference: the tone map `video_filters` builds for an
+        // HDR10 source at the 1,000-nit policy peak, taken from the one
+        // function that spells it, because a probe that measured a
         // *different* CPU chain would be comparing against a fiction.
         None => format!(
-            "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-             zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
-             zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p,\
-             scale=-2:'min({PROBE_HEIGHT},ih)'"
+            "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
+            zscale_tone_map_filter("smpte2084", 1_000)
         ),
     };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
@@ -1706,7 +1705,10 @@ mod tests {
             .map(|i| args[i + 1].clone())
             .expect("a filter graph");
         assert!(vf.contains("tonemap=tonemap=hable"), "{vf}");
-        assert!(vf.contains("zscale=p=bt709,tonemap="), "{vf}");
+        assert!(
+            vf.contains(":t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap="),
+            "gamut conversion on the linearising zscale, ahead of the curve: {vf}"
+        );
         assert!(vf.contains("peak=10"), "{vf}");
         assert!(vf.contains("dither=error_diffusion"), "{vf}");
         assert!(vf.contains("tin=smpte2084"), "{vf}");
