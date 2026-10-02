@@ -108,6 +108,9 @@ pub struct LocalDbRaftMetrics {
 
 #[cfg(feature = "sqlite")]
 impl LocalDbRaftMetrics {
+    pub(crate) fn from_receiver(receiver: watch::Receiver<RaftMetrics<NodeId, Node>>) -> Self {
+        Self { receiver }
+    }
     /// Observe the exact local membership without SQL, management IO or awaits.
     /// Initial/closed/unapplied observations cannot establish a committed
     /// empty-remote roster merely because an old peer directory is empty.
@@ -164,16 +167,21 @@ pub(crate) async fn db_quorum_watermark_local(
     let result = tokio::time::timeout(
         Duration::from_secs(1),
         state.raft_db.raft.ensure_linearizable(),
-    ).await;
+    )
+    .await;
     if started.elapsed() >= Duration::from_millis(100) {
-        tracing::warn!(node = state.id, term = before.current_term,
-            phase = "linearizable_check", elapsed_ms = started.elapsed().as_millis() as u64,
+        tracing::warn!(
+            node = state.id,
+            term = before.current_term,
+            phase = "linearizable_check",
+            elapsed_ms = started.elapsed().as_millis() as u64,
             timed_out = result.is_err(),
-            "slow leader quorum watermark proof (quorum/apply split unavailable)");
+            "slow leader quorum watermark proof (quorum/apply split unavailable)"
+        );
     }
     let committed = result
-    .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??
-    .ok_or_else(|| Error::LeaderChange("database leader has no read index".into()))?;
+        .map_err(|_| Error::Timeout("database quorum watermark proof timed out".into()))??
+        .ok_or_else(|| Error::LeaderChange("database leader has no read index".into()))?;
     let after = state.raft_db.raft.metrics().borrow().clone();
     after.running_state?;
     if after.state != ServerState::Leader
@@ -230,6 +238,152 @@ impl Client {
         Ok(LocalDbRaftMetrics {
             receiver: state.raft_db.raft.metrics(),
         })
+    }
+
+    /// The same caller-owned admission installed before listeners. Remote or
+    /// unguarded local clients cannot manufacture a replacement context.
+    pub fn local_membership_admission(
+        &self,
+    ) -> Result<Arc<dyn crate::membership_admission::MembershipAdmission>, Error> {
+        self.inner
+            .state
+            .as_ref()
+            .and_then(|state| state.membership_admission.clone())
+            .ok_or_else(|| Error::Error("local startup membership admission is unavailable".into()))
+    }
+
+    /// Submit one promotion request after authenticated clock observation.
+    /// There is deliberately no redirect/retry loop: a transport failure may
+    /// mean the proposal was submitted, so callers must reconcile the applied
+    /// watch rather than acquire a replacement proof and submit again.
+    #[cfg(feature = "sqlite")]
+    pub async fn promote_after_clock_observation(
+        &self,
+        deadline: time::Instant,
+    ) -> Result<(), Error> {
+        let state = self
+            .inner
+            .state
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup promotion requires a local node".into()))?;
+        let policy = state
+            .membership_admission
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup promotion requires installed admission".into()))?;
+        // Capture before the first await, including any original refusal.
+        let original = policy.prepare(
+            crate::membership_admission::MembershipAcquisition::Promote { node_id: state.id },
+        );
+        let metrics = state.raft_db.raft.metrics().borrow().clone();
+        if metrics
+            .membership_config
+            .voter_ids()
+            .any(|id| id == state.id)
+        {
+            // Effective membership can precede application. This is already
+            // submitted reconciliation, not authority for another proposal.
+            return Ok(());
+        }
+        if !crate::helpers::membership_is_applied(&metrics) {
+            return Err(Error::Error(
+                "startup promotion requires applied membership".into(),
+            ));
+        }
+        let local = metrics
+            .membership_config
+            .membership()
+            .get_node(&state.id)
+            .ok_or_else(|| {
+                Error::Error("startup promotion target is absent from membership".into())
+            })?;
+        let leader_id = metrics
+            .current_leader
+            .ok_or_else(|| Error::Error("startup promotion has no current leader".into()))?;
+        let leader = metrics
+            .membership_config
+            .membership()
+            .get_node(&leader_id)
+            .ok_or_else(|| {
+                Error::Error("startup promotion leader is absent from membership".into())
+            })?;
+        let payload = crate::helpers::serialize(&crate::network::management::LearnerReq {
+            node_id: state.id,
+            addr_api: local.addr_api.clone(),
+            addr_raft: local.addr_raft.clone(),
+        })?;
+        let scheme = if self.inner.tls_config.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let url = format!(
+            "{scheme}://{}/cluster/become_member/sqlite",
+            leader.addr_api
+        );
+        let client = self.inner.client.as_ref().ok_or_else(|| {
+            Error::Error("startup promotion has no configured management client".into())
+        })?;
+        let request = client
+            .post(url)
+            .header(HEADER_NAME_SECRET, &state.secret_api)
+            .body(payload);
+        if time::Instant::now() >= deadline {
+            return Err(Error::Error(
+                "startup promotion budget expired before submission".into(),
+            ));
+        }
+        original.redeem()?;
+        let response = time::timeout_at(deadline, request.send())
+            .await
+            .map_err(|_| {
+                Error::Error("startup promotion outcome is unknown after deadline".into())
+            })??;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        let error = time::timeout_at(deadline, response.json::<Error>())
+            .await
+            .map_err(|_| {
+                Error::Error("startup promotion response is unknown after deadline".into())
+            })??;
+        Err(error)
+    }
+
+    /// Activate deferred vendor jobs only after this actual local member has
+    /// applied its vote. Repeated completion never starts a second job owner.
+    #[cfg(feature = "sqlite")]
+    pub fn finish_clock_observation(&self) -> Result<(), Error> {
+        let state = self
+            .inner
+            .state
+            .as_ref()
+            .ok_or_else(|| Error::Error("startup completion requires a local node".into()))?;
+        let metrics = state.raft_db.raft.metrics().borrow().clone();
+        if !crate::helpers::membership_is_applied(&metrics)
+            || !metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == state.id)
+        {
+            return Err(Error::Error(
+                "startup completion requires an applied local vote".into(),
+            ));
+        }
+        #[cfg(feature = "backup")]
+        if let Some(config) = state
+            .startup_backup
+            .lock()
+            .map_err(|_| Error::Error("startup backup ownership lock is poisoned".into()))?
+            .take()
+        {
+            crate::backup::start_cron(
+                self.clone(),
+                config,
+                #[cfg(feature = "s3")]
+                state.s3_config.clone(),
+            );
+        }
+        Ok(())
     }
 
     /// Obtain the process-local database snapshot instrumentation handle.

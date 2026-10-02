@@ -20,11 +20,60 @@ use crate::backup;
 #[cfg(feature = "dashboard")]
 use crate::dashboard;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StartupPhase {
+    Normal,
+    ClockObservation,
+}
+
+/// Only the staged startup future owns these tasks until Client handoff.
+/// Normal startup preserves its existing detached-task behavior. Storage
+/// workers are not aborted here: accepted snapshot work must drain first.
+struct StartupTaskOwner {
+    enabled: bool,
+    tasks: Vec<tokio::task::AbortHandle>,
+}
+
+impl StartupTaskOwner {
+    fn track<T>(&mut self, task: &tokio::task::JoinHandle<T>) {
+        if self.enabled {
+            self.tasks.push(task.abort_handle());
+        }
+    }
+
+    fn handoff(&mut self) {
+        self.tasks.clear();
+    }
+}
+
+impl Drop for StartupTaskOwner {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
 #[allow(clippy::extra_unused_type_parameters)]
-pub async fn start_node_inner<C>(node_config: Box<NodeConfig>) -> Result<Client, Error>
+pub(crate) async fn start_node_inner<C>(
+    mut node_config: Box<NodeConfig>,
+    membership_admission: Option<Arc<dyn crate::membership_admission::MembershipAdmission>>,
+    phase: StartupPhase,
+) -> Result<Client, Error>
 where
     C: Debug + CacheVariants,
 {
+    let mut startup_storage =
+        crate::startup_cleanup::StartupStorageOwner::new(phase == StartupPhase::ClockObservation);
+    // Locals drop in reverse declaration order: stop admitting network work
+    // synchronously before spawning the asynchronous storage drainage owner.
+    let mut startup_tasks = StartupTaskOwner {
+        enabled: phase == StartupPhase::ClockObservation,
+        tasks: Vec::new(),
+    };
+    if phase == StartupPhase::ClockObservation {
+        node_config.learner_only = true;
+    }
     node_config.is_valid()?;
 
     if rustls::crypto::ring::default_provider()
@@ -73,16 +122,31 @@ where
         raft_config.clone(),
         _do_reset_metadata,
         snapshot_transport.clone(),
+        phase == StartupPhase::ClockObservation,
     )
     .await?;
+
+    #[cfg(feature = "sqlite")]
+    startup_storage.protect_db(&raft_db);
 
     #[cfg(feature = "cache")]
     let raft_cache = store::start_raft_cache::<C>(
         &node_config,
         raft_config.clone(),
         snapshot_transport.clone(),
+        phase == StartupPhase::ClockObservation,
     )
     .await?;
+
+    #[cfg(feature = "cache")]
+    startup_storage.protect_cache(&raft_cache);
+
+    #[cfg(feature = "sqlite")]
+    if let Some(admission) = &membership_admission {
+        admission.bind_membership(crate::LocalDbRaftMetrics::from_receiver(
+            raft_db.raft.metrics(),
+        ))?;
+    }
 
     let (api_addr, rpc_addr) = {
         let node = node_config
@@ -128,6 +192,11 @@ where
         #[cfg(feature = "cache")]
         raft_cache,
         raft_lock: Arc::new(Mutex::new(())),
+        membership_admission,
+        #[cfg(feature = "backup")]
+        startup_backup: std::sync::Mutex::new(
+            (phase == StartupPhase::ClockObservation).then(|| node_config.backup_config.clone()),
+        ),
         secret_api: node_config.secret_api,
         secret_raft: node_config.secret_raft,
         #[cfg(feature = "dashboard")]
@@ -147,12 +216,14 @@ where
     });
 
     #[cfg(any(feature = "sqlite", feature = "cache"))]
-    split_brain_check::spawn(
-        state.clone(),
-        node_config.nodes.clone(),
-        node_config.tls_api.is_some(),
-        tls_api_no_verify,
-    );
+    if phase == StartupPhase::Normal {
+        split_brain_check::spawn(
+            state.clone(),
+            node_config.nodes.clone(),
+            node_config.tls_api.is_some(),
+            tls_api_no_verify,
+        );
+    }
 
     #[cfg(all(feature = "backup", feature = "sqlite"))]
     if backup_applied {
@@ -176,7 +247,7 @@ where
     if let Some(config) = &node_config.tls_raft {
         let config = config.server_config(&node_config.listen_addr_raft).await;
         let server = axum_server::from_tcp_rustls(listener_raft, config)?;
-        task::spawn(Box::pin(async move {
+        let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
             server
@@ -184,14 +255,16 @@ where
                 .await
                 .unwrap();
         }));
+        startup_tasks.track(&task);
     } else {
         let listener = TcpListener::from_std(listener_raft)?;
-        task::spawn(Box::pin(async move {
+        let task = task::spawn(Box::pin(async move {
             axum::serve(listener, router_internal.into_make_service())
                 .with_graceful_shutdown(shutdown)
                 .await
                 .unwrap()
         }));
+        startup_tasks.track(&task);
     };
 
     let default_routes = Router::new()
@@ -265,19 +338,21 @@ where
     if let Some(config) = &node_config.tls_api {
         let config = config.server_config(&node_config.listen_addr_api).await;
         let server = axum_server::from_tcp_rustls(listener_api, config)?;
-        task::spawn(Box::pin(async move {
+        let task = task::spawn(Box::pin(async move {
             // TODO find a way to do a graceful shutdown with `axum_server` or to handle TLS
             //  properly with axum directly
             server.serve(router_api.into_make_service()).await.unwrap();
         }));
+        startup_tasks.track(&task);
     } else {
         let listener = TcpListener::from_std(listener_api)?;
-        task::spawn(Box::pin(async move {
+        let task = task::spawn(Box::pin(async move {
             axum::serve(listener, router_api.into_make_service())
                 .with_graceful_shutdown(shutdown_signal(rx_shutdown))
                 .await
                 .unwrap()
         }));
+        startup_tasks.track(&task);
     };
 
     #[cfg(feature = "sqlite")]
@@ -299,6 +374,9 @@ where
         }))
     };
 
+    #[cfg(feature = "sqlite")]
+    startup_tasks.track(&member_db);
+
     #[cfg(feature = "cache")]
     let member_cache = {
         let st = state.clone();
@@ -318,6 +396,9 @@ where
         }))
     };
 
+    #[cfg(feature = "cache")]
+    startup_tasks.track(&member_cache);
+
     #[cfg(feature = "sqlite")]
     member_db.await??;
     #[cfg(feature = "cache")]
@@ -329,7 +410,7 @@ where
         .map(|node| node.addr_api.clone())
         .collect();
     let client = Client::new_local(
-        state,
+        state.clone(),
         api_nodes,
         tls_api_client_config,
         tls_api_no_verify,
@@ -349,14 +430,28 @@ where
     )
     .await;
 
+    #[cfg(any(feature = "sqlite", feature = "cache"))]
+    if phase == StartupPhase::ClockObservation {
+        split_brain_check::spawn(
+            state,
+            node_config.nodes.clone(),
+            node_config.tls_api.is_some(),
+            tls_api_no_verify,
+        );
+    }
+    startup_tasks.handoff();
+    startup_storage.handoff();
+
     // TODO fix that and also start backup cron jobs with no S3 config
     #[cfg(feature = "backup")]
-    backup::start_cron(
-        client.clone(),
-        node_config.backup_config,
-        #[cfg(feature = "s3")]
-        node_config.s3_config,
-    );
+    if phase == StartupPhase::Normal {
+        backup::start_cron(
+            client.clone(),
+            node_config.backup_config,
+            #[cfg(feature = "s3")]
+            node_config.s3_config,
+        );
+    }
 
     Ok(client)
 }

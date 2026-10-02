@@ -1050,6 +1050,9 @@ impl ClusterClockGuard {
     ) -> Result<(), ClockRefusal> {
         let result = (|| {
             self.revalidate_removal_capture(captured)?;
+            if captured.remaining_removal_budget().is_none() {
+                return Err(ClockRefusal::Unknown);
+            }
             let reference = fence.reference();
             if !captured.matches_target(&reference.target_node_id, reference.target_raft_id)
                 || !captured

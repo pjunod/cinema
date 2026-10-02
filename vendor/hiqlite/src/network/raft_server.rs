@@ -23,9 +23,6 @@ use crate::app_state::RaftType;
 use crate::helpers;
 #[cfg(feature = "cache")]
 use crate::store::state_machine::memory::TypeConfigKV;
-#[cfg(feature = "cache")]
-use std::collections::BTreeSet;
-
 #[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::TypeConfigSqlite;
 
@@ -54,6 +51,8 @@ pub enum RaftStreamRequest {
     SnapshotCache((usize, InstallSnapshotRequest<TypeConfigKV>)),
     #[cfg(feature = "cache")]
     RemoveMembershipCache(u64),
+    #[cfg(feature = "cache")]
+    FencedRemoveMembershipCache(crate::ReductionFenceReference),
 }
 
 impl From<&[u8]> for RaftStreamRequest {
@@ -800,17 +799,85 @@ async fn execute_raft_request(
             debug!("Node drop membership request for Node: {}\n", node_id);
             let _lock = state.raft_lock.lock().await;
             let metrics = helpers::get_raft_metrics(state, &RaftType::Cache).await;
-            let members = metrics.membership_config;
-            let mut nodes_set = BTreeSet::new();
-            for (id, _node) in members.nodes() {
-                if *id != node_id {
-                    nodes_set.insert(*id);
+            if metrics
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == node_id)
+            {
+                // An old frame has no exact owned fence. Installed policies
+                // refuse it; standalone legacy use still removes only target.
+                let result = if metrics
+                    .membership_config
+                    .voter_ids()
+                    .any(|id| id == node_id)
+                {
+                    helpers::remove_voter(state, &RaftType::Cache, node_id, false).await
+                } else {
+                    helpers::remove_learner(state, &RaftType::Cache, node_id).await
+                };
+                if let Err(error) = result {
+                    warn!(
+                        ?error,
+                        "legacy Cache reduction refused; no proposal acceptance claimed"
+                    );
                 }
             }
-            if let Err(err) =
-                helpers::change_membership(state, &RaftType::Cache, nodes_set, false).await
+            return Ok(None);
+        }
+        #[cfg(feature = "cache")]
+        RaftStreamRequest::FencedRemoveMembershipCache(reference) => {
+            if !reference.has_valid_shape() {
+                warn!("invalid exact Cache reduction reference; refusing");
+                return Ok(None);
+            }
+            let target = reference.target_raft_id;
+            let mut admission = state.membership_admission.as_ref().map(|policy| {
+                policy.prepare(
+                    crate::membership_admission::MembershipAcquisition::Reduction {
+                        reference,
+                        retain_as_learner: false,
+                    },
+                )
+            });
+            let _lock = state.raft_lock.lock().await;
+            let metrics = helpers::get_raft_metrics(state, &RaftType::Cache).await;
+            if metrics
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == target)
             {
-                error!("Error removing remote Cache Member: {:?}", err);
+                let Some(prepared) = admission.as_mut() else {
+                    warn!("fenced Cache reduction lacks installed node admission; refusing");
+                    return Ok(None);
+                };
+                if let Err(error) = prepared.prepare_proof().await {
+                    warn!(?error, "fenced Cache reduction proof refused");
+                    return Ok(None);
+                }
+                let result = if metrics.membership_config.voter_ids().any(|id| id == target) {
+                    helpers::remove_voter_with_admission(
+                        state,
+                        &RaftType::Cache,
+                        target,
+                        false,
+                        admission.as_deref(),
+                    )
+                    .await
+                } else {
+                    helpers::remove_learner_with_admission(
+                        state,
+                        &RaftType::Cache,
+                        target,
+                        admission.as_deref(),
+                    )
+                    .await
+                };
+                if let Err(error) = result {
+                    warn!(
+                        ?error,
+                        "fenced Cache reduction refused; no proposal acceptance claimed"
+                    );
+                }
             }
             return Ok(None);
         }

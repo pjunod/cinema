@@ -13,7 +13,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -34,7 +34,7 @@ use crate::store::{
 
 use super::clock::{
     ClockAcquisitionTicket, ClockDecision, ClockMembershipIdentity, ClockMembershipSource,
-    ClockRefusal, ClockRemovalCapture, ClusterClockGuard,
+    ClockRefusal, ClockRemovalCapture, ClusterClockGuard, OwnedClockAcquisitionTicket,
 };
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
@@ -152,8 +152,7 @@ pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
 /// replacement database even when every disposable cache is full.
 const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
 const SNAPSHOT_STORAGE_FLOOR_CAPABILITY: &str = "snapshot_storage_floor_v1";
-const PROMOTION_TARGET_SQL: &str =
-    "SELECT node.raft_id, node.role, node.last_seen_at, \
+const PROMOTION_TARGET_SQL: &str = "SELECT node.raft_id, node.role, node.last_seen_at, \
         EXISTS (SELECT 1 FROM cluster_node_removals removal \
           WHERE removal.node_id = node.node_id) AS removal_pending, \
         progress.last_applied_index, progress.apply_lag_entries, \
@@ -1937,6 +1936,175 @@ impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
     }
 }
 
+/// The node-local guard exists before Hiqlite listeners. Its source remains
+/// Unknown until the actual local watch is bound exactly once by startup.
+pub struct StartupMembershipAdmission {
+    source: Arc<StartupClockMembershipSource>,
+    clock: Arc<ClusterClockGuard>,
+    startup_deadline: Option<tokio::time::Instant>,
+    /// Bound exactly once after construction; never retains the manager/client
+    /// cycle or borrows another installed node's removal authority.
+    removal_owner: OnceLock<Weak<ReplicatedMembership>>,
+}
+
+#[derive(Default)]
+struct StartupClockMembershipSource(OnceLock<hiqlite::LocalDbRaftMetrics>);
+
+impl ClockMembershipSource for StartupClockMembershipSource {
+    fn current(&self) -> Option<ClockMembershipIdentity> {
+        self.0.get()?.current()
+    }
+}
+
+impl Default for StartupMembershipAdmission {
+    fn default() -> Self {
+        let source = Arc::new(StartupClockMembershipSource::default());
+        Self {
+            clock: Arc::new(ClusterClockGuard::with_membership_source(source.clone())),
+            source,
+            startup_deadline: None,
+            removal_owner: OnceLock::new(),
+        }
+    }
+}
+
+impl StartupMembershipAdmission {
+    #[must_use]
+    pub fn with_startup_deadline(deadline: tokio::time::Instant) -> Self {
+        Self {
+            startup_deadline: Some(deadline),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn startup_deadline(&self) -> Option<tokio::time::Instant> {
+        self.startup_deadline
+    }
+
+    #[must_use]
+    pub fn clock_guard(&self) -> Arc<ClusterClockGuard> {
+        Arc::clone(&self.clock)
+    }
+}
+
+struct PreparedStartupMembershipAdmission<'guard> {
+    clock: &'guard ClusterClockGuard,
+    original: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+}
+
+struct PreparedReductionAdmission<'guard> {
+    policy: &'guard StartupMembershipAdmission,
+    reference: hiqlite::ReductionFenceReference,
+    original: Result<ClockRemovalCapture<'guard>, ClockRefusal>,
+    proof: Option<AppliedRemovalFence>,
+}
+
+impl hiqlite::membership_admission::PreparedMembershipAdmission for PreparedReductionAdmission<'_> {
+    fn prepare_proof(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), hiqlite::Error>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.reference.has_valid_shape() {
+                return Err(hiqlite::Error::Error(
+                    "invalid exact reduction reference".into(),
+                ));
+            }
+            let captured = self.original.as_ref().map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })?;
+            let inner = self
+                .policy
+                .removal_owner
+                .get()
+                .and_then(Weak::upgrade)
+                .ok_or_else(|| {
+                    hiqlite::Error::Error("installed removal owner is unavailable".into())
+                })?;
+            let manager = MembershipManager {
+                inner: Some(inner),
+                clock: Arc::clone(&self.policy.clock),
+            };
+            // No new capture, clock query or deadline is created after await.
+            self.proof = Some(
+                manager
+                    .wait_for_reduction_reference(&self.reference, captured)
+                    .await
+                    .map_err(|error| hiqlite::Error::Error(error.to_string().into()))?,
+            );
+            Ok(())
+        })
+    }
+
+    fn redeem(&self) -> Result<(), hiqlite::Error> {
+        let captured = self.original.as_ref().map_err(|error| {
+            hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+        })?;
+        let proof = self.proof.as_ref().ok_or_else(|| {
+            hiqlite::Error::Error("exact reduction proof was not prepared".into())
+        })?;
+        self.policy
+            .clock
+            .admit_fenced_removal(captured, proof)
+            .map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })
+    }
+}
+
+impl hiqlite::membership_admission::PreparedMembershipAdmission
+    for PreparedStartupMembershipAdmission<'_>
+{
+    fn redeem(&self) -> Result<(), hiqlite::Error> {
+        self.clock
+            .admit_for(ClockDecision::MembershipChange, self.original)
+            .map(|_| ())
+            .map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })
+    }
+}
+
+impl hiqlite::membership_admission::MembershipAdmission for StartupMembershipAdmission {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    fn prepare(
+        &self,
+        operation: hiqlite::membership_admission::MembershipAcquisition,
+    ) -> Box<dyn hiqlite::membership_admission::PreparedMembershipAdmission + '_> {
+        if let hiqlite::membership_admission::MembershipAcquisition::Reduction {
+            reference,
+            retain_as_learner,
+        } = operation
+        {
+            // Retained learners are survivors, so this exception cannot excuse
+            // their clock. This closed removal transport always removes target.
+            let original = if retain_as_learner || !reference.has_valid_shape() {
+                Err(ClockRefusal::Unknown)
+            } else {
+                self.clock.capture_removal_raft(reference.target_raft_id)
+            };
+            return Box::new(PreparedReductionAdmission {
+                policy: self,
+                reference,
+                original,
+                proof: None,
+            });
+        }
+        Box::new(PreparedStartupMembershipAdmission {
+            clock: &self.clock,
+            original: self.clock.acquire(),
+        })
+    }
+
+    fn bind_membership(&self, metrics: hiqlite::LocalDbRaftMetrics) -> Result<(), hiqlite::Error> {
+        self.source.0.set(metrics).map_err(|_| {
+            hiqlite::Error::Error("startup clock membership watch was already bound".into())
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LeaderSelfLeaveSequence {
     HandoffThenCommit,
@@ -2173,9 +2341,9 @@ const MAX_FROZEN_REDUCTION_REFERENCES: i64 = 256;
 const FREEZE_REDUCTION_REFERENCE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
     SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM cluster_node_removals AS fence \
       JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = fence.node_id \
-      JOIN settings AS owner ON owner.key = $6 AND owner.value = '1' \
       JOIN cluster_nodes AS node ON node.node_id = fence.node_id \
       WHERE fence.node_id = $4 AND attempt.attempt_id = $5 \
+        AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $6 AND owner.value = '1') \
         AND node.raft_id = $7 AND node.removed_at IS NULL AND $8 > 0) \
     AND ((SELECT COUNT(*) FROM settings WHERE key LIKE 'internal.cluster_reduction.v1.%') < $9 \
       OR EXISTS (SELECT 1 FROM settings WHERE key = $1)) \
@@ -2185,17 +2353,17 @@ const EXACT_REDUCTION_FENCE_SQL: &str = "SELECT COUNT(*) AS count \
     FROM cluster_nodes AS node \
     JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
     JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
-    JOIN settings AS owner ON owner.key = $4 AND owner.value = '1' \
     WHERE node.node_id = $1 AND node.raft_id = $2 \
-      AND attempt.attempt_id = $3 AND node.removed_at IS NULL";
+      AND attempt.attempt_id = $3 AND node.removed_at IS NULL \
+      AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
 
 const READ_REDUCTION_REFERENCE_SQL: &str = "SELECT frozen.value AS reference_json, \
     node.raft_id, node.last_seen_at, node.last_applied_index \
-    FROM settings AS frozen JOIN cluster_nodes AS node ON node.node_id = $2 \
+    FROM settings AS frozen JOIN cluster_nodes AS node ON frozen.key = $1 AND node.node_id = $2 \
     JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
     JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
-    JOIN settings AS owner ON owner.key = $4 AND owner.value = '1' \
-    WHERE frozen.key = $1 AND attempt.attempt_id = $3 AND node.removed_at IS NULL";
+    WHERE attempt.attempt_id = $3 AND node.removed_at IS NULL \
+    AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
 
 const RETIRE_OWNED_REDUCTION_REFERENCE_SQL: &str = "DELETE FROM settings \
     WHERE key = $1 AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
@@ -3394,6 +3562,203 @@ impl MembershipManager {
         role: ClusterRole,
         storage_root: PathBuf,
     ) -> Result<Self, MembershipError> {
+        let manager = Self::construct_replicated(
+            client,
+            replication,
+            store,
+            identity,
+            local,
+            bootstrap_http,
+            artwork_http,
+            secrets,
+            activity_signing_key,
+            activation_marker,
+            role,
+            storage_root,
+        )
+        .await?;
+        manager.initialize().await?;
+        Ok(manager)
+    }
+
+    /// Authenticated observation only: no serving capability publication,
+    /// normal heartbeat, jobs or activation marker. Existing committed plural
+    /// membership must supply its schema; only an actual applied singleton
+    /// vote may establish its initial observation directory/schema.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn clock_observation(
+        client: Client,
+        replication: ReplicationMonitor,
+        store: Arc<dyn Store>,
+        identity: ClusterIdentity,
+        local: ClusterPeer,
+        bootstrap_http: String,
+        artwork_http: String,
+        secrets: JoinSecrets,
+        activity_signing_key: ActivitySigningKey,
+        activation_marker: ActivationMarker,
+        desired_role: ClusterRole,
+        storage_root: PathBuf,
+    ) -> Result<Self, MembershipError> {
+        let manager = Self::construct_replicated(
+            client,
+            replication,
+            store,
+            identity,
+            local,
+            bootstrap_http,
+            artwork_http,
+            secrets,
+            activity_signing_key,
+            activation_marker,
+            desired_role,
+            storage_root,
+        )
+        .await?;
+        let inner = manager.replicated_inner()?;
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("clock observation lacks applied membership".into())
+        })?;
+        if applied.members.len() == 1
+            && applied.voters.len() == 1
+            && applied.local_node == inner.identity.raft_id
+            && applied.voters.contains(&inner.identity.raft_id)
+        {
+            // The shipped pristine initialization has already committed this
+            // exact singleton vote. Only establish the observation directory;
+            // timestamp zero is not a normal heartbeat or serving capability.
+            manager.install_membership_schema_only().await?;
+            inner
+                .client
+                .execute(
+                    "INSERT INTO cluster_nodes (node_id, raft_id, raft_address, api_address, \
+                  last_seen_at, removed_at, role) VALUES ($1,$2,$3,$4,0,NULL,'voter') \
+                  ON CONFLICT(node_id) DO NOTHING",
+                    params!(
+                        inner.identity.node_id.as_str(),
+                        inner.identity.raft_id as i64,
+                        inner.local.raft_address.as_str(),
+                        inner.local.api_address.as_str()
+                    ),
+                )
+                .await?;
+            if inner.local_metrics.current().as_ref() != Some(&applied) {
+                return Err(MembershipError::ClockUnbounded(
+                    ClockRefusal::GenerationChanged,
+                ));
+            }
+        } else {
+            manager.require_membership_schema().await?;
+        }
+        manager.require_clock_observation_identity().await?;
+        manager.publish_activity_signing_key().await?;
+        manager.refresh_activity_public_keys().await?;
+        manager.publish_http_url().await?;
+        Ok(manager)
+    }
+
+    /// Verify only the already admitted UUID/Raft identity. Never update
+    /// last_seen_at here: its existing triggers expire operation/cache leases,
+    /// which is authority that pending observation must not exercise.
+    pub async fn require_clock_observation_identity(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("clock observation lacks applied membership".into())
+        })?;
+        if applied.local_node != inner.identity.raft_id {
+            return Err(MembershipError::Internal(
+                "clock observation has foreign membership".into(),
+            ));
+        }
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 \
+             AND removed_at IS NULL AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+               WHERE removal.node_id=cluster_nodes.node_id)",
+                params!(
+                    inner.identity.node_id.as_str(),
+                    inner.identity.raft_id as i64
+                ),
+            )
+            .await?;
+        if !rows.first().is_some_and(|row| row.count == 1)
+            || inner.local_metrics.current().as_ref() != Some(&applied)
+        {
+            return Err(MembershipError::Internal(
+                "clock observation identity changed or is fenced".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Transition the same auth/replay context only after actual applied
+    /// voter membership. Desired role alone never authorizes this boundary.
+    pub async fn finish_clock_observation(
+        self,
+    ) -> Result<(Self, OwnedClockAcquisitionTicket), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let applied = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("activation lacks applied membership".into())
+        })?;
+        if inner.role == ClusterRole::Voter && !applied.voters.contains(&inner.identity.raft_id) {
+            return Err(MembershipError::Internal(
+                "desired voter is not an applied voter".into(),
+            ));
+        }
+        let original = self
+            .clock
+            .acquire_owned_for(ClockDecision::MembershipChange)
+            .map_err(MembershipError::ClockUnbounded)?;
+        self.initialize_startup(&original).await?;
+        Ok((self, original))
+    }
+
+    async fn initialize_startup(
+        &self,
+        original: &OwnedClockAcquisitionTicket,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        if inner.role.is_learner() {
+            self.require_membership_schema().await?;
+        } else {
+            self.install_membership_schema_only_admitted(Some(original))
+                .await?;
+            // Re-establish only already-durable removal fences. This is
+            // idempotent reconciliation, not a new acquisition to regate.
+            self.backfill_removed_job_owner_fences().await?;
+        }
+        self.commit_heartbeat_admitted(inner, Some(original))
+            .await?;
+        // These immutable metadata publications already established clock
+        // observation, but retain the same original activation proof anyway.
+        original
+            .revalidate()
+            .map_err(MembershipError::ClockUnbounded)?;
+        self.publish_activity_signing_key_admitted(Some(original))
+            .await?;
+        self.refresh_activity_public_keys().await?;
+        original
+            .revalidate()
+            .map_err(MembershipError::ClockUnbounded)?;
+        self.publish_http_url_admitted(Some(original)).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn construct_replicated(
+        client: Client,
+        replication: ReplicationMonitor,
+        store: Arc<dyn Store>,
+        identity: ClusterIdentity,
+        local: ClusterPeer,
+        bootstrap_http: String,
+        artwork_http: String,
+        secrets: JoinSecrets,
+        activity_signing_key: ActivitySigningKey,
+        activation_marker: ActivationMarker,
+        role: ClusterRole,
+        storage_root: PathBuf,
+    ) -> Result<Self, MembershipError> {
         let local_metrics = client
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
@@ -3412,9 +3777,16 @@ impl MembershipManager {
         );
         let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
-            clock: Arc::new(ClusterClockGuard::with_membership_source(Arc::new(
-                local_metrics.clone(),
-            ))),
+            clock: client
+                .local_membership_admission()?
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+                .ok_or_else(|| {
+                    MembershipError::Internal(
+                        "local Hiqlite startup did not install the node clock admission".into(),
+                    )
+                })?
+                .clock_guard(),
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
                 local_metrics,
@@ -3457,7 +3829,20 @@ impl MembershipManager {
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
-        manager.initialize().await?;
+        // Both normal construction and pending observation share this exact
+        // Arc. finish_clock_observation keeps it; no second guard or binding.
+        let inner = manager.inner.as_ref().ok_or(MembershipError::Unavailable)?;
+        let installed = inner.client.local_membership_admission()?;
+        let policy = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .ok_or_else(|| MembershipError::Internal("installed removal policy changed".into()))?;
+        policy
+            .removal_owner
+            .set(Arc::downgrade(inner))
+            .map_err(|_| {
+                MembershipError::Internal("installed removal owner was already bound".into())
+            })?;
         Ok(manager)
     }
 
@@ -3546,7 +3931,10 @@ impl MembershipManager {
     /// "already there" is the steady state on every boot after the first. The
     /// probe can be raced, so the transaction still tolerates the duplicate
     /// and the loop re-reads instead of assuming.
-    async fn apply_additive_membership_columns(&self) -> Result<(), MembershipError> {
+    async fn apply_additive_membership_columns_admitted(
+        &self,
+        original: Option<&OwnedClockAcquisitionTicket>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for _ in 0..3 {
             let mut pending = Vec::new();
@@ -3557,6 +3945,11 @@ impl MembershipManager {
             }
             if pending.is_empty() {
                 return Ok(());
+            }
+            if let Some(original) = original {
+                original
+                    .revalidate()
+                    .map_err(MembershipError::ClockUnbounded)?;
             }
             match inner.client.txn(pending).await {
                 Ok(results) => {
@@ -3586,16 +3979,34 @@ impl MembershipManager {
         )))
     }
 
-    async fn install_membership_schema(&self) -> Result<(), MembershipError> {
+    async fn install_membership_schema_only(&self) -> Result<(), MembershipError> {
+        self.install_membership_schema_only_admitted(None).await
+    }
+
+    async fn install_membership_schema_only_admitted(
+        &self,
+        original: Option<&OwnedClockAcquisitionTicket>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for statement in MEMBERSHIP_SCHEMA {
+            if let Some(original) = original {
+                original
+                    .revalidate()
+                    .map_err(MembershipError::ClockUnbounded)?;
+            }
             inner.client.execute(*statement, params!()).await?;
         }
-        self.apply_additive_membership_columns().await?;
+        self.apply_additive_membership_columns_admitted(original)
+            .await?;
         // One replicated SQLite transaction closes both upgrade directions:
         // fences written before this schema gain a durable legacy reference,
         // and the trigger rejects every later old-coordinator insert. No Raft
         // write can interleave between the backfill and trigger installation.
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
+        }
         inner
             .client
             .txn(vec![
@@ -3667,6 +4078,11 @@ impl MembershipManager {
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
+        }
         let current = inner
             .client
             .execute(
@@ -3688,6 +4104,11 @@ impl MembershipManager {
                 return Err(MembershipError::Incompatible);
             }
         }
+        Ok(())
+    }
+
+    async fn install_membership_schema(&self) -> Result<(), MembershipError> {
+        self.install_membership_schema_only().await?;
         self.backfill_removed_job_owner_fences().await?;
         self.heartbeat().await?;
         if let Err(error) = self.refresh_membership_metrics().await {
@@ -3954,7 +4375,7 @@ impl MembershipManager {
             _ => {
                 return Err(MembershipError::Internal(
                     "invalid join reservation transition".to_owned(),
-                ))
+                ));
             }
         };
         let admission = clock
@@ -4514,6 +4935,14 @@ impl MembershipManager {
     }
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
+        self.commit_heartbeat_admitted(inner, None).await
+    }
+
+    async fn commit_heartbeat_admitted(
+        &self,
+        inner: &ReplicatedMembership,
+        original: Option<&OwnedClockAcquisitionTicket>,
+    ) -> Result<(), MembershipError> {
         // Observe maintenance before publishing any acknowledgement. From this
         // point onward request admission and singleton jobs are fenced even if
         // the transaction below is delayed or the response is lost.
@@ -4733,6 +5162,11 @@ impl MembershipManager {
                 .to_owned(),
             params!(inner.identity.node_id.as_str(), now),
         ));
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
+        }
         inner
             .client
             .txn(statements)
@@ -4881,8 +5315,20 @@ impl MembershipManager {
     /// authority; operators must recover the data directory or rejoin with a
     /// new node identity.
     async fn publish_activity_signing_key(&self) -> Result<(), MembershipError> {
+        self.publish_activity_signing_key_admitted(None).await
+    }
+
+    async fn publish_activity_signing_key_admitted(
+        &self,
+        original: Option<&OwnedClockAcquisitionTicket>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let public_key = inner.activity_signing_key.public_key_hex();
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
+        }
         let changed = inner
             .client
             .execute(
@@ -4974,6 +5420,13 @@ impl MembershipManager {
     /// every ten-second liveness beat would double steady Raft traffic while
     /// carrying no new information.
     async fn publish_http_url(&self) -> Result<(), MembershipError> {
+        self.publish_http_url_admitted(None).await
+    }
+
+    async fn publish_http_url_admitted(
+        &self,
+        original: Option<&OwnedClockAcquisitionTicket>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         // The ownership check belongs in the serialized Raft statement rather
         // than a UNIQUE table constraint. Existing M3 clusters already have
@@ -4983,6 +5436,11 @@ impl MembershipManager {
         // currently published by another node. A still-redeeming token freezes
         // the durable origin chosen during redemption; after finalization the
         // active node identity may atomically publish an operator readdress.
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
+        }
         let transaction = inner
             .client
             .txn(vec![
@@ -5038,6 +5496,11 @@ impl MembershipManager {
                 )));
             }
             Err(error) => return Err(error.into()),
+        }
+        if let Some(original) = original {
+            original
+                .revalidate()
+                .map_err(MembershipError::ClockUnbounded)?;
         }
         self.upsert_hostname(&inner.identity.node_id, &inner.local_hostname)
             .await
@@ -6691,13 +7154,18 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority_counted(
-            &auth.node_id,
-            now,
-            PeerAuthorityRole::CommittedMember,
-            path == "/_internal/v1/clock",
-        )
-        .await
+        let clock_request = path == "/_internal/v1/clock";
+        let authorized = self
+            .verify_live_peer_authority_counted(
+                &auth.node_id,
+                now,
+                PeerAuthorityRole::CommittedMember,
+                clock_request,
+            )
+            .await?;
+        Ok(authorized
+            && (!clock_request
+                || unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64))
     }
 
     /// Authenticate an exact internal mutation whose caller and receiver must
@@ -7171,6 +7639,34 @@ impl MembershipManager {
         clock_request: bool,
     ) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
+        if clock_request {
+            // Clock observation is not serving authority. An admitted peer
+            // may have no fresh normal heartbeat until its promotion finishes;
+            // requiring one here would deadlock authenticated observation.
+            // Keep the existing signature/nonce/rate checks above, and bind
+            // this exact UUID to the same authoritative applied roster across
+            // the consistent read. Never refresh liveness or expire leases.
+            let Some(applied) = inner.local_metrics.current() else {
+                return Ok(false);
+            };
+            if applied.local_node != inner.identity.raft_id {
+                return Ok(false);
+            }
+            self.clock.record_authority_read();
+            let rows = inner
+                .client
+                .query_consistent_map::<ActivityAuthNodeRow, _>(
+                    "SELECT node.raft_id, node.last_seen_at FROM cluster_nodes node \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                    params!(node_id),
+                )
+                .await?;
+            return Ok(rows.len() == 1
+                && applied.members.contains(&rows[0].raft_id)
+                && inner.local_metrics.current().as_ref() == Some(&applied));
+        }
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
             peer_authority_admits(
@@ -7184,9 +7680,6 @@ impl MembershipManager {
             return Ok(false);
         }
         let reachable_after = reachable_after(now);
-        if clock_request {
-            self.clock.record_authority_read();
-        }
         let rows = inner
             .client
             .query_consistent_map::<ActivityAuthNodeRow, _>(
@@ -8699,8 +9192,8 @@ impl MembershipManager {
                     }
                     MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
                         return Err(MembershipError::Internal(format!(
-                        "self-removal outcome is indeterminate after {removal_error}; this voter remains fenced"
-                    )));
+                            "self-removal outcome is indeterminate after {removal_error}; this voter remains fenced"
+                        )));
                     }
                 }
             }
@@ -13598,9 +14091,9 @@ mod tests {
             "cluster_cache_admin_revocation_lease_intents",
             "cluster_credential_mutation_intents",
         ] {
-            assert!(MEMBERSHIP_SCHEMA.iter().any(
-                |statement| statement.contains(&format!("CREATE TABLE IF NOT EXISTS {table}"))
-            ));
+            assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+                statement.contains(&format!("CREATE TABLE IF NOT EXISTS {table}"))
+            }));
         }
         for trigger in [
             "cluster_cache_admin_lease_heartbeat_expiry",
@@ -13646,10 +14139,12 @@ mod tests {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
                 && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
         }));
-        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
-            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases")));
-        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| statement
-            .contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents")));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_releases")
+        }));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_lease_intents")
+        }));
         for trigger in [
             REQUIRE_OPERATION_LEASE_INSERT_INTENT_SQL,
             REQUIRE_OPERATION_LEASE_UPDATE_INTENT_SQL,

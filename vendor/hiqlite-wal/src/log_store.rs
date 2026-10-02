@@ -31,6 +31,24 @@ where
 {
     /// Start the LogStore
     pub async fn start(base_path: String, sync: LogSync, wal_size: u32) -> Result<Self, Error> {
+        Self::start_inner(base_path, sync, wal_size, false).await
+    }
+
+    /// Retain partially constructed writer ownership during staged startup.
+    pub async fn start_staged(
+        base_path: String,
+        sync: LogSync,
+        wal_size: u32,
+    ) -> Result<Self, Error> {
+        Self::start_inner(base_path, sync, wal_size, true).await
+    }
+
+    async fn start_inner(
+        base_path: String,
+        sync: LogSync,
+        wal_size: u32,
+        staged: bool,
+    ) -> Result<Self, Error> {
         let slf = task::spawn_blocking(move || {
             fs::create_dir_all(&base_path)?;
             #[cfg(target_os = "linux")]
@@ -62,8 +80,11 @@ where
                 wal_size,
                 lock_exists,
                 meta.clone(),
+                staged,
             )?;
+            let mut partial = writer::PartialStartupWriter::new(staged, &writer);
             let reader = reader::spawn(meta.clone(), wal.clone())?;
+            partial.handoff();
 
             Ok::<Self, Error>(Self {
                 meta,
@@ -106,6 +127,7 @@ where
                 wal_size,
                 lock_exists,
                 meta,
+                false,
             )?;
             Ok(writer)
         })
