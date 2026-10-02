@@ -72,6 +72,8 @@ internal class ContinuousQualityProtocol(
         response
     }
 
+    suspend fun settlePending() = ordered { replayPending() }
+
     private suspend fun replayPending() { pending?.let { send(it) } }
 
     private suspend fun send(fields: Map<String, JsonElement>): JsonObject {

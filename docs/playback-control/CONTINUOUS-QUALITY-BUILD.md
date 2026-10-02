@@ -3091,3 +3091,52 @@ Controller adoption and terminal reconciliation remain unfinished. Relevant
 pinned implementations are
 [HlsSampleStreamWrapper 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsSampleStreamWrapper.java)
 and [AudioTrackAudioOutput 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackAudioOutput.java).
+
+
+### 10.99 Android adopts one retained continuous source and its terminal owner
+
+Compatible initial finite HLS creation now negotiates a continuous parent on
+its captured profile, reserves its initial load window and installs the bound
+HLS source. The controller retains that source for compatible manual and Auto
+quality requests. Those requests publish the existing viewer intent, reserve
+at the current buffered film frontier and update the retained selection;
+they do not wait for a legacy prepared offer or replace the media item.
+Actual hardware presentation, after accepted queue samples and durable append
+receipts, settles the displayed candidate and quality recipe. It does not
+certify a concurrently changed audio or subtitle media recipe. A presented
+quality updates the retained plan's authority so later seeks do not reopen
+merely because the original plan named the previous quality.
+
+The attachment owns bounded append observations, exact transaction ordering,
+frame-grid conversion and disposal. It can credit a newer exact reservation
+against samples physically accepted and still retained in this attachment,
+without inventing another append. Actual queue retirement plus rendered video
+or audio sink progress authorizes normal disposal. End closes admission,
+cancels only captured media calls, joins its fact pump, ends the captured
+parent and reconciles the terminal ledger. It reports disposal only after
+loaders, queues, decoders and AudioTracks have actually retired. Its cleanup
+scope survives composition cancellation and has one five-second bound;
+missing proof remains a failure, never an empty-ownership receipt.
+
+Media3's ordinary data-source close does not cancel a call still waiting for
+headers. The attachment therefore wraps its captured Call.Factory, retaining
+calls through body close and cancelling them explicitly. Control exchanges
+have a separate owner and remain available for End. The authored regression
+covers body lifetime, pending-header cancellation, refusal of later media
+calls and leaving independent control calls untouched.
+
+The controlled future-load limit is now twelve seconds of playout. Inspection
+of the existing Auto policy found that its upgrade branch requires ten
+seconds of buffered media, so the earlier eight-second bound could prevent
+upgrades. The allocator's byte budget still wins and existing buffers stay
+retained. Authored clock regressions cover 24 fps microsecond rounding,
+30000/1001 cadence, segment frontiers and overflow. Production and test sources
+compile in 14 seconds. No unit tests or adversarial agent review ran.
+
+Android source integration still needs pending-quality seek/race coverage,
+optional presentation timeout handling, restart and teardown qualification,
+and physical phone/TV audio and display evidence. The existing main-backed
+Chrome/Firefox production replay and Apple/Safari qualification also remain.
+The native UI tool was checked again on October 2 and still reports the Mac
+locked. Source transfer to the isolated runtime remains pending the explicit
+approval requested after automatic approval review rejected the transfer.

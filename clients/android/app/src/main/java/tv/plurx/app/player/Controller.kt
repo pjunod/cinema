@@ -59,6 +59,8 @@ import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.session.MediaSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -85,6 +87,7 @@ import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
 import tv.plurx.app.ui.components.tvFocusRing
 import tv.plurx.app.ui.components.RequestInitialFocus
+import kotlinx.serialization.json.JsonObject
 import java.util.Locale
 import java.util.UUID
 
@@ -308,14 +311,115 @@ class Controller internal constructor(
      * keeps a newer user restart behind an in-flight stall fallback, making
      * the user request the server's final replacement as well as the UI's.
      */
+    private val continuousPlayer = builtPlayer.player
+    private val continuousSources = builtPlayer.continuousSources
+    private val continuousOutput = builtPlayer.continuousOutput
+    private val continuousTransfers = builtPlayer.autoTransfers
+    private val continuousClientInstance = UUID.randomUUID().toString()
+    private var continuousAttempt: ContinuousEnrollment? = null
+    private var continuousUsed = false
+    private var continuousFailedRequest: String? = null
+    private var continuousAttachment: ContinuousAttachment? = null
+    private data class OwnedContinuous(val owner: ContinuousAttachment, val source: androidx.media3.exoplayer.source.MediaSource)
+    private val continuousPending = LinkedHashMap<String, OwnedContinuous>()
+
+    private suspend fun createOwnedSession(body: CreateSessionReq): HlsStart {
+        if (body.request_id != null && body.request_id == continuousFailedRequest) {
+            throw java.io.IOException("Controlled parent failed after admission; a new request identity is required")
+        }
+        if (continuousUsed || player !== continuousPlayer || predecessorAttached() || plan.isAudioOnly) {
+            return vm.createHlsSession(plan.fileId, body)
+        }
+        val enrollment = continuousAttempt ?: ContinuousEnrollment(Session.origin, Session.token.orEmpty()).also { continuousAttempt = it }
+        val started = enrollment.open(plan.fileId, body)
+        if (started == null) {
+            enrollment.close()
+            continuousAttempt = null
+            return vm.createHlsSession(plan.fileId, body)
+        }
+        continuousAttempt = null
+        continuousUsed = true
+        lateinit var attachment: ContinuousAttachment
+        attachment = ContinuousAttachment(enrollment, started, continuousClientInstance,
+            continuousSources, continuousOutput, continuousTransfers,
+            presented = { row, _ -> scope.launch {
+                if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive()) {
+                    continuousQualityPresented(row)
+                }
+            } },
+            failed = { error -> Log.w("PlurxPlayback", "continuous ownership ${redactedFailureDetail("continuous", error)}") })
+        try {
+            val position = ((body.start ?: 0.0) * 1000).toLong().coerceAtLeast(0)
+            val source = attachment.source(position, body.quality_auto == true)
+            continuousPending[started.playback.session_id] = OwnedContinuous(attachment, source)
+            return started.playback
+        } catch (error: Exception) {
+            continuousFailedRequest = body.request_id
+            attachment.finishAfterRelease()
+            throw error
+        }
+    }
+
+    private fun releaseOwnedSession(id: String) {
+        val pending = continuousPending.remove(id)
+        if (pending != null) { pending.owner.finishAfterRelease(); return }
+        val attached = continuousAttachment
+        if (attached?.start?.playback?.session_id == id) {
+            attached.closeAdmission()
+            attached.finishAfterRelease()
+        } else vm.endHlsSession(id)
+    }
+
+    private suspend fun retireContinuousForReplacement() {
+        val attachment = continuousAttachment ?: return
+        if (player !== continuousPlayer) return
+        attachment.closeAdmission()
+        player.stop()
+        player.clearMediaItems()
+        attachment.finishAfterRelease()
+        attachment.awaitFinished()
+        if (continuousAttachment === attachment) continuousAttachment = null
+    }
+
+    private fun continuousQualityPresented(row: JsonObject) {
+        val id = row.text("candidate_id") ?: return
+        val pending = playbackIntent.pendingQualityChange
+        val desired = playbackIntent.desiredQuality
+        if (desired.rungHeight != null && row.number("height") != desired.rungHeight?.toLong()) return
+        if (desired == PlaybackQuality.Original) return
+        if (desired == PlaybackQuality.Auto && autoDesiredCandidate?.id?.let { it != id } == true) return
+        val current = currentRecipe()
+        val attached = recipeOwnership.attached ?: return
+        if (!attached.recipe.copy(quality = current.recipe.quality).hasSameMedia(current.recipe)) return
+        autoActiveCandidateId = id
+        planReplacement.presented(desired)
+        stallReopenBudget.seed(row.number("height")?.toInt())
+        if (autoDesiredCandidate?.id == id) {
+            autoLastSwitchMs = monotonicNowMs()
+            if (autoVoluntary) autoSwitchTimes.add(monotonicNowMs())
+            autoDesiredCandidate = null
+            autoPreparing = false
+            autoUpgradeSinceMs = null
+        }
+        if (pending != null) {
+            playbackIntent.clearQualityChange(pending)
+            directedChange?.takeIf { it.pending == pending }?.let { it.committed(); logQualitySwitch("continuous", it.quality) }
+            retainedQualityRequest = null
+        }
+        recipeOwnership.attach(current)
+        recipeOwnership.selectionApplied(current)
+        selectionRecipe = current
+        playbackControl.playerChanged()
+    }
+
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body) },
+        createSession = ::createOwnedSession,
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
         isBadRequest = { failure -> refusalStatusOf(failure) == 400 },
         freshRequestId = { UUID.randomUUID().toString() },
-        releaseSession = vm::endHlsSession,
+        releaseSession = ::releaseOwnedSession,
     )
 
     /**
@@ -1545,6 +1649,20 @@ class Controller internal constructor(
             val change = DirectedChange(epoch = publicationEpoch, quality = quality,
                 pending = pending, incumbentSelection = incumbentSelection)
             directedChange = change
+            val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
+            val row = quality.rungHeight?.let { continuous?.rendition(it) }
+                ?: if (quality == PlaybackQuality.Auto) continuous?.rendition(player.videoSize.height) else null
+            if (continuous != null && row != null) {
+                try {
+                    val applied = withTimeout(12_000) {
+                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), quality == PlaybackQuality.Auto)
+                    }
+                    if (!applied) fallBackDirectedChange(change, "unsupported")
+                } catch (_: TimeoutCancellationException) { fallBackDirectedChange(change, "timed_out") }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) { fallBackDirectedChange(change, "fallback") }
+                return@launch
+            }
             when (val step = playbackControl.awaitPreparedOffer(tappedAtMs)) {
                 // The same entry point the reporter's push uses, and idempotent
                 // with it: the ledger answers `Same` for an id it has seen, so
@@ -1781,7 +1899,7 @@ class Controller internal constructor(
         controlObservationIsClosed = true
         preparedRollbackReopen = null
         collectRetiredPlayer()
-        endPlaybackControl(settling) { endingSession?.let(vm::endHlsSession) }
+        endPlaybackControl(settling) { endingSession?.let(::releaseOwnedSession) }
         // A verdict survives a reopen because the failure it explains usually
         // arrives after one. It must not survive the title: a confident
         // sentence about the wrong film is worse than a generic one.
@@ -1803,7 +1921,14 @@ class Controller internal constructor(
         if (plan.isAudioOnly) PlaybackService.detach(context, mediaSession)
         mediaSession.release()
         preparedVideoSurfaces?.release()
+        continuousAttachment?.closeAdmission()
         player.release()
+        continuousAttachment?.finishAfterRelease()
+        continuousAttachment = null
+        continuousPending.values.forEach { it.owner.finishAfterRelease() }
+        continuousPending.clear()
+        continuousAttempt?.close()
+        continuousAttempt = null
     }
 
     fun switchAudio(index: Long) {
@@ -1997,7 +2122,7 @@ class Controller internal constructor(
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
         val endingSession = sessionId
-        endPlaybackControl { endingSession?.let(vm::endHlsSession) }
+        endPlaybackControl { endingSession?.let(::releaseOwnedSession) }
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -2068,6 +2193,7 @@ class Controller internal constructor(
                 // A later seek or track switch won while this request was in
                 // flight. Release this now-stale server session instead of letting
                 // its older timeline replace the current one.
+                if (hls.session_id !in continuousPending) retireContinuousForReplacement()
                 sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
                     sessionId = hls.session_id
                     beginPlaybackControl(hls)
@@ -2086,7 +2212,11 @@ class Controller internal constructor(
                     val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
                     baseMs = timeline.baseMs
                     activeMediaPath = relativeMediaPath(hls.playlist_url)
-                    player.setMediaItem(
+                    val owned = continuousPending.remove(hls.session_id)
+                    if (owned != null) {
+                        continuousAttachment = owned.owner
+                        player.setMediaSource(owned.source, timeline.attachPositionMs)
+                    } else player.setMediaItem(
                         MediaItem.fromUri(Session.url(hls.playlist_url)),
                         timeline.attachPositionMs,
                     )
@@ -2362,6 +2492,7 @@ class Controller internal constructor(
                     }
                     return@launch
                 }
+                if (hls.session_id !in continuousPending) retireContinuousForReplacement()
                 sessionCreateCoordinator.attachIfCurrent(hls, { stallGuard.isCurrent(requestVersion) }) { hls ->
                     // Update the same-rung budget: the budget counts consecutive
                     // reopen responses that do NOT resolve a strictly lower rung than
@@ -2381,7 +2512,11 @@ class Controller internal constructor(
                     val timeline = sessionPlaybackTimeline(hls, requestedStartMs = positionMs)
                     baseMs = timeline.baseMs
                     activeMediaPath = relativeMediaPath(hls.playlist_url)
-                    player.setMediaItem(
+                    val owned = continuousPending.remove(hls.session_id)
+                    if (owned != null) {
+                        continuousAttachment = owned.owner
+                        player.setMediaSource(owned.source, timeline.attachPositionMs)
+                    } else player.setMediaItem(
                         MediaItem.fromUri(Session.url(hls.playlist_url)),
                         timeline.attachPositionMs,
                     )
@@ -2559,7 +2694,7 @@ class Controller internal constructor(
     private fun leaveSessionPlayback() {
         stallGuard.invalidateForUserAction()
         val endingSession = sessionId
-        endPlaybackControl { endingSession?.let(vm::endHlsSession) }
+        endPlaybackControl { endingSession?.let(::releaseOwnedSession) }
         sessionId = null
         clearStatusPolling()
         encoder = null
@@ -2650,6 +2785,7 @@ class Controller internal constructor(
      * media recipe, session capability, and compatibility flags do not move. */
     private fun retryMediaOnNextNode(error: PlaybackException): Boolean {
         if (!playbackControlBootstrapFence.isActive()) return false
+        if (continuousAttachment != null && player === continuousPlayer) return false
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
         val recipe = recipeOwnership.attached ?: currentRecipe()
@@ -3177,6 +3313,19 @@ class Controller internal constructor(
         val incumbent = player
         scope.launch {
             playbackControl.reportIntent()
+            val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
+            val row = continuous?.rendition(chosen.height, chosen.id)
+            if (continuous != null && row != null) {
+                if (mediaMutationEpoch != epoch || player !== incumbent || playbackIntent.desiredQuality != PlaybackQuality.Auto || autoDesiredCandidate?.id != chosen.id) return@launch
+                try {
+                    if (!withTimeout(12_000) {
+                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true)
+                    }) failAutoPreparation()
+                } catch (_: TimeoutCancellationException) { failAutoPreparation() }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) { failAutoPreparation() }
+                return@launch
+            }
             when (val step = playbackControl.awaitPreparedOffer(now)) {
                 is PreparedOfferWait.Step.Offered -> {
                     if (mediaMutationEpoch == epoch && player === incumbent &&
@@ -3891,7 +4040,12 @@ class Controller internal constructor(
         retiredParkedAtMs = 0L
         if (preparedPredecessor?.player === retired) preparedPredecessor = null
         preparedVideoSurfaces?.remove(retired)
+        if (retired === continuousPlayer) continuousAttachment?.closeAdmission()
         retired.release()
+        if (retired === continuousPlayer) {
+            continuousAttachment?.finishAfterRelease()
+            continuousAttachment = null
+        }
         val reopen = preparedRollbackReopen ?: return
         preparedRollbackReopen = null
         restartAt(reopen.first, reopen.second)

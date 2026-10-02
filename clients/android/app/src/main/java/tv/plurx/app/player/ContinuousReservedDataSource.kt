@@ -39,6 +39,7 @@ internal class ContinuousReservedDataSource(
     private val media: ContinuousQualityMedia,
     private val reserve: suspend (ContinuousQualityMedia.Resource, ByteArray?) -> Unit,
     private val loads: ContinuousLoads = ContinuousLoads(),
+    private val cancelNetwork: (() -> Unit)? = null,
 ) : BaseDataSource(false) {
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
@@ -140,7 +141,9 @@ internal class ContinuousReservedDataSource(
      * loader-thread lease or clearing that thread's extraction provenance. */
     fun cancelPending() {
         synchronized(lifetime) { opening.get()?.cancel() }
-        try { upstream.getAndSet(null)?.close() } catch (_: Exception) { /* Loader finally still owns retirement. */ }
+        try {
+            if (cancelNetwork != null) cancelNetwork.invoke() else upstream.get()?.close()
+        } catch (_: Exception) { /* Loader finally still owns retirement. */ }
     }
 
     override fun close() {

@@ -55,6 +55,9 @@ internal class ContinuousQueueOwnership(private val owner: Any) {
         }
     }
 
+    @Synchronized fun wasAppended(rendition: String, artifact: String): Boolean =
+        records["$rendition:$artifact"]?.credited == true
+
     @Synchronized fun queuedArtifacts(): List<ContinuousLoadContext.Verified> = records.values.map { it.load }
 
     /** After admission is fenced and loaders are quiescent, queue reset may

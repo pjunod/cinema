@@ -24,12 +24,12 @@ class ContinuousLoadControlTest {
         val control = ContinuousLoadControl(delegate) { it == owned }
         fun request(id: MediaSource.MediaPeriodId, duration: Long, speed: Float = 1f) = LoadControl.Parameters(
             PlayerId.UNSET, Timeline.EMPTY, id, 0, duration, speed, true, false, C.TIME_UNSET, C.TIME_UNSET)
-        assertTrue(control.shouldContinueLoading(request(owned, 7_999_999)))
-        assertFalse(control.shouldContinueLoading(request(owned, 8_000_000)))
+        assertTrue(control.shouldContinueLoading(request(owned, 11_999_999)))
+        assertFalse(control.shouldContinueLoading(request(owned, 12_000_000)))
         assertTrue(control.shouldContinueLoading(request(ordinary, 50_000_000)))
-        assertTrue(control.shouldContinueLoading(request(owned, 15_999_999, 2f)))
-        assertFalse(control.shouldContinueLoading(request(owned, 16_000_000, 2f)))
-        assertFalse(control.shouldContinueLoading(request(owned, 8_000_000, Float.NaN)))
+        assertTrue(control.shouldContinueLoading(request(owned, 23_999_999, 2f)))
+        assertFalse(control.shouldContinueLoading(request(owned, 24_000_000, 2f)))
+        assertFalse(control.shouldContinueLoading(request(owned, 12_000_000, Float.NaN)))
         byteBudget = false
         assertFalse(control.shouldContinueLoading(request(owned, 0)))
         assertFalse(control.shouldContinueLoading(request(ordinary, 0)))

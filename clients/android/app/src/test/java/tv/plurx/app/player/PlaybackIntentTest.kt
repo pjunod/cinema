@@ -12,6 +12,21 @@ import org.junit.Test
 import tv.plurx.app.data.PlaybackQuality
 
 class PlaybackIntentTest {
+    @Test fun aPresentedContinuousQualityKeepsLaterSeeksOnTheRetainedPlan() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+        val routed = mutableListOf<Pair<Long, PlaybackQuality>>()
+        replacement.retain { target, quality -> routed += target to quality }
+        val quality = PlaybackQuality.Q720
+        intent.beginQualityChange(quality, 0)
+        replacement.presented(quality)
+        intent.beginSeek(50_000, 10_000)
+        assertFalse(replacement.route(intent))
+        assertTrue(routed.isEmpty())
+        assertTrue(replacement.route(intent, force = true))
+        assertEquals(listOf(50_000L to quality), routed)
+    }
+
     @Test
     fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause() {
         val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)

@@ -530,13 +530,16 @@ internal class PlaybackControlBootstrapFence {
 }
 
 /** A later transport/track command carries an outstanding plan change with it. */
-internal class PlaybackPlanReplacement(private val activeQuality: PlaybackQuality) {
+internal class PlaybackPlanReplacement(private var activeQuality: PlaybackQuality) {
     private var reload: ((Long, PlaybackQuality) -> Unit)? = null
     private var publishedGeneration: Long? = null
 
     fun retain(callback: (Long, PlaybackQuality) -> Unit) {
         reload = callback
     }
+
+    /** A retained source may present a new quality without replacing its plan. */
+    fun presented(quality: PlaybackQuality) { activeQuality = quality }
 
     fun route(intent: PlaybackIntent, force: Boolean = false, retry: Boolean = false): Boolean {
         val pending = intent.pendingSeek ?: return false

@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap
  * window sequence, rather than a process-wide current family. */
 internal class ContinuousSourceRegistry {
     private val bindings = ConcurrentHashMap<MediaSource.MediaPeriodId, ContinuousVideoSelection>()
+    fun owns(selection: ContinuousVideoSelection): Boolean = bindings.values.any { it === selection }
     fun binding(id: MediaSource.MediaPeriodId): ContinuousVideoSelection? = bindings[id]
 
     fun source(delegate: MediaSource, selection: ContinuousVideoSelection, periodReleaseRequested: () -> Unit): MediaSource =
