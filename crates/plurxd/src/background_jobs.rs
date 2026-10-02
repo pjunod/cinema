@@ -658,6 +658,62 @@ impl JobFence {
         Ok(published)
     }
 
+    pub(crate) async fn publish_encoded_output(
+        &self,
+        intent: plurx_core::store::background_jobs::EncodedOutputIntent,
+        output: plurx_core::store::background_jobs::CopyOutputJobOutput,
+    ) -> Result<bool, StoreError> {
+        use plurx_core::store::background_jobs::{JobKind, PublishEncodedOutputJob};
+        let mut state = self.0.state.lock().await;
+        if self.0.kind != JobKind::EncodedOutputPrepare
+            || !self.0.authority.may_execute_job(self.0.kind).await
+            || !self.may_publish()
+        {
+            return Ok(false);
+        }
+        let Some(token) = state.token.clone() else {
+            return Ok(false);
+        };
+        let mut request = PublishEncodedOutputJob {
+            token,
+            intent,
+            output,
+            now_ms: unix_ms()?,
+        };
+        let result = match self
+            .0
+            .store
+            .publish_encoded_output_job(request.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if !self.0.authority.may_execute_job(self.0.kind).await || !self.may_publish() {
+                    return Err(error);
+                }
+                request.now_ms = unix_ms()?;
+                self.0.store.publish_encoded_output_job(request).await?
+            }
+        };
+        let published = matches!(
+            result,
+            JobPublishOutcome::Published { .. } | JobPublishOutcome::AlreadyPublished { .. }
+        );
+        if published {
+            self.0.copy_output_completed.store(true, Ordering::Release);
+            state.token = None;
+        }
+        metrics::event(
+            self.0.kind,
+            if published {
+                Event::Published
+            } else {
+                Event::FencedPublication
+            },
+        );
+        Ok(published)
+    }
+
     pub(crate) async fn publish_transcode(
         &self,
         output: TranscodeJobOutput,
@@ -1137,6 +1193,11 @@ impl JobFence {
 /// item hide every lower item. Keyset pages bound each read; the active-row
 /// cap bounds a complete pass. Admission is held through ambiguous claims.
 pub(crate) enum PreparationClaim {
+    Encoded(
+        plurx_core::store::background_jobs::BackgroundJob,
+        ActiveBackgroundJob,
+        tokio::sync::OwnedSemaphorePermit,
+    ),
     Transcode(
         plurx_core::domain::PretranscodeJob,
         ActiveBackgroundJob,
@@ -1163,7 +1224,11 @@ pub(crate) async fn claim_pretranscode(
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let boot = BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string());
     let mut kinds = Vec::new();
-    for kind in [JobKind::TranscodePrepare, JobKind::CopyOutputPrepare] {
+    for kind in [
+        JobKind::TranscodePrepare,
+        JobKind::CopyOutputPrepare,
+        JobKind::EncodedOutputPrepare,
+    ] {
         if authority.may_execute_job(kind).await {
             kinds.push(kind);
         }
@@ -1200,6 +1265,52 @@ pub(crate) async fn claim_pretranscode(
             let Ok(payload) = candidate.supported_payload() else {
                 continue;
             };
+            if let JobPayload::EncodedOutputPrepare {
+                intent,
+                scratch_bytes,
+                ..
+            } = &payload
+            {
+                if intent.target_node_id != node || *scratch_bytes > capabilities.scratch_bytes {
+                    continue;
+                }
+                let Some(admission) = transcode.admit_encoded_preparation() else {
+                    return Ok(None);
+                };
+                if !authority
+                    .may_execute_job(JobKind::EncodedOutputPrepare)
+                    .await
+                {
+                    continue;
+                }
+                let now_ms = unix_ms()?;
+                let request = ClaimJob {
+                    job_id: candidate.id.clone(),
+                    expected_revision: candidate.revision,
+                    node_id: node.into(),
+                    boot_id: boot.clone(),
+                    claim_id: uuid::Uuid::new_v4().to_string(),
+                    kind: JobKind::EncodedOutputPrepare,
+                    payload_version: 1,
+                    now_ms,
+                    dispatched_at_ms: now_ms,
+                };
+                let Some((job, deadline)) =
+                    claim_with_resolution(store.as_ref(), &candidate, request).await?
+                else {
+                    continue;
+                };
+                let active = ActiveBackgroundJob::start(
+                    Arc::clone(&store),
+                    Arc::clone(&authority),
+                    job.token.clone().ok_or_else(|| {
+                        StoreError::Task("claimed encoded job has no ownership token".into())
+                    })?,
+                    deadline,
+                    JobKind::EncodedOutputPrepare,
+                )?;
+                return Ok(Some(PreparationClaim::Encoded(job, active, admission)));
+            }
             if let JobPayload::CopyOutputPrepare {
                 intent,
                 scratch_bytes,

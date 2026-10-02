@@ -164,6 +164,17 @@ exact first-publication, encoded preparation, rolling/PUT retained-consumer
 and original corpus/device acceptance remain open. See the
 dated claim in [the canonical S-10 plan](../streaming/HONEST-MASTER-PLAYLIST.md).
 
+The 2026-10-02 encoded-output continuation is in progress on the same original
+S-10 contract: distinct versioned intent, actual selected resolver facts,
+existing Background admission, finite full-output reservation, guarded
+settlement and compatible new-attachment capture. Five new focused IDs have
+passed once, including real selected audio and offset and the actual v92-to-v93
+upgrade. Registration follows the immutable recovery92/68 parent with encoded
+SQLite93/Hiqlite69; final committed-source checks and independent review remain
+pending. Rolling/PUT
+observations are not retained authority; unseen-tail first-publication and
+original physical/corpus acceptance are not closed by this milestone.
+
 The local prepared-observation follow-up supplies optional independently
 authenticated HTTP context, exact accepted-actor desired lifetime and a separate
 actual stage-writer lifetime token. Registration follows successful local prime;
