@@ -1,4 +1,4 @@
-//! Authenticated four-timestamp response; no enforcement or Store consumer.
+//! Authenticated four-timestamp response with causal leader/learner observation.
 use crate::state::AppState;
 use axum::{
     body::Body,
@@ -21,7 +21,13 @@ pub(crate) async fn snapshot(
     State(state): State<AppState>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(&state.membership, &state.node_id, request).await
+    snapshot_for_membership(
+        &state.membership,
+        &state.clock_observer,
+        &state.node_id,
+        request,
+    )
+    .await
 }
 
 /// One existing exact-request authorizer, shared by pending observation and
@@ -30,33 +36,69 @@ pub(crate) async fn snapshot(
 pub(crate) struct ObservationContext {
     pub(crate) membership: plurx_core::cluster::membership::MembershipManager,
     pub(crate) node_id: String,
+    pub(crate) observer: crate::clock_offset::ClockObserver,
 }
 
 pub(crate) async fn observation_snapshot(
     State(state): State<ObservationContext>,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
-    snapshot_for_membership(&state.membership, &state.node_id, request).await
+    snapshot_for_membership(&state.membership, &state.observer, &state.node_id, request).await
 }
 
 async fn snapshot_for_membership(
     membership: &plurx_core::cluster::membership::MembershipManager,
+    observer: &crate::clock_offset::ClockObserver,
     node_id: &str,
     request: Request<Body>,
 ) -> Result<Response<Body>, StatusCode> {
     let received_unix_ms = crate::media_sessions::unix_ms();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let guard = membership.clock_guard();
+    let clock_generation = guard.ticket().clock_generation;
     let auth = super::peer_transport::exact_auth_from_headers(request.headers())
         .ok_or(StatusCode::UNAUTHORIZED)?;
     // The exact proof is for an empty GET. Never ignore an unsigned raw body.
-    axum::body::to_bytes(request.into_body(), 0)
+    tokio::time::timeout_at(deadline, axum::body::to_bytes(request.into_body(), 0))
         .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    if !membership
-        .authorize_internal_peer_request(&auth, "GET", PATH, &[])
-        .await
-        .unwrap_or(false)
+    if !tokio::time::timeout_at(
+        deadline,
+        membership.authorize_internal_peer_request(&auth, "GET", PATH, &[]),
+    )
+    .await
+    .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+    .unwrap_or(false)
     {
         return Err(StatusCode::UNAUTHORIZED);
+    }
+    if !observer.belongs_to(membership) {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
+    let barrier = tokio::time::timeout_at(deadline, observer.learner_barrier(&auth.node_id))
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    if let Some(barrier) = barrier {
+        let completed = tokio::time::timeout_at(deadline, observer.observe_learner(&barrier))
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        tokio::time::timeout_at(deadline, observer.revalidate_learner(&barrier, completed))
+            .await
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    }
+    // No nonce is consumed again. All inverse service time remains between
+    // t2/t3 and is subtracted from RTT by the unchanged four-stamp arithmetic.
+    if tokio::time::Instant::now() >= deadline
+        || guard.ticket().clock_generation != clock_generation
+        || !membership
+            .authenticated_clock_request_still_fresh(&auth)
+            .unwrap_or(false)
+    {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
     let sent_unix_ms = crate::media_sessions::unix_ms();
     let body = serde_json::to_vec(&ClockResponse {

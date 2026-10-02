@@ -1920,6 +1920,16 @@ pub struct ClockPeerRoster {
     pub peers: Vec<ActivityPeer>,
 }
 
+/// Exact local applied membership and current leadership for a causal clock
+/// observation. Desired startup roles and replicated heartbeat rows are not
+/// authority for this identity. Reading it performs no IO or await.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClockLeadershipIdentity {
+    pub membership: ClockMembershipIdentity,
+    pub current_term: u64,
+    pub current_leader: Option<u64>,
+}
+
 impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
     fn current(&self) -> Option<ClockMembershipIdentity> {
         let snapshot = self.membership_snapshot();
@@ -3409,6 +3419,45 @@ impl MembershipManager {
     #[must_use]
     pub fn clock_guard(&self) -> Arc<super::clock::ClusterClockGuard> {
         Arc::clone(&self.clock)
+    }
+
+    #[must_use]
+    pub fn clock_leadership_identity(&self) -> Option<ClockLeadershipIdentity> {
+        let inner = self.inner.as_deref()?;
+        let membership = inner.local_metrics.current()?;
+        let leadership = inner.local_metrics.snapshot();
+        if !leadership.running
+            || leadership.node_id != inner.identity.raft_id
+            || membership.local_node != inner.identity.raft_id
+            || inner.local_metrics.current().as_ref() != Some(&membership)
+        {
+            return None;
+        }
+        let after = inner.local_metrics.snapshot();
+        if !after.running
+            || after.node_id != leadership.node_id
+            || after.current_term != leadership.current_term
+            || after.current_leader != leadership.current_leader
+        {
+            return None;
+        }
+        Some(ClockLeadershipIdentity {
+            membership,
+            current_term: leadership.current_term,
+            current_leader: leadership.current_leader,
+        })
+    }
+
+    /// Recheck the original authenticated clock request after an awaited
+    /// observation. This does not verify a signature or consume its nonce a
+    /// second time; callers must have completed ordinary authorization first.
+    pub fn authenticated_clock_request_still_fresh(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        Ok(auth.target_node_id == inner.identity.node_id
+            && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
     #[must_use]
