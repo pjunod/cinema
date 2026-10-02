@@ -17734,8 +17734,16 @@ async fn populated_v14_and_current_sources_activate_once_and_reopen_replicated()
 /// key-resolution refusal leaves no incoming target, then the same directory
 /// activates and its replicated envelope still opens under the node-local key.
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+#[test]
+fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-legacy-sealing",
+        legacy_sealing_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn legacy_sealing_observation_fixture() {
     let _case = HIQLITE_CASE.lock().await;
     install_contract_crypto_provider();
 
@@ -18034,9 +18042,17 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[ignore = "spawned by the one-voter activation contract"]
-async fn hiqlite_activation_node_process() {
+fn hiqlite_activation_node_process() {
+    startup_observer::run_full_hiqlite_fixture(
+        "k06-r1-contract-node",
+        activation_node_observation_fixture,
+    );
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn activation_node_observation_fixture() {
     install_contract_crypto_provider();
     let launch: ActivationNodeLaunch = serde_json::from_str(
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
