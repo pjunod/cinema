@@ -32,7 +32,10 @@ use crate::store::{
     AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSION,
 };
 
-use super::clock::{ClockAcquisitionTicket, ClockDecision, ClockRefusal, ClusterClockGuard};
+use super::clock::{
+    ClockAcquisitionTicket, ClockDecision, ClockMembershipIdentity, ClockMembershipSource,
+    ClockRefusal, ClusterClockGuard,
+};
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
@@ -1913,6 +1916,27 @@ pub struct MembershipManager {
     clock: Arc<super::clock::ClusterClockGuard>,
 }
 
+pub struct ClockPeerRoster {
+    pub membership: Option<ClockMembershipIdentity>,
+    pub peers: Vec<ActivityPeer>,
+}
+
+impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
+    fn current(&self) -> Option<ClockMembershipIdentity> {
+        let snapshot = self.membership_snapshot();
+        if !snapshot.running || !snapshot.committed || !snapshot.members.contains(&snapshot.node_id)
+        {
+            return None;
+        }
+        Some(ClockMembershipIdentity {
+            local_node: snapshot.node_id,
+            log: snapshot.membership_log?,
+            members: snapshot.members,
+            voters: snapshot.voters,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum LeaderSelfLeaveSequence {
     HandoffThenCommit,
@@ -3347,7 +3371,9 @@ impl MembershipManager {
         );
         let membership_metrics = PassiveMembershipMetrics::replicated();
         let manager = Self {
-            clock: Arc::new(super::clock::ClusterClockGuard::new(true)),
+            clock: Arc::new(ClusterClockGuard::with_membership_source(Arc::new(
+                local_metrics.clone(),
+            ))),
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
                 local_metrics,
@@ -6268,19 +6294,24 @@ impl MembershipManager {
     /// Exact bounded clock roster, including stale and pending-removal members.
     /// Missing identity or endpoint invalidates the whole round; reachability
     /// never shortens clock coverage. No credential-guard mutation is involved.
-    pub async fn clock_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+    pub async fn clock_peers(&self) -> Result<ClockPeerRoster, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
-            return Ok(Vec::new());
+            return Ok(ClockPeerRoster {
+                membership: None,
+                peers: Vec::new(),
+            });
         };
-        let members = inner
-            .client
-            .metrics_db()
-            .await?
-            .membership_config
-            .nodes()
-            .map(|(raft_id, _)| *raft_id)
-            .collect::<BTreeSet<_>>();
-        let members_json = bounded_committed_raft_ids_json(&members)?;
+        // Effective Raft membership may be unapplied. Never turn that state
+        // (or an absent local node) into a proved empty remote directory.
+        let membership = inner.local_metrics.current().ok_or_else(|| {
+            MembershipError::Internal("local applied clock membership is unavailable".into())
+        })?;
+        if membership.local_node != inner.identity.raft_id {
+            return Err(MembershipError::Internal(
+                "local clock watch belongs to a different Raft identity".into(),
+            ));
+        }
+        let members_json = bounded_committed_raft_ids_json(&membership.members)?;
         let rows = inner
             .client
             .query_consistent_map::<ActivityPeerRow, _>(
@@ -6288,12 +6319,21 @@ impl MembershipManager {
                 params!(inner.identity.node_id.as_str(), members_json),
             )
             .await?;
-        Self::cache_admin_revocation_peer_directory(
+        if inner.local_metrics.current().as_ref() != Some(&membership) {
+            return Err(MembershipError::ClockUnbounded(
+                ClockRefusal::GenerationChanged,
+            ));
+        }
+        let peers = Self::cache_admin_revocation_peer_directory(
             unix_ms()?,
-            &members,
+            &membership.members,
             inner.identity.raft_id,
             rows,
-        )
+        )?;
+        Ok(ClockPeerRoster {
+            membership: Some(membership),
+            peers,
+        })
     }
 
     /// Resolve every exact committed remote member for cache-admin revocation.

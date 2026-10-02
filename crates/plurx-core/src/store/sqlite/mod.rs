@@ -1191,6 +1191,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::candidate_link::SCHEMA,
     // v91: copy preparation follows the same exact source cancellation guards.
     super::background_jobs::COPY_OUTPUT_SCHEMA,
+    // v92: authenticated candidate failures, independent of network priors.
+    super::candidate_recovery::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

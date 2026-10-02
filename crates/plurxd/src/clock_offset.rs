@@ -97,12 +97,13 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
     let transport = crate::http::peer_transport::PeerTransport::new(state.membership.clone());
     let mut filters = BTreeMap::<String, Filter>::new();
     let mut generation = guard.ticket().clock_generation;
+    let mut membership = None;
     let mut interval = tokio::time::interval(CLOCK_PROBE_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! { () = shutdown.cancelled() => break, _ = interval.tick() => {} }
         // Roster discovery is bounded independently of the common 2 s peer deadline.
-        let peers = match tokio::time::timeout(
+        let peer_roster = match tokio::time::timeout(
             Duration::from_secs(2),
             state.membership.clock_peers(),
         )
@@ -115,18 +116,26 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
                 continue;
             }
         };
-        let mut roster = peers
+        let mut roster = peer_roster
+            .peers
             .iter()
             .map(|peer| peer.node_id.clone())
             .collect::<Vec<_>>();
         roster.sort();
-        let ticket = guard.roster(&roster);
-        if ticket.clock_generation != generation {
+        let ticket = match guard.roster_for_membership(&roster, peer_roster.membership.as_ref()) {
+            Ok(ticket) => ticket,
+            Err(_) => {
+                filters.clear();
+                continue;
+            }
+        };
+        if ticket.clock_generation != generation || peer_roster.membership != membership {
             filters.clear();
             generation = ticket.clock_generation;
+            membership = peer_roster.membership.clone();
         }
         filters.retain(|id, _| roster.contains(id));
-        let results = stream::iter(peers)
+        let results = stream::iter(peer_roster.peers)
             .map(|peer| {
                 let transport = transport.clone();
                 async move {
@@ -171,13 +180,14 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
         let final_peers =
             tokio::time::timeout(Duration::from_secs(2), state.membership.clock_peers()).await;
         let same_roster = match final_peers {
-            Ok(Ok(peers)) => {
-                let mut ids = peers
+            Ok(Ok(final_roster)) => {
+                let mut ids = final_roster
+                    .peers
                     .iter()
                     .map(|peer| peer.node_id.clone())
                     .collect::<Vec<_>>();
                 ids.sort();
-                ids == roster
+                ids == roster && final_roster.membership == peer_roster.membership
             }
             _ => false,
         };
