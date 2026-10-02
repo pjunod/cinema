@@ -2477,7 +2477,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # the HTTP/probe handles through shutdown drain; normal activation transfers
 # the same observer, not a second producer or recovery owner. Two socket
 # transfer fixture tasks are joined or drained by their test.
-expected_occurrences = 706
+# Review64 R4 causal fixture: +9 test-only namespaced tasks in internal_clock.rs.
+# The test retains/joins its real HTTP listeners, observer and signed callers;
+# waiter cancellation does not cancel the observer owner. No production owner.
+expected_occurrences = 715
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2654,7 +2657,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 54
+# Review64 R4: +1 owned/joined finite-stack test thread. No production task.
+expected_occurrences = 55
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3680,7 +3684,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadline or producer life is renewed.
 # Review64 R4 combines sender-fence/directory proof in the last read: removes
 # one preceding timeout, retaining the SAME original two-second deadline.
-expected_occurrences = 1192
+# Review64 R4: +7 bounded real-handler/test waits, preserving original receipt
+# deadlines and test-owned cleanup. No production timer or renewed clock age.
+expected_occurrences = 1199
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4498,7 +4504,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # response assertion, not a child launch, task or lifecycle owner.
 # +1 same58 final exact-readback control: another in-process Response.status()
 # verifies older-completion refusal without ACK. No child or new owner.
-expected_occurrences = 424
+# Review64 R4: +3 actual HTTP response status assertions and the same +1
+# owned/joined finite-stack test thread; none launches a process.
+expected_occurrences = 428
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
