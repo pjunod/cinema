@@ -11,6 +11,7 @@ and a mean hides exactly the starts people remember.
     scripts/bench fixtures                 # build the corpus (once, ~2 min)
     scripts/bench run --token TOKEN        # play everything, print the table
     scripts/bench run --only 4k-hdr10      # one fixture, while iterating
+    scripts/bench qualification-corpus    # metadata only; no acquisition or scoring
     scripts/bench rate-control --base http://media1:32400 --token TOKEN \
       --corpus scripts/perf2-rate-control-smoke-corpus.json --modes vbr \
       --vmaf-ffmpeg ffmpeg --vmaf-model vmaf_v0.6.1 \
@@ -39,6 +40,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import statistics
 import subprocess
 import sys
@@ -196,6 +198,190 @@ MIN_CAPTURE_FREE_BYTES = 512 * 1024 * 1024
 
 class BenchError(RuntimeError):
     """A benchmark contract or tool failure that belongs in the JSON result."""
+
+
+QUALIFICATION_CLASSES = {
+    "1080p-h264": "baseline", "1080p-animation": "animation",
+    "720p-web": "baseline", "4k-hevc-sdr": "baseline",
+    "4k-hdr10": "hdr10", "4k-hlg": "hlg", "sparse-gop": "long-gop",
+    "grainy": "grain", "dark-gradient": "dark-gradient", "sport": "sport",
+    "dark-gradient-10bit": "dark-gradient", "burn-pgs": "burn", "dv-p5": "dv",
+}
+
+
+def qualification_json(path, budget, expected_sha256=None):
+    """Bound metadata reads; never open a fixture, tool or server connection."""
+    path = Path(os.path.abspath(path))
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise BenchError("qualification metadata requires POSIX no-follow file reads")
+    limit = min(1024 * 1024, budget[0])
+    if limit <= 0:
+        raise BenchError("qualification metadata exceeds 4 MiB aggregate")
+
+    def object_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise BenchError("duplicate qualification JSON key")
+            result[key] = value
+        return result
+
+    def invalid_constant(value):
+        raise BenchError("non-finite qualification JSON number")
+
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise BenchError("non-finite qualification JSON number")
+        return number
+
+    try:
+        if any(parent.is_symlink() for parent in (path, *path.parents)):
+            raise BenchError("qualification metadata symlinks refuse")
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as source:
+            before = os.fstat(source.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise BenchError("qualification metadata must be regular")
+            raw = source.read(limit + 1)
+            after = os.fstat(source.fileno())
+        identity = lambda value: (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
+        if (len(raw) > limit or identity(before) != identity(after)
+                or identity(after) != identity(path.stat(follow_symlinks=False))):
+            raise BenchError("qualification metadata oversized or changed during read")
+        budget[0] -= len(raw)
+        digest = hashlib.sha256(raw).hexdigest()
+        if expected_sha256 is not None and digest != expected_sha256:
+            raise BenchError("qualification grade receipt SHA-256 mismatch")
+        return json.loads(raw, object_pairs_hook=object_pairs,
+                          parse_constant=invalid_constant, parse_float=finite_float), digest
+    except (OSError, ValueError, RecursionError) as error:
+        raise BenchError(f"cannot read qualification metadata: {error}") from error
+
+
+def qualification_sha(value, where, required=False):
+    if value is None and not required:
+        return
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise BenchError(f"{where} requires lowercase SHA-256")
+
+
+def load_qualification_corpus(path, require_associated=False):
+    """Validate domain/identity associations, not media or qualification.
+
+    The incumbent rate-control loader and independent scorer remain authoritative
+    for their actual executions. Even a complete association is NOT a decoded
+    grade, graph, device, artistic-reference or acquisition-availability proof.
+    """
+    budget = [4 * 1024 * 1024]
+    document, digest = qualification_json(path, budget)
+    if (not isinstance(document, dict) or type(document.get("version")) is not int
+            or document["version"] != 1 or document.get("purpose") != "codec_qualification"):
+        raise BenchError("qualification corpus requires version1/codec_qualification")
+    fixtures = document.get("fixtures")
+    if not isinstance(fixtures, list) or not 1 <= len(fixtures) <= 64:
+        raise BenchError("qualification fixtures require 1..64 rows")
+    seen, generators, rows, missing = set(), set(), [], []
+    for fixture in fixtures:
+        if not isinstance(fixture, dict):
+            raise BenchError("qualification fixture must be an object")
+        identity, generator = fixture.get("identity"), fixture.get("generator")
+        if not isinstance(identity, str) or not NAME.fullmatch(identity) or identity in seen:
+            raise BenchError("qualification identity must be unique and filename-safe")
+        seen.add(identity)
+        if not isinstance(generator, str) or generator not in FIXTURES or generator in generators:
+            raise BenchError("qualification generator must name one distinct existing fixture")
+        generators.add(generator)
+        if fixture.get("class") != QUALIFICATION_CLASSES[generator]:
+            raise BenchError("qualification class disagrees with its existing generator")
+        expected_range = {"pq": "hdr10", "hlg": "hlg", None: "sdr"}[FIXTURES[generator]["hdr"]] if generator != "dv-p5" else "dv-p5"
+        if fixture.get("dynamic_range") != expected_range:
+            raise BenchError("qualification source domain disagrees with its generator")
+        if fixture.get("filename") != generator + ".mkv":
+            raise BenchError("qualification filename must retain the existing fixture name")
+        source = fixture.get("source")
+        if not isinstance(source, dict) or source.get("state") not in ("unmeasured", "historical"):
+            raise BenchError("qualification source is historical or unmeasured, never available-by-claim")
+        source_sha = source.get("sha256")
+        qualification_sha(source_sha, "source", source["state"] == "historical")
+        if source["state"] == "unmeasured" and source_sha is not None:
+            raise BenchError("unknown source binding must retain null SHA-256")
+        if not isinstance(source.get("identity"), str) or not NAME.fullmatch(source["identity"]):
+            raise BenchError("qualification source identity must be filename-safe")
+        trim = fixture.get("trim")
+        if not isinstance(trim, dict) or type(trim.get("start_seconds")) not in (int, float):
+            raise BenchError("qualification trim requires a finite start")
+        if not math.isfinite(trim["start_seconds"]) or trim["start_seconds"] != 0:
+            raise BenchError("qualification references currently bind a zero-start interval")
+        seconds = positive_number(trim.get("duration_seconds"), "qualification duration")
+        if seconds > 30:
+            raise BenchError("qualification reference interval exceeds scorer's 30-second bound")
+        if type(fixture.get("rung")) is not int or fixture["rung"] not in (1080, 2160):
+            raise BenchError("qualification rung must be1080 or2160")
+        refs = fixture.get("references")
+        if not isinstance(refs, list) or not 1 <= len(refs) <= 2:
+            raise BenchError("qualification references require one or two grade associations")
+        grades, normalized = set(), []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise BenchError("qualification reference must be an object")
+            grade, domain, kind = ref.get("output_grade"), ref.get("domain"), ref.get("kind")
+            if grade not in ("sdr", "hdr10") or grade in grades:
+                raise BenchError("qualification output grades must be distinct SDR/HDR10")
+            grades.add(grade)
+            expected = ("unsupported", "unavailable") if expected_range in ("hlg", "dv-p5") else (
+                ("sdr-bt709-vmaf", "same-source") if expected_range == "sdr" else
+                ("pq-code-values", "same-source") if grade == "hdr10" else
+                ("sdr-bt709-vmaf", "independent-pq-to-sdr"))
+            if (domain, kind) != expected or (expected_range == "sdr" and grade != "sdr"):
+                raise BenchError("qualification reference domain/grade is incompatible with source")
+            state = ref.get("state")
+            if state not in ("unmeasured", "associated") or (kind == "unavailable" and state != "unmeasured"):
+                raise BenchError("unsupported or unmeasured reference cannot claim association")
+            qualification_sha(ref.get("sha256"), "reference", state == "associated")
+            qualification_sha(ref.get("parent_source_sha256"), "reference parent", state == "associated")
+            if ref.get("parent_source_sha256") != source_sha:
+                raise BenchError("qualification reference belongs to a different parent source")
+            if kind == "same-source" and ref.get("sha256") != source_sha:
+                raise BenchError("same-source reference must bind the source SHA-256 exactly")
+            receipt = ref.get("receipt")
+            verified = False
+            if kind != "independent-pq-to-sdr":
+                if receipt is not None:
+                    raise BenchError("this reference domain does not consume a PQ grade receipt")
+            elif state == "associated":
+                if not isinstance(receipt, dict) or not isinstance(receipt.get("path"), str) or not receipt["path"]:
+                    raise BenchError("independent SDR association requires a retained grade receipt")
+                qualification_sha(receipt.get("sha256"), "grade receipt", True)
+                proof, _ = qualification_json(Path(path).parent / receipt["path"], budget, receipt["sha256"])
+                if (not isinstance(proof, dict) or type(proof.get("schema")) is not int or proof["schema"] != 1
+                        or proof.get("kind") != "independent-PQ-to-BT709-Hable-reference"
+                        or proof.get("parent_source_sha256") != source_sha
+                        or proof.get("reference_sha256") != ref["sha256"]
+                        or type(proof.get("duration_seconds")) not in (int, float)
+                        or proof["duration_seconds"] != seconds):
+                    raise BenchError("grade receipt parent/reference/domain/interval mismatch")
+                verified = True
+            elif receipt is not None or ref.get("sha256") is not None:
+                raise BenchError("unmeasured independent grade must retain null reference/receipt")
+            if kind == "unavailable" and ref.get("sha256") is not None:
+                raise BenchError("unsupported reference must retain null SHA-256")
+            if state == "unmeasured":
+                missing.append(identity + ":" + grade)
+            normalized.append({"output_grade": grade, "domain": domain, "kind": kind,
+                               "state": state, "receipt_binding_verified": verified})
+        if grades != ({"sdr"} if expected_range == "sdr" else {"sdr", "hdr10"}):
+            raise BenchError("qualification fixture must account for each relevant delivered grade")
+        rows.append({"identity": identity, "generator": generator, "class": fixture["class"],
+                     "source_state": source["state"], "references": normalized})
+    if generators != set(FIXTURES):
+        raise BenchError("qualification plan must retain all13 existing generators")
+    if require_associated and missing:
+        raise BenchError("unmeasured qualification reference associations: " + ", ".join(missing))
+    return {"version": 1, "purpose": "codec_qualification", "manifest_sha256": digest,
+            "metadata_valid": True, "all_references_associated": not missing,
+            "measurement_executed": False, "qualified": False,
+            "unmeasured_associations": missing, "fixtures": rows}
 
 
 def sh(cmd, **kw):
@@ -2068,6 +2254,10 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
+    qc = sub.add_parser("qualification-corpus", help="validate metadata-only codec/reference associations; never acquire or score")
+    qc.add_argument("--corpus", default=str(Path(__file__).with_name("codec-qualification-corpus.json")))
+    qc.add_argument("--require-associated", action="store_true", help="refuse incomplete measurement inputs; never changes ordinary playback")
+
     f = sub.add_parser("fixtures", help="build the corpus")
     f.add_argument("--dir", default="./bench-media")
     f.add_argument("--only", choices=sorted(FIXTURES), help="build one named fixture")
@@ -2158,6 +2348,16 @@ def main():
     rc.add_argument("--only", default=None, help="one fixture name")
 
     args = ap.parse_args()
+
+    if args.cmd == "qualification-corpus":
+        try:
+            result = load_qualification_corpus(args.corpus, args.require_associated)
+        except BenchError as error:
+            print(json.dumps({"metadata_valid": False, "measurement_executed": False,
+                              "qualified": False, "error": str(error)}, sort_keys=True))
+            return 1
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
 
     if args.cmd == "rate-control":
         result = rate_control_report(args)
