@@ -736,6 +736,9 @@ title = "Library discovery and catalog maintenance"
 contract = "Scans find supported media, update existing items idempotently, and preserve user-owned files."
 paths = [
   "crates/plurx-core/src/scan/**",
+  # S-08's stored-probe field-order backfill page: catalogue maintenance that
+  # gives probed rows the token the scanner writes for the same document.
+  "crates/plurx-core/src/store/field_order_backfill.rs",
   "crates/plurx-core/src/store/sqlite/library.rs",
   "crates/plurx-core/src/store/sqlite/media.rs",
   "crates/plurxd/src/http/{browse,comingsoon,images,images_worker,items,libraries,photos,scan}.rs",

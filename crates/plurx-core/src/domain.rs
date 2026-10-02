@@ -504,6 +504,13 @@ impl DolbyVisionFacts {
     }
 }
 
+/// The stored token for "probed, and the probe reported no field order".
+///
+/// [`crate::scan::probe::parse_probe_json`] is its single owner: every parsed
+/// probe carries either FFprobe's token or this one, so a `NULL` field order
+/// in the catalogue means only that the row has never been probed.
+pub const FIELD_ORDER_UNKNOWN: &str = "unknown";
+
 /// The ordering FFprobe reports for an interlaced video stream.
 ///
 /// The spelling remains separate from [`MediaFile::field_order`]: storage
@@ -562,8 +569,10 @@ pub struct MediaFile {
     /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
     /// identity, not a second spelling of the codec family.
     pub video_codec_tag: Option<String>,
-    /// FFprobe's field-order token for the selected playable video stream.
-    /// Decisions must use [`ScanType::from_field_order`], not string inequality.
+    /// FFprobe's field-order token for the selected playable video stream,
+    /// [`FIELD_ORDER_UNKNOWN`] for a probed row that reported none, `None`
+    /// only for a row never probed. Decisions must use
+    /// [`ScanType::from_field_order`], not string inequality.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
@@ -668,6 +677,10 @@ pub struct ProbeResult {
     pub container: Option<String>,
     pub video_codec: Option<String>,
     pub video_codec_tag: Option<String>,
+    /// FFprobe's token for the selected playable video stream, or
+    /// [`FIELD_ORDER_UNKNOWN`] when the probe was parsed and reported none
+    /// (including audio-only files). `None` only on a result that was never
+    /// parsed from a probe document.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
@@ -692,6 +705,23 @@ pub struct ProbeResult {
     /// it the best home-video date short of an NFO — see
     /// docs/features/HOMEVIDEO-PLAN.md §4.4.
     pub creation_time: Option<String>,
+}
+
+impl ProbeResult {
+    /// The field-order value a catalogue write stores for this result.
+    ///
+    /// A parsed probe already carries a token ([`FIELD_ORDER_UNKNOWN`] when
+    /// FFprobe reported none), but a result can reach a write boundary from a
+    /// binary that predates that rule — an older probe worker's published
+    /// facts during a rolling deploy. A result with a probe document is a
+    /// probed row, so it is stored as `unknown` rather than stranded as
+    /// `NULL`; only a result with no document (never probed, or a failed
+    /// probe) stores `NULL`.
+    pub fn stored_field_order(&self) -> Option<&str> {
+        self.field_order
+            .as_deref()
+            .or_else(|| self.raw_json.is_some().then_some(FIELD_ORDER_UNKNOWN))
+    }
 }
 
 // ---------------------------------------------------------------------------
