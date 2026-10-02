@@ -1363,16 +1363,20 @@ pub(crate) async fn local_quality_candidates(
     {
         return Vec::new();
     }
-    let Ok(Some(file)) = state.store.get_file(request.file_id).await else {
+    let Ok(Some(snapshot)) = state
+        .store
+        .playback_planning_snapshot(request.file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+        .await
+    else {
         return Vec::new();
     };
-    if file.size != request.source_size || file.mtime != request.source_mtime {
+    if snapshot.file.size != request.source_size || snapshot.file.mtime != request.source_mtime {
         return Vec::new();
     }
     state
         .transcode
-        .quality_candidates_with_copy_contract(
-            &file,
+        .quality_candidates_from_snapshot(
+            &snapshot,
             &request.caps,
             request.audio_index,
             request.audio_offset_ms,

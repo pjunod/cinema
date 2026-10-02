@@ -1187,6 +1187,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
     // v89: file/source-indexed preparation status reads.
     super::background_jobs::PREPARATION_INDEX_SCHEMA,
+    // v90: transactional playback planning settings generation.
+    super::PLAYBACK_INPUT_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

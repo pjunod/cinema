@@ -16,11 +16,89 @@ impl TranscodeManager {
         presentation: Presentation,
         retained_copy: Option<(bool, bool, bool)>,
     ) -> Vec<QualityCandidate> {
-        let mut catalog_file = file.clone();
+        let Ok(Some(snapshot)) = self
+            .store
+            .playback_planning_snapshot(file.id, &QUALITY_PLANNING_KEYS)
+            .await
+        else {
+            return Vec::new();
+        };
+        if snapshot.file.size != file.size || snapshot.file.mtime != file.mtime {
+            return Vec::new();
+        }
+        self.quality_candidates_from_snapshot(
+            &snapshot,
+            caps,
+            audio,
+            audio_offset_ms,
+            subtitle,
+            presentation,
+            retained_copy,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn quality_candidates_from_snapshot(
+        &self,
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        caps: &plurx_core::playback::DeviceCaps,
+        audio: Option<i64>,
+        audio_offset_ms: i64,
+        subtitle: Option<i64>,
+        presentation: Presentation,
+        retained_copy: Option<(bool, bool, bool)>,
+    ) -> Vec<QualityCandidate> {
+        let mut catalog_file = snapshot.file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
-        let audio = self.candidate_audio_index(file, audio).await;
-        let source_facts = self.quality_source_facts(file).await;
+        let mut prefs = plurx_core::tracks::LangPrefs::default();
+        if let Some(value) = snapshot
+            .settings
+            .get(keys::AUDIO_LANG)
+            .filter(|value| !value.trim().is_empty())
+        {
+            prefs.audio_lang = value.trim().to_owned();
+        }
+        if let Some(value) = snapshot
+            .settings
+            .get(keys::SUB_LANG)
+            .filter(|value| !value.trim().is_empty())
+        {
+            prefs.sub_lang = value.trim().to_owned();
+        }
+        if let Some(value) = snapshot.settings.get(keys::SUB_MODE) {
+            prefs.sub_mode = plurx_core::tracks::SubMode::parse(value.trim());
+        }
+        let audio = Self::select_tracks_with_prefs(file, audio, None, &prefs, false).audio_index;
+        let probe: serde_json::Value = match snapshot.probe_json.as_deref() {
+            Some(encoded) => match serde_json::from_str(encoded) {
+                Ok(probe) => probe,
+                Err(_) => return Vec::new(),
+            },
+            None => Self::catalog_plan_probe(file),
+        };
+        let source_facts = Self::quality_facts_from_probe(file, &probe);
+        let preference = snapshot
+            .settings
+            .get(keys::HWACCEL)
+            .map(String::as_str)
+            .unwrap_or_default();
+        let (requested_mode, requested_quality, _) = super::normalize_rate_control_request(
+            snapshot
+                .settings
+                .get(keys::TRANSCODE_RATE_MODE)
+                .map(String::as_str),
+            snapshot
+                .settings
+                .get(keys::TRANSCODE_QUALITY)
+                .map(String::as_str),
+        );
+        let rate_control = RateControlSnapshot {
+            requested_mode,
+            requested_quality,
+            quality_rc: self.rate_control_snapshot().quality_rc,
+        };
         let coded_rate = source_facts
             .as_ref()
             .and_then(|facts| facts.frame_rate().value())
@@ -30,7 +108,10 @@ impl TranscodeManager {
         profile.retain_applicable_learned_limits(crate::media_sessions::unix_ms());
         let mut node =
             plurx_core::playback::RenderCaps::strip_only(crate::ffmpeg::has_dovi_rpu().await);
-        node.dolby_vision_convert = self.dv_convert_enabled().await;
+        node.dolby_vision_convert = plurx_core::store::stored_switch(
+            snapshot.settings.get(keys::DV_CONVERT).map(String::as_str),
+            true,
+        );
         let copy_decision = plurx_core::playback::decide(file, &profile, &node);
         let (copy_audio, copy_dv, copy_conversion) = retained_copy.unwrap_or((
             copy_decision.transcode_audio,
@@ -157,7 +238,13 @@ impl TranscodeManager {
                 continue;
             }
             let Ok((encoder, grade)) = self
-                .encoder_and_grade_for(file, hdr_requested, height, subtitle.is_some())
+                .encoder_and_grade_for_with_preference(
+                    file,
+                    hdr_requested,
+                    height,
+                    subtitle.is_some(),
+                    preference,
+                )
                 .await
             else {
                 continue;
@@ -166,7 +253,7 @@ impl TranscodeManager {
                 continue;
             }
             let mut options = self.live_lookup_options(
-                self.rate_control_snapshot(),
+                rate_control,
                 encoder,
                 file,
                 height,
@@ -191,7 +278,16 @@ impl TranscodeManager {
                 options.video_bitrate_kbps = profile.video_bitrate_kbps();
                 options.effective_rate_control = EffectiveRateControl::Vbr;
             }
-            let Ok(plan) = self.resolve_movie_plan(file, &options, encoder).await else {
+            let Some(facts) = source_facts.as_ref() else {
+                continue;
+            };
+            let Ok(plan) = self.resolve_movie_plan_with_facts(
+                file,
+                &options,
+                encoder,
+                facts,
+                &AttemptRestrictions::none(),
+            ) else {
                 continue;
             };
             let contract = plan.output_contract();
@@ -314,10 +410,17 @@ impl TranscodeManager {
     ) -> Option<DecodeFacts> {
         let probe: serde_json::Value =
             serde_json::from_str(&self.store.get_file_probe_json(file.id).await.ok()??).ok()?;
-        let index = crate::decode_facts::absolute_video_ordinal(&probe, 0)?;
+        Self::quality_facts_from_probe(file, &probe)
+    }
+
+    pub(super) fn quality_facts_from_probe(
+        file: &plurx_core::domain::MediaFile,
+        probe: &serde_json::Value,
+    ) -> Option<DecodeFacts> {
+        let index = crate::decode_facts::absolute_video_ordinal(probe, 0)?;
         let catalog = DecodeCatalogMetadata::from_media_file(file).ok()?;
         crate::decode_facts::legacy_ordinal_facts(
-            &probe,
+            probe,
             Self::plan_source_identity(file).ok()?,
             index,
             Some(&catalog),
@@ -417,6 +520,18 @@ fn candidate_heights(source_height: Option<i64>) -> Vec<i64> {
     heights.dedup();
     heights
 }
+
+pub(crate) const QUALITY_PLANNING_KEYS: [&str; 9] = [
+    keys::HWACCEL,
+    keys::DV_CONVERT,
+    keys::AUDIO_LANG,
+    keys::SUB_LANG,
+    keys::SUB_MODE,
+    keys::PLAYBACK_DISPLAY_AWARE_AUTO,
+    keys::PLAYBACK_CONTROL_PROTOCOL_V1,
+    keys::TRANSCODE_RATE_MODE,
+    keys::TRANSCODE_QUALITY,
+];
 
 #[cfg(test)]
 mod tests {

@@ -21,8 +21,8 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Pinned Rust loop | done | Rust 1.97.1; current-main all-target compile passed |
 | Typed diagnostics and accounting | done | Diagnostic commit retained before bound repair |
 | One catalog per create | done | Canonical caps and recipe/worker identities retained |
-| Android compaction and shared contract | building | No legacy blanket 400 |
-| Snapshot, generation and budgets | pending | Parameters recorded before dependent changes |
+| Android compaction and shared contract | done | No legacy blanket 400 |
+| Snapshot, generation and budgets | building | Parameters recorded before dependent changes |
 | Partial selection through existing owners | pending | No new watchdog/retry owner |
 | Review and fast lane | pending | No tests claimed yet |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
@@ -71,3 +71,8 @@ Concrete implementation decisions, 2026-10-02:
 5. Initial Auto may select fully validated local partial rows. Explicit identity
    cannot become absent on incomplete discovery; no remote partial substitution.
    The existing sustainable-quality owner handles later upgrades.
+
+Snapshot enumeration compiles with Rust 1.97.1. Android app and JVM test sources
+compile successfully; tests have not executed. Database triggers cover raw SQL
+import writes and same-timestamp updates. Final dispatch bindings and outer
+create deadlines are still being integrated.

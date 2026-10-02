@@ -1836,6 +1836,27 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
+        let keys = crate::store::selected_settings_json(keys)?;
+        self.with_read(move |conn| {
+            let sql = format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
+                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
+                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each(?2))) AS planning_settings \
+                FROM files WHERE id = ?1");
+            conn.query_row(&sql, params![file_id, keys], |row| {
+                let encoded: String = row.get("planning_settings")?;
+                let settings = serde_json::from_str(&encoded).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+                Ok(crate::store::PlaybackPlanningSnapshot { file: file_from_row(row)?,
+                    probe_json: row.get("planning_probe")?, settings,
+                    generation: row.get("planning_generation")? })
+            }).optional().map_err(StoreError::from)
+        }).await
+    }
+
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
         // The per-request metadata lookup: session starts, decisions, VTT.
         // Read-only, so it takes a read connection instead of queuing behind

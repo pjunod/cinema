@@ -47,7 +47,7 @@ impl TranscodeManager {
     /// resulting plan differs from a stored-probe plan and therefore names a
     /// different artifact, which is correct — they are different measurements,
     /// and the one made from real probe output wins the moment it exists.
-    fn catalog_plan_probe(file: &plurx_core::domain::MediaFile) -> serde_json::Value {
+    pub(super) fn catalog_plan_probe(file: &plurx_core::domain::MediaFile) -> serde_json::Value {
         let transfer = match transcode::routing_hdr(file) {
             Some("hdr10" | "hdr10plus" | "dolby_vision") => Some("smpte2084"),
             Some("hlg") => Some("arib-std-b67"),
@@ -146,7 +146,7 @@ impl TranscodeManager {
         self.resolve_movie_plan_with_facts(file, options, encoder, &facts, restrictions)
     }
 
-    fn resolve_movie_plan_with_facts(
+    pub(super) fn resolve_movie_plan_with_facts(
         &self,
         file: &plurx_core::domain::MediaFile,
         options: &TranscodeOptions,
@@ -738,6 +738,7 @@ impl TranscodeManager {
     /// Every refusal degrades to [`OutputGrade::Sdr`], which is exactly
     /// today's behaviour — an HDR10 rung that cannot be proved is not an
     /// error, it is the ladder that already exists.
+    #[cfg(test)]
     pub(super) async fn hdr10_grade_for(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -745,6 +746,27 @@ impl TranscodeManager {
         target_height: i64,
         encoder: Encoder,
         subtitle_burn: bool,
+    ) -> Result<OutputGrade, String> {
+        self.hdr10_grade_for_with_preference(
+            file,
+            requested,
+            target_height,
+            encoder,
+            subtitle_burn,
+            self.encoder().await,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn hdr10_grade_for_with_preference(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested: bool,
+        target_height: i64,
+        encoder: Encoder,
+        subtitle_burn: bool,
+        preferred: Encoder,
     ) -> Result<OutputGrade, String> {
         let Some(route) = plurx_core::playback::hdr_route(file) else {
             return Ok(OutputGrade::Sdr);
@@ -774,7 +796,6 @@ impl TranscodeManager {
         // cores, under realtime, against the 20.3 fps the SDR chain it
         // replaced runs at. Losing the grade is a worse picture; losing
         // realtime is a stall, and the viewer notices that one.
-        let preferred = self.encoder().await;
         if !matches!(preferred, Encoder::Software | Encoder::Qsv) {
             tracing::info!(
                 target: "plurxd::transcode",
@@ -892,12 +913,36 @@ impl TranscodeManager {
         target_height: i64,
         subtitle_burn: bool,
     ) -> Result<(Encoder, OutputGrade), String> {
+        let preference = self
+            .store
+            .get_setting(keys::HWACCEL)
+            .await
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        self.encoder_and_grade_for_with_preference(
+            file,
+            requested,
+            target_height,
+            subtitle_burn,
+            &preference,
+        )
+        .await
+    }
+
+    pub(super) async fn encoder_and_grade_for_with_preference(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested: bool,
+        target_height: i64,
+        subtitle_burn: bool,
+        preference: &str,
+    ) -> Result<(Encoder, OutputGrade), String> {
         let hdr_candidate = if requested
             && !subtitle_burn
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
-            let preferred = self.encoder().await;
+            let preferred = self.caps.choose(preference);
             let qsv_proved = match plurx_core::playback::hdr_route(file) {
                 Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
                 _ => self.hdr10_passthrough_qsv,
@@ -908,16 +953,25 @@ impl TranscodeManager {
                 Encoder::Software
             }
         } else {
-            self.encoder_for_file(file, SESSION_START_CLASS).await?
+            self.encoder_for_file_with_preference(file, preference, SESSION_START_CLASS)
+                .await?
         };
         let grade = self
-            .hdr10_grade_for(file, requested, target_height, hdr_candidate, subtitle_burn)
+            .hdr10_grade_for_with_preference(
+                file,
+                requested,
+                target_height,
+                hdr_candidate,
+                subtitle_burn,
+                self.caps.choose(preference),
+            )
             .await?;
         if grade == OutputGrade::Hdr10 {
             Ok((hdr_candidate, grade))
         } else {
             Ok((
-                self.encoder_for_file(file, SESSION_START_CLASS).await?,
+                self.encoder_for_file_with_preference(file, preference, SESSION_START_CLASS)
+                    .await?,
                 grade,
             ))
         }

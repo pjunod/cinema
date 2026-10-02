@@ -1636,6 +1636,35 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
     })
 }
 
+/// One consistent source/settings read, shared by both durable backends.
+#[derive(Clone, Debug)]
+pub struct PlaybackPlanningSnapshot {
+    pub file: crate::domain::MediaFile,
+    pub probe_json: Option<String>,
+    pub settings: BTreeMap<String, String>,
+    pub generation: i64,
+}
+
+/// All playback/transcode keys invalidate planning. Triggers cover every write
+/// path (including import SQL), deletions and same-timestamp changes. Job keys
+/// deliberately do not invalidate playback. Overflow aborts the mutation.
+pub(crate) const PLAYBACK_INPUT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS playback_input_generation (
+ singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+ generation INTEGER NOT NULL CHECK(typeof(generation) = 'integer' AND generation >= 0)
+);
+INSERT OR IGNORE INTO playback_input_generation(singleton, generation) VALUES(1, 0);
+CREATE TRIGGER IF NOT EXISTS playback_settings_insert AFTER INSERT ON settings
+WHEN NEW.key GLOB 'playback.*' OR NEW.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+CREATE TRIGGER IF NOT EXISTS playback_settings_update AFTER UPDATE ON settings
+WHEN NEW.key GLOB 'playback.*' OR NEW.key GLOB 'transcode.*' OR OLD.key GLOB 'playback.*' OR OLD.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+CREATE TRIGGER IF NOT EXISTS playback_settings_delete AFTER DELETE ON settings
+WHEN OLD.key GLOB 'playback.*' OR OLD.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+"#;
+
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
@@ -2100,6 +2129,7 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// Cheap liveness probe of the backing storage (drives `/readyz`).
     async fn ping(&self) -> Result<(), StoreError>;
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError>;
+
     /// Atomically seed an absent setting and return the durable winner.
     async fn get_or_init_setting(&self, key: &str, seed: &str) -> Result<String, StoreError>;
     /// Read two related settings from one database snapshot.
@@ -3020,6 +3050,12 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         probe: &ProbeResult,
     ) -> Result<i64, StoreError>;
+    /// File/probe, selected settings and generation from exactly one statement.
+    async fn playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<PlaybackPlanningSnapshot>, StoreError>;
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError>;
     /// False means duplicate, full, or a source revision replaced during download.
     async fn add_downloaded_subtitle(

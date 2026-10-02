@@ -458,6 +458,23 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      (probe_json IS NOT NULL) AS probed, video_codec_tag, field_order, \
      max_cll, max_fall, mastering_max_luminance, luminance_source, downloaded_subtitles";
 
+struct PlanningSnapshotRow {
+    file: FileRow,
+    probe_json: Option<String>,
+    generation: i64,
+    settings: String,
+}
+impl From<&mut Row<'_>> for PlanningSnapshotRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            file: FileRow::from(&mut *row),
+            probe_json: row.get("planning_probe"),
+            generation: row.get("planning_generation"),
+            settings: row.get("planning_settings"),
+        }
+    }
+}
+
 struct FileRow {
     id: i64,
     item_id: i64,
@@ -2913,6 +2930,33 @@ impl MediaStore for HiqliteAuthStore {
             .into_iter()
             .map(|row| row.id)
             .collect())
+    }
+
+    async fn playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<super::PlaybackPlanningSnapshot>, StoreError> {
+        let keys = super::selected_settings_json(keys)?;
+        // authority: all planning inputs and generation share one committed read.
+        let rows = self.client().query_consistent_map::<PlanningSnapshotRow, _>(
+            format!("WITH input AS (SELECT $1 AS file_id, $2 AS keys) SELECT {FILE_COLS}, probe_json AS planning_probe, \
+                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
+                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each((SELECT keys FROM input)))) AS planning_settings \
+                FROM files WHERE id = (SELECT file_id FROM input)"), params!(file_id, keys),
+        ).await.map_err(database_error)?;
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                Ok(super::PlaybackPlanningSnapshot {
+                    file: row.file.try_into()?,
+                    probe_json: row.probe_json,
+                    generation: row.generation,
+                    settings: serde_json::from_str(&row.settings)
+                        .map_err(|error| StoreError::Database(error.to_string()))?,
+                })
+            })
+            .transpose()
     }
 
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
