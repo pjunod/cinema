@@ -43,7 +43,11 @@ flag or production execution path.
 The fingerprint binds the named method's normalized AST, decorators and the
 module's non-test fixture context: class bases/decorators, setup/teardown,
 helper methods, module fixtures and import declarations. Line numbers,
-comments and sibling test method bodies are excluded. Thus adding or changing
+comments and sibling test method bodies are excluded. Sibling decorators,
+default expressions, annotations and type-parameter metadata remain as
+body-stripped declaration stubs, in their original order: they can mutate a
+fixture when defined or inspected. Bare sibling declarations without that
+metadata are omitted. Thus adding or changing
 a sibling method does not invalidate a method whose assertions and local
 context are unchanged. Shared context changes conservatively invalidate the
 methods in that module. Local base classes are source-bound; unsupported
@@ -99,6 +103,14 @@ execution, preserved siblings/provenance, fixture/decorator/base changes,
 null-file witnesses, missing/dynamic source, bounds and the production guard.
 Its synthetic API/source/runner fixtures are not an actual workflow run or a
 claim of arbitrary production-dependency coverage.
+
+The separately new focused edge control
+`tests/validation/test_python_unit_receipts.py::test_sibling_definition_metadata_binds_fixture_without_replaying_bodies`
+executes only controlled synthetic class definitions to demonstrate decorator,
+positional/keyword-default and parameter/return-annotation fixture mutations,
+including async sibling declarations. It refuses their changed applicability
+while retaining body-only edits. The earlier combined control remains actual
+historical evidence; it is not replayed or relabelled as covering this edge.
 
 ## Publish before execution, preserve after failure
 
