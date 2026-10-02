@@ -49,7 +49,7 @@ function card(it, watchCtx){
   // was taken and how long it runs, a photo with a square thumb you click to
   // open full-screen.
   if(it.kind==='folder'||it.kind==='photo') return homeCard(it);
-  const img = artHtml(it);
+  const img = artHtml(it, '', true);
   const resb = it.resolution
       ? `<span class="resbadge resgrad ${resClass(it.resolution)}">${esc(resLabel(0,it.resolution))}</span>` : "";
   // On rail cards the series is the headline and the episode (SxEy · name) is
@@ -91,7 +91,7 @@ function homeCard(it){
     const n=it.child_count;
     const sub=n==null? "Folder" : `${n} item${n===1?'':'s'}`;
     return `<div class="poster k-folder" onclick="location.hash='#/item/${itemId}'">
-      <div class="artbox">${artHtml(it)}</div>
+      <div class="artbox">${artHtml(it, '', true)}</div>
       <div class="meta"><div class="t">${esc(it.title)}</div><div class="s"><span class="stxt">${esc(sub)}</span></div></div></div>`;
   }
   return `<div class="poster k-photo" onclick="openLightbox(${it.id})">
