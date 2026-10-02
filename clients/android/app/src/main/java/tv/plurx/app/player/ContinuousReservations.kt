@@ -72,6 +72,10 @@ internal class ContinuousReservations(
             val entry = ContinuousFragmentClock.videoEntry(ContinuousFragmentClock.firstDecodeTick(payload),
                 requireNotNull(resource.row.number("timescale")), requireNotNull(wanted.number("timescale")),
                 requireNotNull(wanted.number("segment_ticks")))
+            // Video ready may already cover this entry while its AAC pin was
+            // disposed. Renew the shared projection even in that case.
+            if (transaction == null) prepare(wanted, entry)
+            protocol.window(requireNotNull(transaction), frontier(wanted, entry))
             reserveWindow(entry)
         }
     }

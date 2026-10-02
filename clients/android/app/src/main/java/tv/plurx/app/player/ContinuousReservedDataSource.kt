@@ -40,6 +40,7 @@ internal class ContinuousReservedDataSource(
     private val reserve: suspend (ContinuousQualityMedia.Resource, ByteArray?) -> Unit,
     private val loads: ContinuousLoads = ContinuousLoads(),
     private val cancelNetwork: (() -> Unit)? = null,
+    private val beforeReserve: suspend (ContinuousQualityMedia.Resource) -> Unit = {},
 ) : BaseDataSource(false) {
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
@@ -75,6 +76,7 @@ internal class ContinuousReservedDataSource(
         if (!opening.compareAndSet(null, job)) throw IOException("Continuous media open already pending")
         try {
             loads.opened(this)
+            if (resource != null && !resource.initialization) blocking(job) { beforeReserve(resource) }
             transferInitializing(dataSpec)
             if (resource?.role == "video" && !resource.initialization) blocking(job) { reserve(resource, null) }
             if (!job.isActive || !loads.isAlive()) throw IOException("Continuous media request cancelled")

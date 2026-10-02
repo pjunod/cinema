@@ -3199,3 +3199,25 @@ intent. Production and test sources compile. Unit execution and formal agent
 review remain deferred to the final main-ready candidate. Optional target
 load failure before exposure, control-phase cancellation and their runtime
 race/pressure evidence remain to be completed.
+
+
+### 10.102 Android serializes physical retirement against artifact reentry
+
+Disposal now establishes a per-resource read barrier atomically with loader
+admission, after all current loaders have actually closed. The queue retirement
+proof is rechecked inside that admission guard. A newly opened loader waits
+before reservation or extraction of the retiring resource; unrelated resources
+remain available. The barrier survives an uncertain disposition and is released
+only after its exact protocol work settles and the old provenance is removed.
+Cancelled readers do not remove another reader's barrier.
+
+An AAC hash missing from the shared reservation now renews its window even
+when the video ready window already covers the same entry. Shared audio can
+be reserved again under a transaction whose historical disposed list contains
+that hash, so audio retirement and terminal cleanup no longer skip the new
+physical reservation on that historical membership alone.
+
+Production and test sources compile in eleven seconds. A regression exercises
+blocked reentry, cancellation, independent resources and barrier reuse; unit
+execution remains deferred to the final main-ready fast lane. Optional target
+load failure before exposure and native runtime qualification remain open.

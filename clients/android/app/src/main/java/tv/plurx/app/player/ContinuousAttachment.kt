@@ -51,6 +51,9 @@ internal class ContinuousAttachment(
         else audioDecoderReleaseEpoch.get() to sinkRelease.get().epoch
     }
     private val loads = ContinuousLoads()
+    private val disposalBarriers = ContinuousDisposalBarriers()
+    private data class Disposal(val load: ContinuousLoadContext.Verified, val owners: Set<String>)
+    private val disposing = LinkedHashMap<String, Disposal>()
     private val mediaCalls = ContinuousMediaCalls(profile.http)
     private val closed = AtomicBoolean()
     private val periodReleaseRequested = AtomicBoolean()
@@ -82,7 +85,8 @@ internal class ContinuousAttachment(
         val upstream = OkHttpDataSource.Factory(mediaCalls).setTransferListener(transfers)
         val sources = DataSource.Factory {
             ContinuousReservedDataSource(owner, upstream, profile.origin, start.schedulePath, start.family,
-                media, reservations::reserve, loads, mediaCalls::cancel)
+                media, reservations::reserve, loads, mediaCalls::cancel,
+                { resource -> disposalBarriers.await(resourceKey(resource)) })
         }
         val extractor = ContinuousHlsExtractorFactory(owner, queues::accepted, { verified ->
             queues.completed(verified)?.let { append ->
@@ -139,6 +143,7 @@ internal class ContinuousAttachment(
 
     private suspend fun flushFacts() {
         protocol.settlePending()
+        finishDisposals()
         queues.observeResets()
         output.audioOutputs.collectReleased()
         while (true) {
@@ -238,11 +243,30 @@ internal class ContinuousAttachment(
             val ids = if (load.resource.role == "video") currentOwners(load)
                 else transactions().lastOrNull()?.text("transaction_id")?.let(::setOf).orEmpty()
             if (ids.isEmpty()) continue
-            for (id in ids) {
-                if (transaction(id)?.getValue("disposed")?.jsonArray?.contains(JsonPrimitive(artifact)) != true)
+            val resourceKey = resourceKey(load.resource)
+            loads.whenQuiescent {
+                // A loader could have reentered since the first queue check.
+                // Recheck while new loader admission is excluded.
+                if (queues.queueRetired(load.resource.rendition, artifact) && disposalBarriers.begin(resourceKey))
+                    disposing[resourceKey] = Disposal(load, ids)
+            }
+        }
+        finishDisposals()
+    }
+
+    private suspend fun finishDisposals() {
+        for ((resourceKey, disposal) in disposing.toMap()) {
+            val load = disposal.load
+            val artifact = requireNotNull(load.authorized.interval.text("artifact_id"))
+            for (id in disposal.owners) {
+                // Shared AAC can be reserved again under a transaction whose
+                // historical disposed list already contains this hash.
+                if (load.resource.role == "audio" || transaction(id)?.getValue("disposed")?.jsonArray?.contains(JsonPrimitive(artifact)) != true)
                     protocol.transition(id, buildJsonObject { put("kind", "disposed"); put("artifacts", JsonArray(listOf(JsonPrimitive(artifact)))) })
             }
             queues.disposed(load.resource.rendition, artifact)
+            disposing.remove(resourceKey)
+            disposalBarriers.retired(resourceKey)
         }
     }
 
@@ -273,7 +297,7 @@ internal class ContinuousAttachment(
                     for ((index, tx) in all.withIndex()) {
                         val disposed = tx.getValue("disposed").jsonArray
                         val artifacts = tx.getValue("reserved").jsonArray.map { it.jsonObject.getValue("artifact_id") }
-                            .plus(if (index == all.lastIndex) audio else emptyList()).distinct().filter { it !in disposed }
+                            .filter { it !in disposed }.plus(if (index == all.lastIndex) audio else emptyList()).distinct()
                         if (artifacts.isNotEmpty()) protocol.transition(requireNotNull(tx.text("transaction_id")), buildJsonObject {
                             put("kind", "disposed"); put("artifacts", JsonArray(artifacts))
                         })
@@ -294,6 +318,7 @@ internal class ContinuousAttachment(
 
     private fun transactions(): List<JsonObject> = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().map { it.jsonObject }
     private fun transaction(id: String): JsonObject? = transactions().singleOrNull { it.text("transaction_id") == id }
+    private fun resourceKey(resource: ContinuousQualityMedia.Resource) = "${resource.role}:${resource.rendition}:${resource.segment}"
     private fun key(interval: JsonObject) = "${interval.text("rendition_id")}:${interval.text("artifact_id")}"
     private fun contains(interval: JsonObject, tick: Long) = requireNotNull(interval.number("from_tick")) <= tick && tick < requireNotNull(interval.number("through_tick"))
     private fun frontier(row: JsonObject, ms: Long): Long = ContinuousFilmClock.frontier(

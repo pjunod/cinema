@@ -17,6 +17,8 @@ internal class ContinuousLoads {
     }
     @Synchronized fun closed(source: ContinuousReservedDataSource) { active.remove(source) }
     @Synchronized fun isQuiescent(): Boolean = active.isEmpty()
+    /** Establish a read barrier atomically with loader admission. */
+    @Synchronized fun <T> whenQuiescent(action: () -> T): T? = if (active.isEmpty()) action() else null
     fun cancel() {
         val pending = synchronized(this) { accepting = false; active.keys.toList() }
         pending.forEach { it.cancelPending() }
