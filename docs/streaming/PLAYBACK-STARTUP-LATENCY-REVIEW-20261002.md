@@ -273,7 +273,7 @@ after-restart case is real, because Paul tests right after deploys.
 **Packaging note:** host, forge and film names are normalized for repository review. Database and boot findings retain the supplied review’s provenance; this is not a new runtime inspection. The companion amendment responds to the evidence-file location claim.
 
 
-## 6. Final implementation review — promotion blocked
+## 6. Final implementation review — findings addressed
 
 **Reviewed:** 2026-10-02 · **Candidate:** `6835957c` · **Base:** `955e1551`
 · **PR:** [draft #711](http://192.168.4.7:3000/noirr/plurx/pulls/711).
@@ -287,7 +287,7 @@ integrated; its changes update store fixture expectations.
 |---|---|
 | P1: native error classification ran before fenced-attachment recovery | Fixed. The shipped media-error handler gives the existing authority reopen owner precedence. Native readiness and classification recheck attachment/execution ownership and authority after awaits, before reload, exhaustion or codec fallback. Shipped parser/owner tests cover known retirement, retirement during playlists/init, typed retirement and late superseded replies. |
 | P2: native readiness 401/403 became Retry/Close startup exhaustion | Fixed. Current startup work is cancelled before handing the typed refusal to the existing `auth_401_403` surface. Tests use the actual parser, media-error handler and policy surface and assert `sign_in`/`close` for master, child and classification refusals. |
-| Promotion blocker: transport-only policy admission enables unqualified source/rate classes | Unresolved. Generated AVC/AAC at 1× with eight-second cuts does not qualify live HEVC/DV, nonzero resume, long/open GOP, rate changes, remote transfer, the real daemon actor/flow/scratch path or physical Apple/Android. The arithmetic retains illegal publication-spacing rows. Keep the candidate draft; do not merge or deploy until production admission retains conservative behavior for unproved classes or the missing evidence qualifies them. |
+| Promotion blocker: transport-only policy admission enables unqualified source/rate classes | Resolved by conservative production admission before first response. Every transport label freezes Conservative; WebFixedHlsV1 and its explicit selector are compiled only under cfg(test). No unfinished runtime mode or new setting ships. Missing source/device/daemon qualification remains required before any future shorter production gate. |
 
 The browser receipts remain evidence for their captured healthy paths and
 source hashes. Later authority/authentication fixes have focused shipped-code
@@ -308,8 +308,19 @@ required by copy response admission. With the matching valid AVC fragment
 seeded before the six-second init delay, only that failed HTTP case was
 retried and passed in 6.37 seconds. No validation fence was relaxed.
 
-**Outcome:** the two review defects are corrected, but the qualification
-blocker prevents promotion. No second implementation review, production
-restart, queue reset, deployment or live reference-film acceptance occurred.
-The ordinary-HLS candidate's measured first motion remains about 8.7 seconds;
-it does not satisfy the requested couple-second start.
+**Outcome:** all three findings are addressed. Production admission retains
+Conservative for every transport; the 32-second candidate and selector exist
+only in test builds. Two new regressions prove that native/hls.js demand cannot
+release at 32 seconds and does release at the existing 48-second runway. The
+five affected candidate fixtures and two admission cases passed. Main
+`c6385996` is integrated; only the two affected census methods were repeated.
+A bounded Safari smoke using the current client and conservative runway
+started at 12.858 seconds and advanced 88.732 seconds without a post-progress
+wait or error. It is not a new 30-minute device qualification.
+
+The smaller candidate retains its original ~8.7-second generated-media
+receipts as experiment evidence. The requested couple-second start remains
+unmet and needs the larger packaging/source work described in the proposal.
+No second implementation review, production restart, queue reset, deployment
+or live reference-film acceptance occurred. The native preparation/error
+repair can now proceed to the exact-head fast lane with conservative admission.

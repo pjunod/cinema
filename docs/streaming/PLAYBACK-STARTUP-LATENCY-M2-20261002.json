@@ -1,6 +1,6 @@
 {
-  "status": "implementation reviewed; native authority/authentication fixes verified; promotion blocked by unqualified all-web policy admission",
-  "build_base": "dea1a403e9a650fc51e35909b36e596be5a5ed13",
+  "status": "review findings addressed; conservative production admission verified; preparing exact-head fast lane",
+  "build_base": "c63859963bcdba67fba695f18d2a741de16bbf30",
   "target_ms": 16000,
   "writer_gate_ms": 12000,
   "candidate_1x_ms": 32000,
@@ -126,17 +126,17 @@
   ],
   "hlsjs_sweep_receipt_sha256": "ad457f5957ab54a09df9868188b9cc9927bfdcc35de7ae79f7b09dc3d423b083",
   "native_status": "generated AVC/AAC 30-minute continuity passed; physical/live source qualification not claimed",
-  "physical_apple_android_status": "not qualified; absent transport metadata retains conservative policy",
+  "physical_apple_android_status": "not qualified for shorter buffering; all production classes retain conservative policy",
   "limits": [
     "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
-    "Browser fixture exercises shipped startup/load policy and HLS engine; it does not execute the daemon actor/flow/scratch. Publication regressions are authored, not run.",
-    "32 seconds of media is an interim improvement, not the strict few-seconds buffer requirement.",
+    "Browser fixture exercises shipped startup/load policy, parser, authority helper and HLS engine with explicit UI/session-open shims; it does not execute the daemon actor/flow/scratch. Focused publication regressions passed.",
+    "The 32-second experiment is inactive in production. Conservative 48-second Safari smoke starts at 12.858s; the strict couple-second requirement remains unmet.",
     "No deployment, queue reset, digest migration or live reference-film acceptance."
   ],
-  "regressions": "Post-review focused checks passed: 13 distinct native cases across targeted runs; legacy playback-control integration and 3 media-recovery cases; 5 rolling cases across the initial run and 2-case retry; 1 master/init case after its fixture correction; 2 previously failed ownership-census methods. Required fast lane is not claimed green. Do not repeat passing cases.",
-  "integrated_main": "7f738563eab80945cf9b97178b8c1a863e62d668",
+  "regressions": "Post-review focused checks passed: 13 distinct native cases across targeted runs; legacy playback-control integration and 3 media-recovery cases; 5 rolling cases across the initial run and 2-case retry; 1 master/init case after its fixture correction; 2 previously failed ownership-census methods. Required fast lane is not claimed green. Do not repeat passing cases. After production-admission correction, all seven affected rolling cases passed (five fixtures moved to explicit test-only candidate plus two conservative admission cases). Integration reran only the two affected inventory methods: both passed in 10.085s.",
+  "integrated_main": "c63859963bcdba67fba695f18d2a741de16bbf30",
   "compiled_source_head": null,
-  "compiler": "rustc 1.97.1, macOS, workspace all-target check passed after current main integration and native review fixes (23.01s)",
+  "compiler": "Pinned rustc 1.97.1 macOS; workspace/all-target check passed in 14.74s after c6385996 integration and conservative admission correction",
   "hlsjs_generated_continuity": {
     "transport": "Chrome / shipped hls.js",
     "threshold_media_s": 32,
@@ -277,6 +277,11 @@
       "source": "post-review checked tree; source hashes retained",
       "command": "cargo check -p plurxd --all-targets",
       "result": "passed in 17.14s after HTTP fixture correction"
+    },
+    {
+      "source": "main c6385996 plus conservative production admission; current source hashes retained",
+      "command": "cargo check --workspace --all-targets",
+      "result": "passed in 14.74s"
     }
   ],
   "premature_ci_run": {
@@ -325,7 +330,7 @@
     "reviewed_head": "6835957c5c6b69b27e10b740ef0acaaa7dee5806",
     "reviewed_base": "955e1551e3d72eb237501d0a652e3cced61cd024",
     "count": 1,
-    "verdict": "promotion blocked",
+    "verdict": "findings addressed; conservative alternative selected",
     "findings": [
       {
         "priority": "P1",
@@ -340,7 +345,7 @@
       {
         "priority": "promotion blocker",
         "finding": "Transport-only WebFixedHlsV1 admission is broader than qualified evidence.",
-        "disposition": "unresolved; keep PR draft and do not merge or deploy. Evidence does not qualify daemon actor/flow/scratch, live HEVC/DV, nonzero resume, long/open GOP, rate changes, physical Apple/Android or remote transfer. A source class admission change or missing qualification evidence is required before ready."
+        "disposition": "Resolved by conservative production admission before first response. Every transport label freezes Conservative; WebFixedHlsV1 and its explicit selector are compiled only under cfg(test). No unfinished runtime mode or new setting ships. Missing source/device/daemon qualification remains required before any future shorter production gate."
       }
     ]
   },
@@ -380,18 +385,28 @@
     {
       "command": "cargo test -p plurxd --bin plurxd native_master_preparation_can_wait_six_seconds_for_exact_init -- --exact http::hls::tests::native_master_preparation_can_wait_six_seconds_for_exact_init --nocapture",
       "result": "1 passed, 3126 filtered out, in 6.37s; only failed HTTP case rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd -- rolling_web_ rolling_transport_does_not_admit_unqualified_short_bootstrap rolling_unqualified_web_waits_for_conservative_first_snapshot",
+      "result": "7 passed, 3122 filtered, 0.09s; only materially changed candidate/admission cases"
+    },
+    {
+      "command": "python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_task_timer_and_process_shapes_have_reviewed_counts",
+      "result": "2 passed in 10.085s after merging c6385996; combined main cleanup removal and native fixture addition counts verified"
     }
   ],
-  "browser_evidence_after_review_fixes": "Healthy-path generated captures retained for the measured source hashes. Authority/auth edge fixes have focused shipped-function coverage; no claim of a new complete browser/device qualification on the later source.",
+  "browser_evidence_after_review_fixes": "New bounded Safari 48-second conservative smoke uses current shipped client/parser/authority helper: first playing 12858ms, maximum advancing position 88.732s, no waits/errors after advancing progress. This is not a second 30-minute qualification; old 32-second candidate captures retain their original source/scope limits.",
   "checked_tree_anchor": "72af3c9747c0145b102a877c760cc426fa790283",
   "post_review_source_sha256": {
     "crates/plurxd/src/web/player/player.js": "848a0f046f40ff6a29d7dc2f69fe33a582f2cfcfd9763e6b4d63037a25b30183",
     "crates/plurxd/src/web/player/transport.js": "1dd7cf8678d7d4c3dd62a3d7b1a7e986d427510a1b877116a6a9b118a76517e3",
-    "crates/plurxd/src/transcode/rolling/session.rs": "03d8fdc3a2bb971aa2426b5b3b530bddce7924c3d02c6e288d4b806a65b95d04",
-    "crates/plurxd/src/transcode/tests/chunk_03.rs": "53c837dbdab3807eb1bbe9759fcb00f77c1cfaa9bb92e06f3b26ffe05bae0c9a",
+    "crates/plurxd/src/transcode/rolling/session.rs": "933e5e86b7fb236ec38b7997efc1ac79e67a3a426fde8841dd21fa2f8594f88b",
+    "crates/plurxd/src/transcode/tests/chunk_03.rs": "5663f7dd9088fa592e6a0c058fa460d14a79a3e24c39d32eb99e295ea78ab3d8",
     "crates/plurxd/src/http/hls/tests/chunk_06.rs": "2e2a240fc1e9ee3a771f1620368c0e8b30fabee58cff4eef9300504073c93580",
     "tests/playback/native-hls-startup.test.js": "15bcaabd41c13afd36e505d59f7c2a6a5f2c72d0598b3a0911d892fe30707ab4",
-    "tests/playback/web-control.test.js": "f094f54cae05e21f3a093ca448ab149e31518e1b812dad1818af7b6013059acb"
+    "tests/playback/web-control.test.js": "f094f54cae05e21f3a093ca448ab149e31518e1b812dad1818af7b6013059acb",
+    "crates/plurxd/src/transcode/rolling/publication.rs": "ca040bcc8091e7282787a3fb5f004140bc6b567df39af9b69254fc4bb7109e53",
+    "tests/playback/native-hls-browser-fixture.py": "42d48babcd121256daf82d4c0521a248e4e3ba834ceed40b1b257521bc536471"
   },
   "post_review_rust_initial_run": {
     "command": "cargo test -p plurxd --bin plurxd rolling_web_ -- --nocapture",
@@ -410,5 +425,44 @@
     "cause": "Copy response admission also validates the first fragment. The fixture delayed init but never supplied seg00000.m4s, so final admission waited for a missing object.",
     "fix": "Seed the matching AVC first fragment from the existing valid media feed before delaying init six seconds; no owner/deadline/validation rule changed.",
     "retry": "Only this failed HTTP case rerun: 1 passed, 3126 filtered out, in 6.37s."
-  }
+  },
+  "production_admission": {
+    "policy": "Conservative for all production classes",
+    "candidate": "WebFixedHlsV1 is test-only",
+    "first_snapshot_at_1x_ms": 48000,
+    "unchanged_producer_allowance": true,
+    "few_seconds_target_met": false
+  },
+  "native_conservative_post_review_smoke": {
+    "kind": "bounded post-review generated-media smoke; not 30-minute continuity or daemon/source qualification",
+    "transport": "Safari native HLS",
+    "conservative_runway_s": 48,
+    "first_playing_ms": 12858,
+    "first_frame_ms": 12861,
+    "observed_playback_s": 88.73158249999767,
+    "elapsed_ms": 102252,
+    "waits_after_progress": [],
+    "errors": [],
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-conservative-post-review-smoke.json",
+    "scope_limit": "The page initially labels continuity-start as a 30-minute observation; this run was deliberately ended earlier and is only a bounded smoke. Server models availability; daemon actor/flow/scratch and physical/live source are not exercised.",
+    "last_advancing_sample_s": 88.73158249999767,
+    "raw_receipt_sha256": "0ace4610e127b87e230cd9c954176f963201e5cbcc22e0100d08bb02c80e155c"
+  },
+  "qualification_disposition": [
+    {
+      "class": "production native/hlsjs/unknown at all accepted rates",
+      "action": "retain existing conservative admission",
+      "proof": "two new focused regressions; bounded generated Safari smoke"
+    },
+    {
+      "class": "32-second generated AVC/AAC 1x candidate",
+      "action": "test-only experiment",
+      "proof": "retained 30-minute Chrome/Safari receipts at their original source hashes"
+    },
+    {
+      "class": "daemon actor/flow/scratch, HEVC/DV, resume/GOP, rate/remote-transfer, physical Apple/Android",
+      "action": "no shorter production admission",
+      "proof": "missing; requires future isolated qualification before activation"
+    }
+  ]
 }

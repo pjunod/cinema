@@ -521,9 +521,89 @@
     }
 
     #[test]
+    fn rolling_transport_does_not_admit_unqualified_short_bootstrap() {
+        for transport in [None, Some("native"), Some("hlsjs"), Some("unknown")] {
+            let mut clock = RollingPublicationClock::default();
+            clock.bind_startup_transport(transport);
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
+            assert!(!clock.startup_policy.uses_small_bootstrap());
+            for rate in [0.25, 1.0, 4.0] {
+                assert_eq!(
+                    clock.startup_policy.bootstrap_ms(rate),
+                    rolling_initial_runway_ms(rate)
+                );
+            }
+            // Production admission is frozen across replacement/clear, and
+            // even the test-lab setter cannot opt an admitted attempt in.
+            clock.reset_for_attempt(1);
+            clock.reset_for_attempt(2);
+            clock.clear_attempt();
+            clock.bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
+            assert_eq!(clock.startup_policy, RollingStartupPolicy::Conservative);
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_unqualified_web_waits_for_conservative_first_snapshot() {
+        for transport in ["native", "hlsjs"] {
+            let directory = crate::test_tempdir().expect("unqualified web bootstrap");
+            let session = test_session(directory.path().to_path_buf());
+            session
+                .publication
+                .lock()
+                .await
+                .bind_startup_transport(Some(transport));
+            accept_rolling_publication_demand(
+                &session,
+                1,
+                0,
+                1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                crate::playback_control::RenderState::Starting,
+            )
+            .await;
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[8.0; 4], false),
+            )
+            .await
+            .expect("short writer inventory");
+            session
+                .publication_cycle("unqualified-web")
+                .await
+                .expect("wait for runway");
+            assert!(
+                session.publication.lock().await.served.is_none(),
+                "transport alone must not release the 32-second candidate"
+            );
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&[8.0; 6], false),
+            )
+            .await
+            .expect("conservative writer inventory");
+            session
+                .publication_cycle("unqualified-web")
+                .await
+                .expect("qualified runway");
+            assert_eq!(
+                session
+                    .publication
+                    .lock()
+                    .await
+                    .served
+                    .as_ref()
+                    .expect("snapshot")
+                    .end_ms,
+                48_000
+            );
+        }
+    }
+
+    #[test]
     fn rolling_web_bootstrap_policy_is_frozen_and_rate_bounded() {
         let mut clock = RollingPublicationClock::default();
-        clock.bind_startup_transport(Some("native"));
+        clock.bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
         assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
         for (rate, expected) in [(0.25, 32_000), (1.0, 32_000), (4.0, 124_000)] {
             assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
@@ -550,7 +630,7 @@
             .publication
             .lock()
             .await
-            .bind_startup_transport(Some("native"));
+            .bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
         accept_rolling_publication_demand(
             &session,
             1,
@@ -597,7 +677,7 @@
             .publication
             .lock()
             .await
-            .bind_startup_transport(Some("native"));
+            .bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
         accept_rolling_publication_demand(
             &session,
             1,
@@ -637,7 +717,7 @@
             .publication
             .lock()
             .await
-            .bind_startup_transport(Some("native"));
+            .bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
         accept_rolling_publication_demand(
             &session,
             1,
@@ -672,7 +752,7 @@
             .publication
             .lock()
             .await
-            .bind_startup_transport(Some("native"));
+            .bind_startup_candidate_for_test(RollingStartupPolicy::WebFixedHlsV1);
         let started = Instant::now();
         let mut previous_end = 0;
         let mut saw_steady = false;

@@ -949,7 +949,7 @@ impl Session {
             clock.update_reserve_phase(lease.as_ref(), &budget);
             if clock.served.is_none() {
                 // Keep steady production/allowance intact. Only first snapshot
-                // readiness and endpoint selection use the qualified bootstrap.
+                // readiness and endpoint selection use the frozen policy.
                 budget.desired_end_ms = clock.first_ready_end_ms(&budget, lease.as_ref());
             }
             let publish = match clock.served.as_ref() {
@@ -1028,11 +1028,15 @@ impl Session {
             selected.index
         } else {
             // The producer retains its steady allowance plus a complete-cut
-            // envelope. A web bootstrap may use less of that paid allowance:
+            // envelope. An isolated candidate may use less of that paid allowance:
             // keep its first advertised endpoint within the policy ceiling.
             let first_web_snapshot = previous_served.is_none()
-                && self.publication.lock().await.startup_policy
-                    == RollingStartupPolicy::WebFixedHlsV1;
+                && self
+                    .publication
+                    .lock()
+                    .await
+                    .startup_policy
+                    .uses_small_bootstrap();
             let selection_allowed_end_ms = if first_web_snapshot {
                 budget.allowed_end_ms.min(
                     budget
@@ -1049,7 +1053,7 @@ impl Session {
             });
             let low_reserve = {
                 let clock = self.publication.lock().await;
-                clock.startup_policy == RollingStartupPolicy::WebFixedHlsV1
+                clock.startup_policy.uses_small_bootstrap()
                     && clock.reserve_phase != RollingReservePhase::Steady
             };
             let floor = earned.or_else(|| {

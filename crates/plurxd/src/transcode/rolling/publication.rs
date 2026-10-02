@@ -134,26 +134,29 @@ pub(super) struct ServedPlaylistSnapshot {
     pub(super) available_at: Instant,
 }
 
-/// Frozen at create from explicit web transport metadata. Unknown clients
-/// and legacy demand retain the qualified three-target bootstrap.
+/// Frozen at create. No production source/transport class is qualified for
+/// shorter readiness yet; candidate selection belongs only to the test lab.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum RollingStartupPolicy {
     #[default]
     Conservative,
+    #[cfg(test)]
     WebFixedHlsV1,
 }
 
 impl RollingStartupPolicy {
-    fn from_transport(transport: Option<&str>) -> Self {
-        match transport {
-            Some("native" | "hlsjs") => Self::WebFixedHlsV1,
-            _ => Self::Conservative,
+    pub(super) fn uses_small_bootstrap(self) -> bool {
+        match self {
+            Self::Conservative => false,
+            #[cfg(test)]
+            Self::WebFixedHlsV1 => true,
         }
     }
 
     pub(super) fn bootstrap_ms(self, rate: f64) -> i64 {
         match self {
             Self::Conservative => rolling_initial_runway_ms(rate),
+            #[cfg(test)]
             Self::WebFixedHlsV1 => {
                 ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
             }
@@ -196,9 +199,20 @@ pub(super) struct RollingPublicationClock {
 }
 
 impl RollingPublicationClock {
-    pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
+    pub(super) fn bind_startup_transport(&mut self, _transport: Option<&str>) {
+        // A web transport label proves neither source cadence nor native
+        // discovery, rate/resume behavior, or the daemon resource path.
+        // Retain conservative readiness before the first production response.
         if !self.startup_policy_bound && self.served.is_none() {
-            self.startup_policy = RollingStartupPolicy::from_transport(transport);
+            self.startup_policy = RollingStartupPolicy::Conservative;
+            self.startup_policy_bound = true;
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn bind_startup_candidate_for_test(&mut self, policy: RollingStartupPolicy) {
+        if !self.startup_policy_bound && self.served.is_none() {
+            self.startup_policy = policy;
             self.startup_policy_bound = true;
         }
     }

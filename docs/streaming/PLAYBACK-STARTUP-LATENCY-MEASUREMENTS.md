@@ -289,3 +289,22 @@ startup guarantee. Native readiness and preparation deadline alignment repair
 the failure attribution even when ordinary HLS still needs a larger runway.
 Track S and physical Apple/Android acceptance remain open. Deployment and
 live reference-film acceptance are separate and have not occurred.
+
+## Conservative admission after final review
+
+The 32-second candidate is restricted to test builds after the final review
+identified insufficient source/rate qualification. All production transport
+labels preserve the existing conservative runway before the first response.
+The current shipped client/parser/authority helper ran a bounded generated
+AVC/AAC Safari smoke with 48 seconds of readiness: first playing at 12.858 s,
+first frame at 12.861 s, maximum position 88.732 s, with no waiting/errors
+after advancing progress. It deliberately ended before 30 minutes; the page's
+initial continuity label does not turn this capture into that qualification.
+The M2 receipt retains its raw path/hash and last advancing sample time.
+
+The previous ~8.7-second, 30-minute Chrome/Safari captures remain evidence for
+the isolated 32-second experiment and their captured source hashes. They do
+not describe the production buffer policy. Daemon/resource-path, HEVC/DV,
+resume/GOP, rate/remote-transfer and physical device evidence remains absent;
+those classes receive no smaller production gate. The couple-second target
+is still unmet. No production deployment or live film acceptance occurred.

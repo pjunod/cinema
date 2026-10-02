@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Isolated Safari cadence experiment; generated media only, no daemon changes."""
-import argparse,json,math,time,threading
+import argparse,json,math,time,threading,re
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from urllib.parse import urlsplit,parse_qs
@@ -11,15 +11,19 @@ html='''<!doctype html><meta charset="utf-8"><title>Native startup qualification
 <style>body{background:#101822;color:#dae6f2;font:18px system-ui;padding:30px}video{width:480px}pre{white-space:pre-wrap}button{padding:12px}</style>
 <h1>Native startup qualification</h1><p>Generated AVC/AAC · fixed target 16 s · 8 s complete segments · burst 3.8× to bootstrap, then 1.05×</p>
 <button id="start">Start ordinary-HLS sweep</button><video id="video" muted playsinline controls></video><pre id="result">Ready. Production playback is untouched.</pre>
-<script src="/policy.js"></script><script src="/hls.min.js"></script><script src="/player.js"></script><script>
+<script src="/policy.js"></script><script src="/hls.min.js"></script><script src="/player.js"></script><script src="/authority.js"></script><script>
 const PlaybackPolicy=window.PlurxPlaybackPolicy;
 const video=document.getElementById('video'),result=document.getElementById('result');let active=null,ordinal=0,records=[],sweeping=false;const fixtureTransport="__TRANSPORT__";const TOKEN=null;
 function bufferTargets(){return {fwd:30,back:30};}function parseSegTimes(t){let n=0;return t.split('\\n').filter(l=>l.startsWith('#EXTINF:')).map(l=>n+=parseFloat(l.slice(8)));}
 function playbackAttemptTerminallyStopped(){return false;}function playbackOwnsAttachedMedia(){return true;}function playbackContext(){return {};}
-function clearStreamFailure(){STREAM_FAILURE=null;}function noteStreamFailure(status,body){let x;try{x=JSON.parse(body);}catch(e){x={};}return {status,...x};}
+function clearStreamFailure(){STREAM_FAILURE=null;}
 function setPlaybackMediaSource(v,url){v.src=url;}function applyPlaybackAttachmentPosition(v,p,attachment,startAt){if(attachment.current())v.currentTime=startAt;}
 function applyPlaybackTransportIntent(v,p){if(p.wantsPlayback)v.play().catch(e=>log('play-rejected',String(e)));else v.pause();}
 function pausePlaybackInternally(v){v.pause();}function resetPlaybackTransportEvents(){}
+function positionForPlaybackIntent(v){return v.currentTime;}function stallRecoverySnapshot(p,v,facts){return facts;}
+function endWait(){}function seekTo(){log('unexpected-authority-reopen','');}function showStallRecoveryFailure(message){log('authority-exhausted',message);}
+function raisePlaybackSurface(source,facts){log('surface',{source,...facts});}function toast(){}
+function playbackSurfaceSourceIsBlocking(source,context){const row=PlaybackPolicy.SURFACE_SOURCES.find(r=>r.id===source&&(r.context==='any'||r.context===context));return !!PlaybackPolicy.SURFACE_CLASSES[row?.class]?.blocking;}
 function clientLog(x){log(x.event,x.message);}function reportTtff(){}function notifyPlaybackControl(){}
 function stopPlayerForExhaustion(){video.pause();}function stallDiagnose(){log('exhausted',PLAYER.hlsStartup?.latestFailure||PLAYER.hlsStartup?.exhaustedReason);return Promise.resolve();}
 function tok(u){return u;}function nativeHlsSubtitleOrdinal(){return -1;}function qualityCatalogSelectionCurrent(){return true;}function startTranscodeFallback(){log('unexpected-rescue','');}
@@ -27,7 +31,7 @@ function log(event,detail){if(!active)return;const row={event,detail,elapsed_ms:
 function render(){result.textContent=JSON.stringify({records,active:active?{threshold:active.threshold,events:active.events,position:video.currentTime,buffered:video.buffered.length?video.buffered.end(video.buffered.length-1):0}:null},null,2);}
 async function start(threshold){if(PLAYER?.hlsStartup)cancelHlsStartup(PLAYER,'fixture_next');if(PLAYER?.hls)PLAYER.hls.destroy();video.pause();video.removeAttribute('src');video.load();
  const id=String(++ordinal);await fetch('/begin',{method:'POST',body:JSON.stringify({run:id,threshold})});
- active={id,threshold,at:performance.now(),events:[],first:false};PLAYER={hls:null,wantsPlayback:true,mediaAttachment:{},controlIntentGeneration:0,method:'remux',qualityCandidates:[{route:'encode',decoder_compatible:true}],abr:{}};
+ active={id,threshold,at:performance.now(),events:[],first:false};PLAYER={hls:null,wantsPlayback:true,mediaAttachment:{},sessionId:'fixture-'+id,controlIntentGeneration:0,method:'remux',qualityCandidates:[{route:'encode',decoder_compatible:true}],abr:{}};
  const player=PLAYER,attachment={current:()=>PLAYER===player};const url='/qual/'+id+'/master.m3u8';
  if(fixtureTransport==='native')attachNativeHls(video,url,0,player,attachment);
  else{const {startup,tgt}=hlsStartupEpisode(player,attachment,url,0);
@@ -73,6 +77,13 @@ class Handler(BaseHTTPRequestHandler):
  def do_GET(self):
   path=urlsplit(self.path).path
   if path=='/':return self.send(html,'text/html')
+  if path=='/authority.js':
+   # Exercise the shipped authority owner; fixture session-open effects above
+   # remain explicit and are not daemon lifetime/flow qualification.
+   text=(repo/'crates/plurxd/src/web/player/measurements.js').read_text()
+   start=text.index('function recoverServingFencedAttachment(')
+   tail=text[start:];following=re.search(r'\n(?:async )?function ',tail)
+   return self.send(tail[:following.start()] if following else tail,'text/javascript')
   if path in ('/player.js','/policy.js','/hls.min.js'):
    rel='player/player.js' if path=='/player.js' else 'hls.min.js' if path=='/hls.min.js' else 'playback-policy.js'
    return self.send((repo/'crates/plurxd/src/web'/rel).read_bytes(),'text/javascript')

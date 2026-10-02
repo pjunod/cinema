@@ -1,6 +1,6 @@
 # Playback startup build — Sol's execution contract through a qualified merge
 
-**Status:** implementation reviewed; promotion blocked by qualification ·
+**Status:** review findings addressed; preparing exact-head fast lane ·
 **Written:** 2026-09-29 EDT · **Builder:** Sol ·
 **Executes:** [the reviewed implementation plan](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md)
 and [R1–R3 review dispositions](PLAYBACK-STARTUP-LATENCY-REVIEW.md).
@@ -66,7 +66,7 @@ The builder's repository is:
 ```text
 /private/tmp/plurx-fast-start-build-20261002
 branch: codex/playback-startup-latency
-current build base: 7f738563 (integrated 2026-10-02)
+current build base: c6385996 (integrated 2026-10-02)
 ```
 
 This is an independent clone of the configured remote. It contains only the
@@ -229,3 +229,15 @@ Native readiness, same-session reload and compatible-route admission reuse
 Track N. Track S's joinable encoded-source preparation is separate outstanding
 work and is not claimed delivered by this amendment. No production deployment,
 queue reset, digest migration or live reference-film acceptance has occurred.
+
+### Final admission disposition
+
+The independent review's source-class blocker is resolved by its conservative
+alternative: every production transport retains Conservative before the first
+response. WebFixedHlsV1 and its selector are test-only. There is no production
+experimental mode or additional setting. The native preparation/error repair
+remains active. Two focused regressions prove conservative admission and
+first publication; the five affected candidate fixtures continue to qualify
+the isolated experiment only. The bounded current-client Safari smoke starts
+at 12.858 seconds. The couple-second target remains future packaging/source
+work, and no deployment or live reference-film acceptance is claimed.
