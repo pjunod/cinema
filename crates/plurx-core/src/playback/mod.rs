@@ -250,8 +250,10 @@ impl DeviceProfile {
             .filter(|channels| *channels > 0)
             .unwrap_or(2);
         let codec = stream.codec.to_ascii_lowercase();
+        // As in `resolve_audio`: a decoding client mixes any layout down for
+        // its own route; only an undecoded bitstream must fit the receiver.
         self.audio_sink_claims.get(&codec).is_some_and(|sink| {
-            channels <= sink.max_channels
+            (channels <= sink.max_channels || self.claimed_audio_decoders.contains(&codec))
                 && stream.sample_rate.is_some_and(|rate| {
                     u32::try_from(rate)
                         .ok()
