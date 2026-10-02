@@ -4020,7 +4020,13 @@ as shown without `--quality`.
 
 Omitting `--quality` explicitly sends and verifies
 `transcode_quality: null` for both captures; it does not preserve a preexisting
-override. The original pair is still restored in the final cleanup path.
+override. The original pair is still restored in the final cleanup path,
+exactly as stored: an unset mode goes back as `null` (each family's default),
+never as the default the settings response displays beside it, and an explicit
+choice goes back as that choice. The harness refuses, before any mutation, a
+server whose settings response has no `transcode_rate_mode_default` field —
+such a server reports unset as `"bitrate"`, and restoring that pinned the
+measured cluster to an explicit bitrate until 2026-10-02.
 
 The 2026-08-14 media1 QSV acceptance used deployed build
 `v0.2.7-167-gb6aaed6` and selected default 22. The no-override run passed with
