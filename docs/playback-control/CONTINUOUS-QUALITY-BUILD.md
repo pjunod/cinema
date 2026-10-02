@@ -1957,3 +1957,25 @@ iOS production/test-source and tvOS production compilation apply without
 unit execution. AVPlayerLayer readiness and decoded output remain software
 facts; physical display and audible continuity still require device
 qualification. The Android warm-surface path remains unfinished.
+
+
+### 10.51 Android finite prepared overlap
+
+Android's prepared exposure now has the same absolute 12-second dual-pipeline
+limit as Apple, independently of its five seconds of active first-frame
+observation. Pause and background still park observation; they cannot retain
+the predecessor decoder forever while the target has no frame. The existing
+rollback and retain-current owner settles expiry. A pure regression covers
+paused overlap expiry, active budget preservation and backward-clock samples.
+Android production/test-source compilation applies without unit execution.
+
+Warm Android composition still needs an application-owned surface hierarchy.
+The [SurfaceView contract](https://developer.android.com/reference/android/view/SurfaceView#getSurfaceControl())
+forbids arbitrary transactions on its internal control; only child reparenting
+is supported. Directly changing that control's visibility or stacking would
+violate the platform contract. The [surface guidance](https://developer.android.com/media/media3/ui/surface)
+also requires retaining SurfaceView for full-resolution TV rendering. No
+unqualified conversion of all devices to TextureView has been introduced.
+Connected Apple devices were inventoried for later qualification; no Android
+device was connected to ADB at this point. Native device evidence remains
+unfinished.

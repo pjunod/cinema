@@ -438,18 +438,27 @@ internal object PreparedReplacementAdvisory {
 }
 
 /** Presentation time spent under Play intent, independent of decoder stalls. */
-internal class PreparedActiveWallBudget(boundMs: Long, nowMs: Long, playbackRequested: Boolean) {
+internal class PreparedActiveWallBudget(
+    boundMs: Long,
+    nowMs: Long,
+    playbackRequested: Boolean,
+    overlapBoundMs: Long? = null,
+) {
     var remainingMs = boundMs.coerceAtLeast(0)
+        private set
+    var remainingOverlapMs = overlapBoundMs?.coerceAtLeast(0)
         private set
     private var observedAtMs = nowMs.coerceAtLeast(0)
     private var wasActive = playbackRequested
 
     fun update(nowMs: Long, playbackRequested: Boolean): Boolean {
         val current = maxOf(observedAtMs, nowMs)
-        if (wasActive) remainingMs -= minOf(remainingMs, current - observedAtMs)
+        val elapsed = current - observedAtMs
+        if (wasActive) remainingMs -= minOf(remainingMs, elapsed)
+        remainingOverlapMs = remainingOverlapMs?.let { it - minOf(it, elapsed) }
         observedAtMs = current
         wasActive = playbackRequested
-        return remainingMs == 0L
+        return remainingMs == 0L || remainingOverlapMs == 0L
     }
 }
 
@@ -466,6 +475,8 @@ internal class PreparedActiveWallBudget(boundMs: Long, nowMs: Long, playbackRequ
  * only then reopens through the normal path.
  */
 internal const val PREPARED_COMMIT_FRAME_BOUND_MS = 5_000L
+/** Pause parks observation but cannot retain a second decoder indefinitely. */
+internal const val PREPARED_OVERLAP_BOUND_MS = 12_000L
 
 /**
  * How long a retired predecessor may sit parked before the watchdog collects it

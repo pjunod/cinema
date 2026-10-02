@@ -946,6 +946,21 @@ class PreparedActiveWallBudgetTest {
         assertEquals(0L, budget.remainingMs)
     }
 
+    @Test fun pauseParksObservationButPhysicalOverlapStillExpires() {
+        val budget = PreparedActiveWallBudget(5_000, 100, true, overlapBoundMs = 12_000)
+        assertFalse(budget.update(2_100, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(1_100, false))
+        assertEquals(10_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_100, false))
+        assertEquals(0L, budget.remainingOverlapMs)
+        assertEquals(3_000L, budget.remainingMs)
+        assertTrue(budget.update(12_101, true))
+    }
+
     @Test fun activeStallsRemainBoundedAndBackwardSamplesCannotRefillBudget() {
         val budget = PreparedActiveWallBudget(5_000, 100, true)
         assertFalse(budget.update(2_100, true))

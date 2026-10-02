@@ -4194,6 +4194,7 @@ class Controller internal constructor(
             PREPARED_COMMIT_FRAME_BOUND_MS,
             monotonicNowMs(),
             playbackIntent.playbackRequested && presentationForeground,
+            overlapBoundMs = PREPARED_OVERLAP_BOUND_MS,
         )
         // M3. Three assignments, on the line the swap is decided at. Nothing
         // is awaited, nothing is read back, and the picture is untouched.
