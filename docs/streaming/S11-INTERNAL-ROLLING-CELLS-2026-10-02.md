@@ -1,6 +1,6 @@
 # S11 internal rolling cells — sixteen measured contexts, not original qualification
 
-**Status:** evidence frozen, original acceptance open · **Written:** 2026-10-02
+**Status:** done — evidence frozen · **Written:** 2026-10-02
 · **Owner:** gpt-6.1-sol, agent:/root/s11_next_cell_sol61.
 
 Companion to [the canonical codec plan](CODEC-AND-GPU-QUALIFICATION.md#54-m3--q8a-does-the-rolling-grid-drift).
