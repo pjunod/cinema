@@ -703,6 +703,9 @@ impl Shared {
             materialize_budget: settings.materialize_budget,
             manifest: Mutex::new(manifest),
             output_measurement: StdMutex::new(PublishedOutputMeasurement::default()),
+            copy_preparation: StdMutex::new(None),
+            preparation_epoch: AtomicU64::new(0),
+            cancelled_preparation_epoch: AtomicU64::new(0),
             identity: Mutex::new(identity_state),
             slot: ProducerSlot::new(),
             readers: Mutex::new(HashMap::new()),
@@ -826,6 +829,9 @@ impl Shared {
         let Some(rendition) = rendition else {
             return;
         };
+        if rendition.preparation().is_some() {
+            return;
+        }
         if !rendition.readers.lock().await.is_empty() {
             return;
         }

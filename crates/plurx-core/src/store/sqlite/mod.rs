@@ -1189,6 +1189,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
     // v90: exact candidate-bound node-local Link samples, never legacy inference.
     super::candidate_link::SCHEMA,
+    // v91: copy preparation follows the same exact source cancellation guards.
+    super::background_jobs::COPY_OUTPUT_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2300,6 +2302,72 @@ impl SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_output_source_guards_upgrade_active_rows_without_touching_unrelated_work() {
+        let conn = Connection::open_in_memory().expect("source guard fixture");
+        conn.execute_batch("CREATE TABLE files(id INTEGER PRIMARY KEY,size INTEGER,mtime INTEGER);
+            CREATE TABLE background_jobs(id TEXT PRIMARY KEY,kind TEXT,state TEXT,last_error_code TEXT,revision INTEGER,payload_json TEXT,target_node_id TEXT);
+            CREATE TABLE background_job_commands(id TEXT,operation TEXT,request_json TEXT,result_json TEXT);
+            CREATE TABLE background_job_waiters(job_id TEXT,state TEXT,deadline_ms INTEGER,target_node_id TEXT,result_ref TEXT,updated_at_ms INTEGER);
+            INSERT INTO files VALUES(1,100,1),(2,100,1);").expect("fixture tables");
+        // Load the actual original two guards, not a simulated predecessor.
+        for statement in super::super::background_jobs::SCHEMA.split("-- next statement\n") {
+            if statement.contains("CREATE TRIGGER IF NOT EXISTS background_job_source_changed\n")
+                || statement
+                    .contains("CREATE TRIGGER IF NOT EXISTS background_job_source_deleted\n")
+            {
+                conn.execute_batch(statement)
+                    .expect("original source guard");
+            }
+        }
+        for (id, kind, state, file) in [
+            ("copy", "copy_output_prepare", "queued", 1),
+            ("copy-running", "copy_output_prepare", "running", 2),
+            ("transcode", "transcode_prepare", "queued", 1),
+            ("fragment", "fragment_index_build", "running", 2),
+            ("unrelated", "provider_refresh", "queued", 1),
+            ("complete", "copy_output_prepare", "succeeded", 1),
+        ] {
+            conn.execute(
+                "INSERT INTO background_jobs(id,kind,state,last_error_code,revision,payload_json) VALUES(?1,?2,?3,NULL,7,?4)",
+                params![
+                    id,
+                    kind,
+                    state,
+                    format!("{{\"file_id\":{file},\"source_size\":100,\"source_mtime\":1}}")
+                ],
+            )
+            .expect("seed job");
+        }
+        conn.execute("UPDATE files SET size=101 WHERE id=1", [])
+            .expect("old update");
+        let state = |id: &str| {
+            conn.query_row(
+                "SELECT state,revision FROM background_jobs WHERE id=?1",
+                [id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("job state")
+        };
+        assert_eq!(state("copy"), ("queued".into(), 7));
+        assert_eq!(state("transcode"), ("cancelled".into(), 8));
+        conn.execute_batch(&format!(
+            "BEGIN;\n{}\nCOMMIT;",
+            super::super::background_jobs::COPY_OUTPUT_SCHEMA
+        ))
+        .expect("atomic source guard upgrade");
+        conn.execute("UPDATE files SET size=102 WHERE id=1", [])
+            .expect("new update");
+        conn.execute("DELETE FROM files WHERE id=2", [])
+            .expect("source deletion");
+        assert_eq!(state("copy"), ("cancelled".into(), 8));
+        assert_eq!(state("copy-running"), ("cancelling".into(), 8));
+        assert_eq!(state("fragment"), ("cancelling".into(), 8));
+        assert_eq!(state("unrelated"), ("queued".into(), 7));
+        assert_eq!(state("complete"), ("succeeded".into(), 7));
+        assert_eq!(state("transcode"), ("cancelled".into(), 8));
+    }
 
     #[test]
     fn a05_v89_sqlite_prior_migration_preserves_unattributed_history() {
