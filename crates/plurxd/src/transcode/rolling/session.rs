@@ -977,7 +977,13 @@ impl Session {
                     // Before the first snapshot there is no deadline to
                     // restart, and a held producer's recent speed is the last
                     // one it measured before the stop, not a capacity reading.
-                    None => !held_for_scratch && end_ms >= budget.desired_end_ms,
+                    // Capacity becomes measurable at the fixed initial runway,
+                    // independently of the publication frontier advancing with
+                    // elapsed time. Clearing a hold must not defer rejection.
+                    None => {
+                        !held_for_scratch
+                            && end_ms >= clock.startup_policy.bootstrap_ms(playback_rate)
+                    }
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms

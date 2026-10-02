@@ -2020,6 +2020,8 @@
         let directory = crate::test_tempdir().expect("publication deadline");
         let session = test_session(directory.path().to_path_buf());
         let started = Instant::now();
+        // Even a slow producer is not judged below the fixed initial runway.
+        session.progress.recent_milli.store(500, Relaxed);
         // Anchor the legacy publication budget below the initial runway.
         scratch_hold_write_playlist(&session, &[16.0, 16.0]).await;
         session
@@ -2029,7 +2031,6 @@
         // Exactly the initial runway, measured at half speed, staged ten
         // seconds later: the legacy budget now wants 58 s, so nothing
         // publishes and the session stays in its pre-publication state.
-        session.progress.recent_milli.store(500, Relaxed);
         scratch_hold_write_playlist(&session, &[16.0, 16.0, 16.0]).await;
         scratch_hold_set(&session, Some(AheadHoldReason::Global), started).await;
         let held_until = started + ROLLING_PUBLICATION_HARD * 3;
