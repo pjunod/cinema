@@ -159,7 +159,8 @@ Reason: the flip must be per family and must not disturb an operator who
 chose bitrate on purpose. Without the third state, changing
 `RateMode::default()` would also override that operator's choice.
 
-`GET /api/v1/settings` keeps returning the stored pair; `GET /api/v1/system`
+`GET /api/v1/settings` returns the stored pair, with an unset mode as `null`
+(§7.4; it reported `"bitrate"` until 2026-10-02); `GET /api/v1/system`
 `encoders.quality_rc` gains `default_rate_mode` per family so the Developer
 page can print "family default: quality (qualified 2026-MM-DD, artefact
 sha256 …)". No new setting key: the existing pair is the switch, and it is
@@ -450,6 +451,86 @@ exists.
 3. `bitrate_for_height`, `-maxrate 1.5×`, and `-bufsize 2×` remain unchanged.
    No source-average bitrate cap is introduced.
 
+### 7.4 The flip was inert — 2026-10-02
+
+**Finding.** A read-only fleet audit found all four daemons logging
+`published validated rate-control snapshot requested_mode="bitrate"`: the
+cluster held an *explicit* `bitrate`, not an unset pair. §3.1 makes a family
+default reach only an unset pair, so flipping QSV (or any family) to `Quality`
+would have changed nothing on the fleet. Three paths produced or hid the
+explicit value:
+
+1. `GET /api/v1/settings` reported an unset pair as `"bitrate"`
+   (`settings_dto`, "compatibility value for an absent pair"), so a client
+   could not tell unset from an operator's choice.
+2. `scripts/bench rate-control` recorded that displayed value in
+   `setting_contract` and `restore_rate_settings` PUT it back after every full
+   comparison — every measured cluster ended pinned to an explicit `bitrate`.
+   This is the likely origin of the fleet's value (the 2026-08-14 media1 QSV
+   acceptance restored exactly that body).
+3. The speculative pretranscode dedupe key spelled an unset pair as
+   `requested:bitrate` whatever the families resolved to, so even on an unset
+   cluster a flip would have left every queued speculative row under the old
+   policy instead of cancelling and re-queuing it.
+
+**What changed** (branch `opus/s06-rate-control-continuation`, no default
+flipped):
+
+- The pair is tri-state end to end. `GET /api/v1/settings` reports an unset
+  mode as `null` and shows what it resolves to beside it
+  (`transcode_rate_mode_default`, `transcode_rate_mode_default_encoder`,
+  `transcode_quality_default` — this node's selected family; display only).
+  `PUT` accepts `{"transcode_rate_mode": null, "transcode_quality": null}` as
+  the explicit clear, still as one complete pair; it stores an empty mode,
+  which every node reads back as unset. Explicit values and their
+  effective-policy snapshots are unchanged. Settings → Playback → Advanced
+  server delivery gains an **Encoder rate control** card whose **Default (per
+  encoder)** option saves the clear; no other Save sends the pair.
+- `scripts/bench` restores the pair exactly as found: unset as `null`,
+  explicit as itself. It refuses, before any mutation, a server whose settings
+  response lacks `transcode_rate_mode_default`, because such a server cannot
+  say whether its `"bitrate"` was chosen.
+- The speculative key's rate-control entry now spells the *effective*
+  requested mode on each encoder family that may claim the row (the pinned
+  family, or all five for auto — never the claiming node's local pick, which
+  would cancel rows across mixed hardware). An explicit mode spells itself; an
+  unset mode spells the agreed family default when all claimable families
+  agree — byte-identical to the explicit request of that mode — and each
+  family's mode when they differ. With every default Bitrate the durable value
+  is unchanged
+  (`an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
+  still pins it), so this deploys without cancelling a queued row; a later
+  flip of one family moves exactly the rows that family may claim, and rows
+  queued under an explicit choice keep their identity. A change to a family's
+  `default_quality()` is still not spelled in the key (neither unset nor
+  explicit-quality-without-override rows move); that is a separate,
+  deliberate decision if one is ever made.
+
+**Operator step: return an explicit cluster value to "default".** The setting
+is replicated, so one request on any voter clears it cluster-wide. After this
+branch is deployed, either choose **Default (per encoder)** in the Encoder
+rate control card and Save, or:
+
+```bash
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"transcode_rate_mode":null,"transcode_quality":null}' \
+  http://media1:32400/api/v1/settings | jq '.transcode_rate_mode, .transcode_rate_mode_default'
+```
+
+It returns `null` and the family default; within the two-second refresh every
+node logs `requested_mode="family_default"`. While every default is Bitrate the
+clear changes no recipe, argv or speculative key — it only lets a later flip
+land. Clear it before, not after, the flip PR deploys, so the flip is measured
+against the cluster it will actually reach.
+
+**Still owed.** Nothing here measures quality or throughput. The per-family
+comparisons — M3 (QSV on media1), M4 (software on lab4) and the VA-API
+comparison on lab6 — and the §3.3 flip decision remain open; an offline
+pre-screen is being measured separately and does not replace them. Every
+`Encoder::default_rate_mode()` still returns Bitrate.
+
 ---
 
 ## Execution log
@@ -469,3 +550,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M4 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | needs: representative lab4 n2 capture with hardware selection disabled under the §5.4 contract. Software remains Bitrate. |
 | 2026-09-22 | claude-opus-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M1/M2 review fixes | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | All three adversarial-review findings fixed. M1's dedupe key spells an unset pair `requested:bitrate` again; the two inherited fixtures gained bit-exact, seeded generation and every pinned fixture gained `-threads 1`, with both manifests re-pinned from three byte-identical generations across two core counts; and `load_rate_control_corpus` refuses `dynamic_range: hdr10` while `score_vmaf` has no tone-map. Each fix has a test that fails on revert. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M5 | [#414](http://192.168.4.7:3000/noirr/plurx/pulls/414) | Read-only four-node census in §7.1. NVENC and VideoToolbox remain unrunnable; VA-API is selectable on m6 but has zero encoded sessions since restart. All three defaults remain Bitrate. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Inert-flip fix | branch `opus/s06-rate-control-continuation` | §7.4: settings DTO/PUT/web card tri-state with an explicit clear, bench restores what it found, speculative key spells the effective per-family policy (durable value unchanged while every default is Bitrate). No default flipped; M3/M4/VA-API comparisons still owed. |
