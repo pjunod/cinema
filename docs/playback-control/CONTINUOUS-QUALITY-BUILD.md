@@ -2932,3 +2932,27 @@ Authored regressions cover the real selection-index reorder, stable instance
 reuse, reservation-before-selection, an interval boundary, stale/unknown
 choices and supported-definition changes. Production and regression sources
 compile. Unit execution and physical buffer-retention proof remain deferred.
+
+
+### 10.94 Android verifies reserved media bytes before extraction
+
+The native media verifier resolves resources under the captured same-origin
+session parent, checks rendition and init paths against the immutable family,
+and bounds every payload at 16 MiB. Initialization bytes must hash to their
+exact descriptor identity. Fragment bytes must match an accepted, undisposed
+reservation by hash, rendition, timescale and length. Video fragment numbers
+also bind to the declared rational-grid interval, including a shorter tail;
+frontier arithmetic refuses overflow. Every matching transaction owner is
+retained for the future append/disposal observer rather than arbitrarily
+crediting one when the same artifact has several owners.
+
+The server already verifies the reserved fragment's actual fMP4 sample grid
+before publishing that hash; matching the bytes preserves that provenance.
+This verifier does not establish queue acceptance or rendered presentation.
+The loader must still reserve before a cold request, fence its attachment,
+reject foreign requests within its bound media source, and connect actual
+sample/decoder/sink ownership. Authored component regressions cover init and
+fragment byte changes, missing and disposed pins, foreign identities, segment
+interval mismatch, payload bounds and overflowing frontiers. Production and
+test sources compile; unit execution remains deferred. Native enrollment is
+still not connected.
