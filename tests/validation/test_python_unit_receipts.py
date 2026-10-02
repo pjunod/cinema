@@ -58,6 +58,232 @@ class PythonReceiptCase(unittest.TestCase):
         self.assertEqual(events, ["bad", "new"])
         self.assertEqual(state["passes"]["validation:good"], old)
 
+    def test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates(self):
+        """ONE fake-source control; never execute the repository test inventory."""
+        import hashlib
+        import os
+
+        old_commit, current_commit = "a" * 40, "b" * 40
+        module_path = "tests/validation/test_fixture.py"
+        other_path = "tests/operations/test_ops.py"
+        old_source = b'''import unittest
+FLAG = True
+def decorate(fn):
+    return fn
+class Helper:
+    def helper(self):
+        return 7
+class Case(Helper, unittest.TestCase):
+    def setUp(self):
+        self.value = 7
+    @decorate
+    def test_changed(self):
+        self.assertTrue(FLAG)
+    def test_unchanged(self):
+        self.assertEqual(self.helper(), self.value)
+'''
+        current_source = old_source.replace(b"self.assertTrue(FLAG)", b"self.assertFalse(FLAG)")
+        other_source = b"import unittest\nclass Case(unittest.TestCase):\n    def test_other(self):\n        pass\n"
+        changed = "validation:test_fixture.Case.test_changed"
+        unchanged = "validation:test_fixture.Case.test_unchanged"
+        other = "operations:test_ops.Case.test_other"
+        sources = {(old_commit, module_path): old_source, (current_commit, module_path): current_source,
+                   (old_commit, other_path): other_source, (current_commit, other_path): other_source}
+        current_files = {module_path: current_source, other_path: other_source}
+        reads = []
+
+        def source_reader(commit, path):
+            reads.append((commit, path))
+            if (commit, path) not in sources:
+                raise receipts.ReceiptError("intentional missing historical blob")
+            return sources[commit, path]
+
+        def guard():
+            return receipts.SourceApplicability(current_commit, source_reader, current_files.__getitem__)
+
+        old_pass = {"commit": old_commit, "run": 10}
+        new_pass = {"commit": current_commit, "run": 11}
+        same_guard = guard()
+        self.assertFalse(same_guard(changed, old_pass))
+        self.assertTrue(same_guard(unchanged, old_pass))
+        self.assertTrue(same_guard(other, old_pass))
+        before = list(reads)
+        self.assertTrue(same_guard(unchanged, old_pass))
+        self.assertEqual(reads, before, "each immutable source blob is cached")
+        same_guard.finish({unchanged: old_pass, other: old_pass})
+
+        # Sibling method edits/additions and line/comment movement do not
+        # invalidate the unchanged method's actual assertions or fixtures.
+        sources[current_commit, module_path] = b"# new comment\n\n" + current_source + b"    def test_sibling(self):\n        self.fail('new sibling')\n"
+        current_files[module_path] = sources[current_commit, module_path]
+        self.assertTrue(guard()(unchanged, old_pass))
+        sources[current_commit, module_path] = current_source
+        current_files[module_path] = current_source
+        for changed_fixture in (
+                old_source.replace(b"return 7", b"return 8"),
+                old_source.replace(b"self.value = 7", b"self.value = 8"),
+                old_source.replace(b"@decorate", b"@unittest.skip('new decorator')"),
+                old_source.replace(b"Case(Helper, unittest.TestCase)", b"Case(unittest.TestCase, Helper)")):
+            sources[current_commit, module_path] = changed_fixture
+            current_files[module_path] = changed_fixture
+            self.assertFalse(guard()(changed, old_pass))
+        sources[current_commit, module_path] = current_source
+        current_files[module_path] = current_source
+
+        def archived(value):
+            data = io.BytesIO()
+            with zipfile.ZipFile(data, "w") as archive:
+                archive.writestr("receipt.json", json.dumps(value))
+            return data.getvalue()
+
+        class FakeAPI:
+            def __init__(self, current_passes=None, comments=None, old_passes=None):
+                self.comments = comments or []
+                self.zips, self.finals, self.markers = {}, [], {}
+                for run, commit, passes in (
+                        (10, old_commit, old_passes if old_passes is not None else
+                         {changed: old_pass, unchanged: old_pass, other: old_pass}),
+                        (11, current_commit, current_passes or {})):
+                    final = {**journal(), "run": run, "commit": commit,
+                             "complete": True, "passes": passes}
+                    start = {**final, "complete": False, "passes": {}}
+                    for identity, value, name in (
+                            (run + 100, start, receipts.key(SCOPE) + "-start-" + str(run)),
+                            (run + 200, final, receipts.key(SCOPE))):
+                        raw = archived(value)
+                        self.zips["/actions/artifacts/" + str(identity) + "/zip"] = raw
+                        item = {"id": identity, "run_id": run, "name": name,
+                                "expired": False, "size_in_bytes": len(raw)}
+                        if value["complete"]:
+                            self.finals.append(item)
+                        else:
+                            self.markers[name] = [item]
+
+            def pages(self, path, query=None, field=None):
+                if path == "/actions/artifacts":
+                    return self.finals if query["name"] == receipts.key(SCOPE) else self.markers[query["name"]]
+                if path == "/actions/runs":
+                    return [{"id": 10, "commit_sha": old_commit},
+                            {"id": 11, "commit_sha": current_commit}]
+                if path.endswith("/jobs"):
+                    return [{"name": receipts.job_name(SCOPE), "repo_id": 7,
+                             "attempt": 1, "status": "success"}]
+                if path == "/issues/42/comments":
+                    return self.comments
+                raise AssertionError("unexpected fake API path")
+
+            def bytes(self, path, query=None):
+                return self.zips[path]
+
+            def get(self, path):
+                return {"user": {"id": 2}, "permission": "write"}
+
+        with tempfile.TemporaryDirectory() as root:
+            previous = os.getcwd()
+            os.chdir(root)
+            try:
+                restored = receipts.restore(FakeAPI(), SCOPE, 12, applicability=guard())
+                self.assertEqual(restored, {unchanged: old_pass, other: old_pass})
+                newest = receipts.restore(FakeAPI({changed: new_pass}), SCOPE, 12, applicability=guard())
+                self.assertEqual(newest[changed], new_pass, "stale old journal cannot mask new applicable source")
+                events = []
+                state = {**journal(), "run": 12, "commit": current_commit,
+                         "passes": dict(restored), "applicability_commit": current_commit}
+                self.assertEqual(self.execute(state, {
+                    "validation": [Fake(changed.split(":", 1)[1], events),
+                                   Fake(unchanged.split(":", 1)[1], events)],
+                    "operations": [Fake(other.split(":", 1)[1], events)]}), 0)
+                self.assertEqual(events, [changed.split(":", 1)[1]])
+                self.assertEqual(state["passes"][unchanged], old_pass)
+                self.assertEqual(state["passes"][changed], {"commit": current_commit, "run": 12})
+
+                directory = Path("validation/python-unit-local")
+                directory.mkdir(parents=True)
+
+                def local(file_bytes, test_id, source_commit=None, identity=5):
+                    proof = {"version": 1, "repository": 7, "branch": "codex/fix", "suite": "validation",
+                             "test_file": module_path, "test_file_sha256": hashlib.sha256(file_bytes).hexdigest(),
+                             "test_ids": [test_id.split(":", 1)[1]], "command": "explicit fake command",
+                             "output": "explicit fake outcome", "result": {"failed": 0, "errors": 0,
+                             "skipped": 0, "expected_failures": 0, "unexpected_successes": 0, "count": 1}}
+                    if source_commit is not None:
+                        proof["source_commit"] = source_commit
+                    raw = json.dumps(proof).encode()
+                    digest = hashlib.sha256(raw).hexdigest()
+                    (directory / (digest + ".json")).write_bytes(raw)
+                    return {"id": identity, "user": {"id": 2, "login": "writer"}, "body":
+                            "Python-Unit-Receipt: " + json.dumps({"repository": 7, "pr": 42,
+                            "suite": "validation", "sha256": digest})}
+
+                stale_local = local(old_source, changed)
+                with self.assertRaisesRegex(receipts.ReceiptError, "Null-source"):
+                    receipts.restore(FakeAPI(comments=[stale_local]), SCOPE, 12, applicability=guard())
+                repaired = receipts.restore(FakeAPI({changed: new_pass}, [stale_local]),
+                                            SCOPE, 12, applicability=guard())
+                self.assertEqual(repaired[changed], new_pass)
+                fresh_local = local(current_source, changed, current_commit, 6)
+                locally_bound = receipts.restore(FakeAPI(comments=[fresh_local, stale_local]),
+                                                 SCOPE, 12, applicability=guard())
+                self.assertIsNone(locally_bound[changed]["run"])
+                self.assertEqual(locally_bound[changed]["commit"], current_commit)
+                self.assertTrue(locally_bound[changed]["provenance"].endswith("comment-6"))
+                stale_claim = json.loads(stale_local["body"].split(": ", 1)[1])
+                old_local_source = {"commit": None, "run": None, "provenance":
+                    "attested-local:" + stale_claim["sha256"] + ":" +
+                    hashlib.sha256(old_source).hexdigest() + ":comment-5"}
+                inherited_local = receipts.restore(FakeAPI(
+                    {changed: new_pass}, [fresh_local, stale_local],
+                    {changed: old_local_source, unchanged: old_pass, other: old_pass}),
+                    SCOPE, 12, applicability=guard())
+                self.assertEqual(inherited_local[changed], locally_bound[changed],
+                                 "old authenticated local attribution remains historical, not applicable")
+                exact_null = local(current_source, unchanged, identity=7)
+                bound = receipts.restore(FakeAPI(comments=[fresh_local, stale_local, exact_null]),
+                                         SCOPE, 12, applicability=guard())
+                self.assertIsNone(bound[unchanged]["commit"])
+                self.assertIsNone(bound[unchanged]["run"])
+            finally:
+                os.chdir(previous)
+
+        # Unknown input is not a green or permission to replay all methods.
+        for broken in (b"def load_tests(*args): pass\n" + current_source,
+                       current_source.replace(b"Helper, unittest.TestCase", b"ForeignBase"),
+                       current_source.replace(b"def setUp(self):", b"def run(self):")):
+            sources[current_commit, module_path] = broken
+            current_files[module_path] = broken
+            unknown = guard()
+            self.assertFalse(unknown(unchanged, old_pass))
+            with self.assertRaises(receipts.ReceiptError):
+                unknown.finish({})
+        sources[current_commit, module_path] = current_source
+        current_files[module_path] = current_source
+        missing = guard()
+        self.assertFalse(missing(unchanged, {"commit": "c" * 40, "run": 9}))
+        with self.assertRaisesRegex(receipts.ReceiptError, "missing historical"):
+            missing.finish({})
+        current_files[module_path] = old_source
+        dirty = guard()
+        self.assertFalse(dirty(unchanged, old_pass))
+        with self.assertRaisesRegex(receipts.ReceiptError, "worktree differs"):
+            dirty.finish({})
+        current_files[module_path] = current_source
+        for limit, value in (("MAX_TEST_SOURCE", 1), ("MAX_SOURCE_CACHE_BYTES", 1),
+                             ("MAX_SOURCE_AST_NODES", 1), ("MAX_SOURCE_CACHE_AST_NODES", 1),
+                             ("MAX_SOURCE_CACHE_FILES", 0)):
+            with patch.object(receipts, limit, value):
+                bounded = guard()
+                self.assertFalse(bounded(unchanged, old_pass))
+                with self.assertRaises(receipts.ReceiptError):
+                    bounded.finish({})
+        with patch.object(receipts, "discover") as discovery:
+            with tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(receipts.ReceiptError, "CLI applicability"):
+                    receipts.execute(journal(), Path(root) / "receipt.json")
+            discovery.assert_not_called()
+        source = Path(receipts.__file__).read_text()
+        self.assertIn("applicability=SourceApplicability(commit)", source)
+        self.assertIn('"applicability_commit": commit', source)
+
     def test_skip_never_counts_as_success(self):
         state, events = journal(), []
         self.assertEqual(self.execute(state, {
