@@ -148,6 +148,30 @@ impl VodServe {
         tokio::spawn(async move {
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
             shared.hooks.get().before_terminal_detach().await;
+            let children = {
+                let mut sessions = shared.sessions.lock().await;
+                sessions
+                    .get_mut(&session_id)
+                    .filter(|session| {
+                        session.tombstone.is_some()
+                            && session
+                                .terminal_cleanup
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &cleanup))
+                            && session
+                                .rendition
+                                .as_ref()
+                                .is_some_and(|current| Arc::ptr_eq(current, &rendition))
+                    })
+                    .map(|session| std::mem::take(&mut session.children))
+                    .unwrap_or_default()
+            };
+            // End drains every child before releasing the parent caption
+            // window. The detached cleanup owns their capacity and reader ids
+            // even when the original HTTP waiter has already disappeared.
+            for child in children {
+                child.detach(&shared.pool).await;
+            }
             rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };

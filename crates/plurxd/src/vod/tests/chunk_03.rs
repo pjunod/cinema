@@ -8,6 +8,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
@@ -55,6 +56,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
                 file: replacement_file,
@@ -2811,6 +2813,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                children: Vec::new(),
                 rendition: Some(rendition),
                 rendition_key,
                 file,

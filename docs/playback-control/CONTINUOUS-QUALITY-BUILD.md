@@ -1679,3 +1679,21 @@ it now refuses a different compatible set under an existing attachment. The
 family regression covers these distinctions; pinned compilation applies and
 unit execution remains deferred. Durable parent reconstruction still needs
 the family descriptor and actor integration.
+
+### 10.36 Parent-owned media-reader cleanup
+
+The public VOD parent now owns private media readers and their retained
+admission handles. Terminal cleanup drains them before ending the parent's
+caption window; replay cannot remove another parent's later reader. A
+same-ID replacement takes the outgoing child graph and retires it without
+fencing the new parent's captions. Registry-committed replacement cleanup
+and idle reap keep an owned lifecycle guard in a cancellation-independent
+task, so a cancelled requester cannot leak children or let resurrection
+race the departing graph. The committed replacement driver is kicked before
+asynchronous teardown.
+
+Authored regressions cover private child isolation, terminal replay, same-ID
+replacement and cancelled idle reap with a concurrent resurrection. Pinned
+Rust compilation applies; unit execution remains deferred to final review.
+Family construction, admission attachment and child HTTP/peer serving are
+still needed before this graph carries production continuous media.

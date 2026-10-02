@@ -512,8 +512,8 @@ impl VodServe {
                 .collect()
         };
         for (id, lifecycle) in expired {
-            let _lifecycle = lifecycle.lock().await;
-            let rendition = {
+            let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
+            let expired_session = {
                 let mut sessions = self.shared.sessions.lock().await;
                 let still_expired = sessions.get(&id).is_some_and(|session| {
                     Arc::ptr_eq(&session.lifecycle, &lifecycle)
@@ -522,22 +522,35 @@ impl VodServe {
                             > SESSION_IDLE_TTL
                 });
                 if still_expired {
-                    sessions.remove(&id).and_then(|session| session.rendition)
+                    sessions.remove(&id)
                 } else {
                     None
                 }
             };
-            if let Some(rendition) = rendition {
-                // Keep the per-id gate through detach. A resurrection for the
-                // same durable id must attach only after this old reader is
-                // gone, never between registry removal and detach.
-                rendition.detach_reader(&self.shared.pool, &id).await;
-                tracing::info!(
-                    target: "plurxd::vodserve",
-                    session = %session_log_id(&id),
-                    rendition = %rendition.key,
-                    "vod session idle-reaped (sliding TTL)"
-                );
+            if let Some(mut session) = expired_session {
+                let children = std::mem::take(&mut session.children);
+                let rendition = session.rendition.take();
+                let shared = Arc::clone(&self.shared);
+                let cleanup = spawn_cancellation_independent(async move {
+                    // Keep the exact per-id gate through all child detaches.
+                    // Cancelling maintain cannot let a same-id resurrection
+                    // race the departed parent's still-attached reader graph.
+                    let _lifecycle = lifecycle_guard;
+                    for child in children {
+                        child.detach(&shared.pool).await;
+                    }
+                    if let Some(rendition) = rendition {
+                        rendition.detach_reader(&shared.pool, &id).await;
+                        rendition.kick();
+                        tracing::info!(
+                            target: "plurxd::vodserve",
+                            session = %session_log_id(&id),
+                            rendition = %rendition.key,
+                            "vod session idle-reaped (sliding TTL)"
+                        );
+                    }
+                });
+                let _ = cleanup.await;
             }
         }
 

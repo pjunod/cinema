@@ -581,6 +581,25 @@ pub(super) fn terminal_reason(cause: Terminal) -> &'static str {
     }
 }
 
+/// One private media reader owned by a public parent's incarnation. Its
+/// opaque reader id is independent of the public capability, so delayed old
+/// cleanup cannot remove a replacement parent's demand on shared media.
+pub(super) struct ParentMediaReader {
+    pub(super) reader_id: String,
+    pub(super) rendition: Arc<Rendition>,
+    /// Family admission lasts through detach; a worker's exclusive claim
+    /// independently retains the same reservation through confirmed reap.
+    pub(super) _reservation: Option<crate::vodencode::EncodePermit>,
+}
+impl ParentMediaReader {
+    pub(super) async fn detach(self, pool: &crate::waitpool::WaitPool) {
+        self.rendition
+            .detach_media_reader(pool, &self.reader_id)
+            .await;
+        self.rendition.kick();
+    }
+}
+
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 pub(super) struct Session {
@@ -588,6 +607,9 @@ pub(super) struct Session {
     /// publishes completion. The compact fields below retain exact 410/replay
     /// identity without retaining manifests, source handles, readers, or the
     /// producer graph until the next maintenance tick.
+    /// Private video/audio readers share this parent's authority and cleanup.
+    /// They never allocate additional public playback sessions or captions.
+    pub(super) children: Vec<ParentMediaReader>,
     pub(super) rendition: Option<Arc<Rendition>>,
     pub(super) rendition_key: String,
     pub(super) file: Arc<MediaFile>,

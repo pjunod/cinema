@@ -671,6 +671,7 @@ use crate::queue_fixture::QueueFixture;
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                children: Vec::new(),
                 rendition: Some(rendition),
                 rendition_key,
                 file,
@@ -720,6 +721,7 @@ use crate::queue_fixture::QueueFixture;
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                children: Vec::new(),
                 rendition: None,
                 rendition_key,
                 file,

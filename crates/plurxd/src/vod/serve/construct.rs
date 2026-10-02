@@ -182,13 +182,22 @@ impl VodServe {
 
         let lifecycle = self.shared.session_lifecycle(session_id);
         let _lifecycle = lifecycle.lock().await;
-        let previous = self
+        let (previous, children) = self
             .shared
             .sessions
             .lock()
             .await
-            .get(session_id)
-            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
+            .get_mut(session_id)
+            .map(|session| {
+                (
+                    session.rendition.as_ref().map(Arc::clone),
+                    std::mem::take(&mut session.children),
+                )
+            })
+            .unwrap_or_default();
+        for child in children {
+            child.detach(&self.shared.pool).await;
+        }
         if let Some(previous) = previous {
             previous.detach_reader(&self.shared.pool, session_id).await;
         }
@@ -196,6 +205,7 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                children: Vec::new(),
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(file.clone()),

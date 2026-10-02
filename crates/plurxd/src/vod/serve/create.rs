@@ -505,9 +505,10 @@ impl VodServe {
             None
         };
         let lifecycle = self.shared.session_lifecycle(&session_id);
-        let _lifecycle = lifecycle.lock().await;
+        let lifecycle_guard = Arc::clone(&lifecycle).lock_owned().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
+            children: Vec::new(),
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),
@@ -644,6 +645,10 @@ impl VodServe {
         if let Some(outgoing) = sessions.get(&session_id) {
             outgoing.abort_staged_preparation();
         }
+        let outgoing_children = sessions
+            .get_mut(&session_id)
+            .map(|session| std::mem::take(&mut session.children))
+            .unwrap_or_default();
         sessions.insert(session_id.clone(), replacement);
         // Both reader graphs are committed, so the rendition-wide guards have
         // no further work. They used to live to the end of the function, which
@@ -655,18 +660,46 @@ impl VodServe {
         drop(previous_readers);
         drop(_serving_transition);
         drop(sessions);
-        if let Some(flight) = obsolete_window_flight {
-            crate::subtitles::abandon_session_window(&session_id, flight).await;
+        let cleanup_id = session_id.clone();
+        let shared = Arc::clone(&self.shared);
+        let file_id = file.id;
+        let file_height = file.height.unwrap_or(0);
+        let kind = req.kind;
+        // Wake the committed reader graph before any asynchronous cleanup.
+        // Cancellation cannot strand an attached parent without a driver kick.
+        rendition.kick();
+        if outgoing_children.is_empty() && obsolete_window_flight.is_none() {
+            self.emit_lifecycle(
+                &cleanup_id,
+                file_id,
+                file_height,
+                kind,
+                "session_start",
+                None,
+            );
+            drop(lifecycle_guard);
+        } else {
+            let cleanup = spawn_cancellation_independent(async move {
+                let _lifecycle = lifecycle_guard;
+                // Child identities belong to the outgoing incarnation. Retiring
+                // them cannot fence parent captions or remove a new private reader.
+                for child in outgoing_children {
+                    child.detach(&shared.pool).await;
+                }
+                if let Some(flight) = obsolete_window_flight {
+                    crate::subtitles::abandon_session_window(&cleanup_id, flight).await;
+                }
+                VodServe { shared }.emit_lifecycle(
+                    &cleanup_id,
+                    file_id,
+                    file_height,
+                    kind,
+                    "session_start",
+                    None,
+                );
+            });
+            let _ = cleanup.await;
         }
-        self.emit_lifecycle(
-            &session_id,
-            file.id,
-            file.height.unwrap_or(0),
-            req.kind,
-            "session_start",
-            None,
-        );
-        drop(_lifecycle);
         // The reader graph and registry are now one committed attachment.
         // Release does not wait for producer wakeup, tracing or lifecycle
         // event publication, and can tombstone this exact incarnation before
@@ -676,7 +709,6 @@ impl VodServe {
         // per-key build gate before this point would let a dormant purge
         // remove it in the lookup/attach gap.
         drop(attachment);
-        rendition.kick();
         tracing::info!(
             target: "plurxd::vodserve",
             session = %session_log_id(&session_id),
