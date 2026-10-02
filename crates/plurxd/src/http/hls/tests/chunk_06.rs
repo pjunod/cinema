@@ -265,19 +265,22 @@
                     }),
                 )
                 .await
-                .is_ok()
             })
         };
         let first = spawn_create(DesiredQuality::Original);
         let second = spawn_create(DesiredQuality::Manual { height: 720 });
         let (first, second) = tokio::join!(first, second);
-        let accepted = [first.expect("first task"), second.expect("second task")]
+        let first = first.expect("first task");
+        let second = second.expect("second task");
+        let accepted = [first.is_ok(), second.is_ok()]
             .into_iter()
             .filter(|accepted| *accepted)
             .count();
         assert!(
             accepted >= 1,
-            "with control off, a viewer who asks twice must still get a session"
+            "with control off, a viewer who asks twice must still get a session: first={:?}, second={:?}",
+            first.as_ref().err(),
+            second.as_ref().err(),
         );
 
         // Whatever the pointer ended up naming, it names the ask that is
