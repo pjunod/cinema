@@ -1542,7 +1542,14 @@ BUILD_SHA := $(shell git rev-parse HEAD 2>/dev/null)
 # binary's built_at stamp and BuildKit's image timestamps are the same on every
 # build of one commit (crates/plurxd/build_support/source_date.rs). `.git` is
 # outside the build context, so the build script cannot read it there itself.
-SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)
+#
+# Empty for a `-dirty` tree: HEAD's time would date a binary that is not HEAD,
+# so the build script falls back to the clock. And `:=`, not `?=`: the image is
+# stamped with this checkout's BUILD_REF and BUILD_SHA, so its date comes from
+# the same checkout, never from a SOURCE_DATE_EPOCH some other tool left
+# exported in the shell. A deliberate override is still
+# `make docker SOURCE_DATE_EPOCH=<seconds>`, which Make lets win.
+SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,$(shell git log -1 --format=%ct 2>/dev/null))
 HOST_SHORTNAME := $(shell hostname -s 2>/dev/null || hostname 2>/dev/null || echo unknown-host)
 
 .PHONY: version

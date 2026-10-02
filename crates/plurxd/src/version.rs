@@ -56,24 +56,45 @@ mod tests {
     fn source_date_epoch_wins_over_the_commit_and_the_clock() {
         // Two builds of one commit must stamp the same date: the variable the
         // image build passes is used verbatim, not the clock it ran at.
-        let got = resolve_source_date(Some("1759388856"), || Some(1), never);
+        let got = resolve_source_date(Some("1759388856"), false, || Some(1), never);
         assert_eq!(got, Ok(1_759_388_856));
         assert_eq!(format_utc(1_759_388_856), "2025-10-02T07:07:36Z");
     }
 
     #[test]
     fn without_source_date_epoch_the_commit_time_is_used_before_the_clock() {
-        assert_eq!(resolve_source_date(None, || Some(42), never), Ok(42));
+        assert_eq!(resolve_source_date(None, false, || Some(42), never), Ok(42));
         // Compose passes an empty value when nothing derived one: that is
         // "unset", not malformed.
-        assert_eq!(resolve_source_date(Some(" "), || Some(42), never), Ok(42));
-        assert_eq!(resolve_source_date(None, || None, || 7), Ok(7));
+        assert_eq!(
+            resolve_source_date(Some(" "), false, || Some(42), never),
+            Ok(42)
+        );
+        assert_eq!(resolve_source_date(None, false, || None, || 7), Ok(7));
+    }
+
+    #[test]
+    fn a_dirty_build_is_not_dated_with_head_s_commit_time() {
+        // A `-dirty` tree is not HEAD; dating it with HEAD's time would claim
+        // the edited binary is the committed one. Only the clock may date it,
+        // unless a caller deliberately passes SOURCE_DATE_EPOCH.
+        let never_commit =
+            || -> Option<i64> { panic!("a dirty build must not read the commit time") };
+        assert_eq!(resolve_source_date(None, true, never_commit, || 7), Ok(7));
+        assert_eq!(
+            resolve_source_date(Some(""), true, never_commit, || 7),
+            Ok(7)
+        );
+        assert_eq!(
+            resolve_source_date(Some("99"), true, never_commit, never),
+            Ok(99)
+        );
     }
 
     #[test]
     fn a_malformed_source_date_epoch_fails_instead_of_reading_the_clock() {
         for bad in ["yesterday", "-1", "+5", "1.5", "17e8"] {
-            let err = resolve_source_date(Some(bad), || Some(1), never)
+            let err = resolve_source_date(Some(bad), false, || Some(1), never)
                 .expect_err("malformed SOURCE_DATE_EPOCH must be refused");
             assert!(err.contains("SOURCE_DATE_EPOCH"), "{err}");
         }
