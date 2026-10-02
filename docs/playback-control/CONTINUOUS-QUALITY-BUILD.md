@@ -2795,3 +2795,21 @@ and local HTTP server were closed. The failed receipt remains
 was obtained, and no lock-state diagnosis is inferred from that timeout.
 The future-rendezvous iOS production/test-source and tvOS production builds
 both passed. No unit test was executed.
+
+
+### 10.88 Android preserves the metadata named by its first-render event
+
+The renderer thread can submit several frame metadata callbacks before the
+application looper receives its first-render event. The pending slot now keeps
+the first valid frame until explicit seek/output invalidation, so later queued
+metadata cannot replace the picture used by alignment. The authored regression
+queues a later frame before render settlement and requires the original PTS,
+then checks seek invalidation and a fresh frame. Android production and test
+sources compile; unit execution remains deferred.
+
+This concerns the ordinary renderer metadata path. Pinned Media3's tunneled
+buffer callback does not invoke the standard frame-metadata listener, so TV
+PTS proof still needs its renderer integration. It is not claimed from a
+format change or the first-frame event alone. The inspected paths are in
+[the pinned video renderer](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/MediaCodecVideoRenderer.java).
+Physical-device and audible/display qualification remain outstanding.

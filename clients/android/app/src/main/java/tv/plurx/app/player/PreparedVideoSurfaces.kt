@@ -16,7 +16,6 @@ import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
-import java.util.concurrent.atomic.AtomicReference
 import java.util.IdentityHashMap
 import java.util.concurrent.Executor
 
@@ -33,7 +32,7 @@ import java.util.concurrent.Executor
 internal class PreparedVideoSurfaces private constructor() {
     private class Output(val player: ExoPlayer, val control: SurfaceControl) {
         val surface = Surface(control)
-        val pendingFrame = AtomicReference<PreparedSurfaceReceipts.Frame?>(null)
+        val pendingFrame = PreparedFirstFrameSlot()
         lateinit var metadata: VideoFrameMetadataListener
         var width = 0
         var height = 0
@@ -100,7 +99,7 @@ internal class PreparedVideoSurfaces private constructor() {
     }
 
     fun invalidate(player: ExoPlayer) {
-        outputs[player]?.let { receipts.invalidate(it);it.pendingFrame.set(null) }
+        outputs[player]?.let { receipts.invalidate(it);it.pendingFrame.clear() }
     }
 
     fun ready(player: ExoPlayer, positionMs: Long? = null): Boolean {
@@ -198,12 +197,12 @@ internal class PreparedVideoSurfaces private constructor() {
         receipts.attach(output)
         output.metadata = VideoFrameMetadataListener { positionUs, _, format, _ ->
             val durationUs = format.frameRate.takeIf { it.isFinite() && it > 0 }?.let { 1_000_000.0 / it }
-            output.pendingFrame.set(PreparedSurfaceReceipts.Frame(positionUs, format.width, format.height, durationUs))
+            output.pendingFrame.offer(PreparedSurfaceReceipts.Frame(positionUs, format.width, format.height, durationUs))
         }
         output.observer = object : AnalyticsListener {
             override fun onRenderedFirstFrame(eventTime: AnalyticsListener.EventTime, target: Any, renderTimeMs: Long) {
                 if (target === output.surface && outputs[player] === output) {
-                    output.pendingFrame.get()?.let { receipts.rendered(output, it) }
+                    output.pendingFrame.snapshot()?.let { receipts.rendered(output, it) }
                 }
             }
             override fun onVideoSizeChanged(eventTime: AnalyticsListener.EventTime, videoSize: VideoSize) {

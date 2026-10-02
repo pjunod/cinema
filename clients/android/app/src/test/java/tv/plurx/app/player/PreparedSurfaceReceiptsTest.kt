@@ -46,6 +46,23 @@ class PreparedSurfaceReceiptsTest {
         assertTrue(owner.ready(output)) // Raster readiness is separate from alignment proof.
     }
 
+    @Test fun queuedMetadataCannotReplaceTheFrameNamedByFirstRender() {
+        val slot = PreparedFirstFrameSlot()
+        val first = PreparedSurfaceReceipts.Frame(10_000_000, 1920, 1080, 1_000_000.0 / 24)
+        slot.offer(first)
+        slot.offer(PreparedSurfaceReceipts.Frame(10_041_667, 1920, 1080, 1_000_000.0 / 24))
+        val owner = PreparedSurfaceReceipts<Any>(); val output = Any(); owner.attach(output)
+        owner.rendered(output, requireNotNull(slot.snapshot()))
+        assertSame(first, slot.snapshot())
+        assertTrue(owner.ready(output, 10_000)); assertFalse(owner.ready(output, 10_083))
+        slot.clear(); owner.invalidate(output)
+        assertNull(slot.snapshot()); assertFalse(owner.ready(output))
+        slot.offer(PreparedSurfaceReceipts.Frame(-1, 1920, 1080))
+        assertNull(slot.snapshot())
+        val afterSeek = PreparedSurfaceReceipts.Frame(30_000_000, 1920, 1080, 1_000_000.0 / 24)
+        slot.offer(afterSeek); assertSame(afterSeek, slot.snapshot())
+    }
+
     @Test fun outputOverlapIsBoundedAndRetirementAllowsTheNextPreparation() {
         val owner = PreparedSurfaceReceipts<Any>()
         val first = Any(); val second = Any(); val third = Any()

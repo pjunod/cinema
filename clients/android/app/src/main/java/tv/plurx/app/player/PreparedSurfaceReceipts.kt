@@ -1,6 +1,7 @@
 package tv.plurx.app.player
 
 import java.util.IdentityHashMap
+import java.util.concurrent.atomic.AtomicReference
 
 /** Ownership of actual output frames and asynchronous compositor receipts. */
 internal class PreparedSurfaceReceipts<T : Any> {
@@ -46,4 +47,18 @@ internal class PreparedSurfaceReceipts<T : Any> {
         invalidate(output)
         frames.remove(output)
     }
+}
+
+
+/** The renderer thread can queue more metadata before its first-frame event
+ * reaches the application looper. Preserve the first candidate for that event. */
+internal class PreparedFirstFrameSlot {
+    private val first = AtomicReference<PreparedSurfaceReceipts.Frame?>(null)
+    fun offer(frame: PreparedSurfaceReceipts.Frame) {
+        if (frame.positionUs >= 0 && frame.width > 0 && frame.height > 0) {
+            first.compareAndSet(null, frame)
+        }
+    }
+    fun snapshot(): PreparedSurfaceReceipts.Frame? = first.get()
+    fun clear() { first.set(null) }
 }
