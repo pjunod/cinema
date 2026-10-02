@@ -7584,10 +7584,18 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
     })
 }
 
+/// Probe a retained tuner prefix with the configured ffprobe.
+///
+/// `class` is the caller's, as for the other dual-use probe helpers
+/// (`ChildWork::new(class, ..)`): a viewer's start and a DVR transport wait on
+/// this child and pass `Realtime`; the boot caption probe reuses the same
+/// helper through the production graph path with nobody waiting and passes
+/// `Background`.
 async fn probe_live_source(
     system: &SystemInfo,
     directory: &Path,
     prefix: &[u8],
+    class: crate::process_control::ChildClass,
 ) -> Result<LiveSourceFacts, LiveTvError> {
     if system.ffprobe.trim().is_empty() {
         return Err(LiveTvError::CodecUnsupported(
@@ -7623,7 +7631,7 @@ async fn probe_live_source(
     }
     let (mut child, _child_job) = crate::process_control::spawn_job_owned(
         &mut command,
-        crate::process_control::ChildWork::realtime("Live TV source probe"),
+        crate::process_control::ChildWork::new(class, "Live TV source probe"),
     )
     .map_err(|error| {
         LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))

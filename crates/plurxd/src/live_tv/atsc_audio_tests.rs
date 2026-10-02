@@ -299,9 +299,14 @@ async fn verify_ac3_capture(bytes: Vec<u8>) {
         ..SystemInfo::default()
     };
     let root = crate::test_tempdir().expect("live audio scratch");
-    let source = probe_live_source(&system, root.path(), &bytes)
-        .await
-        .expect("capture probe");
+    let source = probe_live_source(
+        &system,
+        root.path(),
+        &bytes,
+        crate::process_control::ChildClass::Realtime,
+    )
+    .await
+    .expect("capture probe");
     assert_eq!(source.audio_codec.as_deref(), Some("ac3"));
     let delivery = resolve_live_delivery(
         &source,
