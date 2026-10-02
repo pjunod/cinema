@@ -23346,6 +23346,317 @@ async fn active_legacy_identity_blocks_exact_forced_successor() {
 }
 
 #[tokio::test]
+async fn analysis_reconciliation_preserves_work_and_fences_changed_requests() {
+    for_each_backend(|store, backend| async move {
+        let (user_id, file_id) = seed_file(&store, "analysis-reconciliation").await;
+        let base = NewAnalysisRequest {
+            request_id: "reconcile-old".into(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".into(),
+            pipeline_version: "old-engine".into(),
+            video_identity: "video-a".into(),
+            requested_generation: "old-generation".into(),
+            priority: "normal".into(),
+            trigger: "background".into(),
+            force_rebuild: false,
+            target_node_id: "node-a".into(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&base)
+            .await
+            .expect("old request");
+        let claimed = store
+            .claim_analysis_request("node-a", 11, 1011)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert!(store
+            .retry_analysis_request(&claimed, "foreground_preempted", 12, 13, false)
+            .await
+            .expect("reconciliation contract operation"));
+        let old = store
+            .analysis_request(&base.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        let attempts_before = store
+            .analysis_attempts(&old.request_id, 10)
+            .await
+            .expect("reconciliation contract operation");
+        let new = NewAnalysisRequest {
+            request_id: "reconcile-new".into(),
+            pipeline_version: "current-engine".into(),
+            requested_generation: "current-generation".into(),
+            ..base.clone()
+        };
+        assert!(
+            store
+                .reconcile_analysis_request(&old, &new, 14)
+                .await
+                .expect("reconciliation contract operation"),
+            "{backend}"
+        );
+        let retired = store
+            .analysis_request(&old.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(retired.state, "cancelled", "{backend}");
+        assert_eq!(retired.last_error_code, "request_reconciled", "{backend}");
+        assert_eq!(
+            serde_json::to_value(
+                store
+                    .analysis_attempts(&old.request_id, 10)
+                    .await
+                    .expect("reconciliation contract operation")
+            )
+            .expect("reconciliation contract operation"),
+            serde_json::to_value(attempts_before).expect("reconciliation contract operation"),
+            "attempt history is not rewritten"
+        );
+        assert_eq!(
+            retired.pipeline_version, "old-engine",
+            "history is retained"
+        );
+        let successor = store
+            .analysis_request(&new.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(successor.pipeline_version, "current-engine", "{backend}");
+        assert!(
+            !store
+                .reconcile_analysis_request(&old, &new, 15)
+                .await
+                .expect("reconciliation contract operation"),
+            "repeat is idempotent"
+        );
+
+        let duplicate = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-duplicate".into(),
+                pipeline_version: "older-engine".into(),
+                requested_generation: "older-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let joined = NewAnalysisRequest {
+            request_id: "should-not-be-created".into(),
+            ..new.clone()
+        };
+        assert!(
+            store
+                .reconcile_analysis_request(&duplicate, &joined, 16)
+                .await
+                .expect("reconciliation contract operation"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .analysis_request(&joined.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .is_none(),
+            "join existing current work"
+        );
+        assert_eq!(
+            store
+                .analysis_reconciliation_page("", 1)
+                .await
+                .expect("reconciliation contract operation")[0]
+                .request_id,
+            new.request_id
+        );
+        assert!(store
+            .analysis_reconciliation_page(&new.request_id, 100)
+            .await
+            .expect("reconciliation contract operation")
+            .is_empty());
+
+        let before_claim = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-race".into(),
+                pipeline_version: "race-engine".into(),
+                requested_generation: "race-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        store
+            .claim_analysis_request_compatible("node-a", Some("race-engine"), 1012, 2012)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert!(
+            !store
+                .reconcile_analysis_request(&before_claim, &joined, 1013)
+                .await
+                .expect("reconciliation contract operation"),
+            "a worker won the race"
+        );
+        assert_eq!(
+            store
+                .analysis_request(&before_claim.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .state,
+            "running"
+        );
+
+        let source_race = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-source-race".into(),
+                pipeline_version: "source-engine".into(),
+                requested_generation: "source-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let changed_source = NewAnalysisRequest {
+            request_id: "wrong-source".into(),
+            source_mtime: 999,
+            ..new.clone()
+        };
+        assert!(
+            !store
+                .reconcile_analysis_request(&source_race, &changed_source, 19)
+                .await
+                .expect("reconciliation contract operation"),
+            "source rechecked in transaction"
+        );
+        assert!(store
+            .analysis_request("wrong-source")
+            .await
+            .expect("reconciliation contract operation")
+            .is_none());
+        assert_eq!(
+            store
+                .analysis_request(&source_race.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .state,
+            "queued"
+        );
+        let viewer_request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-viewer".into(),
+                pipeline_version: "viewer-engine".into(),
+                requested_generation: "viewer-generation".into(),
+                ..base.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        assert!(store
+            .join_analysis_viewer(AnalysisViewerInterest {
+                analysis_request_id: viewer_request.request_id.clone(),
+                requested_generation: viewer_request.requested_generation.clone(),
+                pipeline_version: viewer_request.pipeline_version.clone(),
+                video_identity: viewer_request.video_identity.clone(),
+                target_node_id: viewer_request.target_node_id.clone(),
+                user_id,
+                playback_id: "reconciliation-viewer".into(),
+                now_ms: 2000,
+            })
+            .await
+            .expect("reconciliation contract operation"));
+        assert!(
+            !store
+                .reconcile_analysis_request(&viewer_request, &joined, 2001)
+                .await
+                .expect("reconciliation contract operation"),
+            "active playback interest is preserved"
+        );
+
+        let forced = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "reconcile-forced".into(),
+                pipeline_version: "forced-old".into(),
+                requested_generation: "forced-old-generation".into(),
+                force_rebuild: true,
+                priority: "forced".into(),
+                ..base
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let forced_new = NewAnalysisRequest {
+            request_id: "reconcile-forced-new".into(),
+            pipeline_version: "forced-new".into(),
+            requested_generation: "forced-new-generation".into(),
+            force_rebuild: true,
+            priority: "forced".into(),
+            ..new
+        };
+        assert!(store
+            .reconcile_analysis_request(&forced, &forced_new, 2002)
+            .await
+            .expect("reconciliation contract operation"));
+        assert!(
+            store
+                .analysis_request(&forced_new.request_id)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .force_rebuild
+        );
+        let another_forced = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: "another-forced-old".into(),
+                pipeline_version: "another-old-engine".into(),
+                requested_generation: "another-old-generation".into(),
+                ..forced_new.clone()
+            })
+            .await
+            .expect("reconciliation contract operation");
+        let joining_forced = NewAnalysisRequest {
+            request_id: "forced-join-no-insert".into(),
+            requested_generation: "different-forced-generation".into(),
+            ..forced_new.clone()
+        };
+        let occupied = store
+            .analysis_reconciliation_forced_slot(&joining_forced)
+            .await
+            .expect("reconciliation contract operation")
+            .expect("reconciliation contract operation");
+        assert_eq!(occupied.request_id, forced_new.request_id);
+        assert!(
+            store
+                .reconcile_analysis_request(&another_forced, &joining_forced, 2003)
+                .await
+                .expect("reconciliation contract operation"),
+            "two obsolete forced engines converge on one active rebuild"
+        );
+        assert!(store
+            .analysis_request(&joining_forced.request_id)
+            .await
+            .expect("reconciliation contract operation")
+            .is_none());
+        let alternate_target = NewAnalysisRequest {
+            target_node_id: "other-node".into(),
+            ..joining_forced
+        };
+        assert_eq!(
+            store
+                .analysis_reconciliation_forced_slot(&alternate_target)
+                .await
+                .expect("reconciliation contract operation")
+                .expect("reconciliation contract operation")
+                .request_id,
+            forced_new.request_id,
+            "the forced slot spans target nodes"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn content_analysis_repair_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let (_, file_id) = seed_file(&store, "content-analysis-repair").await;

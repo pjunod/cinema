@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 240
+One binary serves everything on one port (`:32400` by default). plurx has 241
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -1990,8 +1990,44 @@ Every route here is admin.
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
 | POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
+
+### Reconcile obsolete unfinished requests
+
+**Reconciliation:** `POST /analysis/reconcile` with `{}` previews up to 100
+unfinished requests in request-ID order. Pass the returned `next_cursor` as
+`cursor` until it is null to inspect the entire backlog. Each candidate includes
+its title, original and replacement node IDs, reason, eligibility, and an opaque
+`candidate_id`. Preview never mutates the queue.
+
+Apply with `{"dry_run":false,"candidates":[{"request_id":"…",
+"candidate_id":"…"}]}` (at most 100 selections). Keep
+`reassign_unavailable` identical between preview and apply. The server derives
+the replacement again and checks the preview identity before an atomic
+create-or-join and retirement. A changed request returns `changed`; a successful
+repair returns `reconciled`. Re-preview after any interrupted batch. Applying
+while content analysis is disabled returns 409.
+
+Only queued fragment-index requests without a worker result are eligible.
+Current requests, running/submitted work, live playback interests, and worker
+retry deadlines are preserved. The engine comes from the target node's current
+worker report, which must be less than 30 seconds old. Peers predating this
+field are unknown. Explicit `reassign_unavailable:true` permits moving unknown
+targets to the receiving node only when that node can access the source.
+Same-engine forced rebuilds cannot be moved across nodes while their original
+forced slot exists; preview reports `rebuild_target`. Other components and
+terminal history are outside this operation. Predictive requests retain their
+producer's expiry ownership and report `producer_owned`; a different generation
+alone does not make a playback request obsolete.
+
+The operation retains the predecessor with `request_reconciled`, subject to
+normal history retention, and does not delete artifacts or rewrite attempts.
+Ordinary successors join an identical existing generation. Forced successors
+retain rebuild intent and use a deterministic identity for safe retries, joining
+an active forced rebuild on the same target when its source, engine and video
+match. A forced slot on a different target reports `rebuild_target` in preview.
 
 ### 16.1 Two vocabularies
 

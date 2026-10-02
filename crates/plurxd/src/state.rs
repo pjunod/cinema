@@ -2664,7 +2664,7 @@ impl LeaseHeartbeat {
     }
 }
 
-fn analysis_request_generation(
+pub(crate) fn analysis_request_generation(
     file: &MediaFile,
     component: &str,
     pipeline_version: &str,
