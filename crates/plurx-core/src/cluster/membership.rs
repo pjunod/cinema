@@ -1945,6 +1945,27 @@ pub struct ClockLeadershipIdentity {
     pub current_leader: Option<u64>,
 }
 
+/// Startup-only pre-submission admission. A clock proof's age limit cannot
+/// replenish the original phased startup budget. Already submitted writes
+/// retain their own completion/reconciliation; this guards the NEXT boundary.
+pub struct StartupActivationAdmission {
+    clock: OwnedClockAcquisitionTicket,
+    deadline: tokio::time::Instant,
+}
+
+impl StartupActivationAdmission {
+    pub fn revalidate(&self) -> Result<(), MembershipError> {
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(MembershipError::Internal(
+                "startup activation exceeded original deadline".into(),
+            ));
+        }
+        self.clock
+            .revalidate()
+            .map_err(MembershipError::ClockUnbounded)
+    }
+}
+
 impl ClockMembershipSource for hiqlite::LocalDbRaftMetrics {
     fn current(&self) -> Option<ClockMembershipIdentity> {
         let snapshot = self.membership_snapshot();
@@ -3774,8 +3795,19 @@ impl MembershipManager {
     /// voter membership. Desired role alone never authorizes this boundary.
     pub async fn finish_clock_observation(
         self,
-    ) -> Result<(Self, OwnedClockAcquisitionTicket), MembershipError> {
+        deadline: tokio::time::Instant,
+    ) -> Result<(Self, StartupActivationAdmission), MembershipError> {
         let inner = self.replicated_inner()?;
+        let installed = inner.client.local_membership_admission()?;
+        let original_deadline = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .and_then(StartupMembershipAdmission::startup_deadline);
+        if original_deadline != Some(deadline) {
+            return Err(MembershipError::Internal(
+                "startup activation cannot replace original deadline".into(),
+            ));
+        }
         let applied = inner.local_metrics.current().ok_or_else(|| {
             MembershipError::Internal("activation lacks applied membership".into())
         })?;
@@ -3784,17 +3816,22 @@ impl MembershipManager {
                 "desired voter is not an applied voter".into(),
             ));
         }
-        let original = self
-            .clock
-            .acquire_owned_for(ClockDecision::MembershipChange)
-            .map_err(MembershipError::ClockUnbounded)?;
+        let original = StartupActivationAdmission {
+            clock: self
+                .clock
+                .acquire_owned_for(ClockDecision::MembershipChange)
+                .map_err(MembershipError::ClockUnbounded)?,
+            deadline,
+        };
+        original.revalidate()?;
         self.initialize_startup(&original).await?;
+        original.revalidate()?;
         Ok((self, original))
     }
 
     async fn initialize_startup(
         &self,
-        original: &OwnedClockAcquisitionTicket,
+        original: &StartupActivationAdmission,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         if inner.role.is_learner() {
@@ -3810,15 +3847,11 @@ impl MembershipManager {
             .await?;
         // These immutable metadata publications already established clock
         // observation, but retain the same original activation proof anyway.
-        original
-            .revalidate()
-            .map_err(MembershipError::ClockUnbounded)?;
+        original.revalidate()?;
         self.publish_activity_signing_key_admitted(Some(original))
             .await?;
         self.refresh_activity_public_keys().await?;
-        original
-            .revalidate()
-            .map_err(MembershipError::ClockUnbounded)?;
+        original.revalidate()?;
         self.publish_http_url_admitted(Some(original)).await
     }
 
@@ -4011,7 +4044,7 @@ impl MembershipManager {
     /// and the loop re-reads instead of assuming.
     async fn apply_additive_membership_columns_admitted(
         &self,
-        original: Option<&OwnedClockAcquisitionTicket>,
+        original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for _ in 0..3 {
@@ -4025,9 +4058,7 @@ impl MembershipManager {
                 return Ok(());
             }
             if let Some(original) = original {
-                original
-                    .revalidate()
-                    .map_err(MembershipError::ClockUnbounded)?;
+                original.revalidate()?;
             }
             match inner.client.txn(pending).await {
                 Ok(results) => {
@@ -4063,14 +4094,12 @@ impl MembershipManager {
 
     async fn install_membership_schema_only_admitted(
         &self,
-        original: Option<&OwnedClockAcquisitionTicket>,
+        original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         for statement in MEMBERSHIP_SCHEMA {
             if let Some(original) = original {
-                original
-                    .revalidate()
-                    .map_err(MembershipError::ClockUnbounded)?;
+                original.revalidate()?;
             }
             inner.client.execute(*statement, params!()).await?;
         }
@@ -4081,9 +4110,7 @@ impl MembershipManager {
         // and the trigger rejects every later old-coordinator insert. No Raft
         // write can interleave between the backfill and trigger installation.
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         inner
             .client
@@ -4157,9 +4184,7 @@ impl MembershipManager {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         let current = inner
             .client
@@ -5019,7 +5044,7 @@ impl MembershipManager {
     async fn commit_heartbeat_admitted(
         &self,
         inner: &ReplicatedMembership,
-        original: Option<&OwnedClockAcquisitionTicket>,
+        original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         // Observe maintenance before publishing any acknowledgement. From this
         // point onward request admission and singleton jobs are fenced even if
@@ -5241,9 +5266,7 @@ impl MembershipManager {
             params!(inner.identity.node_id.as_str(), now),
         ));
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         inner
             .client
@@ -5398,14 +5421,12 @@ impl MembershipManager {
 
     async fn publish_activity_signing_key_admitted(
         &self,
-        original: Option<&OwnedClockAcquisitionTicket>,
+        original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let public_key = inner.activity_signing_key.public_key_hex();
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         let changed = inner
             .client
@@ -5503,7 +5524,7 @@ impl MembershipManager {
 
     async fn publish_http_url_admitted(
         &self,
-        original: Option<&OwnedClockAcquisitionTicket>,
+        original: Option<&StartupActivationAdmission>,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         // The ownership check belongs in the serialized Raft statement rather
@@ -5515,9 +5536,7 @@ impl MembershipManager {
         // the durable origin chosen during redemption; after finalization the
         // active node identity may atomically publish an operator readdress.
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         let transaction = inner
             .client
@@ -5576,9 +5595,7 @@ impl MembershipManager {
             Err(error) => return Err(error.into()),
         }
         if let Some(original) = original {
-            original
-                .revalidate()
-                .map_err(MembershipError::ClockUnbounded)?;
+            original.revalidate()?;
         }
         self.upsert_hostname(&inner.identity.node_id, &inner.local_hostname)
             .await
@@ -12863,6 +12880,33 @@ mod tests {
         )
         .expect("actual durable removal");
         assert!(read("learner").is_empty());
+    }
+
+    #[tokio::test]
+    async fn k06_startup_activation_retains_deadline_without_reclassifying_clock() {
+        // An actual standalone guard supplies no invented remote membership
+        // or clock samples. This isolates phase budget from valid clock age.
+        let guard = Arc::new(ClusterClockGuard::new(false));
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(20);
+        let admission = StartupActivationAdmission {
+            clock: guard
+                .acquire_owned_for(ClockDecision::MembershipChange)
+                .expect("NoPeers"),
+            deadline,
+        };
+        admission
+            .revalidate()
+            .expect("before original phase deadline");
+        tokio::time::sleep_until(deadline).await;
+        assert!(matches!(
+            admission.revalidate(),
+            Err(MembershipError::Internal(_))
+        ));
+        admission
+            .clock
+            .revalidate()
+            .expect("clock proof remains valid");
+        assert_eq!(admission.deadline, deadline, "no replenished phase budget");
     }
 
     #[test]
