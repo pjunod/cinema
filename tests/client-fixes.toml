@@ -3611,6 +3611,23 @@ source_anchor = "internal fun autoDecoderAcknowledgementCurrent(accepted: Boolea
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget()"
 
+# S-09 route sink claims (claude-opus-5-5). Device-route acceptance (M3/M5)
+# remains separate physical evidence.
+[[fixes]]
+id = "apple.audio-route-sink-claim"
+commits = ["fa43eab6a0f30a178d1ed112d8c9af6333691eda"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "static func audioSinks(route: AudioRouteFacts) -> [AudioSinkClaim]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver"
+
+[[fixes]]
+id = "android.audio-route-sink-claim"
+commits = ["68c21b9aeb35cbac74fc284c552b4e1c8d03d6ce", "8af9707a2664258a02aac2e5a97c8c825fbb3ee9"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun audioSinkClaims("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink"
 # D-02 prepared-successor audio focus (claude-opus-5-5). The device re-run of
 # a prepared quality change remains separate physical evidence.
 [[fixes]]
