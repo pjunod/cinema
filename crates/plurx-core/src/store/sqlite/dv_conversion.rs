@@ -1407,7 +1407,7 @@ mod tests {
     }
 
     /// The downgrade fixture above has to undo every migration *after* the
-    /// guard, including v87 analysis-source reservations and v88's cleanup index.
+    /// guard, including v89's preparation history index.
     ///
     /// The fixture is built by opening at the current version — the committed
     /// claim it needs can only be written through the store's own API — and
@@ -1435,7 +1435,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 44] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 45] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1519,6 +1519,9 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS analysis_source_reservations",
             // Both fixtures remove v88's index so replay exercises its creation.
             "CREATE INDEX IF NOT EXISTS analysis_requests_result_target_force",
+            // Both fixtures drop background_jobs through the shared helper,
+            // which also removes v89's source-scoped preparation index.
+            "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
         ];
 
         assert!(

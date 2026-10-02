@@ -7205,9 +7205,9 @@ mod tests {
             "v64 advances to the viewer-analysis schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 61,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 62,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v66 step"
+            "this implementation contains every additive v5→v67 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
