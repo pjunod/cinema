@@ -1065,6 +1065,119 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
+    def test_runtime_assets_layer_drops_build_time_state(self):
+        """P-02 M6: the media runtime layer must not carry build-time state.
+
+        Two cold builds of one commit differed in that layer only by apt,
+        dpkg and alternatives logs, ldconfig's aux-cache, fontconfig's caches,
+        the static probe's `config.log` and (across days) the account's
+        last-change day. Each is either removed or given a fixed input.
+        """
+        dockerfile = read("Dockerfile")
+        assets = dockerfile.split(" AS runtime-assets\n", 1)[1].split("\nFROM ", 1)[0]
+        run = assets[assets.index("\nRUN ") :]
+        removal = run.index("rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache")
+        self.assertIn("/var/cache/fontconfig/*.cache-*", run[removal : removal + 200])
+        # Removal comes after the last package operation in the layer.
+        self.assertLess(run.rindex("apt-get autoremove -y"), removal)
+        self.assertIn(
+            'SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \\\n'
+            "        useradd -r -g plurx -d /var/lib/plurx plurx",
+            run,
+        )
+        self.assertIn("snapshot_day=$(printf '%s' \"$DEBIAN_SNAPSHOT\" | cut -c1-8)", run)
+        # The commit's time would rebuild this layer on every commit.
+        self.assertNotRegex(assets, r"(?m)^ARG SOURCE_DATE_EPOCH")
+
+        probe = read("scripts/build-static-ffprobe")
+        self.assertNotIn('"$documentation/config.log"', probe)
+        self.assertIn('cp config.h "$documentation/config.h"', probe)
+        self.assertIn('cp ffbuild/config.mak "$documentation/config.mak"', probe)
+
+    def test_image_builds_pass_the_commit_time_as_source_date_epoch(self):
+        """P-02 M6: two builds of one commit must be the same binary.
+
+        `crates/plurxd/build.rs` used to stamp `built_at` from the compile
+        clock, so no rebuild was ever byte-identical. It now honours
+        `SOURCE_DATE_EPOCH`, which is only worth anything if every image build
+        actually passes the commit's time: the Docker context has no `.git`.
+        """
+        dockerfile = read("Dockerfile")
+        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertRegex(build_stage, r"(?m)^ARG SOURCE_DATE_EPOCH$")
+        self.assertLess(
+            build_stage.index("ARG SOURCE_DATE_EPOCH"), build_stage.index("cargo build")
+        )
+
+        makefile = read("Makefile")
+        self.assertIn(
+            "SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,"
+            "$(shell git log -1 --format=%ct 2>/dev/null))",
+            makefile,
+        )
+        commit_time = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"],
+            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+
+        def docker_build(*variables: str, env: dict[str, str] | None = None) -> str:
+            result = subprocess.run(
+                ["make", "--no-print-directory", "-n", "docker", *variables],
+                cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+                env={**os.environ, **(env or {})},
+            )
+            (line,) = [c for c in result.stdout.splitlines() if "docker build" in c]
+            return line
+
+        # A clean tree is dated by HEAD, even with an unrelated value exported.
+        clean = docker_build("BUILD_REF=v1.2.3", env={"SOURCE_DATE_EPOCH": "77"})
+        self.assertIn(f'--build-arg SOURCE_DATE_EPOCH="{commit_time}"', clean)
+        # A dirty tree is not HEAD: no date is passed, so build.rs reads the clock.
+        dirty = docker_build("BUILD_REF=v1.2.3-4-gabc-dirty")
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH=""', dirty)
+        (pinned,) = [
+            c
+            for c in make_dry_run_commands("docker", "SOURCE_DATE_EPOCH=1234")
+            if "docker build" in c
+        ]
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="1234"', pinned)
+        (rollout,) = [
+            c
+            for c in make_dry_run_commands("docker-up", "SOURCE_DATE_EPOCH=1234")
+            if "docker compose up -d --build" in c
+        ]
+        self.assertIn('SOURCE_DATE_EPOCH="1234" ', rollout)
+        self.assertIn(
+            "SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}", read("deploy/docker-compose.yml")
+        )
+
+        push = read("scripts/registry-push")
+        self.assertIn('SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$FULL_SHA")"', push)
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"', push)
+
+        smoke = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertIn(
+            'echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"',
+            smoke,
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}", smoke
+        )
+        release = read(".github/workflows/publish-release.yml")
+        self.assertIn(
+            'echo "source_date_epoch=$(git show -s --format=%ct "$commit_sha")"', release
+        )
+        self.assertIn(
+            "source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}", release
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ needs.resolve.outputs.source_date_epoch }}", release
+        )
+
+        build_rs = read("crates/plurxd/build.rs")
+        self.assertIn("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH", build_rs)
+        self.assertIn('std::env::var("SOURCE_DATE_EPOCH")', build_rs)
+
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
         # Only the shipped media installer owns these two cache-clean points.

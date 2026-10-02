@@ -1475,6 +1475,23 @@ test("Default plus a typed value sends {null, null}", async () => {
   assert.equal(fields.prq.disabled, false);
 });
 
+test("the version stamp dates a release by its source date, not a compile time", () => {
+  // built_at is SOURCE_DATE_EPOCH, else the commit time, else the compile
+  // clock (crates/plurxd/build_support/source_date.rs). For an exact-tag
+  // release it is the tagged commit's date, so the label must not say "built".
+  const make = (server) => new Function("SERVER",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildLabel")}\nreturn buildLabel;`)(server);
+  const at = "2026-10-02T14:44:46Z";
+  assert.equal(make({version:"0.3.0", build:"v0.3.0", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"unknown", built_at:at})(), "0.3.0 · dated 02 Oct 14:44Z");
+  assert.equal(make({version:"0.3.0", build:"v0.3.0-5-gabc", built_at:at})(), "0.3.0 · v0.3.0-5-gabc");
+  const tag = new Function("esc",
+    `${shippedSource("sourceDateLabel")}\n${shippedSource("buildTag")}\nreturn buildTag;`)(esc);
+  const unstamped = tag({version:"0.3.0", build:"unknown", built_at:at});
+  assert.match(unstamped, /\(unstamped · dated 02 Oct 14:44Z\)/);
+  assert.doesNotMatch(unstamped, /build time|· built/);
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);

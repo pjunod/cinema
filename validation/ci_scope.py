@@ -180,8 +180,12 @@ RELEASE_BUILD_PATHS = (
     "Cargo.toml",
     "**/Cargo.toml",
     "**/build.rs",
+    # build.rs includes these with #[path]; `**/build.rs` alone misses them.
+    "crates/plurxd/build_support/**",
     "Dockerfile",
     "rust-toolchain.toml",
+    # Copied into the runtime-assets stage that package-smoke builds.
+    "scripts/build-static-ffprobe",
     "scripts/ci-buildkit-prune",
     "scripts/ci-execution-mode",
     "scripts/release-package-candidate",
