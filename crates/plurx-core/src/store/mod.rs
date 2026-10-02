@@ -2078,17 +2078,16 @@ pub mod keys {
     /// with a `NULL` field order either its reporter token or the explicit
     /// `unknown` value.
     ///
-    /// The second pass. The first (`JOB_FIELD_ORDER_BACKFILL_V1_*`) stamped
+    /// The second pass. The first (`jobs.field_order_backfilled`) stamped
     /// itself done while the scanner still wrote `NULL` for a probe without
     /// the key, so every row scanned after its stamp stayed `NULL`. The parsed
-    /// probe now always carries a token, and this pass sweeps those rows.
+    /// probe now always carries a token, and this pass sweeps those rows. The
+    /// first pass's stamp and cursors are left in place, as every superseded
+    /// backfill's are: deleting them would only make a not-yet-upgraded node
+    /// in a rolling deploy run the first pass again and re-create them.
     pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled_v2";
     /// Node-local strictly-after cursor for the field-order backfill.
     pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_v2_cursor";
-    /// The first pass's stamp and cursor family. Not read by anything: the
-    /// second pass deletes both, in the transaction that stamps itself done.
-    pub const JOB_FIELD_ORDER_BACKFILL_V1_DONE: &str = "jobs.field_order_backfilled";
-    pub const JOB_FIELD_ORDER_BACKFILL_V1_CURSOR: &str = "jobs.field_order_backfill_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
@@ -2156,21 +2155,6 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// partial write must never leave a durable configuration that no request
     /// actually submitted.
     async fn put_settings(&self, values: &[(&str, &str)]) -> Result<(), StoreError>;
-    /// Write `key = value` and, in the same transaction, delete every setting
-    /// in each retired family: the key spelled exactly as the family, and
-    /// every node-scoped `<family>.node.<id>` key.
-    ///
-    /// For a job that supersedes an earlier one-shot job: stamping the new
-    /// pass complete and removing the old pass's stamp and per-node cursors
-    /// is one decision, so neither can survive without the other. At most
-    /// [`RETIRED_SETTING_FAMILIES_MAX`] families; a family that would match
-    /// `key` itself is refused rather than deleting the write it accompanies.
-    async fn put_setting_retiring(
-        &self,
-        key: &str,
-        value: &str,
-        retired_families: &[&str],
-    ) -> Result<(), StoreError>;
     /// Atomically replace a related settings tuple only while its generation
     /// still equals `expected_generation`. `values` must include
     /// `generation_key` set to exactly expected + 1. A false result is a
@@ -2193,42 +2177,6 @@ pub(crate) fn selected_settings_json(keys: &[&str]) -> Result<String, StoreError
     }
     serde_json::to_string(keys).map_err(|error| StoreError::Task(error.to_string()))
 }
-
-/// Bound on [`SettingsStore::put_setting_retiring`]'s family list.
-pub const RETIRED_SETTING_FAMILIES_MAX: usize = 8;
-
-/// Whether `key` belongs to the retired settings `family`: the family key
-/// itself or a node-scoped `<family>.node.<id>` key. The SQL predicate both
-/// backends use is the same comparison, so this is its executable spelling.
-pub(crate) fn setting_in_retired_family(key: &str, family: &str) -> bool {
-    key == family
-        || key
-            .strip_prefix(family)
-            .is_some_and(|rest| rest.starts_with(".node."))
-}
-
-pub(crate) fn validate_retired_setting_families(
-    key: &str,
-    retired_families: &[&str],
-) -> Result<(), StoreError> {
-    if retired_families.len() > RETIRED_SETTING_FAMILIES_MAX
-        || retired_families
-            .iter()
-            .any(|family| family.trim().is_empty() || setting_in_retired_family(key, family))
-    {
-        return Err(StoreError::Database(
-            "retired setting families must be bounded, non-empty, and must not match the written key"
-                .to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-/// The shared delete for one retired family; `$1`/`?1` is the family.
-pub(crate) const RETIRE_SETTING_FAMILY_SQL_SQLITE: &str = "DELETE FROM settings \
-     WHERE key = ?1 OR substr(key, 1, length(?1) + 6) = ?1 || '.node.'";
-pub(crate) const RETIRE_SETTING_FAMILY_SQL_HIQLITE: &str = "DELETE FROM settings \
-     WHERE key = $1 OR substr(key, 1, length($1) + 6) = $1 || '.node.'";
 
 pub(crate) fn validate_generated_settings(
     generation_key: &str,

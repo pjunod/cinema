@@ -4542,37 +4542,6 @@ impl SettingsStore for HiqliteAuthStore {
         Ok(())
     }
 
-    async fn put_setting_retiring(
-        &self,
-        key: &str,
-        value: &str,
-        retired_families: &[&str],
-    ) -> Result<(), StoreError> {
-        crate::store::validate_retired_setting_families(key, retired_families)?;
-        let now = self.now()?;
-        let upsert = "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
-                      ON CONFLICT(key) DO UPDATE SET \
-                      value = excluded.value, updated_at = excluded.updated_at";
-        validate_sql(upsert)?;
-        validate_sql(crate::store::RETIRE_SETTING_FAMILY_SQL_HIQLITE)?;
-        let statements = std::iter::once((upsert.to_owned(), params!(key, value, now))).chain(
-            retired_families.iter().map(|family| {
-                (
-                    crate::store::RETIRE_SETTING_FAMILY_SQL_HIQLITE.to_owned(),
-                    params!(*family),
-                )
-            }),
-        );
-        self.client()
-            .txn(statements)
-            .await
-            .map_err(database_error)?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        Ok(())
-    }
-
     async fn put_settings_if_generation(
         &self,
         generation_key: &str,
