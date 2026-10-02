@@ -73,6 +73,12 @@ func autoNegativeLinkAcknowledgement(receipt: String, values: [String], status: 
         UUID(uuidString: receipt)?.uuidString.lowercased() == receipt
 }
 
+func autoDecoderAcknowledgementCurrent(accepted: Bool, observedAtMs: Int, nowMs: Int,
+                                       remainingMs: Int, sameAttachment: Bool) -> Bool {
+    accepted && sameAttachment && remainingMs > 0 && nowMs >= observedAtMs &&
+        nowMs - observedAtMs < min(remainingMs, 250)
+}
+
 /// One viewer transaction's optional portion; refusal leaves the same original
 /// deadline and its healthy-route reserve, never a freshly started fallback.
 struct AutoViewerBoundaryBudget {
@@ -387,7 +393,7 @@ private struct AppleCandidateRecoveryLog: Encodable {
     let candidate_recovery: Sample
     struct Sample: Encodable {
         var cause = "decode"
-        let event_id = UUID().uuidString
+        let event_id = UUID().uuidString.lowercased()
         let candidate_id: String
         let recipe_digest: [UInt8]
         let age_ms = 0
@@ -2345,6 +2351,7 @@ final class PlayerController: ObservableObject {
     private var autoDecoderRejected: Set<String> = []
     private var autoDecodePressure = AutoDecodePressureWindow()
     private var autoDecodeQualityResponseUsed = false
+    private var autoDecodeProofPending = false
     private var autoRecoveryCause: AutoRecoveryCauseTicket?
     private var autoPreparedTargetRevision: UInt64?
     private var autoPreparedViewerEpoch: Int?
@@ -2992,11 +2999,22 @@ final class PlayerController: ObservableObject {
     }
 
     private func acknowledgeNegativeLink(_ payload: AppleCandidateLinkLog, receipt: String, deadline: Double) async -> Bool {
+        guard payload.link_sample.negative, payload.link_sample.receipt == receipt,
+              let body = try? JSONEncoder().encode(payload) else { return false }
+        return await acknowledgeClientEvidence(body, receipt: receipt, header: "X-Plurx-Link-Accepted", deadline: deadline)
+    }
+
+    private func acknowledgeDecoderFailure(_ payload: AppleCandidateRecoveryLog, deadline: Double) async -> Bool {
+        guard payload.candidate_recovery.cause == "decode",
+              let body = try? JSONEncoder().encode(payload) else { return false }
+        return await acknowledgeClientEvidence(body, receipt: payload.candidate_recovery.event_id,
+            header: "X-Plurx-Recovery-Accepted", deadline: deadline)
+    }
+
+    private func acknowledgeClientEvidence(_ body: Data, receipt: String, header: String, deadline: Double) async -> Bool {
         let remaining = (deadline - ProcessInfo.processInfo.systemUptime) * 1000
         guard remaining.isFinite, remaining >= 1,
-              payload.link_sample.negative, payload.link_sample.receipt == receipt,
-              let url = Session.shared.url("/api/v1/client-log"),
-              let body = try? JSONEncoder().encode(payload) else { return false }
+              let url = Session.shared.url("/api/v1/client-log") else { return false }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
@@ -3008,8 +3026,9 @@ final class PlayerController: ObservableObject {
             group.addTask {
                 guard let (_, response) = try? await URLSession.shared.data(for: frozenRequest),
                       let response = response as? HTTPURLResponse,
+                      ProcessInfo.processInfo.systemUptime < deadline,
                       autoNegativeLinkAcknowledgement(receipt: receipt,
-                        values: response.value(forHTTPHeaderField: "X-Plurx-Link-Accepted").map { [$0] } ?? [],
+                        values: response.value(forHTTPHeaderField: header).map { [$0] } ?? [],
                         status: response.statusCode, sameEndpoint: response.url == url, remainingMs: waitMs)
                 else { return false }
                 return true
@@ -3223,12 +3242,15 @@ final class PlayerController: ObservableObject {
             eligible: wantsPlayback && surface.presenting && player.rate > 0 &&
                 seekState.pendingMs == nil && !isChangingStream &&
                 (bufferedRunwaySeconds() ?? 0) >= 10)
-        if decodePressure, noteAutoDecodeFailure(pressure: autoDecodePressure.evidence) {
+        if decodePressure {
             let pressureAttempt = snapshotAttempt()
             let position = realPositionMs()
+            let evidence = autoDecodePressure.evidence
             Task { @MainActor [weak self] in
                 guard let self, self.attemptStillCurrent(pressureAttempt, fence: .autoQualityOffer),
                       !self.isChangingStream else { return }
+                guard await self.noteAutoDecodeFailure(pressure: evidence),
+                      self.attemptStillCurrent(pressureAttempt, fence: .autoQualityOffer) else { return }
                 await self.reopen(at: position, intent: .sameDeliveryRepair)
             }
         }
@@ -8487,7 +8509,10 @@ final class PlayerController: ObservableObject {
             eventStatus: detail?.eventStatus,
             eventComment: detail?.eventComment
         )
-        let autoDecodeRecovery = isCompatibilityFailure && noteAutoDecodeFailure()
+        let decoderAttempt = snapshotAttempt()
+        let autoDecodeRecovery = isCompatibilityFailure ? await noteAutoDecodeFailure() : false
+        guard player.currentItem === item,
+              attemptStillCurrent(decoderAttempt, fence: .itemFailureLadder) else { return }
         // Only a transport failure can be answered by another node; see
         // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
         // same question and would walk the whole list for a terminal 404.
@@ -9474,7 +9499,11 @@ final class PlayerController: ObservableObject {
     /// then say so.
     private func handleBlackFrameDecodeFailure(at position: Int) async {
         guard started, !isChangingStream, player.currentItem != nil else { return }
-        noteAutoDecodeFailure()
+        let decoderAttempt = snapshotAttempt()
+        let decoderItem = player.currentItem
+        _ = await noteAutoDecodeFailure()
+        guard player.currentItem === decoderItem,
+              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecodeFailure) else { return }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()
@@ -10981,30 +11010,43 @@ extension PlayerController {
         }
     }
 
-    @discardableResult private func noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = nil) -> Bool {
+    @discardableResult private func noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = nil) async -> Bool {
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
               selectedHeight == nil, !selectedQualityIsOriginal,
               let candidates = decision?.qualityCandidates,
               let current = candidates.first(where: { $0.id == autoActiveCandidateId }),
-              !autoDecoderRejected.contains(current.id) else { return false }
-        autoDecoderRejected.insert(current.id)
-        if let sessionId {
-            postClientLog(AppleCandidateRecoveryLog(session_id: sessionId, candidate_recovery: .init(
+              !autoDecoderRejected.contains(current.id), !autoDecodeProofPending,
+              let sessionId, let item = player.currentItem else { return false }
+        let payload = AppleCandidateRecoveryLog(session_id: sessionId, candidate_recovery: .init(
                 candidate_id: current.id, recipe_digest: current.recipeDigest,
                 decoder_failed: pressure == nil,
                 rendered_elapsed_ms: pressure?.elapsedMs ?? 0, position_progress_ms: pressure?.progressMs ?? 0,
                 dropped_frames: pressure?.droppedFrames ?? 0,
-                runway_ms: Int(max(0, (bufferedRunwaySeconds() ?? 0) * 1_000)))))
-        }
+                runway_ms: Int(max(0, (bufferedRunwaySeconds() ?? 0) * 1_000))))
+        let captured = snapshotAttempt()
+        let observedAt = PlaybackControlSession.monotonicMs()
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.25
+        autoDecodeProofPending = true
+        defer { autoDecodeProofPending = false }
+        guard await acknowledgeDecoderFailure(payload, deadline: deadline),
+              autoDecoderAcknowledgementCurrent(accepted: true, observedAtMs: observedAt,
+                nowMs: PlaybackControlSession.monotonicMs(), remainingMs: 250,
+                sameAttachment: player.currentItem === item && self.sessionId == sessionId),
+              !Task.isCancelled, attemptStillCurrent(captured, fence: .itemFailureLadder),
+              PlaybackControlSession.monotonicMs() >= observedAt,
+              ProcessInfo.processInfo.systemUptime < deadline,
+              model?.displayAwareAuto == true, model?.autoAbr == true,
+              player.currentItem === item, self.sessionId == sessionId,
+              autoActiveCandidateId == current.id, selectedHeight == nil, !selectedQualityIsOriginal else { return false }
+        autoDecoderRejected.insert(current.id)
         guard !autoDecodeQualityResponseUsed else { return false }
         let next = autoRecoveryCandidate(candidates, current: current, rejected: autoDecoderRejected, decoderRecovery: true)
         if let next {
-            guard let sessionId, let item = player.currentItem else { return false }
             autoDecodeQualityResponseUsed = true
             autoRecoveryCause = AutoRecoveryCauseTicket(session: sessionId, attachment: ObjectIdentifier(item),
                 incumbentCandidate: current.id, proposedCandidate: next.id, cause: .decode,
-                observedAtMs: PlaybackControlSession.monotonicMs())
+                observedAtMs: observedAt)
             autoDesiredCandidate = next
             autoPreparing = false
             autoUpgradeSinceMs = nil

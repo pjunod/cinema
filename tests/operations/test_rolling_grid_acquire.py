@@ -8,12 +8,59 @@ import sys
 import tempfile
 import unittest
 import time
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 ACQUIRE = importlib.machinery.SourceFileLoader("rolling_acquire", str(ROOT / "scripts/rolling-grid-acquire")).load_module()
 
 
 class RollingAcquireOwnershipTests(unittest.TestCase):
+    def test_explicit_test_stack_crosses_both_owned_child_boundaries_without_inherited_environment(self):
+        class CapturedLaunch(Exception):
+            pass
+        class Group:
+            def kill(self): pass
+            def remove(self): pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = {"nonce": "a" * 64, "root": str(root), "source": str(root / "source"),
+                        "source_sha256": "b" * 64, "probe": str(root / "probe"), "height": 360,
+                        "page": str(root / "page"), "test_binary": str(root / "binary"),
+                        "ffmpeg": str(root / "ffmpeg"), "ffprobe": str(root / "ffprobe"),
+                        "test_stack_bytes": 8388608}
+            Path(manifest["source"]).write_bytes(b"synthetic fixture")
+            launched = []
+            def capture(command, **kwargs):
+                launched.append((command, kwargs["env"]))
+                raise CapturedLaunch()
+            with patch.dict(os.environ, {"RUST_MIN_STACK": "33554432", "SECRET_TOKEN": "excluded"}), \
+                 patch.object(ACQUIRE, "admit_owner", return_value=root), \
+                 patch.object(ACQUIRE, "validate", return_value=root), \
+                 patch.object(ACQUIRE, "execution_envelope", return_value={"memory_max": "2147483648"}), \
+                 patch.object(ACQUIRE, "OwnedNamespace", return_value=Group()), \
+                 patch.object(ACQUIRE.subprocess, "Popen", side_effect=capture):
+                with self.assertRaises(CapturedLaunch):
+                    ACQUIRE.acquire(manifest)
+                with self.assertRaises(CapturedLaunch):
+                    ACQUIRE.acquire_worker(manifest, time.monotonic() + 20)
+            self.assertEqual(len(launched), 2)
+            self.assertIn("--exec-owned-cell", launched[0][0])
+            self.assertIn("--exec-owned-test", launched[1][0])
+            for _, environment in launched:
+                self.assertEqual(environment["RUST_MIN_STACK"], "8388608")
+                self.assertNotIn("SECRET_TOKEN", environment)
+            self.assertEqual(set(launched[0][1]), {"PATH", "HOME", "RUST_MIN_STACK"})
+            self.assertEqual(set(launched[1][1]), {"PATH", "HOME", "RUST_MIN_STACK",
+                                                 "PLURX_ROLLING_CELL", "PLURX_FFMPEG", "PLURX_FFPROBE"})
+            envelope = json.loads((root / "execution-envelope.json").read_text())
+            self.assertEqual(envelope["test_process_environment"], launched[1][1])
+            default = dict(manifest)
+            del default["test_stack_bytes"]
+            self.assertNotIn("RUST_MIN_STACK", ACQUIRE.owned_child_environment(default))
+            for invalid in (True, "8388608", 2097151, 2097153, 8388609, 33554432):
+                with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, "test_stack_bytes"):
+                    ACQUIRE.owned_child_environment(dict(manifest, test_stack_bytes=invalid))
+
     def test_absolute_supervisor_bounds_stalled_operation_including_drain_and_close(self):
         class Worker:
             pid = 123

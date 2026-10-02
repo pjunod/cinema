@@ -220,8 +220,9 @@ class Controller internal constructor(
                         pipeline === player && establishedPlayback && presentationForeground && player.isPlaying &&
                             playbackIntent.pendingSeek == null && directedChange == null &&
                             player.bufferedPosition - player.currentPosition >= 10_000L)) {
-                    if (noteAutoDecodeFailure(pressure = autoDecodePressure.evidence)) {
-                        restartAt(realPosition(), "decode-quality")
+                    val evidence = autoDecodePressure.evidence
+                    scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                        if (noteAutoDecodeFailure(pressure = evidence)) restartAt(realPosition(), "decode-quality")
                     }
                 }
             }
@@ -913,6 +914,12 @@ class Controller internal constructor(
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { handlePlayerError(error) }
+        }
+
+        private suspend fun handlePlayerError(error: PlaybackException) {
+            val failureAttachment = player
+            val failureAttempt = stallGuard.observeStall()
             if (!playbackControlBootstrapFence.isActive()) return
             // The departing item's failure does not own a newer requested
             // recipe (or seek create). That create and its target deadline
@@ -1000,7 +1007,9 @@ class Controller internal constructor(
                 return
             }
             if (handleAudioSinkFailure(error, refusal)) return
-            if (controlErrorCode(error.errorCode) == ClientErrorCode.DECODER && noteAutoDecodeFailure()) {
+            val decodeRecovery = controlErrorCode(error.errorCode) == ClientErrorCode.DECODER && noteAutoDecodeFailure()
+            if (player !== failureAttachment || !stallGuard.isCurrent(failureAttempt)) return
+            if (decodeRecovery) {
                 restartAt(realPosition(), "decode-quality")
                 raiseRecoveryStep(refusal, "Retrying a decoder-compatible quality.")
                 return
@@ -3268,24 +3277,35 @@ class Controller internal constructor(
         surfaceOwner.logOnly(mediaMutationEpoch, "auto_quality_recovery:${if (severe) "link" else "encode"}:${next.id}")
     }
 
-    private fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
+    private var autoDecodeProofPending = false
+    private suspend fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return false
         val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return false
-        if (!autoDecoderRejected.add(current.id)) return false
-        sessionId?.let { session -> postPlaybackClientLog(scope, PlaybackClientLog(level = "warn",
+        if (autoDecoderRejected.contains(current.id) || autoDecodeProofPending) return false
+        val session = sessionId ?: return false
+        val attachment = player
+        val attempt = stallGuard.observeStall()
+        val observedAt = monotonicNowMs()
+        val event = PlaybackClientLog(level = "warn",
             event = "candidate_recovery", message = "Candidate decoder evidence", ua = "Android Media3", sessionId = session,
             candidateRecovery = CandidateRecoverySample(event_id = UUID.randomUUID().toString(), candidate_id = current.id,
                 recipe_digest = current.recipe_digest, decoder_failed = pressure == null,
                 rendered_elapsed_ms = pressure?.elapsedMs ?: 0, position_progress_ms = pressure?.progressMs ?: 0,
-                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0)))) }
+                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0)))
+        autoDecodeProofPending = true
+        val accepted = try { acknowledgeDecoderFailure(event, 250L) } finally { autoDecodeProofPending = false }
+        if (!autoDecoderAcknowledgementCurrent(accepted, observedAt, monotonicNowMs(), 250L,
+                player === attachment && sessionId == session) || !stallGuard.isCurrent(attempt) ||
+            autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            monotonicNowMs() < observedAt || monotonicNowMs() - observedAt > 250L) return false
+        autoDecoderRejected.add(current.id)
         if (autoDecodeQualityResponseUsed) return false
         val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
-        val session = sessionId ?: return false
         autoDecodeQualityResponseUsed = true
         autoRecoveryCause = AutoRecoveryCauseTicket(session, player, current.id, next.id,
-            tv.plurx.app.data.ReopenReason.Decode, monotonicNowMs())
+            tv.plurx.app.data.ReopenReason.Decode, observedAt)
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
