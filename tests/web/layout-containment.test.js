@@ -198,6 +198,12 @@ test("fractional content columns have explicit non-intrinsic floors", () => {
 });
 
 const index = fs.readFileSync(path.join(ROOT, ASSETS[0]), "utf8");
+test("media info track chips remain boxes with a separate more row", () => {
+  assert.match(index, /\.media-preparation-side \.trk\{[^}]*display:inline-block/);
+  assert.match(index, /\.media-preparation-side \.trkfold summary\{[^}]*display:grid;grid-template-columns:minmax\(0,1fr\)/);
+  assert.match(index, /\.media-preparation-side \.trkmore\{[^}]*display:flex/);
+  assert.match(index, /\.media-preparation-side \.trkfold summary::after\{content:none\}/);
+});
 assert.match(index, /main\{[^}]*padding:var\(--main-inset-top\) var\(--main-inset-x\) 60px/);
 assert.match(index, /\.hero\{[^}]*margin:calc\(-1 \* var\(--main-inset-top\)\) calc\(-1 \* var\(--main-inset-x\)\)/);
 assert.match(index, /\.specs\{[^}]*grid-template-columns:84px minmax\(0,1fr\)/);

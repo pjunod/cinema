@@ -900,7 +900,12 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // remain bound by query_map; full-schema contracts execute that exact constant
 // on both backends. The terminal DELETE previously bound inline and contributed
 // no unchecked site, so it does not change this count.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
+// 91 -> 92: analysis_reconciliation_page prepares its keyset SELECT before
+// query_map binds `after` and `limit` to ?1 and ?2. The shared store contract
+// analysis_reconciliation_preserves_work_and_fences_changed_requests executes
+// the paginated query; the separate preparation keeps its arity out of this
+// same-statement scanner's reach.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {

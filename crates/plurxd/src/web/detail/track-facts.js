@@ -174,6 +174,29 @@ function preparationRow(title,value,extra=""){
   const v=value||{state:"unknown",detail:"Status was not returned"};
   return `<div class="prep-row"><div><h3>${esc(title)}</h3><p>${esc(v.detail||"")}</p>${extra}</div>${preparationBadge(v.state)}</div>`;
 }
+function preparationGroups(rows){
+  const groups=[
+    ["attention","Needs attention",["attention","failed"]],
+    ["processing","Processing",["running","verified","cancelling"]],
+    ["queued","Queued",["queued"]],
+    ["pending","Pending",["pending"]],
+    ["cancelled","Cancelled",["cancelled"]],
+    ["on-demand","On demand",["on_demand"]],
+    ["done-ready","Done & ready",["done","ready","committed","succeeded"]],
+    ["unknown","Unknown",["unknown"]],
+    ["off","Off",["off"]],
+    ["not-needed","Not needed",["none","not_applicable"]],
+    ["unsupported","Unsupported",["unsupported"]],
+    ["enabled","Enabled",["enabled"]],
+    ["idle","Idle",["idle"]],
+  ];
+  const known=new Set(groups.flatMap(([, ,states])=>states));
+  return groups.map(([id,label,states])=>{
+    const members=rows.filter(([,value])=>states.includes(known.has(value?.state)?value.state:"unknown"));
+    if(!members.length) return "";
+    return `<details class="prep-group" data-prep-disclosure="${id}"><summary><span>${esc(label)}</span><span class="prep-count" aria-label="${members.length} parts">${members.length}</span></summary><div class="prep-group-items">${members.map(([title,value,extra])=>preparationRow(title,value,extra)).join("")}</div></details>`;
+  }).join("");
+}
 function mediaPreparationHtml(f,data){
   const subs=data.subtitles||{}, tracks=f.subtitle_streams||[];
   const preferred=tracks.find(t=>t.index===subs.preferred_index);
@@ -198,9 +221,7 @@ function mediaPreparationHtml(f,data){
     :states.some(v=>!v||v==="unknown")?"Preparation status is incomplete"
     :states.some(v=>["pending","running","queued"].includes(v))?"Preparation in progress":states.every(v=>["ready","done","none","not_applicable","unsupported"].includes(v))?"Core preparation complete":"Preparation is incomplete";
   return `<div class="prep-overview" role="status">${esc(headline)}<small>Preparation status does not prevent playback.</small></div>
-    ${essentials.map(([title,value,extra])=>preparationRow(title,value,extra)).join("")}
-    <div class="prep-other-heading"><h3>Other processing</h3><p>Optional work and features generated when needed.</p></div>
-    ${other.map(([title,value])=>preparationRow(title,value)).join("")}
+    ${preparationGroups([...essentials,...other])}
     <p class="prep-checked">Checked ${esc(new Date(data.checked_at_ms).toLocaleTimeString())} · Recorded extraction results; delivery is verified when used.</p>`;
 }
 async function hydrateMediaPreparation(files,generation=PAGE_RENDER_GENERATION){
@@ -213,15 +234,31 @@ async function hydrateMediaPreparation(files,generation=PAGE_RENDER_GENERATION){
     try{
       const data=await api(`/files/${id}/preparation`);
       if(generation!==PAGE_RENDER_GENERATION||document.getElementById(`prep-file-${id}`)!==mount) continue;
-      const prior=/** @type {HTMLDetailsElement|null} */ (mount.querySelector('details[data-prep-disclosure="tracks"]'));
-      const open=prior?.open, focused=prior&&document.activeElement===prior.querySelector("summary");
       const signature=JSON.stringify({...data,checked_at_ms:0});
       if(mount.dataset.prepSnapshot!==signature){
+        const disclosures=new Map(Array.from(mount.querySelectorAll('details[data-prep-disclosure]'),(/** @type {HTMLDetailsElement} */ prior)=>[
+          prior.dataset.prepDisclosure,{open:prior.open,focused:document.activeElement===prior.querySelector("summary")}
+        ]));
         mount.innerHTML=mediaPreparationHtml(f,data);
         mount.dataset.prepSnapshot=signature;
-        const details=/** @type {HTMLDetailsElement|null} */ (mount.querySelector('details[data-prep-disclosure="tracks"]'));
-        if(details&&open) details.open=true;
-        if(details&&focused) details.querySelector("summary").focus({preventScroll:true});
+        let restoredFocus=false;
+        for(const details of /** @type {NodeListOf<HTMLDetailsElement>} */ (mount.querySelectorAll('details[data-prep-disclosure]'))){
+          const prior=disclosures.get(details.dataset.prepDisclosure);
+          if(prior?.open) details.open=true;
+          if(prior?.focused){
+            // A subtitle status change can move its disclosure into another group.
+            const parent=/** @type {HTMLDetailsElement|null} */ (details.parentElement.closest('details[data-prep-disclosure]'));
+            if(parent) parent.open=true;
+            details.querySelector("summary").focus({preventScroll:true});
+            restoredFocus=true;
+          }
+        }
+        // A group disappears when its last part changes state. Keep keyboard
+        // navigation in the preparation list instead of dropping focus to body.
+        if(!restoredFocus&&Array.from(disclosures.values()).some(prior=>prior.focused)){
+          const fallback=/** @type {HTMLElement|null} */ (mount.querySelector('.prep-group>summary'));
+          fallback?.focus({preventScroll:true});
+        }
       }
       // Poll activity reported by the queue, never infer it from missing outputs.
       const pending=data.active===true;

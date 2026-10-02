@@ -5902,6 +5902,9 @@ mod tests {
                 // Admin-only route: `AdminUser` was extracted before the body
                 // ran, so `true` is that proof handed on.
                 ("analysis.rs".to_owned(), "true".to_owned()),
+                // Reconciliation also requires AdminUser before previewing
+                // candidate target names from the roster.
+                ("analysis_reconcile.rs".to_owned(), "true".to_owned()),
                 // Any signed-in household member reaches this one, so the
                 // permission is this reader's own admin flag.
                 ("system.rs".to_owned(), "user.0.is_admin".to_owned()),

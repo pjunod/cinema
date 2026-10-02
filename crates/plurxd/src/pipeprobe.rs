@@ -143,8 +143,15 @@ impl PipelineReport {
 ///
 /// Runs once at startup, after encoder detection — it needs to know which
 /// encoder won, because a graph is only worth probing if it can feed it.
-pub async fn probe(work_dir: &Path, encoder: Encoder) -> PipelineReport {
-    probe_with(&Spawn, work_dir, encoder).await
+pub async fn probe(work_dir: &Path, runtime_cache: &Path, encoder: Encoder) -> PipelineReport {
+    probe_with(
+        &Spawn {
+            runtime_cache: Some(runtime_cache),
+        },
+        work_dir,
+        encoder,
+    )
+    .await
 }
 
 /// The external tools this probe drives.
@@ -182,15 +189,30 @@ enum Stdout {
 }
 
 /// The production tools: the real binaries, and nothing else.
-struct Spawn;
+#[derive(Default)]
+struct Spawn<'a> {
+    runtime_cache: Option<&'a Path>,
+}
 
-impl Tools for Spawn {
+impl Spawn<'_> {
+    fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(program);
+        if let Some(runtime_cache) = self.runtime_cache {
+            // The startup probe must run with the same writable shader/font
+            // cache as playback, including when the service has HOME=/.
+            crate::producer_spawn::configure_ffmpeg_runtime(&mut command, runtime_cache);
+        }
+        command
+    }
+}
+
+impl Tools for Spawn<'_> {
     async fn ffmpeg(
         &self,
         args: Vec<String>,
         stdout: Stdout,
     ) -> Result<std::process::Output, String> {
-        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        let mut command = self.command(ffmpeg_bin());
         command
             .args(&args)
             .stdin(std::process::Stdio::null())
@@ -209,7 +231,7 @@ impl Tools for Spawn {
     }
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
-        let mut command = tokio::process::Command::new(ffprobe_bin());
+        let mut command = self.command(ffprobe_bin());
         command
             .args(&args)
             .stdin(std::process::Stdio::null())
@@ -333,7 +355,7 @@ static BURN_FILTERS: tokio::sync::OnceCell<BurnFilters> = tokio::sync::OnceCell:
 /// seam the tone-map probe uses.
 pub async fn burn_filters() -> BurnFilters {
     *BURN_FILTERS
-        .get_or_init(|| async { burn_filters_with(&Spawn).await })
+        .get_or_init(|| async { burn_filters_with(&Spawn::default()).await })
         .await
 }
 
@@ -555,14 +577,15 @@ async fn run<T: Tools>(
 
 /// Did the tool succeed, and if not, what did it say?
 ///
-/// The rejection carried into the report is ffmpeg's own first complaint. A
+/// The rejection carries a bounded tail of ffmpeg's diagnostics: an initial
+/// shader-cache warning can otherwise hide the actual filter/device error. A
 /// non-zero exit with an empty stderr still has to produce a reason: "rejected,
 /// no reason given" is a verdict nobody can act on.
 fn check_exit(output: &std::process::Output) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
-    Err(first_line(&String::from_utf8_lossy(&output.stderr)))
+    Err(diagnostic_summary(&String::from_utf8_lossy(&output.stderr)))
 }
 
 /// The exact ffmpeg command one candidate is measured with.
@@ -810,13 +833,16 @@ fn fixture_args(path: &Path) -> Vec<String> {
     .collect()
 }
 
-fn first_line(stderr: &str) -> String {
-    stderr
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-        .unwrap_or("no error output")
-        .to_owned()
+fn diagnostic_summary(stderr: &str) -> String {
+    let stderr = stderr.trim();
+    if stderr.is_empty() {
+        return "no error output".to_owned();
+    }
+    let mut start = stderr.len().saturating_sub(4096);
+    while !stderr.is_char_boundary(start) {
+        start += 1;
+    }
+    stderr[start..].to_owned()
 }
 
 /// `movie=` takes a filter-argument path: colons and backslashes are special.
@@ -842,7 +868,7 @@ mod tests {
     /// burn preflight refuses a session on is the parse this guard proves.
     async fn has_filters(names: &[&str]) -> bool {
         let args = vec!["-hide_banner".to_owned(), "-filters".to_owned()];
-        let Ok(out) = Spawn.ffmpeg(args, Stdout::Capture).await else {
+        let Ok(out) = Spawn::default().ffmpeg(args, Stdout::Capture).await else {
             return false;
         };
         declares_filters(&String::from_utf8_lossy(&out.stdout), names)
@@ -971,7 +997,7 @@ mod tests {
     #[tokio::test]
     async fn the_probe_reads_what_ffprobe_answers() {
         plurx_core::testfixtures::require_ffmpeg();
-        let output = Spawn
+        let output = Spawn::default()
             .ffprobe(vec!["-version".to_owned()])
             .await
             .expect("ffprobe answers its own version");
@@ -1006,12 +1032,18 @@ mod tests {
         }
         let dir = crate::test_tempdir().expect("workdir");
 
-        let clip = fixture(&Spawn, dir.path()).await.expect("fixture");
+        let clip = fixture(&Spawn::default(), dir.path())
+            .await
+            .expect("fixture");
         // Really HDR10, in the stream, not just a 10-bit pixel format — the
         // decoder has to carry this through for a GPU graph to be testable.
-        let tags = probe_stream(&Spawn, &clip, "color_transfer,color_primaries,color_space")
-            .await
-            .expect("probe");
+        let tags = probe_stream(
+            &Spawn::default(),
+            &clip,
+            "color_transfer,color_primaries,color_space",
+        )
+        .await
+        .expect("probe");
         let get = |k: &str| {
             tags.iter()
                 .find(|(key, _)| key == k)
@@ -1023,15 +1055,26 @@ mod tests {
 
         // Generating it twice reuses the first: the probe costs a few seconds
         // once per boot, not once per candidate.
-        assert_eq!(fixture(&Spawn, dir.path()).await.expect("cached"), clip);
+        assert_eq!(
+            fixture(&Spawn::default(), dir.path())
+                .await
+                .expect("cached"),
+            clip
+        );
 
         // The reference run: the CPU chain, checked the same ways every
         // candidate is. It asserts BT.709 on its output internally, so
         // reaching a Sample at all is that assertion passing.
         let out = dir.path().join("out.mp4");
-        let sample = run(&Spawn, &clip, &out, Pipeline::Cpu, Encoder::Software)
-            .await
-            .expect("the CPU chain must work — it is the fallback for everything");
+        let sample = run(
+            &Spawn::default(),
+            &clip,
+            &out,
+            Pipeline::Cpu,
+            Encoder::Software,
+        )
+        .await
+        .expect("the CPU chain must work — it is the fallback for everything");
         assert!(
             sample.y > 1.0 && sample.y < 254.0,
             "a black or blown-out reference means the measurement is broken, not the picture: {sample:?}"
@@ -1264,12 +1307,41 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(unix)]
+    async fn the_probe_uses_the_writable_runtime_cache_with_a_root_home() {
+        let root = crate::test_tempdir().expect("root");
+        let runtime_cache = root.path().join("runtime");
+        std::fs::create_dir(&runtime_cache).expect("cache exists before startup probes");
+        let tools = Spawn {
+            runtime_cache: Some(&runtime_cache),
+        };
+        let mut command = tools.command("/bin/sh");
+        command.env("HOME", "/").args([
+            "-c",
+            "test \"$AV_LOG_FORCE_NOCOLOR\" = 1 && printf shader > \"$XDG_CACHE_HOME/probe-cache\"",
+        ]);
+        let output = crate::process_control::output_job_owned(
+            &mut command,
+            crate::process_control::ChildWork::background("tone-map pipeline probe"),
+        )
+        .await
+        .expect("spawn probe child");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            std::fs::read(runtime_cache.join("probe-cache")).expect("child used app cache"),
+            b"shader"
+        );
+    }
+
+    #[tokio::test]
     async fn a_software_encoder_skips_the_probe_entirely() {
         let dir = crate::test_tempdir().expect("workdir");
         // Through the real entry point: a software encode must not reach the
         // tools at all, so this cannot spawn anything.
         assert_eq!(
-            probe(dir.path(), Encoder::Software).await.selected(),
+            probe(dir.path(), dir.path(), Encoder::Software)
+                .await
+                .selected(),
             Pipeline::Cpu
         );
         let report = probe_with(&Recorded::default(), dir.path(), Encoder::Software).await;
@@ -1411,7 +1483,7 @@ mod tests {
                 ..Recorded::default()
             })
             .await,
-            "[vf#0:0] Impossible to convert"
+            "[vf#0:0] Impossible to convert\nExiting"
         );
 
         // 2. It ran, and produced a picture still tagged for HDR — which
@@ -1847,16 +1919,29 @@ mod tests {
         }
     }
 
-    /// The rejection sent to the report is ffmpeg's own first complaint, not
-    /// the last line of its banner.
+    /// Keep the filter error after any nonfatal driver-cache warning.
     #[test]
-    fn a_failure_is_reported_as_ffmpegs_first_complaint() {
+    fn a_failure_reports_the_diagnostics_after_a_cache_warning() {
+        let diagnostics = "Failed to create //.cache for shader cache (Permission denied)---disabling.\n[vf#0:0] No such filter: 'tonemap_vaapi'\nError opening filters\n";
+        let why =
+            check_exit(&failed_output(diagnostics).expect("output")).expect_err("failed graph");
+        assert!(why.contains("Permission denied"));
+        assert!(why.contains("No such filter: 'tonemap_vaapi'"));
+        assert!(why.contains("Error opening filters"));
         assert_eq!(
-            first_line("\n  \n[vf#0:0] No such filter: 'zscale'\nError opening filters\n"),
-            "[vf#0:0] No such filter: 'zscale'"
+            diagnostic_summary("\n  \n[vf#0:0] No such filter: 'zscale'\nError opening filters\n"),
+            "[vf#0:0] No such filter: 'zscale'\nError opening filters"
         );
-        assert_eq!(first_line(""), "no error output");
-        assert_eq!(first_line("   \n\t\n"), "no error output");
+        assert_eq!(diagnostic_summary(""), "no error output");
+        assert_eq!(diagnostic_summary("   \n\t\n"), "no error output");
+    }
+
+    #[test]
+    fn probe_diagnostics_are_bounded_without_splitting_utf8() {
+        let diagnostics = format!("{}\nDevice creation failed", "界".repeat(4096));
+        let why = diagnostic_summary(&diagnostics);
+        assert!(why.len() <= 4096);
+        assert!(why.ends_with("Device creation failed"));
     }
 
     #[test]
