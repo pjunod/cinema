@@ -271,3 +271,45 @@ after-restart case is real, because Paul tests right after deploys.
    behind the 24 s row, plus scratch sizing.
 4. **Master/child deadline alignment**, per ruling 3.
 **Packaging note:** host, forge and film names are normalized for repository review. Database and boot findings retain the supplied review’s provenance; this is not a new runtime inspection. The companion amendment responds to the evidence-file location claim.
+
+
+## 6. Final implementation review — promotion blocked
+
+**Reviewed:** 2026-10-02 · **Candidate:** `6835957c` · **Base:** `955e1551`
+· **PR:** [draft #711](http://192.168.4.7:3000/noirr/plurx/pulls/711).
+This is the single final independent implementation review required by
+[the build contract](PLAYBACK-STARTUP-LATENCY-BUILD.md), distinct from the
+proposal review above. It read the implementation and evidence without
+running tests, editing code or changing CI. Main `7f738563` was subsequently
+integrated; its changes update store fixture expectations.
+
+| Finding | Disposition after review |
+|---|---|
+| P1: native error classification ran before fenced-attachment recovery | Fixed. The shipped media-error handler gives the existing authority reopen owner precedence. Native readiness and classification recheck attachment/execution ownership and authority after awaits, before reload, exhaustion or codec fallback. Shipped parser/owner tests cover known retirement, retirement during playlists/init, typed retirement and late superseded replies. |
+| P2: native readiness 401/403 became Retry/Close startup exhaustion | Fixed. Current startup work is cancelled before handing the typed refusal to the existing `auth_401_403` surface. Tests use the actual parser, media-error handler and policy surface and assert `sign_in`/`close` for master, child and classification refusals. |
+| Promotion blocker: transport-only policy admission enables unqualified source/rate classes | Unresolved. Generated AVC/AAC at 1× with eight-second cuts does not qualify live HEVC/DV, nonzero resume, long/open GOP, rate changes, remote transfer, the real daemon actor/flow/scratch path or physical Apple/Android. The arithmetic retains illegal publication-spacing rows. Keep the candidate draft; do not merge or deploy until production admission retains conservative behavior for unproved classes or the missing evidence qualifies them. |
+
+The browser receipts remain evidence for their captured healthy paths and
+source hashes. Later authority/authentication fixes have focused shipped-code
+regressions; those receipts are not a new complete device qualification of
+the changed candidate. Exact executed checks and remaining work live in
+[the M2 receipt](PLAYBACK-STARTUP-LATENCY-M2-20261002.json).
+
+**Post-review regressions:** the first focused Rust run passed three cases
+and failed two. The capacity fixture used 0.95× at the existing 0.05×
+measurement margin; it now uses a 0.90× deficit, without changing the
+capacity rule. The continuity test exposed a real phase defect: reserve was
+classified from the consumed previous snapshot and not refreshed after
+publication. The committed prefix now updates the phase against the unchanged
+steady frontier. The trace asserts steady publication from 320 seconds.
+Only the two failed cases were retried and passed; the three passing cases
+were retained. The master/init fixture initially omitted the first fragment
+required by copy response admission. With the matching valid AVC fragment
+seeded before the six-second init delay, only that failed HTTP case was
+retried and passed in 6.37 seconds. No validation fence was relaxed.
+
+**Outcome:** the two review defects are corrected, but the qualification
+blocker prevents promotion. No second implementation review, production
+restart, queue reset, deployment or live reference-film acceptance occurred.
+The ordinary-HLS candidate's measured first motion remains about 8.7 seconds;
+it does not satisfy the requested couple-second start.

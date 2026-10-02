@@ -1307,7 +1307,8 @@ async function main() {
       shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
       shippedSource("attachNativeHls"),shippedSource("hlsStartupCurrent"),
       shippedSource("nativeHlsCurrent"),shippedSource("armNativeHlsDeadline"),
-      shippedSource("runNativeHlsReadiness"),
+      shippedSource("nativeHlsRecoverAuthority"),shippedSource("recoverServingFencedAttachment"),
+      shippedSource("nativeHlsAuthenticationRefused"),shippedSource("runNativeHlsReadiness"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
     ].join("\n"))(native);

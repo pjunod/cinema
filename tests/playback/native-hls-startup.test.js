@@ -1,27 +1,37 @@
 "use strict";
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../../crates/plurxd/src/web/player/player.js'),'utf8');
+function shippedFunction(file,name){
+ const text=fs.readFileSync(path.join(__dirname,'../../crates/plurxd/src/web/player/',file),'utf8');
+ const start=text.indexOf(`function ${name}(`);assert.ok(start>=0,name);
+ const tail=text.slice(start),next=/\n(?:async )?function /.exec(tail);
+ return next?tail.slice(0,next.index):tail;
+}
 const policy=require('../../crates/plurxd/src/web/playback-policy.js');
 const master='#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000\nindex.m3u8\n';
 const media='#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:8,\nseg_0000.m4s\n#EXTINF:8,\nseg_0001.m4s\n#EXTINF:8,\nseg_0002.m4s\n';
 async function flush(){for(let i=0;i<16;i++)await new Promise(resolve=>setImmediate(resolve));}
 function harness(){
- let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map();
- const video={readyState:0,videoWidth:0,currentTime:0,paused:true,addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
- const player={hls:null,wantsPlayback:true,method:'remux',mediaAttachment:{},controlIntentGeneration:0,qualityCandidates:[],abr:{}};
+ let now=0,ordinal=0;const timers=new Map(),answers=[],requests=[],sources=[],rescues=[],diagnoses=[],positions=[],listeners=new Map(),reopens=[],surfaces=[],stops=[];
+ const video={readyState:0,videoWidth:0,currentTime:0,paused:true,currentSrc:'/session/master.m3u8',getAttribute:()=>'/session/master.m3u8',addEventListener(event,fn){listeners.set(event,fn);},removeEventListener(event,fn){if(listeners.get(event)===fn)listeners.delete(event);},removeAttribute(){},load(){},pause(){},play(){return Promise.resolve();}};
+ const player={hls:null,wantsPlayback:true,method:'remux',sessionId:'retired',stallRecoveries:0,mediaAttachment:{},controlIntentGeneration:0,qualityCandidates:[],abr:{}};
  const ctx=vm.createContext({PlaybackPolicy:policy,URL,TextDecoder,AbortController,Uint8Array,console,
-  performance:{now:()=>now},location:{href:'http://fixture.invalid/'},player,video,
+  document:{getElementById:id=>id==='video'?video:{classList:{remove(){}}}},performance:{now:()=>now},location:{href:'http://fixture.invalid/'},player,video,
   setTimeout:(fn,ms)=>{const id=++ordinal;timers.set(id,{fn,at:now+ms});return id;},clearTimeout:id=>timers.delete(id),
   fetch:async(url,options)=>{requests.push({url,options});const answer=answers.shift();if(!answer)throw Error('No scripted answer');return typeof answer==='function'?answer(options):answer;},
   bufferTargets:()=>({}),parseSegTimes:text=>text.split('\n').filter(line=>line.startsWith('#EXTINF:')).map((_,i)=>(i+1)*8),
   setPlaybackMediaSource:(_,url)=>sources.push(url),applyPlaybackTransportIntent(){},applyPlaybackAttachmentPosition(){positions.push(true);},pausePlaybackInternally(){},resetPlaybackTransportEvents(){},
-  playbackOwnsAttachedMedia:()=>true,qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
+  playbackOwnsAttachedMedia:p=>p===player,qualityCatalogSelectionCurrent:()=>true,notifyPlaybackControl(){},clearStall(){},playbackContext:()=>({}),clientLog(){},tok:x=>x,
+  pbTick(){},pbSyncPlayIcon(){},endWait(){},positionForPlaybackIntent:()=>42,stallRecoverySnapshot:(_p,_v,facts)=>facts,seekTo:(...args)=>reopens.push(args),showStallRecoveryFailure(){throw Error('unexpected recovery exhaustion');},playbackIsReal:()=>false,playbackSurfaceSourceIsBlocking:()=>true,stopPlayerForExhaustion:()=>stops.push(true),raisePlaybackSurface:(source,facts)=>surfaces.push(policy.presentSurface(policy.initialSurfaceState(),{raise:source,...facts,now_ms:now})),toast(){},
   startTranscodeFallback:(...args)=>rescues.push(args),stallDiagnose:()=>{diagnoses.push(true);return Promise.resolve();}});
  vm.runInContext(source,ctx);
- vm.runInContext("PLAYER=player;function clearStreamFailure(){STREAM_FAILURE=null;}function noteStreamFailure(status,body){let data={};try{data=JSON.parse(body)}catch(e){}return {status,...data};}",ctx);
+ vm.runInContext("PLAYER=player;function clearStreamFailure(){STREAM_FAILURE=null;}",ctx);
+ vm.runInContext(shippedFunction("measurements.js","recoverServingFencedAttachment"),ctx);
+ vm.runInContext(shippedFunction("transport.js","wirePlayerMedia"),ctx);
+ ctx.wirePlayerMedia(video);
  const response=(text,status=200,type='application/vnd.apple.mpegurl')=>new Response(text,{status,headers:{'Content-Type':type}});
  ctx.attachNativeHls(video,'http://fixture.invalid/session/master.m3u8?token=fixture',0,player,{current:()=>ctx.current!==false});
- return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,
+ return {ctx,player,video,answers,requests,sources,rescues,diagnoses,positions,listeners,response,reopens,surfaces,stops,
   advance(ms){now+=ms;for(const [id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}},
   retry(){ctx.runNativeHlsReadiness(video,player,player.hlsStartup);},
   stop(){ctx.cancelHlsStartup(player,'test_done');},
@@ -94,4 +104,81 @@ test('native attached startup expires at its fixed deadline without a new readin
  h.advance(39001);await flush();assert.equal(h.player.hlsStartup.state,'exhausted');
  assert.equal(h.requests.length,requests);assert.equal(h.rescues.length,0);
  h.ctx.exhaustHlsStartup(h.player,'duplicate');h.advance(1);await flush();assert.equal(h.diagnoses.length,1);h.stop();
+});
+
+async function readyNativeHarness(){
+ const h=harness();await flush();h.answers.push(h.response(master),h.response(media));
+ h.advance(1000);await flush();assert.equal(h.sources.length,1);return h;
+}
+function retireNative(h){
+ h.ctx.noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'proof expired'}),{attachment:h.player.mediaAttachment});
+}
+test('shipped native media error gives known authority retirement precedence over codec readiness',async()=>{
+ for(const code of [3,4]){
+  const h=await readyNativeHarness(),requests=h.requests.length;retireNative(h);
+  h.video.error={code};await h.listeners.get('error')();
+  assert.equal(h.reopens.length,1);assert.equal(h.reopens[0][0],42);
+  assert.equal(h.requests.length,requests);assert.equal(h.sources.length,1);
+  assert.equal(h.rescues.length,0);assert.equal(h.player.hlsStartup.native.reloadUsed,false);h.stop();
+ }
+});
+test('shipped native error rejoins authority retirement during playlist or init reads',async()=>{
+ for(const stage of ['playlist','init','typed_refusal']){
+  const h=await readyNativeHarness();let release;
+  const held=()=>new Promise(resolve=>release=resolve);
+  if(stage==='init')h.answers.push(h.response(master),h.response(media),held);
+  else h.answers.push(held);
+  h.video.error={code:4};const operation=h.listeners.get('error')();await flush();
+  if(stage!=='typed_refusal')retireNative(h);
+  release(stage==='init'?h.response(Buffer.from([0,0,0,16,102,116,121,112]),200,'video/mp4'):
+   stage==='typed_refusal'?h.response(JSON.stringify({code:'serving_fenced',message:'proof expired'}),503,'application/json'):h.response(media));
+  await operation;await flush();
+  assert.equal(h.reopens.length,1,stage);assert.equal(h.sources.length,1,stage);
+  assert.equal(h.rescues.length,0,stage);assert.equal(h.diagnoses.length,0,stage);
+  assert.equal(h.player.hlsStartup.native.reloadUsed,false,stage);h.stop();
+ }
+});
+test('native master and child authentication refusals keep the shipped Sign in surface',async()=>{
+ for(const status of [401,403])for(const stage of ['master','child','classification']){
+  const h=stage==='classification'?await readyNativeHarness():harness();await flush();
+  const refused=h.response(JSON.stringify({message:'Please sign in again.'}),status,'application/json');
+  if(stage==='master')h.answers.push(refused);
+  else h.answers.push(h.response(master),refused);
+  if(stage==='classification'){h.video.error={code:4};await h.listeners.get('error')();}
+  else{h.advance(1000);await flush();}
+  assert.equal(h.player.hlsStartup.state,'cancelled',stage);
+  assert.equal(h.player.hlsStartup.cancelledReason,'authentication_refused');
+  assert.equal(h.stops.length,1);assert.equal(h.surfaces.length,1);
+  const fault=h.surfaces[0].state.faults[0];
+  assert.equal(fault.source,'auth_401_403');assert.deepEqual([...fault.actions],['sign_in','close']);
+  h.advance(50000);await flush();assert.equal(h.diagnoses.length,0);assert.equal(h.rescues.length,0);h.stop();
+ }
+});
+
+test('late native authority or auth refusal cannot act on a superseded attachment',async()=>{
+ for(const status of [401,503]){
+  const h=await readyNativeHarness();let release;
+  h.answers.push(()=>new Promise(resolve=>release=resolve));
+  h.video.error={code:4};const operation=h.listeners.get('error')();await flush();
+  h.ctx.current=false;
+  release(h.response(JSON.stringify({code:'serving_fenced',message:'old refusal'}),status,'application/json'));
+  await operation;await flush();
+  assert.equal(h.reopens.length,0);assert.equal(h.surfaces.length,0);
+  assert.equal(h.stops.length,0);assert.equal(h.rescues.length,0);
+  assert.equal(h.player.sessionTerminal,undefined);assert.equal(h.sources.length,1);h.stop();
+ }
+});
+
+test('native classification paused during readiness resumes under the original clock',async()=>{
+ const h=await readyNativeHarness(),episode=h.player.hlsStartup,deadline=episode.deadlineMs;
+ let release;h.answers.push(()=>new Promise(resolve=>release=resolve));
+ h.video.error={code:4};const operation=h.listeners.get('error')();await flush();
+ h.player.wantsPlayback=false;h.player.controlIntentGeneration++;h.ctx.pauseHlsStartup(h.player);
+ await operation;assert.equal(episode.native.pendingError.code,4);
+ assert.equal(h.sources.length,1);assert.equal(h.rescues.length,0);
+ release(h.response(media));await flush();
+ h.answers.push(h.response(master),h.response(media),h.response(Buffer.from([0,0,0,16,102,116,121,112]),200,'video/mp4'),h.response(master),h.response(media));
+ h.player.wantsPlayback=true;h.player.controlIntentGeneration++;h.ctx.resumeHlsStartup(h.video,h.player);await flush();
+ assert.equal(episode.deadlineMs,deadline);assert.equal(episode.native.reloadUsed,true);
+ assert.equal(h.sources.length,2);assert.equal(h.rescues.length,0);h.stop();
 });

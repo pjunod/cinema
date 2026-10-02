@@ -809,6 +809,8 @@ function wirePlayerMedia(v){
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const nativePlayer=PLAYER;
     if(nativePlayer?.hlsStartup?.transport==='native'&&nativePlayer.hlsStartup.native.video!==v) return;
+    // Authority retirement owns the reopen, before native decoder diagnosis.
+    if(nativePlayer.sessionTerminal&&recoverServingFencedAttachment(v,nativePlayer)) return;
     if(nativePlayer?.hlsStartup?.transport==='native'&&!playbackIsReal()
       &&await classifyNativeHlsError(v,nativePlayer,code,msg)) return;
     if(PLAYER!==nativePlayer) return;

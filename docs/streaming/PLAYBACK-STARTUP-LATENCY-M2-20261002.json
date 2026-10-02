@@ -1,5 +1,5 @@
 {
-  "status": "generated hls.js and Safari native 30-minute continuity passed; fleet and live HEVC/DV qualification pending",
+  "status": "implementation reviewed; native authority/authentication fixes verified; promotion blocked by unqualified all-web policy admission",
   "build_base": "dea1a403e9a650fc51e35909b36e596be5a5ed13",
   "target_ms": 16000,
   "writer_gate_ms": 12000,
@@ -133,10 +133,10 @@
     "32 seconds of media is an interim improvement, not the strict few-seconds buffer requirement.",
     "No deployment, queue reset, digest migration or live reference-film acceptance."
   ],
-  "regressions": "authored, not run; deferred until final adversarial review fixes",
-  "integrated_main": "955e1551e3d72eb237501d0a652e3cced61cd024",
-  "compiled_source_head": "cc9099a29033db02950a4d12e1ec982fc757a113",
-  "compiler": "rustc 1.97.1, macOS, workspace all-target check --locked passed; units deferred",
+  "regressions": "Post-review focused checks passed: 13 distinct native cases across targeted runs; legacy playback-control integration and 3 media-recovery cases; 5 rolling cases across the initial run and 2-case retry; 1 master/init case after its fixture correction; 2 previously failed ownership-census methods. Required fast lane is not claimed green. Do not repeat passing cases.",
+  "integrated_main": "7f738563eab80945cf9b97178b8c1a863e62d668",
+  "compiled_source_head": null,
+  "compiler": "rustc 1.97.1, macOS, workspace all-target check passed after current main integration and native review fixes (23.01s)",
   "hlsjs_generated_continuity": {
     "transport": "Chrome / shipped hls.js",
     "threshold_media_s": 32,
@@ -262,6 +262,21 @@
       "source": "cc9099a29033db02950a4d12e1ec982fc757a113",
       "command": "cargo check --workspace --all-targets --locked",
       "result": "passed; current main 955e1551 integrated"
+    },
+    {
+      "source": "current main 7f738563 plus native authority/auth review fixes",
+      "command": "cargo check --workspace --all-targets",
+      "result": "passed in 23.01s"
+    },
+    {
+      "source": "current main 7f738563 plus steady phase fix; checked source hashes retained",
+      "command": "cargo check -p plurxd --all-targets",
+      "result": "passed in 53.42s; later strengthening of fixture assertion remains covered by test rebuild and normal hook"
+    },
+    {
+      "source": "post-review checked tree; source hashes retained",
+      "command": "cargo check -p plurxd --all-targets",
+      "result": "passed in 17.14s after HTTP fixture correction"
     }
   ],
   "premature_ci_run": {
@@ -272,7 +287,7 @@
     "result": "scope passed, preflight ownership inventory failed in four subtests; Rust/web jobs skipped",
     "passed_policy_tests": 249,
     "failed_policy_tests": 4,
-    "fix": "Four owner inventory counts updated with explicit deadline/task/timer/status-read provenance; no test rerun yet"
+    "fix": "Four owner inventory counts updated with explicit deadline/task/timer/status-read provenance. Only the two methods containing failed subtests were rerun: 2 passed in 10.146s; prior 249 passing policy cases were not repeated."
   },
   "native_generated_continuity": {
     "transport": "Safari native HLS / shipped native readiness",
@@ -305,5 +320,95 @@
       }
     ],
     "post_window_limit": "After the 30-minute acceptance window, Safari waits at 1895.913s: the fixture caps its complete prefix at 237 x 8s = 1896s and does not emit ENDLIST. This harness exhaustion is retained and is not a daemon EOF qualification."
+  },
+  "implementation_review": {
+    "reviewed_head": "6835957c5c6b69b27e10b740ef0acaaa7dee5806",
+    "reviewed_base": "955e1551e3d72eb237501d0a652e3cced61cd024",
+    "count": 1,
+    "verdict": "promotion blocked",
+    "findings": [
+      {
+        "priority": "P1",
+        "finding": "Native classification bypassed attachment authority recovery.",
+        "disposition": "fixed: shipped media-error handler gives authority precedence; readiness/classification recheck attachment, execution and authority after awaits. Shipped parser/owner regressions cover known retirement, retirement during playlists/init, typed refusal, supersession and pause/resume."
+      },
+      {
+        "priority": "P2",
+        "finding": "Native 401/403 lost Sign in actions through startup exhaustion.",
+        "disposition": "fixed: cancel current startup work and hand the typed refusal to existing auth_401_403 surface. Actual parser and surface regressions cover master, child and native classification at 401/403."
+      },
+      {
+        "priority": "promotion blocker",
+        "finding": "Transport-only WebFixedHlsV1 admission is broader than qualified evidence.",
+        "disposition": "unresolved; keep PR draft and do not merge or deploy. Evidence does not qualify daemon actor/flow/scratch, live HEVC/DV, nonzero resume, long/open GOP, rate changes, physical Apple/Android or remote transfer. A source class admission change or missing qualification evidence is required before ready."
+      }
+    ]
+  },
+  "focused_checks": [
+    {
+      "command": "node --test tests/playback/native-hls-startup.test.js",
+      "result": "10 passed, auth assertion failed on misspelled expected action; corrected to shipped sign_in and reran only failed auth case (passed). Shipped harness initially lacked pbTick; added inert UI seam before these results."
+    },
+    {
+      "command": "node --test --test-name-pattern='native master and child authentication' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; 401/403 x master/child/classification covered"
+    },
+    {
+      "command": "node --test --test-name-pattern='late native authority or auth refusal' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; 401 and 503 late predecessor replies cannot act"
+    },
+    {
+      "command": "node --test --test-name-pattern='native classification paused during readiness' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; pending native error rejoins original clock after pause"
+    },
+    {
+      "command": "node --test --test-name-pattern='^$' tests/playback/web-control.test.js",
+      "result": "passed; legacy main dispatches child scripts that run appended cases despite the top-level name filter: 18 named cases plus legacy integration assertions. No repeat requested; retained this single complete passing invocation. Do not repeat it."
+    },
+    {
+      "command": "node --test tests/playback/web-media-recovery.test.js",
+      "result": "3 passed"
+    },
+    {
+      "command": "python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_task_timer_and_process_shapes_have_reviewed_counts",
+      "result": "2 passed; only failed methods rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd -- --exact transcode::tests::rolling_web_bootstrap_refuses_known_insufficient_production transcode::tests::rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes",
+      "result": "2 passed, 3125 filtered out, in 0.09s; only failed Rust tests rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd native_master_preparation_can_wait_six_seconds_for_exact_init -- --exact http::hls::tests::native_master_preparation_can_wait_six_seconds_for_exact_init --nocapture",
+      "result": "1 passed, 3126 filtered out, in 6.37s; only failed HTTP case rerun"
+    }
+  ],
+  "browser_evidence_after_review_fixes": "Healthy-path generated captures retained for the measured source hashes. Authority/auth edge fixes have focused shipped-function coverage; no claim of a new complete browser/device qualification on the later source.",
+  "checked_tree_anchor": "72af3c9747c0145b102a877c760cc426fa790283",
+  "post_review_source_sha256": {
+    "crates/plurxd/src/web/player/player.js": "848a0f046f40ff6a29d7dc2f69fe33a582f2cfcfd9763e6b4d63037a25b30183",
+    "crates/plurxd/src/web/player/transport.js": "1dd7cf8678d7d4c3dd62a3d7b1a7e986d427510a1b877116a6a9b118a76517e3",
+    "crates/plurxd/src/transcode/rolling/session.rs": "03d8fdc3a2bb971aa2426b5b3b530bddce7924c3d02c6e288d4b806a65b95d04",
+    "crates/plurxd/src/transcode/tests/chunk_03.rs": "53c837dbdab3807eb1bbe9759fcb00f77c1cfaa9bb92e06f3b26ffe05bae0c9a",
+    "crates/plurxd/src/http/hls/tests/chunk_06.rs": "2e2a240fc1e9ee3a771f1620368c0e8b30fabee58cff4eef9300504073c93580",
+    "tests/playback/native-hls-startup.test.js": "15bcaabd41c13afd36e505d59f7c2a6a5f2c72d0598b3a0911d892fe30707ab4",
+    "tests/playback/web-control.test.js": "f094f54cae05e21f3a093ca448ab149e31518e1b812dad1818af7b6013059acb"
+  },
+  "post_review_rust_initial_run": {
+    "command": "cargo test -p plurxd --bin plurxd rolling_web_ -- --nocapture",
+    "tests": 5,
+    "passed": 3,
+    "failed": 2,
+    "failures": {
+      "rolling_web_bootstrap_refuses_known_insufficient_production": "Fixture used 0.95x at the existing 0.05x permitted measurement boundary; corrected fixture to 0.90x, capacity policy unchanged.",
+      "rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes": "Actual defect: phase was computed from previous served prefix before publication and never refreshed using the committed prefix. Added post-commit phase update against unchanged steady frontier, plus explicit steady assertions from 320s onward."
+    },
+    "retry": "Only the two failed cases rerun: 2 passed, 3125 filtered out, in 0.09s. Three initial passing Rust cases retained."
+  },
+  "http_fixture_initial_failure": {
+    "command": "target/debug/deps/plurxd-fc1273ae08306728 --exact http::hls::tests::native_master_preparation_can_wait_six_seconds_for_exact_init --nocapture",
+    "result": "1 failed: response_state_changed after 12.51s",
+    "cause": "Copy response admission also validates the first fragment. The fixture delayed init but never supplied seg00000.m4s, so final admission waited for a missing object.",
+    "fix": "Seed the matching AVC first fragment from the existing valid media feed before delaying init six seconds; no owner/deadline/validation rule changed.",
+    "retry": "Only this failed HTTP case rerun: 1 passed, 3126 filtered out, in 6.37s."
   }
 }

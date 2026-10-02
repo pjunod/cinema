@@ -647,7 +647,9 @@
             crate::playback_control::RenderState::Starting,
         )
         .await;
-        session.progress.recent_milli.store(950, Relaxed);
+        // The existing capacity rule permits a 0.05x measurement margin.
+        // Use a known deficit outside that margin, not its 0.95x boundary.
+        session.progress.recent_milli.store(900, Relaxed);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
             rolling_playlist(&[8.0; 4], false),
@@ -722,6 +724,13 @@
             }
             if step == 2 {
                 assert_eq!(clock.reserve_phase, RollingReservePhase::ActiveLowReserve);
+            }
+            if position >= 320_000 {
+                assert_eq!(
+                    clock.reserve_phase,
+                    RollingReservePhase::Steady,
+                    "the committed prefix, not its consumed predecessor, establishes reserve"
+                );
             }
             saw_steady |= clock.reserve_phase == RollingReservePhase::Steady;
             assert!(served.end_ms > position, "no drain at step {step}");

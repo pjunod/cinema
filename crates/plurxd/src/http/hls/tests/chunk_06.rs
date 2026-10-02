@@ -1792,7 +1792,14 @@
             HlsDeliveryFixture::publish_copy_actor_managed(dir.path(), "delayed-native-init").await;
         fixture.mark_started().await;
         let init_path = dir.path().join("init.mp4");
-        let init = valid_avc_init();
+        let feed = plurx_core::testfixtures::pipe("h264");
+        let init = parse_avc_init(&feed);
+        // Copy response admission validates its first fragment as well as
+        // init. Seed that fragment so this isolates delayed init preparation,
+        // rather than waiting for a missing first-media authorization object.
+        tokio::fs::write(dir.path().join("seg00000.m4s"), &feed[init.bytes.len()..])
+            .await
+            .expect("complete first AVC fragment");
         let writer = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(6)).await;
             tokio::fs::write(init_path, init.bytes)

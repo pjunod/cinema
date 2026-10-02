@@ -1431,6 +1431,22 @@ function armNativeHlsReadiness(video,player,episode){
       runNativeHlsReadiness(video,player,episode).catch(()=>{});
   },Math.min(wait,Math.max(0,episode.deadlineMs-performance.now())));
 }
+// Reuse the attachment's authority owner after every asynchronous readiness
+// boundary. A retired session must never be reloaded or codec-rescued.
+function nativeHlsRecoverAuthority(video,player,episode,execution){
+  if(!hlsStartupCurrent(player,episode)||episode.native.execution!==execution
+    ||!['active','paused'].includes(episode.state)||!playbackOwnsAttachedMedia(player)) return false;
+  return recoverServingFencedAttachment(video,player);
+}
+function nativeHlsAuthenticationRefused(player,episode){
+  const failure=episode.latestFailure;
+  if(!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player)
+    ||![401,403].includes(failure?.status)) return false;
+  // Cancel startup work before handing the typed refusal to the existing
+  // authentication surface, which owns Sign in / Close in every context.
+  cancelHlsStartup(player,'authentication_refused');
+  return showSessionOpenFailure({streamFailure:failure},'start');
+}
 async function runNativeHlsReadiness(video,player,episode){
   if(episode.native.busy||episode.state!=='active'||!hlsStartupCurrent(player,episode)) return;
   if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
@@ -1439,6 +1455,7 @@ async function runNativeHlsReadiness(video,player,episode){
   episode.native.busy=true;
   try{
     const media=await nativeHlsPlaylists(player,episode);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
     if(!nativeHlsCurrent(player,episode,execution,intent)) return;
     player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
     clearStreamFailure();episode.latestFailure=null;
@@ -1461,7 +1478,9 @@ async function runNativeHlsReadiness(video,player,episode){
     setPlaybackMediaSource(video,tok(episode.playlistUrl));
     applyPlaybackTransportIntent(video,player);
   }catch(error){
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
     if(!nativeHlsCurrent(player,episode,execution,intent)) return;
+    if(nativeHlsAuthenticationRefused(player,episode)) return;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
@@ -1488,9 +1507,12 @@ async function classifyNativeHlsError(video,player,code,message){
   const current=()=>nativeHlsCurrent(player,episode,execution,intent);
   try{
     const media=await nativeHlsPlaylists(player,episode);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(!current()) throw Object.assign(new Error('Native classification was superseded.'),{cancelled:true});
     const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(media.text);
     if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
     await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true});
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
     if(!current()) return true;
     if(!episode.native.reloadUsed){
       episode.native.reloadUsed=true;episode.native.execution++;
@@ -1519,12 +1541,14 @@ async function classifyNativeHlsError(video,player,code,message){
     startTranscodeFallback('stream-rejected',note);
     return true;
   }catch(error){
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
     if(!current()){
       if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)
         &&['paused','active'].includes(episode.state))
         episode.native.pendingError={code,message,execution};
       return true;
     }
+    if(nativeHlsAuthenticationRefused(player,episode)) return true;
     if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
       exhaustHlsStartup(player,'native_readiness_refused');}
     else if(!error.cancelled){

@@ -1274,6 +1274,18 @@ impl Session {
             end_list,
             available_at,
         });
+        // The newly committed prefix can establish steady reserve even when
+        // the previous prefix was low at this cycle's consumed position.
+        // Compare with the steady frontier, never the smaller first gate.
+        clock.update_reserve_phase(
+            lease.as_ref(),
+            &RollingPublicationBudget {
+                desired_end_ms: budget
+                    .consumed_end_ms
+                    .saturating_add(rolling_initial_runway_ms(playback_rate)),
+                ..budget
+            },
+        );
         clock.carried_surplus_ms = served_end_ms.saturating_sub(budget.desired_end_ms).max(0);
         clock.next_publish_at = (!end_list).then(|| available_at + ROLLING_PUBLICATION_TARGET);
         clock.hard_deadline = (!end_list).then(|| available_at + ROLLING_PUBLICATION_HARD);

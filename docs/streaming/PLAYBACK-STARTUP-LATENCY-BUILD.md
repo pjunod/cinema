@@ -1,6 +1,6 @@
 # Playback startup build — Sol's execution contract through a qualified merge
 
-**Status:** implementation in progress; qualification pending ·
+**Status:** implementation reviewed; promotion blocked by qualification ·
 **Written:** 2026-09-29 EDT · **Builder:** Sol ·
 **Executes:** [the reviewed implementation plan](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md)
 and [R1–R3 review dispositions](PLAYBACK-STARTUP-LATENCY-REVIEW.md).
@@ -66,7 +66,7 @@ The builder's repository is:
 ```text
 /private/tmp/plurx-fast-start-build-20261002
 branch: codex/playback-startup-latency
-current build base: b43d9cdb
+current build base: 7f738563 (integrated 2026-10-02)
 ```
 
 This is an independent clone of the configured remote. It contains only the
