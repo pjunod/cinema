@@ -2454,3 +2454,21 @@ absence from the ordinary recipe. The strict media verifier is unchanged.
 The failed Linux receipt remains `continuous-chrome-partial-linux.json`; it
 contains no successful continuity claim. Source compilation and the tracked
 hook precede a new exact-source production probe; unit execution is deferred.
+
+
+### 10.73 Empty-moov color metadata needs frame values and explicit emission
+
+The exact v2 production probe still failed the strict color check. Inspection
+of its actual immutable init bytes confirmed the box was absent. A bounded
+one-second Linux FFmpeg 8.0.1 experiment separated three cases: output codec
+color flags alone omitted `colr`; adding `write_colr` emitted unspecified
+primaries/transfer (`2/2/1`); adding explicit output-frame `setparams` produced
+the required limited-range BT.709 `nclx` (`1/1/1`, range flag zero).
+
+Continuous VOD now applies both the frame metadata and the muxer presence flag,
+with the semantic fingerprint advanced to `continuous-avc-high50-bt709-colr-v3`.
+Ordinary VOD arguments are unchanged. This is explicit signaling for the
+existing SDR envelope, not qualification of other color layouts. The authored
+regression requires frame values and box emission together. The failed v2
+production receipt is retained as `continuous-chrome-partial-linux-color.json`.
+No unit execution or successful continuity claim follows from this experiment.

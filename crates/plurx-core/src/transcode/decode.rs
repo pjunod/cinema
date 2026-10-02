@@ -2620,7 +2620,10 @@ impl ResolvedTranscode {
         // Preserve established standalone artifact keys. The new explicit
         // envelope has its own semantic namespace and never aliases them.
         if options.video_sample_envelope == VideoSampleEnvelope::ContinuousAvcHigh50 {
-            feed("video_sample_envelope", b"continuous-avc-high50-bt709-v2");
+            feed(
+                "video_sample_envelope",
+                b"continuous-avc-high50-bt709-colr-v3",
+            );
         }
 
         feed("height", options.target_height.to_string().as_bytes());

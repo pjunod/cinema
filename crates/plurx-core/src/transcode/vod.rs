@@ -924,6 +924,7 @@ pub fn vod_pipe_args(
     duration_seconds: f64,
 ) -> Vec<String> {
     let media = plan.options();
+    let continuous = media.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50;
     let target = execution.start_seconds.max(0.0);
     let audio_anchor = vod_audio_anchor(target) as f64 / f64::from(VOD_AUDIO_RATE);
     let audio = AudioClock::new(target, media.audio_offset_ms);
@@ -997,8 +998,13 @@ pub fn vod_pipe_args(
         "trim=start={target:.9},fps={}:start_time={target:.9},",
         grid.frame_rate()
     );
+    let color = if continuous {
+        ",setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+    } else {
+        ""
+    };
     let last = format!(
-        ",tpad=stop_mode=clone:stop_duration={remaining:.9},trim=end_frame={frames},setpts=PTS-{audio_anchor:.9}/TB"
+        ",tpad=stop_mode=clone:stop_duration={remaining:.9},trim=end_frame={frames},setpts=PTS-{audio_anchor:.9}/TB{color}"
     );
     // Use the same explicit even raster for CPU scale, GPU/bitmap scale,
     // identity and HLS facts; -2's independent aspect rounding can differ.
@@ -1050,7 +1056,7 @@ pub fn vod_pipe_args(
             "aac_low".to_owned(),
         ]);
     }
-    if media.video_sample_envelope == super::VideoSampleEnvelope::ContinuousAvcHigh50 {
+    if continuous {
         // The verified continuous family promises limited-range BT.709 SDR.
         // Do not inherit absent container tags from an otherwise valid source:
         // the encoder and MP4 muxer must publish the explicit output record.
@@ -1107,7 +1113,14 @@ pub fn vod_pipe_args(
         // The runner removes encoder priming and restores the film-global
         // audio lattice. Per-generation edit lists must not change the init
         // or apply a second priming shift after fragment publication.
-        "+empty_moov+delay_moov+default_base_moof+frag_keyframe".to_owned(),
+        if continuous {
+            // With empty_moov FFmpeg can omit colr despite codec flags. The
+            // frame filter above owns the values; this flag owns their presence.
+            "+empty_moov+delay_moov+default_base_moof+frag_keyframe+write_colr"
+        } else {
+            "+empty_moov+delay_moov+default_base_moof+frag_keyframe"
+        }
+        .to_owned(),
         "-video_track_timescale".to_owned(),
         grid.numerator.to_string(),
         "-f".to_owned(),
@@ -1352,6 +1365,16 @@ mod tests {
                 .any(|pair| pair == [option, value]));
             assert!(!args.iter().any(|argument| argument == option));
         }
+        assert!(continuous_args.windows(2).any(|pair| pair[0] == "-vf"
+            && pair[1].ends_with(
+                "setparams=range=limited:color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+            )));
+        assert!(continuous_args
+            .windows(2)
+            .any(|pair| pair[0] == "-movflags" && pair[1].ends_with("+write_colr")));
+        assert!(!args
+            .iter()
+            .any(|argument| argument.contains("setparams=") || argument.contains("write_colr")));
         assert_ne!(continuous_plan.plan_digest(), plan.plan_digest());
         assert_eq!(
             continuous_plan.output_contract().effective_width(),
