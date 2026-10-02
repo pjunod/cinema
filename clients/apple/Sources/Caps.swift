@@ -12,7 +12,8 @@ struct DeviceCaps: Codable, Equatable {
     let video: [VideoCaps]
     let audio: [String]
     /// The current route's reach per codec (AUDIO-RESOLVED-INDEPENDENTLY.md
-    /// §3.1). Empty is the legacy contract and is not encoded.
+    /// §3.1). Empty (encoded as `[]`) is the legacy contract: the server
+    /// treats an empty list exactly like an absent one.
     var audioSinks: [AudioSinkClaim] = []
     let containers: [String]
     let transports: [String]
