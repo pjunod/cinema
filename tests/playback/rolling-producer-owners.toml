@@ -2380,7 +2380,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # replacement waiter in the test task instead of spawning a joined task.
 # This removes a test-only owner; production cleanup ownership is unchanged.
 # Combined native fixture addition and main cleanup fixture removal.
-# +1 for playback_preparation_wakes_busy_analysis_only_for_its_live_viewer:
+# +1 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
 # a test-only background consumer, retained in `consumer`, then explicitly
 # aborted and awaited before the cancellation assertions. No producer/process
 # owner is added; the existing daemon consumer owns its fenced work.
@@ -3536,7 +3536,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
 # Combined native-init fixture and TCL source: measured total 1129.
-# +4 for playback_preparation_wakes_busy_analysis_only_for_its_live_viewer:
+# +4 for playback_preparation_wakes_busy_analysis_for_any_live_request_waiter:
 # a 100 ms maintenance deferral observation, a 20 ms claim poll bounded by
 # a two-second timeout, and a one-second viewer-departure timeout. All are
 # test-only; each timeout asserts rather than extending a production budget.

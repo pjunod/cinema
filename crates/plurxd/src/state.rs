@@ -2229,6 +2229,27 @@ enum AnalysisResolutionError {
     Terminal(&'static str),
 }
 
+/// Remember contention throughout a source read, even if playback ends before
+/// its deadline. A busy-viewer timeout must not exhaust the durable retry budget.
+#[derive(Default)]
+struct AnalysisAttestationBudget(std::sync::atomic::AtomicBool);
+
+impl AnalysisAttestationBudget {
+    fn observe_busy(&self, busy: bool) {
+        if busy {
+            self.0.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn deadline_failure(&self, busy_now: bool) -> AnalysisResolutionError {
+        self.observe_busy(busy_now);
+        AnalysisResolutionError::Retry {
+            code: "source_attestation_timeout",
+            charge_attempt: !self.0.load(std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FragmentSourceReadFailure {
     Stale,
@@ -8780,6 +8801,8 @@ impl JobManager {
                 0,
             );
         };
+        let attestation_budget = AnalysisAttestationBudget::default();
+        attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
         let attested = tokio::select! {
             result = crate::fragment_index_cluster::attest_copy_source(
                 node_id,
@@ -8792,7 +8815,7 @@ impl JobManager {
                     charge_attempt: true,
                 })?
             }
-            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost) => {
+            () = self.wait_for_cluster_fragment_index_stop(transcode, Some(request), lost, &attestation_budget) => {
                 if lost.is_cancelled() {
                     return Err(AnalysisResolutionError::ClaimLost);
                 }
@@ -8802,12 +8825,9 @@ impl JobManager {
                 });
             }
             () = wait_analysis_deadline(attest_timeout) => {
-                // Charge timeout attempts so large/slow or unavailable sources
-                // back off and eventually stop instead of retrying forever.
-                return Err(AnalysisResolutionError::Retry {
-                    code: "source_attestation_timeout",
-                    charge_attempt: true,
-                });
+                // Playback contention must not turn a formerly deferred request
+                // into terminal attempt_limit. Idle-only reads retain the cap.
+                return Err(attestation_budget.deadline_failure(!transcode.pretranscode_worker_idle()));
             }
         };
         if lost.is_cancelled() {
@@ -9045,8 +9065,9 @@ impl JobManager {
             return false;
         };
         // Source attestation holds the Store's bounded source-I/O reservation,
-        // not an encoder slot. Its own requesting playback must not repeatedly
-        // cancel it. Expired/departed viewers and failed reads fail closed.
+        // not an encoder slot. Any live playback waiter on this request permits
+        // the read while this node is busy. Expired/departed viewers and failed
+        // reads fail closed.
         self.store
             .analysis_preparation_observation(&request.request_id, clock_ms())
             .await
@@ -9060,9 +9081,11 @@ impl JobManager {
         transcode: &TranscodeManager,
         request: Option<&AnalysisRequest>,
         permit_lost: &tokio_util::sync::CancellationToken,
+        attestation_budget: &AnalysisAttestationBudget,
     ) {
         let mut ticks = 0_u8;
         loop {
+            attestation_budget.observe_busy(!transcode.pretranscode_worker_idle());
             if permit_lost.is_cancelled()
                 || !self.analysis_source_may_continue(transcode, request).await
             {
@@ -10690,7 +10713,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn playback_preparation_wakes_busy_analysis_only_for_its_live_viewer() {
+    async fn playback_preparation_wakes_busy_analysis_for_any_live_request_waiter() {
         use plurx_core::store::{
             BackgroundJobStore as _, ClusterFragmentIndexStore as _, UserStore as _,
         };
@@ -10792,7 +10815,7 @@ mod tests {
         assert!(
             jobs.analysis_source_may_continue(&transcode, Some(&request))
                 .await,
-            "the requested source read must survive its viewer's playback"
+            "any live request waiter permits the source read on a busy node"
         );
         assert!(
             !jobs.analysis_source_may_continue(&transcode, None).await,
@@ -10816,7 +10839,7 @@ mod tests {
         let _ = consumer.await;
         assert!(
             admitted.is_ok(),
-            "a busy worker must admit the source read requested by its own playback: {:?}",
+            "a busy worker must admit a source read with any live request waiter: {:?}",
             store.analysis_request(&request.request_id).await
         );
         let interest = plurx_core::store::AnalysisViewerInterest {
@@ -10840,7 +10863,12 @@ mod tests {
         let lost = tokio_util::sync::CancellationToken::new();
         tokio::time::timeout(
             Duration::from_secs(1),
-            jobs.wait_for_cluster_fragment_index_stop(&transcode, Some(&request), &lost),
+            jobs.wait_for_cluster_fragment_index_stop(
+                &transcode,
+                Some(&request),
+                &lost,
+                &AnalysisAttestationBudget::default(),
+            ),
         )
         .await
         .expect("departed viewer stops source attestation");
@@ -11184,6 +11212,38 @@ mod tests {
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"renewed\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"outcome_write_lost\"} 1"));
         assert!(rendered.contains("plurx_analysis_lease_total{event=\"lost\"} 0"));
+    }
+
+    #[test]
+    fn playback_contention_timeouts_do_not_exhaust_analysis_attempts() {
+        let budget = AnalysisAttestationBudget::default();
+        assert_eq!(
+            budget.deadline_failure(false),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: true,
+            }
+        );
+        budget.observe_busy(true);
+        budget.observe_busy(false);
+        for _ in 0..10 {
+            assert_eq!(
+                budget.deadline_failure(false),
+                AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    charge_attempt: false,
+                },
+                "contention remains uncharged even after the viewer stops"
+            );
+        }
+        assert_eq!(
+            AnalysisAttestationBudget::default().deadline_failure(true),
+            AnalysisResolutionError::Retry {
+                code: "source_attestation_timeout",
+                charge_attempt: false,
+            },
+            "a newly busy node at the deadline also stays uncharged"
+        );
     }
 
     #[test]
@@ -13995,8 +14055,13 @@ mod tests {
             let transcode = Arc::clone(&transcode);
             let lost = lost.clone();
             tokio::spawn(async move {
-                jobs.wait_for_cluster_fragment_index_stop(&transcode, None, &lost)
-                    .await;
+                jobs.wait_for_cluster_fragment_index_stop(
+                    &transcode,
+                    None,
+                    &lost,
+                    &AnalysisAttestationBudget::default(),
+                )
+                .await;
                 lost.is_cancelled()
             })
         };
