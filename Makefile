@@ -1487,6 +1487,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/layout-containment.test.js
 	@node tests/web/calm-library.test.js
 	@node tests/web/page-read-budget.test.js
+	@node --test tests/web/media-preparation.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).

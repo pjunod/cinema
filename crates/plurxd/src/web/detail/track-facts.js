@@ -112,12 +112,25 @@ function specBlock(f){
         : f.vod_index_status==="unsupported"
           ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);
-  return `<dl class="specs">
+  const facts=`<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
     ${audRow}
     ${subRow}
     ${hlsRow}
-    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
+    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>`;
+  if(!f.video_codec) return `${facts}${prePlayPickers(f)}${analysis}`;
+  const id=exactWireId(f);
+  return `<div class="media-preparation-layout">
+    <section class="media-preparation-main" aria-label="Media preparation">
+      <div class="prep-heading"><div><div class="prep-eyebrow">BEFORE YOU PRESS PLAY</div><h2>Media preparation</h2></div>
+        <button class="ghost sm" onclick='refreshMediaPreparation(${esc(JSON.stringify(id))},this)'>Refresh status</button></div>
+      <p class="muted prep-intro">What is ready, what is still processing, and what happens on demand.</p>
+      <div id="prep-file-${esc(id)}" class="prep-status"><p class="muted" role="status">Checking preparation…</p></div>${analysis}
+    </section>
+    <aside class="media-preparation-side" aria-label="Playback settings and file details">
+      <div class="prep-eyebrow">YOUR CHOICES</div><h2>This playback</h2>${prePlayPickers(f)}
+      <h3>File & tracks</h3>${facts}
+    </aside></div>`;
 }
 function analysisFileControl(f){
   if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
@@ -144,4 +157,90 @@ async function requestAnalysis(fileId,force,btn,stay=false){
     else location.hash="#/analysis";
   }catch(error){ toast(error.message||"Couldn’t queue analysis"); }
   finally{ if(btn&&document.body.contains(btn)){ btn.disabled=false; btn.textContent=label; } }
+}
+
+// Readiness is a projection of server processing facts, independent of PREPLAY.
+// Only these mounts refresh; playback controls and hero artwork stay intact.
+const PREPARATION_LABELS={ready:"Ready",done:"Done",pending:"Pending",queued:"Queued",running:"Processing",
+  attention:"Needs attention",failed:"Failed",cancelled:"Cancelled",unknown:"Unknown",none:"No tracks",
+  unsupported:"Unsupported",not_applicable:"Not needed",on_demand:"On demand",off:"Off",enabled:"Enabled",
+  committed:"Converted",verified:"Publishing",succeeded:"Completed",cancelling:"Cancelling",idle:"Idle"};
+function preparationBadge(state){
+  const tone=["ready","done","committed","succeeded"].includes(state)?"good"
+    :["attention","failed"].includes(state)?"bad":["queued","running","pending","verified"].includes(state)?"warn":"neutral";
+  return `<span class="prep-badge ${tone}">${esc(PREPARATION_LABELS[state]||"Unknown")}</span>`;
+}
+function preparationRow(title,value,extra=""){
+  const v=value||{state:"unknown",detail:"Status was not returned"};
+  return `<div class="prep-row"><div><h3>${esc(title)}</h3><p>${esc(v.detail||"")}</p>${extra}</div>${preparationBadge(v.state)}</div>`;
+}
+function mediaPreparationHtml(f,data){
+  const subs=data.subtitles||{}, tracks=f.subtitle_streams||[];
+  const preferred=tracks.find(t=>t.index===subs.preferred_index);
+  const counts=`${subs.ready||0} of ${subs.total||0} extracted${subs.empty?` · ${subs.empty} empty`:""}${subs.failed?` · ${subs.failed} need attention`:""}`;
+  const rule=preferred?`Indicator follows configured default: ${subFactLabel(preferred)}`
+    :subs.total?`Configured default ${langName(subs.preferred_language)||subs.preferred_language||"subtitle"} is absent — waiting for all tracks`
+    :"This file has no subtitle tracks";
+  const subDetail=`${rule}. ${counts}.`;
+  const trackDetails=tracks.length?`<details class="prep-tracks" data-prep-disclosure="tracks"><summary>All subtitle tracks <span class="muted">${counts}</span></summary><div>${tracks.map(t=>{
+    const result=(subs.tracks||[]).find(r=>r.index===t.index)||{};
+    const label=result.state==="empty"?'<span class="prep-badge neutral">Empty</span>':preparationBadge(result.state==="ready"?"done":result.state);
+    return `<div class="prep-track"><span>${esc(subFactLabel(t))}${t.index===subs.preferred_index?'<small>Configured default</small>':""}</span>${label}</div>`;
+  }).join("")}</div></details>`:"";
+  const subtitleWork=["queued","running","failed","cancelled"].includes((subs.work||{}).state)
+    ?`<p class="prep-work">${esc(PREPARATION_LABELS[subs.work.state])}: ${esc(subs.work.detail)}</p>`:"";
+  const essentials=[["Playback analysis",data.playback],["Subtitles",{state:subs.state,detail:subDetail},subtitleWork+trackDetails],
+    ["Skip markers",data.markers],["File inspection",data.probe],["Metadata & artwork",data.metadata]];
+  const other=[["Prepared versions",data.versions],["Chapter previews",data.thumbnails],
+    ["Dolby Vision conversion",data.conversion],["Semantic search",data.search],["Subtitle downloads",data.downloads]];
+  const states=essentials.map(([,v])=>v&&v.state);
+  const headline=states.some(v=>["failed","attention"].includes(v))?"Some preparation needs attention"
+    :states.some(v=>!v||v==="unknown")?"Preparation status is incomplete"
+    :states.some(v=>["pending","running","queued"].includes(v))?"Preparation in progress":states.every(v=>["ready","done","none","not_applicable","unsupported"].includes(v))?"Core preparation complete":"Preparation is incomplete";
+  return `<div class="prep-overview" role="status">${esc(headline)}<small>Preparation status does not prevent playback.</small></div>
+    ${essentials.map(([title,value,extra])=>preparationRow(title,value,extra)).join("")}
+    <div class="prep-other-heading"><h3>Other processing</h3><p>Optional work and features generated when needed.</p></div>
+    ${other.map(([title,value])=>preparationRow(title,value)).join("")}
+    <p class="prep-checked">Checked ${esc(new Date(data.checked_at_ms).toLocaleTimeString())} · Recorded extraction results; delivery is verified when used.</p>`;
+}
+async function hydrateMediaPreparation(files,generation=PAGE_RENDER_GENERATION){
+  let active=false;
+  // Sequential reads bound concurrent database work for multi-version items.
+  for(const f of files||[]){
+    if(generation!==PAGE_RENDER_GENERATION) break;
+    const id=exactWireId(f), mount=document.getElementById(`prep-file-${id}`);
+    if(!mount) continue;
+    try{
+      const data=await api(`/files/${id}/preparation`);
+      if(generation!==PAGE_RENDER_GENERATION||document.getElementById(`prep-file-${id}`)!==mount) continue;
+      const prior=/** @type {HTMLDetailsElement|null} */ (mount.querySelector('details[data-prep-disclosure="tracks"]'));
+      const open=prior?.open, focused=prior&&document.activeElement===prior.querySelector("summary");
+      const signature=JSON.stringify({...data,checked_at_ms:0});
+      if(mount.dataset.prepSnapshot!==signature){
+        mount.innerHTML=mediaPreparationHtml(f,data);
+        mount.dataset.prepSnapshot=signature;
+        const details=/** @type {HTMLDetailsElement|null} */ (mount.querySelector('details[data-prep-disclosure="tracks"]'));
+        if(details&&open) details.open=true;
+        if(details&&focused) details.querySelector("summary").focus({preventScroll:true});
+      }
+      // Poll activity reported by the queue, never infer it from missing outputs.
+      const pending=data.active===true;
+      mount.dataset.prepActive=pending?"true":"false";
+      active=active||pending;
+    }catch(error){
+      if(generation!==PAGE_RENDER_GENERATION||document.getElementById(`prep-file-${id}`)!==mount) continue;
+      // A failed refresh invalidates a previous green snapshot. Keep selectors usable.
+      mount.innerHTML=`<div class="prep-overview" role="status">Preparation status unavailable<small>${esc(error.message||"Could not read processing state")}. Use Refresh status to try again.</small></div>`;
+      mount.dataset.prepActive="false";
+      delete mount.dataset.prepSnapshot;
+    }
+  }
+  return active;
+}
+async function refreshMediaPreparation(id,button){
+  const generation=PAGE_RENDER_GENERATION;
+  if(button) button.disabled=true;
+  try{
+    await pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
+  }finally{ if(button) button.disabled=false; }
 }

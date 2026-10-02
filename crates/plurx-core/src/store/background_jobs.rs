@@ -1298,6 +1298,12 @@ RETURNING result_json
 /// Domain producers authorize the request before attaching a waiter.
 #[async_trait]
 pub trait BackgroundJobStore: Send + Sync {
+    /// File-scoped preparation history for the current catalog source only.
+    /// This projection excludes payloads, paths and consumer credentials.
+    async fn media_preparation_history(
+        &self,
+        file_id: i64,
+    ) -> Result<serde_json::Value, StoreError>;
     /// Join or renew a viewer's bounded interest in an exact preparation.
     async fn join_analysis_viewer(
         &self,
@@ -1567,6 +1573,23 @@ pub(super) async fn enqueue_body<T: QueueSql>(
 
 #[async_trait]
 impl<T: QueueSql> BackgroundJobStore for T {
+    async fn media_preparation_history(
+        &self,
+        file_id: i64,
+    ) -> Result<serde_json::Value, StoreError> {
+        let rows = self
+            .queue_sql(
+                MEDIA_PREPARATION_SQL.into(),
+                encode(&serde_json::json!({"file_id":file_id}))?,
+                false,
+                false,
+            )
+            .await?;
+        rows.first()
+            .map(|row| decode(row))
+            .transpose()
+            .map(|row| row.unwrap_or(serde_json::Value::Null))
+    }
     async fn join_analysis_viewer(
         &self,
         interest: AnalysisViewerInterest,
@@ -2912,3 +2935,39 @@ LIMIT 1
         })
     }
 }
+
+/// File-scoped read paths; append-only migrations install these on both backends.
+pub(crate) const PREPARATION_INDEX_SCHEMA: &str = "CREATE INDEX IF NOT EXISTS background_jobs_file_source ON background_jobs(kind, json_extract(payload_json, '$.file_id'), json_extract(payload_json, '$.source_size'), json_extract(payload_json, '$.source_mtime'), updated_at_ms DESC);";
+
+/// Read-only projection shared by SQLite and Hiqlite. Holder rows advertise
+/// copies; consumers still verify the bytes when they use them.
+const MEDIA_PREPARATION_SQL: &str = r#"
+SELECT json_object(
+ 'library_kind', l.kind,
+ 'metadata_at', CASE WHEN i.kind = 'episode' THEN grandparent.metadata_at
+                     WHEN i.kind = 'season' THEN parent.metadata_at ELSE i.metadata_at END,
+ 'analysis', json((SELECT json_group_array(json_object(
+   'id', r.request_id, 'component', r.component, 'state', r.state,
+   'error', r.last_error_code, 'updated_at_ms', r.updated_at_ms))
+   FROM (SELECT * FROM analysis_requests WHERE file_id = f.id
+     AND source_size = f.size AND source_mtime = f.mtime
+     ORDER BY updated_at_ms DESC, request_id DESC LIMIT 128) r)),
+ 'copies', (SELECT count(*) FROM background_transcode_artifacts a
+   WHERE a.file_id = f.id AND a.source_size = f.size AND a.source_mtime = f.mtime
+     AND EXISTS (SELECT 1 FROM transcode_cache_locations c
+       WHERE c.recipe_hash = a.recipe_hash AND c.manifest_digest = a.manifest_digest
+         AND c.complete = 1 AND c.storage_class = 'local' AND c.bytes > 0
+         AND NOT EXISTS (SELECT 1 FROM settings WHERE key = 'internal.cluster_job_owner_removed.' || c.node_id))),
+ 'versions', json((SELECT json_group_array(json_object(
+   'state', j.state, 'updated_at_ms', j.updated_at_ms))
+   FROM (SELECT state, updated_at_ms FROM background_jobs WHERE kind = 'transcode_prepare'
+     AND json_extract(payload_json, '$.file_id') = f.id
+     AND json_extract(payload_json, '$.source_size') = f.size
+     AND json_extract(payload_json, '$.source_mtime') = f.mtime
+     ORDER BY updated_at_ms DESC LIMIT 128) j))
+) AS result_json FROM files f JOIN items i ON i.id = f.item_id
+JOIN libraries l ON l.id = i.library_id
+LEFT JOIN items parent ON parent.id = i.parent_id
+LEFT JOIN items grandparent ON grandparent.id = parent.parent_id
+WHERE f.id = json_extract($1, '$.file_id')
+"#;
