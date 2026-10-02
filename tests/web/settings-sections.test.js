@@ -1404,6 +1404,29 @@ test("HEVC override saves either choice without consulting advisory readiness", 
   }
 });
 
+test("tone-map probe failures stay collapsed beneath the selected pipeline", () => {
+  const render = new Function("esc", `${shippedSource("toneMapHtml")}\nreturn toneMapHtml;`)(esc);
+  const rejected = {pipeline:"vaapi",label:"GPU tone-map (VA-API)",passed:false,rejected:"Driver refused <HDR> & output"};
+  for (const selected of ["libplacebo_vaapi", "cpu"]) {
+    const label = selected === "cpu" ? "CPU tone-map" : "GPU tone-map (Vulkan / VA-API)";
+    const html = render({ran:true,selected,selected_label:label,verdicts:[rejected,
+      {pipeline:selected,label,passed:true}]});
+    const disclosure = html.match(/<details\b([^>]*)>([\s\S]*?)<\/details>/);
+    assert.ok(disclosure, "rejected probes remain available for diagnosis");
+    assert.doesNotMatch(disclosure[1], /\bopen(?:\s|=|$)/, "probe details start collapsed");
+    assert.match(disclosure[2], /<summary[^>]*>Probe details<\/summary>/);
+    assert.ok(disclosure[2].includes("Driver refused &lt;HDR&gt; &amp; output"));
+    const visible = html.replace(disclosure[0], "");
+    assert.ok(visible.includes(label), "the selected pipeline stays visible");
+    assert.doesNotMatch(visible, /Driver refused|GPU tone-map \(VA-API\)/);
+    assert.equal(visible.includes("fell back"), selected === "cpu", "CPU fallback stays explicit");
+  }
+  assert.doesNotMatch(render({ran:true,selected:"libplacebo_vaapi",selected_label:"GPU tone-map (Vulkan / VA-API)",verdicts:[]}), /<details/,
+    "no empty disclosure when no probe was rejected");
+  assert.match(render({ran:false,selected:"cpu",verdicts:[{rejected:"software encoder"}]}), /software encoder/,
+    "an unprobed node keeps its short explanation");
+});
+
 main().then(() => {
   if (started !== finished) failures += started - finished;
   process.stdout.write(`${started - failures}/${started} passed\n`);
