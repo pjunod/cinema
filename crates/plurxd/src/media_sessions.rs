@@ -1178,7 +1178,17 @@ impl ReleaseSettlement {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct CandidateCatalogContext {
+    pub caps: plurx_core::playback::DeviceCaps,
+    pub candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub binding: crate::media_pool::PlanningBinding,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_catalog: Option<CandidateCatalogContext>,
     /// Retained route context. Tolerated by the parser floor, never minted by
     /// it and never sufficient to authorize a worker route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1217,7 +1227,14 @@ impl RemoteStartRequest {
 }
 
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
-    (request.candidate_id.is_none() || request.decoder_caps.is_some())
+    (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
+        && request.candidate_catalog.as_ref().is_none_or(|context| {
+            request.candidate_id == Some(context.candidate.id) && context.candidate.identity_matches()
+                && context.caps.v == 2 && context.caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
+                && context.caps.validate_audio_sinks().is_ok() && context.caps.validate_progressive_hevc_sample_entries().is_ok()
+                && context.binding.generation >= 0 && context.binding.source_digest.len() == 64
+                && context.binding.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
         // An explicit snapshot is a current capability constraint, including
         // on ordinary negotiated routes. Empty/all-unavailable is decoder
         // loss, not permission to fall back to legacy unconstrained dispatch.
@@ -5864,6 +5881,7 @@ mod tests {
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,

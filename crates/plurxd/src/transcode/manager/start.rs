@@ -424,6 +424,21 @@ impl TranscodeManager {
         candidate_context: Option<&super::CandidateExecutionContext>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
+        if let Some(binding) =
+            candidate_context.and_then(|context| context.planning_binding.as_ref())
+        {
+            let snapshot = self
+                .store
+                .playback_planning_snapshot(file_id, &super::QUALITY_PLANNING_KEYS)
+                .await
+                .map_err(|error| super::catalog_input_error(error.to_string()))?
+                .ok_or_else(|| super::catalog_input_error("candidate source missing"))?;
+            if *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot) {
+                return Err(super::catalog_input_error(
+                    "candidate source or settings changed before admission",
+                ));
+            }
+        }
         let rate_control = self.rate_control_snapshot();
         // Cluster replacements are provisional until their durable pointer CAS
         // wins. Killing the old process here would turn an admission/Store

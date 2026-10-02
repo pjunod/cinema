@@ -5422,6 +5422,12 @@ tokio::task_local! {
     static HTTP_STORE_OPERATION_COUNTS: HttpStoreOperationCounts;
 }
 
+/// Capture the active request accounting without replacing its attribution.
+#[must_use]
+pub fn current_http_store_operations() -> Option<HttpStoreOperationCounts> {
+    HTTP_STORE_OPERATION_COUNTS.try_with(Clone::clone).ok()
+}
+
 /// Scope one HTTP request so replicated Store operations can be attributed
 /// after its response is ready without putting route labels in `plurx-core`.
 pub async fn scope_http_store_operations<T>(

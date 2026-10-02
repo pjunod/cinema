@@ -1021,6 +1021,7 @@ pub(super) async fn plan_preparation_candidate(
     );
     let plan = resolve_plan(
         PlanInputs {
+            snapshot: None,
             state,
             user_id: predecessor.user_id,
             file_id: predecessor.request.file_id,
@@ -1532,6 +1533,13 @@ pub(super) async fn stage_prepared_successor_with_prime(
         ..candidate.clone()
     };
     let staged_recipe = RemoteStartRequest {
+        candidate_catalog: candidate.candidate_context.as_ref().and_then(|context| {
+            Some(crate::media_sessions::CandidateCatalogContext {
+                caps: context.canonical_caps.clone()?,
+                candidate: context.selected_candidate.clone(),
+                binding: context.planning_binding.clone()?,
+            })
+        }),
         candidate_id: candidate
             .candidate_context
             .as_ref()
@@ -1557,6 +1565,9 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
+        quality_catalog_status: candidate.candidate_context.as_ref()
+            .and_then(|context| context.quality_catalog.as_ref())
+            .map(|catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes})),
         display_aware_auto_protocol: predecessor
             .decoder_caps
             .as_ref()
@@ -1565,32 +1576,11 @@ pub(super) async fn stage_prepared_successor_with_prime(
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        quality_candidates: if let Some(caps) = predecessor.decoder_caps.as_ref() {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        state,
-                        crate::media_pool::QualityCatalogRequest {
-                            copy_contract: candidate.kind.copy_contract(),
-                            file_id: source.id,
-                            source_size: source.size,
-                            source_mtime: source.mtime,
-                            caps: caps.device_caps(),
-                            audio_index: candidate.audio_index,
-                            audio_offset_ms: candidate.audio_offset_ms,
-                            subtitle_burn: candidate.subtitle_burn,
-                            presentation: candidate.presentation,
-                        },
-                    )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.candidate)
-                    .collect(),
-            )
-        } else {
-            None
-        },
+        quality_candidates: candidate.candidate_context.as_ref()
+            .and_then(|context| context.quality_catalog.as_ref())
+            .map(|catalog| catalog.candidates.iter()
+                .filter(|entry| entry.dispatch_supported && !entry.partial)
+                .map(|entry| entry.candidate.clone()).collect()),
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,

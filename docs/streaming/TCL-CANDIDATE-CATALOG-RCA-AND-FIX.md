@@ -2,7 +2,7 @@
 
 **Status:** open · diagnosis approved with changes by Opus; revision 3
 addresses implementation-plan conditions ·
-**Investigated / revised:** 2026-10-02 · **Implementation:** not started.
+**Investigated / revised:** 2026-10-02 · **Implementation:** building; see [status and evidence](TCL-CATALOG-REPAIR-STATUS.md).
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) and the
 [streaming reliability plan](STREAMING-RELIABILITY-IMPLEMENTATION.md).
@@ -554,8 +554,9 @@ stage a fresh two seconds.
 
 **Budget owner:** propose one `CreateStartupBudget` owned by
 `create_with_purpose`, starting at handler entry and ending when its response
-is ready. `T_CREATE_START_MS = TBD` is an explicit blocking design value, not
-an implemented deadline or a passing acceptance result. Select it with the
+is ready. The implementation records `T_CREATE_START_MS = 10,000` ms and a 500 ms
+transport/serialization reserve on the status page. This engineering allocation
+is not a passing timing acceptance result. It was selected with the
 existing client startup/recovery owners, leaving time for response transit,
 manifest retrieval and first-frame presentation, and carry any shorter upstream
 remaining allowance. Android's

@@ -343,6 +343,7 @@
             ..staged_candidate_request()
         };
         let response = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -379,6 +380,7 @@
             request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
             owner_node_id: fixture.state.node_id.clone(),
             recipe_json: serde_json::to_string(&RemoteStartRequest {
+                candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -455,6 +457,7 @@
             ..staged_candidate_request()
         };
         let recipe = RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -468,6 +471,7 @@
             request: request.clone(),
         };
         let start = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -1747,6 +1751,7 @@
 
     fn staged_predecessor_recipe(route: &MediaSessionRoute) -> RemoteStartRequest {
         RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2011,6 +2016,7 @@
                 .replace("\"typeless_playlist\":true", "\"typeless_playlist\":false")
                 .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
                 response_json: serde_json::to_string(&StartResponse {
+        quality_catalog_status: None,
                     display_aware_auto_protocol: Some("route-v1".to_owned()),
                     quality_candidate_id: None,
                     quality_candidates: None,

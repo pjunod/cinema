@@ -912,6 +912,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
         let recipe = RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -943,6 +944,7 @@
             },
         };
         let start = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -1799,6 +1801,7 @@
             .recipe_json
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -2076,6 +2079,7 @@
             .await
             .expect("terminal cancellation user");
         let recipe = RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2107,6 +2111,7 @@
             },
         };
         let start = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -2340,6 +2345,7 @@
             let generation = uuid::Uuid::new_v4().to_string();
             let client_instance_id = uuid::Uuid::new_v4().to_string();
             let recipe = RemoteStartRequest {
+                candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -2371,6 +2377,7 @@
                 },
             };
             let start = StartResponse {
+        quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,

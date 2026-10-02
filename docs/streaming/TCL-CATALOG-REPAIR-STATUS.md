@@ -22,8 +22,8 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Typed diagnostics and accounting | done | Diagnostic commit retained before bound repair |
 | One catalog per create | done | Canonical caps and recipe/worker identities retained |
 | Android compaction and shared contract | done | No legacy blanket 400 |
-| Snapshot, generation and budgets | building | Parameters recorded before dependent changes |
-| Partial selection through existing owners | pending | No new watchdog/retry owner |
+| Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
+| Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
 | Review and fast lane | pending | No tests claimed yet |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
 
@@ -74,5 +74,12 @@ Concrete implementation decisions, 2026-10-02:
 
 Snapshot enumeration compiles with Rust 1.97.1. Android app and JVM test sources
 compile successfully; tests have not executed. Database triggers cover raw SQL
-import writes and same-timestamp updates. Final dispatch bindings and outer
-create deadlines are still being integrated.
+import writes and same-timestamp updates. Final dispatch binds generation and source/probe identity, and revalidates the
+selected descriptor without another ladder enumeration. Protocol 8 carries this
+strict worker contract; older ingress and sessions need draining on rollout.
+Successor responses retain their selection catalog.
+
+Compiler checks pass on the current implementation. Boundary, legacy, binding
+and expired-budget regressions are written and have not run. Apple compilation
+first hit sandboxed macro/simulator services; an unsandboxed compile is underway.
+No review or test acceptance is claimed.

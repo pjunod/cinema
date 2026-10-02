@@ -612,7 +612,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
-                    req.candidate_context.as_ref(),
+                    req.candidate_context.as_deref(),
                     priority,
                 )
                 .await

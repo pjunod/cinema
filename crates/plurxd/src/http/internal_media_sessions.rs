@@ -183,7 +183,7 @@ pub(crate) async fn start(
         .transcode
         .restore_candidate_context(&mut request)
         .await
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
@@ -1115,6 +1115,7 @@ mod tests {
 
     fn relay_start_response(session_id: &str, incarnation_id: &str) -> String {
         serde_json::to_string(&crate::http::hls::StartResponse {
+            quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,

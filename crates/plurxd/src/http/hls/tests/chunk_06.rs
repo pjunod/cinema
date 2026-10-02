@@ -370,6 +370,7 @@
         };
         resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state,
                 user_id: 7,
                 file_id: source.id,
@@ -471,6 +472,7 @@
             };
             let resolved = resolve_plan(
                 PlanInputs {
+            snapshot: None,
                     state: &state,
                     user_id: 7,
                     file_id: source.id,
@@ -513,6 +515,7 @@
             ..bare_create()
         };
         let inputs = || PlanInputs {
+            snapshot: None,
             state: &state,
             user_id: 7,
             file_id: source.id,
@@ -577,6 +580,7 @@
         let expected = review.notes.clone();
         let resolved = resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state: &state,
                 user_id: 7,
                 file_id: source.id,
@@ -2591,6 +2595,7 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    candidate_catalog: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,
@@ -2962,4 +2967,40 @@
             StatusCode::SERVICE_UNAVAILABLE,
             "the unreachable remote owner is tried after the point, and the release deferred"
         );
+    }
+
+    #[test]
+    fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
+        let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+            file: staged_source_file(), probe_json: Some("{\"streams\":[]}".to_owned()),
+            settings: Default::default(), generation: 1,
+        };
+        let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+        snapshot.probe_json = Some("{\"streams\":[{\"codec_name\":\"hevc\"}]}".to_owned());
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        snapshot.probe_json = Some("{\"streams\":[]}".to_owned());
+        snapshot.generation += 1;
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+    }
+
+    #[tokio::test]
+    async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
+        let state = resolver_state();
+        let request = crate::media_pool::QualityCatalogRequest {
+            file_id: -1, source_size: -1, source_mtime: -1,
+            caps: Default::default(), copy_contract: None, audio_index: None,
+            audio_offset_ms: 0, subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        let outcome = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now(), None,
+        ).await;
+        assert!(!outcome.complete);
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(outcome.causes, vec![crate::media_pool::CatalogCause::LocalDeadline]);
+        let invalid = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now() + Duration::from_secs(1), None,
+        ).await;
+        assert!(matches!(invalid.causes.as_slice(), [crate::media_pool::CatalogCause::RequestInvalid(_)]));
     }

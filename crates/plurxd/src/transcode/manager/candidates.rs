@@ -2,44 +2,8 @@ use super::*;
 use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
 
 impl TranscodeManager {
-    /// Resolve the same output contracts used at dispatch. This never reserves
-    /// capacity: incomplete cache verification and unknown production remain
-    /// unknown, and a later owner must resolve and compare the full recipe.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn quality_candidates_with_copy_contract(
-        &self,
-        file: &plurx_core::domain::MediaFile,
-        caps: &plurx_core::playback::DeviceCaps,
-        audio: Option<i64>,
-        audio_offset_ms: i64,
-        subtitle: Option<i64>,
-        presentation: Presentation,
-        retained_copy: Option<(bool, bool, bool)>,
-    ) -> Vec<QualityCandidate> {
-        let Ok(Some(snapshot)) = self
-            .store
-            .playback_planning_snapshot(file.id, &QUALITY_PLANNING_KEYS)
-            .await
-        else {
-            return Vec::new();
-        };
-        if snapshot.file.size != file.size || snapshot.file.mtime != file.mtime {
-            return Vec::new();
-        }
-        self.quality_candidates_from_snapshot(
-            &snapshot,
-            caps,
-            audio,
-            audio_offset_ms,
-            subtitle,
-            presentation,
-            retained_copy,
-        )
-        .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn quality_candidates_from_snapshot(
+    pub(crate) async fn quality_candidates_from_snapshot_progress(
         &self,
         snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
         caps: &plurx_core::playback::DeviceCaps,
@@ -48,29 +12,13 @@ impl TranscodeManager {
         subtitle: Option<i64>,
         presentation: Presentation,
         retained_copy: Option<(bool, bool, bool)>,
+        progress: Option<&std::sync::Mutex<Vec<QualityCandidate>>>,
+        selected: Option<&QualityCandidate>,
     ) -> Vec<QualityCandidate> {
         let mut catalog_file = snapshot.file.clone();
         catalog_file.audio_offset_ms = audio_offset_ms;
         let file = &catalog_file;
-        let mut prefs = plurx_core::tracks::LangPrefs::default();
-        if let Some(value) = snapshot
-            .settings
-            .get(keys::AUDIO_LANG)
-            .filter(|value| !value.trim().is_empty())
-        {
-            prefs.audio_lang = value.trim().to_owned();
-        }
-        if let Some(value) = snapshot
-            .settings
-            .get(keys::SUB_LANG)
-            .filter(|value| !value.trim().is_empty())
-        {
-            prefs.sub_lang = value.trim().to_owned();
-        }
-        if let Some(value) = snapshot.settings.get(keys::SUB_MODE) {
-            prefs.sub_mode = plurx_core::tracks::SubMode::parse(value.trim());
-        }
-        let audio = Self::select_tracks_with_prefs(file, audio, None, &prefs, false).audio_index;
+        let audio = Self::candidate_audio_from_snapshot(snapshot, audio);
         let probe: serde_json::Value = match snapshot.probe_json.as_deref() {
             Some(encoded) => match serde_json::from_str(encoded) {
                 Ok(probe) => probe,
@@ -118,8 +66,19 @@ impl TranscodeManager {
             copy_decision.preserve_dolby_vision,
             copy_decision.convert_dolby_vision,
         ));
-        let copy_engine = crate::ffmpeg::EncodedExecutable::capture().await.ok();
-        let copy_runtime_engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok();
+        let copy_possible = copy_decision.method != plurx_core::playback::PlaybackMethod::Transcode
+            && subtitle.is_none()
+            && selected.is_none_or(|candidate| candidate.route != CandidateRoute::Encode);
+        let copy_engine = if copy_possible {
+            crate::ffmpeg::EncodedExecutable::capture().await.ok()
+        } else {
+            None
+        };
+        let copy_runtime_engine = if copy_possible {
+            crate::ffmpeg::EncodedEngine::capture(None).await.ok()
+        } else {
+            None
+        };
         let copy_source = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
             .ok();
@@ -182,7 +141,7 @@ impl TranscodeManager {
                     .expect("bounded candidate source identity is serializable"),
                 );
                 let recipe_digest: [u8; 32] = hash.finalize().into();
-                result.push(QualityCandidate {
+                let candidate = QualityCandidate {
                     id: CandidateId::for_recipe_digest(recipe_digest),
                     recipe_digest,
                     route: CandidateRoute::Remux,
@@ -200,7 +159,14 @@ impl TranscodeManager {
                     decoder_compatible: true,
                     complete_cache: false,
                     sustainable: true,
-                });
+                };
+                if let Some(progress) = progress {
+                    progress
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(candidate.clone());
+                }
+                result.push(candidate);
             }
         }
 
@@ -234,6 +200,14 @@ impl TranscodeManager {
                     .map(move |normalized| (height, hdr, normalized))
             })
         }) {
+            if selected.is_some_and(|candidate| {
+                candidate.route != CandidateRoute::Encode
+                    || i64::from(candidate.target_height) != height
+                    || (candidate.grade == OutputGrade::Hdr10) != hdr_requested
+                    || candidate.normalized_geometry != normalized_geometry
+            }) {
+                continue;
+            }
             if !normalized_geometry && !legacy_geometry_known {
                 continue;
             }
@@ -364,7 +338,7 @@ impl TranscodeManager {
                 (u64::from(plan.options().video_bitrate_kbps) + u64::from(audio_budget)) * 1000;
             let peak_bps = u64::from(plan.options().video_bitrate_kbps) * 1500
                 + u64::from(audio_budget) * 1000;
-            result.push(QualityCandidate {
+            let candidate = QualityCandidate {
                 id: CandidateId::for_recipe_digest(recipe_digest),
                 recipe_digest,
                 route: CandidateRoute::Encode,
@@ -378,9 +352,41 @@ impl TranscodeManager {
                 decoder_compatible,
                 complete_cache,
                 sustainable,
-            });
+            };
+            if let Some(progress) = progress {
+                progress
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(candidate.clone());
+            }
+            result.push(candidate);
         }
         result
+    }
+
+    pub(crate) fn candidate_audio_from_snapshot(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+        audio: Option<i64>,
+    ) -> Option<i64> {
+        let mut prefs = plurx_core::tracks::LangPrefs::default();
+        if let Some(value) = snapshot
+            .settings
+            .get(keys::AUDIO_LANG)
+            .filter(|value| !value.trim().is_empty())
+        {
+            prefs.audio_lang = value.trim().to_owned();
+        }
+        if let Some(value) = snapshot
+            .settings
+            .get(keys::SUB_LANG)
+            .filter(|value| !value.trim().is_empty())
+        {
+            prefs.sub_lang = value.trim().to_owned();
+        }
+        if let Some(value) = snapshot.settings.get(keys::SUB_MODE) {
+            prefs.sub_mode = plurx_core::tracks::SubMode::parse(value.trim());
+        }
+        Self::select_tracks_with_prefs(&snapshot.file, audio, None, &prefs, false).audio_index
     }
 
     pub(crate) async fn candidate_audio_index(
@@ -413,6 +419,17 @@ impl TranscodeManager {
         Self::quality_facts_from_probe(file, &probe)
     }
 
+    pub(crate) fn quality_facts_from_snapshot(
+        snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+    ) -> Option<DecodeFacts> {
+        let probe = snapshot
+            .probe_json
+            .as_deref()
+            .and_then(|encoded| serde_json::from_str(encoded).ok())
+            .unwrap_or_else(|| Self::catalog_plan_probe(&snapshot.file));
+        Self::quality_facts_from_probe(&snapshot.file, &probe)
+    }
+
     pub(super) fn quality_facts_from_probe(
         file: &plurx_core::domain::MediaFile,
         probe: &serde_json::Value,
@@ -435,16 +452,20 @@ impl TranscodeManager {
         let Some(id) = envelope.candidate_id else {
             return Ok(());
         };
-        let snapshot = envelope
-            .decoder_caps
+        let catalog = envelope
+            .candidate_catalog
             .as_ref()
-            .ok_or_else(|| "candidate decoder snapshot missing".to_owned())?;
-        let file = self
+            .ok_or_else(|| "candidate canonical evidence missing".to_owned())?;
+        let planning = self
             .store
-            .get_file(envelope.request.file_id)
+            .playback_planning_snapshot(envelope.request.file_id, &QUALITY_PLANNING_KEYS)
             .await
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "candidate source missing".to_owned())?;
+        if catalog.binding != crate::media_pool::PlanningBinding::from_snapshot(&planning) {
+            return Err("candidate source or settings changed".to_owned());
+        }
+        let file = &planning.file;
         if file.size != envelope.source_size || file.mtime != envelope.source_mtime {
             return Err("candidate source changed".to_owned());
         }
@@ -456,15 +477,25 @@ impl TranscodeManager {
             } => Some((aac, preserve_dolby_vision, convert_dolby_vision)),
             SessionKind::Transcode { .. } => None,
         };
+        let mut canonical_caps = catalog.caps.clone();
+        if let Some(snapshot) = envelope.decoder_caps.as_ref() {
+            canonical_caps.video = snapshot.device_caps().video;
+        }
+        let selected = &catalog.candidate;
+        if selected.id != id {
+            return Err("candidate descriptor identity mismatch".to_owned());
+        }
         let candidates = self
-            .quality_candidates_with_copy_contract(
-                &file,
-                &snapshot.device_caps(),
+            .quality_candidates_from_snapshot_progress(
+                &planning,
+                &canonical_caps,
                 envelope.request.audio_index,
                 envelope.request.audio_offset_ms,
                 envelope.request.subtitle_burn,
                 envelope.request.presentation,
                 retained_copy,
+                None,
+                Some(selected),
             )
             .await;
         let candidate = candidates
@@ -479,12 +510,20 @@ impl TranscodeManager {
             SessionKind::Copy { .. } if candidate.route != CandidateRoute::Encode => {}
             _ => return Err("candidate delivery mismatch".to_owned()),
         }
-        envelope.request.candidate_context = Some(Self::candidate_context(candidate));
+        let mut context = Self::candidate_context(candidate);
+        context.canonical_caps = Some(canonical_caps);
+        context.planning_binding =
+            Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        envelope.request.candidate_context = Some(Box::new(context));
         Ok(())
     }
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
+            quality_catalog: None,
+            canonical_caps: None,
+            selected_candidate: candidate.clone(),
+            planning_binding: None,
             owner_node_id: None,
             candidate_id: candidate.id,
             recipe_digest: candidate.recipe_digest,
