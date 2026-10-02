@@ -287,14 +287,28 @@ with `luminance_source = 'none'` by id cursor, 16 per tick under the
 `catalogue:luminance-frame` cluster job lease, and runs the scanner's own
 first-frame read (`scan::probe::first_frame_luminance` — one thread, the same
 30 s / 256 KiB bounds, the background child class, attributed as "catalogue
-luminance backfill"). A frame that carries MDCV/CLL is written as `frame`
-through `set_file_frame_luminance`, fenced to the listed id/path/size/mtime/
-probe snapshot and to the row still being `none`. A frame with nothing, or
-one that cannot be read, leaves `none` and moves the cursor (open question 2's
-ruling: a new probe document earns another read). A file whose disk identity
-changed is left to the rescan that change triggers; a file that cannot be
-stat'ed stops the page without advancing, so an offline mount is retried
-rather than walked to completion. Exhaustion stamps
+luminance backfill"). Only rows whose stored document classifies
+PQ/HLG with no stream record are read — the scanner's own eligibility; the
+document walk also stamps a Dolby Vision row whose base layer is neither. A
+frame that carries MDCV/CLL is written as `frame` through
+`set_file_frame_luminance`, fenced to the listed id/path/size/mtime/probe
+snapshot and to the row still being `none`. The cursor moves past a row only
+on evidence about that row: a frame with nothing, or ffprobe's own refusal
+of the file (`ProbeError::is_file_verdict`), leaves `none` and moves on (open
+question 2's ruling: a new probe document earns another read), unless every
+read in a page of more than one was refused, which says more about the
+reader than the files. ffprobe that could not run (not found, not
+executable, exit 126/127) or did not finish (timeout, signal), and a failed
+store write, stop the page where it is. A file whose disk identity changed
+is left to the rescan that change triggers. A file that cannot be stat'ed is
+judged by its library root, with the scanner's root-identity read plus a
+non-empty listing: root available, so the row is stale (deleted file,
+dangling link) and the next scan reconciles it, skip; root unavailable
+(unmounted share, media not on this node), stop without advancing. A row a
+later rescan writes `none` under an id the walk has passed is not revisited:
+the scanner writes `none` only after attempting this same frame read itself,
+so that row waits for its file's next change like every other scan-time
+probe fact. Exhaustion stamps
 `jobs.luminance_frame_backfilled`; the cursor is
 `jobs.luminance_frame_backfill_cursor.node.<id>`, node-local like the other
 backfill cursors.
@@ -314,7 +328,7 @@ claim the held probe reads frame side data.
 
 ### 3.3 M2 — the chain
 
-**Source implemented; required image evidence remains pending.** The CPU recipe now chooses CLL,
+**Source implemented; real-title image evidence recorded on lab3 2026-10-02 ([§5.3.1](#531-m2-evidence-2026-10-02)); the media1 QSV repeat remains.** The CPU recipe now chooses CLL,
 then mastering maximum luminance, then the documented 1,000-nit policy
 default. Peak value and `cll`/`mdcv`/`default` provenance enter the plan
 digest, session log and fixed-cardinality metric. The boot probe's CPU
@@ -361,8 +375,12 @@ it from there.
   reinhard/hable/mobius — `ffmpeg -h filter=tonemap`).
 
 Identity: the plan digest gains `tone_map_peak` (the number and its
-provenance: `cll` | `mdcv` | `default`), and the filter string changes for
-every `ToneMap::Zscale` session, so every CPU-tone-mapped recipe key moves.
+provenance: `cll` | `mdcv` | `default`) and its version moves, so every
+CPU-tone-mapped recipe key moves. The filter string itself is not an
+identity input — neither `plan_digest` nor `Recipe::hash` feeds it; the
+tone-map kind and the peak pair enter as typed fields — which is why the
+2026-10-02 respelling (gamut folded into the linearising zscale,
+bit-identical output) moved no key.
 `RESOLVED_TRANSCODE_PLAN_VERSION` is 3 because the plan digest gained fields
 and ordering semantics. It was drafted here as 2; S-08's `deinterlace` field
 reached main first and published 2, so this work takes the next revision. `CACHE_RECIPE_VERSION` stays 3; invalidation is by
@@ -491,11 +509,15 @@ not a variable; repeated on media1 for the QSV hwdownload path):
 3. Readings per frame: `signalstats` YAVG/YMAX/YMIN; a histogram
    (`histogram` filter to PNG); `psnr`/`ssim` between before and after to
    quantify the change; visual stills side by side in the PR.
-4. Banding: on the gradient source, read one horizontal line of 8-bit luma
-   (`-vf crop=1920:1:0:540,extractplanes=y -f rawvideo`) before and after
-   dither and count **level transitions** along it (adjacent pixels that
-   differ) and the **longest flat run** in pixels. *Restated 2026-10-02:* the
-   original measure, distinct 8-bit levels on the line, cannot show dither.
+4. Dither activity: on the gradient source, read one horizontal line of
+   8-bit luma (`-vf crop=1920:1:0:540,extractplanes=y -f rawvideo`) before
+   and after dither and count **level transitions** along it (adjacent
+   pixels that differ) and the **longest flat run** in pixels. These show
+   that error diffusion is acting on the output — flat steps broken into
+   interleaved neighbouring levels. They are not a perceptual banding
+   measure; whether visible banding fell is judged on the stills.
+   *Restated 2026-10-02:* the original measure, distinct 8-bit levels on the
+   line, cannot show dither at all.
    On a monotonic ramp error diffusion only interleaves the two neighbouring
    levels at each step, so the set of levels is unchanged (measured 240 = 240,
    113 = 113, 36 = 36 with dither working), and the earlier 20 → 21 reading
@@ -510,9 +532,9 @@ asserting `peak=10` with `default` provenance for a source with no facts,
 `peak=40` for MaxCLL 4000, `peak=` from mastering luminance when only MDCV
 exists; the `assert_no_pq_at_8_bit` guard still passes.
 
-Acceptance: the PR carries the stills, the ramp readings (more level
-transitions and a shorter longest flat run after than before, at an equal
-distinct-level count), `psnr` numbers, the cost delta, and `cargo test -p
+Acceptance: the PR carries the stills, the ramp readings showing dither
+active (more level transitions and a shorter longest flat run after than
+before, at an equal distinct-level count), `psnr` numbers, the cost delta, and `cargo test -p
 plurx-core transcode` green.
 
 The generated narrow 10-bit ramp was compared inside media1's shipped
@@ -575,7 +597,7 @@ MaxCLL 793 renders slightly brighter, 2008 about two levels darker, 9978
 about eight levels darker, and B's highlights no longer reach super-white
 (before YMAX 232–238, after 191–213).
 
-Banding, on a generated PQ ramp (row 540, 8-bit luma):
+Dither activity, on a generated PQ ramp (row 540, 8-bit luma):
 
 | ramp (10-bit codes) | distinct levels before / after | transitions before → after | longest flat run px before → after |
 |---|---|---|---|
@@ -584,7 +606,11 @@ Banding, on a generated PQ ramp (row 540, 8-bit luma):
 | narrow 380–460 | 36 / 36 | 35 → 617 | 72 → 49 |
 
 The after chain without dither matches before exactly on all three ramps, so
-the change is the dither. This meets the restated bar in step 4.
+the change is the dither. This is evidence that dither is active on the
+output and meets the restated step 4 reading. It is not a perceptual
+banding result: these counts say the quantiser now diffuses its error, not
+that a viewer sees less banding on real gradients, which remains a judgement
+on the stills.
 
 Cost, `-benchmark` on 20 s of A at 4K software decode → 1080 (480 frames),
 median of three, two independent sets:
@@ -597,8 +623,8 @@ median of three, two independent sets:
 | folded, no dither | +1.0 % | noise |
 
 The first-merged chain failed the 5 % bar; the folded chain meets it
-end to end. Dither is the only material added cost and is what the banding
-readings above buy. On the production image, the folded and separate forms
+end to end. Dither is the only material added cost; the readings above show it
+working. On the production image, the folded and separate forms
 produced identical framemd5 sets over 24 frames of a 10-bit PQ pattern at
 `peak` 10, 20.08 and 99.78, and for HLG input.
 
@@ -716,4 +742,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added bounded stream/frame luminance collection, SQLite v64 and replicated v43 storage, exact-snapshot backfill, decode/cache identity and read-only DTO fields. Parser/facts/schema/store-contract regressions pass, including the actual Hiqlite contract path. The review follow-up makes Dolby Vision with a PQ/HLG selected base layer eligible for frame luminance recovery; legacy SEI-only recovery remains explicitly owned by ordinary scan rather than the stream-only held probe. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 (source complete; evidence pending) | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added explicit peak/provenance, gamut-before-curve, final error-diffusion dither, log/metric/recipe identity and matching boot-probe reference. Held stream facts now refine the actual filter; the plan digest version is 2; playback-info exposes peak value and provenance. On the generated narrow ramp, dither increased distinct 8-bit luma levels 20→21; corrected wall time was 0.488 s versus 0.479 s before (+1.9%). Temporary media was removed. Required lab4, 10/50/90 and Harbor Lights still/histogram evidence remains pending, so M2 is not accepted. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / pending | Needs the merged/coordinated schema build deployed to media1 and before/after `/api/v1/system` pipeline verdicts. The named real-title image protocol remains an M2 prerequisite; Apple TV/Chrome post-deploy playback and selected-pipeline observations remain M3. No branch build was deployed from this draft. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M2 evidence + corrections (Opus continuation) | pending | Real-title before/after on lab3 (§5.3.1): four HDR10 titles and an SEI-stripped clip at 10/50/90 %, ramp banding, cost. The first-merged chain failed the 5 % cost bar (+10–14 %); folding `p=bt709` into the linearising zscale is bit-identical, brings it to +4.2 % and closes an untagged-primaries zero-frame failure. Banding bar restated to transitions and flat-run length (35 → 617, 72 → 49 px on the narrow ramp). New first-frame luminance backfill for HDR rows catalogued `none` (1,004 of 1,074 on the production catalogue), both store backends. Super-white and MaxCLL-above-mastering recorded with recommendations. media1 QSV leg and M3 remain. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M2 evidence + corrections (Opus continuation) | PR #727 | Real-title before/after on lab3 (§5.3.1): four HDR10 titles and an SEI-stripped clip at 10/50/90 %, ramp banding, cost. The first-merged chain failed the 5 % cost bar (+10–14 %); folding `p=bt709` into the linearising zscale is bit-identical, brings it to +4.2 % and closes an untagged-primaries zero-frame failure. Banding bar restated to transitions and flat-run length (35 → 617, 72 → 49 px on the narrow ramp). New first-frame luminance backfill for HDR rows catalogued `none` (1,004 of 1,074 on the production catalogue), both store backends. Super-white and MaxCLL-above-mastering recorded with recommendations. media1 QSV leg and M3 remain. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Review 65 repairs | PR #727 | Frame backfill: probe failures classified in `ProbeError` (verdict on the file vs could-not-run/did-not-finish, exit 126/127 = not executed); only verdicts advance, and an all-refused page does not; a missing file under an available root is skipped, under an unavailable root stops; selection limited to the scanner's PQ/HLG eligibility; scan-written `none` behind the cursor documented as waiting for the file's change. Real-ffmpeg regression for an untagged-primaries frame; fence, Spawn, store-error and fenced-write tests; identity and dither wording corrected. |
