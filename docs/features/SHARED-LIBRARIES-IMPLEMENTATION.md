@@ -1463,7 +1463,7 @@ implied by the build handoff.
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
 | S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
 | S2 | implementation in progress; topology qualification open | `codex/sharing-s2-network` (unpublished) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
-| S3 | not started | — | — |
+| S3 | implementation started; ownership migration open | `codex/sharing-s3-principals` (unpublished) | Typed principal and canonical owner-key construction implemented; two decoder/collision tests passed and core Clippy passed. All 36 Store operations, table rebuilds, real owner checks, cluster floor and old-writer receipts remain open. |
 | S4 | not started | — | — |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
@@ -1641,3 +1641,30 @@ pinned transport; complete per-node availability and deployment diagnostics;
 shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
 startup ordering; the final task gate. The current listener refuses unqualified
 non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
+
+
+### 16.4 Implementation progress — S3, 2026-10-02
+
+The unpublished S3 worktree starts from local S2 checkpoint `269900c6a`;
+its final review branch must be ported to the current gated effort. The
+primary checkout and the S2 compiler archive remain untouched.
+
+`PlaybackPrincipal` now distinguishes a real local numeric user from a grant
+UUID and validated 64-character viewer pseudonym. Only its constructor
+builds an owner key. The row-projection decoder rejects mixed local/shared
+columns, noncanonical UUIDs, malformed pseudonyms and mismatched keys; it
+never adopts a foreign local user. Debug output redacts the pseudonym.
+Two focused tests passed; core Clippy with denied warnings passed using
+Rust 1.97.1 and `hiqlite-store`.
+
+The Store recount at this checkpoint confirms 36 `MediaSessionStore`
+operations, 16 with an explicit numeric-user key and 20 with other keys or
+structured input. This recount is not the required complete predicate,
+conflict-target and decoder census. Existing session tables and runtime
+callers still use the old ownership shape; no shared playback admission or
+migration acceptance is claimed.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib playback_principal::tests -- --nocapture
+cargo clippy --locked -p plurx-core --features hiqlite-store --lib -- -D warnings
+```
