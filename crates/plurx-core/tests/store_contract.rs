@@ -19001,15 +19001,40 @@ async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
         );
 
         let candidate = page.into_iter().next().expect("candidate");
-        let mut stale = candidate.clone();
-        stale.mtime += 1;
-        assert!(
-            !store
-                .set_file_frame_luminance(&stale, Some(1), None, None)
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
-            "{backend}: a different snapshot is refused"
-        );
+        // Each identity field fences the write on its own.
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/hdr-frame/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_luminance(&stale, Some(1), None, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .luminance_source
+                    .as_deref(),
+                Some("none"),
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
         assert!(store
             .set_file_frame_luminance(&candidate, Some(2008), Some(612), Some(4000))
             .await

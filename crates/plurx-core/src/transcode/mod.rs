@@ -1290,6 +1290,33 @@ fn with_subtitles(mut chain: Vec<String>, opts: &TranscodeOptions, source_path: 
 /// rather than inferred so a new spelling has to be added deliberately.
 const EIGHT_BIT_FORMATS: &[&str] = &["yuv420p", "yuvj420p", "nv12", "yuv422p", "yuv444p"];
 
+/// The CPU HDR→SDR tone map: linearise, convert BT.2020 → BT.709 primaries,
+/// apply the Hable curve against an explicit peak, return to 8-bit BT.709
+/// limited range with error-diffusion dither.
+///
+/// `transfer_in` is the source transfer (`smpte2084` or `arib-std-b67`) and
+/// `peak_nits` the stated or policy peak; `tonemap` takes it in hundreds of
+/// nits. This is the one spelling of the chain: the boot probe measures
+/// every GPU graph against exactly this string, so it must not be copied.
+///
+/// The gamut conversion rides on the linearising `zscale` (`p=bt709`) rather
+/// than on a separate pass ahead of `tonemap`. zimg converts primaries in
+/// linear light either way, still before the curve, so the output is
+/// bit-identical to a standalone `zscale=p=bt709` — and one float32 pass
+/// cheaper. Naming the output primaries there matters on its own too: with
+/// `pin=` but no `p=`, zimg takes the *output* primaries from the frame, so a
+/// decoded frame that arrives without a primaries tag fails the graph with
+/// "no path between colorspaces" and produces nothing.
+pub fn zscale_tone_map_filter(transfer_in: &str, peak_nits: u32) -> String {
+    format!(
+        "zscale=tin={transfer_in}:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,\
+         format=gbrpf32le,\
+         tonemap=tonemap=hable:desat=0:peak={peak},\
+         zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
+        peak = f64::from(peak_nits) / 100.0,
+    )
+}
+
 /// Refuse to hand ffmpeg a filter that asks for a PQ **output** transfer at an
 /// 8-bit output depth.
 ///
@@ -1323,33 +1350,6 @@ const EIGHT_BIT_FORMATS: &[&str] = &["yuv420p", "yuvj420p", "nv12", "yuv422p", "
 /// caller who could choose one: every reachable path builds the chain from an
 /// `OutputGrade`, so a violation is a bug in this file that a test must catch
 /// before a viewer's ffmpeg does.
-/// The CPU HDR→SDR tone map: linearise, convert BT.2020 → BT.709 primaries,
-/// apply the Hable curve against an explicit peak, return to 8-bit BT.709
-/// limited range with error-diffusion dither.
-///
-/// `transfer_in` is the source transfer (`smpte2084` or `arib-std-b67`) and
-/// `peak_nits` the stated or policy peak; `tonemap` takes it in hundreds of
-/// nits. This is the one spelling of the chain: the boot probe measures
-/// every GPU graph against exactly this string, so it must not be copied.
-///
-/// The gamut conversion rides on the linearising `zscale` (`p=bt709`) rather
-/// than on a separate pass ahead of `tonemap`. zimg converts primaries in
-/// linear light either way, still before the curve, so the output is
-/// bit-identical to a standalone `zscale=p=bt709` — and one float32 pass
-/// cheaper. Naming the output primaries there matters on its own too: with
-/// `pin=` but no `p=`, zimg takes the *output* primaries from the frame, so a
-/// decoded frame that arrives without a primaries tag fails the graph with
-/// "no path between colorspaces" and produces nothing.
-pub fn zscale_tone_map_filter(transfer_in: &str, peak_nits: u32) -> String {
-    format!(
-        "zscale=tin={transfer_in}:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,\
-         format=gbrpf32le,\
-         tonemap=tonemap=hable:desat=0:peak={peak},\
-         zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
-        peak = f64::from(peak_nits) / 100.0,
-    )
-}
-
 pub fn assert_no_pq_at_8_bit(chain: &str) {
     // `,` separates filters, `;` separates the branches of a filter_complex.
     for filter in chain.split([',', ';']) {
