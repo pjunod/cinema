@@ -1103,6 +1103,7 @@ paths = [
   "Dockerfile.store-shard",
   "deploy/**",
   "crates/plurxd/build.rs",
+  "crates/plurxd/build_support/**",
   "crates/plurxd/plurxd.manifest",
   "crates/plurxd/src/windows_service.rs",
   "crates/plurxd/src/version.rs",
