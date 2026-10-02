@@ -615,7 +615,62 @@ pub struct VodStart {
     pub duration_ms: i64,
 }
 
-/// The durable request plus an already resolved encoder recipe. Plain copy
+/// Actual init-verified media and exact catalog provenance for one parent.
+pub(crate) struct VerifiedContinuousFamily {
+    pub family: plurx_core::transcode::VodPresentationFamily,
+    pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
+    pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
+    pub candidates: HashMap<String, plurx_core::playback::candidate::CandidateId>,
+}
+
+impl VerifiedContinuousFamily {
+    pub(crate) fn description(&self) -> Result<Vec<u8>, VodError> {
+        let mut video = Vec::new();
+        for rung in self.family.video().rungs() {
+            let candidate = self.candidates.get(rung.rendition_id()).ok_or_else(|| {
+                VodError::ProducerFailed("family rung has no retained catalog identity".into())
+            })?;
+            let budget = self
+                .video_budgets
+                .iter()
+                .find(|budget| budget.rendition_id == rung.rendition_id())
+                .ok_or_else(|| {
+                    VodError::ProducerFailed("family rung has no delivery budget".into())
+                })?;
+            video.push(serde_json::json!({
+                "candidate_id": candidate, "rendition_id": rung.rendition_id(),
+                "init_id": rung.init_id(), "width": rung.facts().width,
+                "height": rung.facts().height, "codec": rung.facts().codec,
+                "timescale": rung.grid().numerator, "frame_ticks": rung.grid().denominator,
+                "segment_ticks": rung.grid().segment_ticks(),
+                "peak_bps": budget.peak_bps,
+                "playlist": format!("video/{}/index.m3u8", rung.rendition_id()),
+            }));
+        }
+        let audio = self.family.audio().map(|audio| {
+            serde_json::json!({
+                "rendition_id": audio.rendition_id(), "init_id": audio.init_id(),
+                "codec": audio.facts().codec, "channels": audio.facts().channels,
+                "timescale": plurx_core::transcode::VOD_AUDIO_RATE,
+                "peak_bps": self.audio_budget.as_ref().map(|budget| budget.peak_bps),
+                "playlist": format!("audio/{}/index.m3u8", audio.rendition_id()),
+            })
+        });
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "family_id": self.family.id(),
+            "mode": "autonomous_reserved", "master": "master.m3u8", "video": video, "audio": audio,
+        }))
+        .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        if bytes.len() > 32 * 1024 {
+            return Err(VodError::ProducerFailed(
+                "family description exceeds its bound".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// The durable request plus already resolved encoder recipes. Plain copy
 /// callers need no encoder preparation and convert from their request alone.
 pub(crate) struct VodRecipeRequest<'a> {
     pub request: &'a SessionRequest,

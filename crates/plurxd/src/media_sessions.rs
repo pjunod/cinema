@@ -1531,6 +1531,7 @@ pub(crate) enum RelayResource {
         diagnostic: Option<String>,
     },
     VideoPlaylist,
+    ContinuousFamily,
     SubtitlePlaylist {
         index: i64,
     },
@@ -1625,7 +1626,7 @@ impl RelayHeaders {
 impl RelayResource {
     pub(crate) fn is_valid(&self) -> bool {
         match self {
-            Self::Status | Self::VideoPlaylist | Self::Delete => true,
+            Self::Status | Self::VideoPlaylist | Self::ContinuousFamily | Self::Delete => true,
             Self::Playlist { native, subtitle } => {
                 native.is_none_or(|value| value <= 1)
                     && subtitle.is_none_or(|value| (0..=1_024).contains(&value))
@@ -1656,6 +1657,7 @@ impl RelayResource {
             Self::Playlist { .. }
             | Self::Master { .. }
             | Self::VideoPlaylist
+            | Self::ContinuousFamily
             | Self::SubtitlePlaylist { .. }
             | Self::ChildPlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
             Self::Segment { .. } | Self::ChildSegment { .. } => RELAY_SEGMENT_MAX_LIFETIME,

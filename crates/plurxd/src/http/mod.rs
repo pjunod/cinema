@@ -1706,6 +1706,7 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route("/hls/{session}/quality-family", get(hls::continuous_family))
         .route(
             "/hls/{session}/control",
             post(hls::control).layer(DefaultBodyLimit::max(

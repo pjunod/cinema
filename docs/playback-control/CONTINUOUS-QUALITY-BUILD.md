@@ -1979,3 +1979,23 @@ unqualified conversion of all devices to TextureView has been introduced.
 Connected Apple devices were inventoried for later qualification; no Android
 device was connected to ADB at this point. Native device evidence remains
 unfinished.
+
+
+### 10.52 Catalog provenance and verified family description
+
+Each private video reader now retains its exact catalog candidate identity.
+The family verifier returns reusable init-verified media facts; the master
+and independently versioned `quality-family` metadata derive from that same
+verifier. The bounded metadata names exact candidate, rendition and init IDs,
+actual raster/codec/cadence, container-inclusive delivery ceilings, stable
+relative playlists and the honest `autonomous_reserved` resource mode. It
+cannot invent a candidate for a rung whose provenance was not retained.
+
+The read-only capability route has a typed peer relay and existing response
+ownership fences. Ordinary parents answer family absence under their own
+response owner; a missing local owner uses bounded reconstruction and keeps
+terminal/owner-loss refusals. Legacy start and control JSON remain unchanged.
+The existing AAC campaign covers candidate mapping, two verified video rows
+and the exact shared soundtrack description. Pinned compilation and normal
+hooks apply; unit execution remains deferred. Schedule mutations, durable
+family descriptors and production client adoption remain unfinished.

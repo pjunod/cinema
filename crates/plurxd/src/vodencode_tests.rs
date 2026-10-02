@@ -374,6 +374,11 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         owner_node_id: None, candidate_id: companion_id, recipe_digest: [10; 32],
         normalized_geometry: true, grade: plurx_core::transcode::OutputGrade::Sdr, profile: None,
     });
+    parent_request.candidate_context = Some(crate::transcode::CandidateExecutionContext {
+        owner_node_id: None, candidate_id: plurx_core::playback::candidate::CandidateId([7; 16]),
+        recipe_digest: [8; 32], normalized_geometry: true,
+        grade: plurx_core::transcode::OutputGrade::Sdr, profile: None,
+    });
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;
@@ -409,6 +414,15 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     }
     assert_eq!(serve.continuous_master_before(&parent, Instant::now() + Duration::from_secs(5)).await
         .expect("same parent").result.expect("stable family").expect("master"), master_bytes);
+    let description = serve.continuous_family_description_before(&parent, Instant::now() + Duration::from_secs(5)).await
+        .expect("family parent").result.expect("verified description").expect("description bytes");
+    let description: serde_json::Value = serde_json::from_slice(&description).expect("family JSON");
+    assert_eq!(description["version"], 1);
+    assert_eq!(description["mode"], "autonomous_reserved");
+    assert_eq!(description["video"].as_array().expect("rungs").len(), 2);
+    assert!(description["video"].as_array().expect("rungs").iter().any(|rung| rung["candidate_id"] == companion_id.to_hex()));
+    assert!(description["video"].as_array().expect("rungs").iter().all(|rung| rung["candidate_id"].is_string()));
+    assert_eq!(description["audio"]["rendition_id"], soundtrack.key);
     assert!(serve.commit_resolved_media(&parent, &master.owner, None).await);
     assert!(serve.end(&parent, Terminal::Deleted).await);
     assert!(!serve.commit_resolved_media(&parent, &master.owner, None).await, "ended master cannot commit");

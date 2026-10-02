@@ -206,6 +206,9 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             )
             .await
         }
+        RelayResource::ContinuousFamily => {
+            continuous_family_local_before(state, &request.session_id, request_deadline).await
+        }
         RelayResource::ChildPlaylist { role, rendition } => {
             child_playlist_local_before(
                 state,

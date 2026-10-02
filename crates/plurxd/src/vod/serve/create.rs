@@ -766,9 +766,23 @@ impl VodServe {
             media
                 .into_iter()
                 .zip(permits)
-                .map(|(rendition, permit)| ParentMediaReader {
+                .map(|(child, permit)| ParentMediaReader {
+                    candidate_id: if Arc::ptr_eq(&child, &rendition) {
+                        req.candidate_context
+                            .as_ref()
+                            .map(|context| context.candidate_id)
+                    } else if companion_rendition
+                        .as_ref()
+                        .is_some_and(|companion| Arc::ptr_eq(&child, companion))
+                    {
+                        req.continuous_media
+                            .as_ref()
+                            .and_then(|media| media.autonomous_companion)
+                    } else {
+                        None
+                    },
                     reader_id: uuid::Uuid::new_v4().to_string(),
-                    rendition,
+                    rendition: child,
                     _reservation: Some(permit),
                 })
                 .collect::<Vec<_>>()

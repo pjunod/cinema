@@ -30,6 +30,96 @@ pub async fn segment(
     .await
 }
 
+/// Independently versioned family metadata; legacy start/control JSON is unchanged.
+pub async fn continuous_family(
+    State(state): State<AppState>,
+    AxPath(session): AxPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let (_, deadline) = playlist_request_deadlines(&state);
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::ContinuousFamily,
+        RelayHeaders::from_http(&headers),
+        deadline,
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    continuous_family_local_before(&state, &session, deadline).await
+}
+
+pub(super) async fn continuous_family_local_before(
+    state: &AppState,
+    session: &str,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let (media_deadline, _) = playlist_request_deadlines_before(state, deadline);
+    let answer = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(media_deadline),
+        state
+            .transcode
+            .vod_continuous_family_description_before(session, media_deadline),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let Some(answer) = answer else {
+        return Err(
+            match vod_resurrected_before(state, session, media_deadline).await {
+                VodResurrection::Absent => ApiError::NotFound("session"),
+                VodResurrection::Ended => media_session_ended(),
+                VodResurrection::OwnerLost(resume) => media_owner_lost(resume),
+                VodResurrection::Unavailable | VodResurrection::Resurrected => {
+                    vod_resurrection_unavailable()
+                }
+            },
+        );
+    };
+    let publication_deadline = response_publication_deadline_before(deadline);
+    let (bytes, owner) = admitted_vod_publication(
+        state,
+        session,
+        answer,
+        "continuous-family",
+        Some("quality-family"),
+        publication_deadline,
+    )
+    .await?;
+    let Some(bytes) = bytes else {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "continuous-family",
+            Some("quality-family"),
+            publication_deadline,
+        )
+        .await?;
+        return Err(ApiError::NotFound("continuous family"));
+    };
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(bytes))
+        .map_err(|_| ApiError::NotFound("continuous family"))?;
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "continuous-family",
+            Some("quality-family"),
+        ),
+        true,
+        response,
+        publication_deadline,
+    )
+    .await
+}
+
 pub async fn child_playlist(
     State(state): State<AppState>,
     AxPath((session, role, rendition)): AxPath<(String, String, String)>,

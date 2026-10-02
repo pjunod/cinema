@@ -594,6 +594,7 @@ pub(super) struct ResolvedMediaReader {
 /// opaque reader id is independent of the public capability, so delayed old
 /// cleanup cannot remove a replacement parent's demand on shared media.
 pub(super) struct ParentMediaReader {
+    pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     pub(super) reader_id: String,
     pub(super) rendition: Arc<Rendition>,
     /// Family admission lasts through detach; a worker's exclusive claim

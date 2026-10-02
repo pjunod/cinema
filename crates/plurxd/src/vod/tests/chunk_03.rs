@@ -781,9 +781,9 @@
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(VIEWER).expect("parent");
-            session.children.push(ParentMediaReader { reader_id: "private-audio".into(),
+            session.children.push(ParentMediaReader { candidate_id: None, reader_id: "private-audio".into(),
                 rendition: Arc::clone(&soundtrack), _reservation: None });
-            session.children.push(ParentMediaReader { reader_id: "private-root".into(),
+            session.children.push(ParentMediaReader { candidate_id: None, reader_id: "private-root".into(),
                 rendition: Arc::clone(&rendition), _reservation: None });
         }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {

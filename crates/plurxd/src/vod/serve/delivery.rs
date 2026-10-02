@@ -403,6 +403,53 @@ impl VodServe {
         session_id: &str,
         deadline: Instant,
     ) -> Option<VodPublication<Option<Vec<u8>>>> {
+        let publication = self
+            .verified_continuous_family_before(session_id, deadline)
+            .await?;
+        Some(VodPublication {
+            owner: publication.owner,
+            result: publication.result.and_then(|family| {
+                family
+                    .map(|family| {
+                        family
+                            .family
+                            .master_playlist(&family.video_budgets, family.audio_budget.as_ref())
+                            .map(String::into_bytes)
+                            .map_err(|error| VodError::ProducerFailed(error.to_string()))
+                    })
+                    .transpose()
+            }),
+        })
+    }
+
+    pub(crate) async fn continuous_family_description_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodPublication<Option<Vec<u8>>>> {
+        let publication = self
+            .verified_continuous_family_before(session_id, deadline)
+            .await;
+        let Some(publication) = publication else {
+            let root = self.session_rendition(session_id).await?;
+            return Some(VodPublication {
+                owner: root.owner,
+                result: root.result.map(|_| None),
+            });
+        };
+        Some(VodPublication {
+            owner: publication.owner,
+            result: publication
+                .result
+                .and_then(|family| family.map(|family| family.description()).transpose()),
+        })
+    }
+
+    pub(crate) async fn verified_continuous_family_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Option<VodPublication<Option<VerifiedContinuousFamily>>> {
         let is_continuous = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
@@ -588,10 +635,7 @@ impl VodServe {
                     audio,
                 )
                 .map_err(fail)?;
-                let bytes = family
-                    .master_playlist(&video_budgets, audio_budget.as_ref())
-                    .map_err(fail)?
-                    .into_bytes();
+
                 let sessions = self.shared.sessions.lock().await;
                 let Some(session) = sessions.get(session_id) else {
                     return Ok(None);
@@ -607,7 +651,21 @@ impl VodServe {
                 {
                     return Ok(None);
                 }
-                Ok(Some(bytes))
+                let candidates = session
+                    .children
+                    .iter()
+                    .filter_map(|child| {
+                        child
+                            .candidate_id
+                            .map(|id| (child.rendition.key.clone(), id))
+                    })
+                    .collect();
+                Ok(Some(VerifiedContinuousFamily {
+                    family,
+                    video_budgets,
+                    audio_budget,
+                    candidates,
+                }))
             }
             .await;
         Some(VodPublication { result, owner })
