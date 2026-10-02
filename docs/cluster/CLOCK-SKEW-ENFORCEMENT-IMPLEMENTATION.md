@@ -223,6 +223,18 @@ does not claim the held-handler race or remaining causal/operational proof.
 The same sole review's selector callers, post-handoff cleanup and original
 activation deadline findings remain open; draft source is not qualified.
 
+**2026-10-02 review64 R3 source repair:** readiness checks original expiry
+before accepting a safe guard. Final activation binds its clock ticket to
+the exact deadline installed before vendor startup; the public finishing
+boundary cannot substitute a later deadline. Schema, heartbeat, signing-key,
+HTTP and marker pre-submission checks carry both facts. Phase expiry is a
+startup error, not an invented clock refusal or an extension of clock age.
+Submitted writes are still awaited through actual completion, without an
+outer timeout abandoning them; an expired phase refuses the next boundary
+and successful activation. The new bounded phase/clock control passed once.
+Actual delayed-write/runtime and other causal acceptance remain owed, as do
+review64's R1 selector harness and R2 post-handoff ownership repairs.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

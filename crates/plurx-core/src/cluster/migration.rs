@@ -401,7 +401,13 @@ async fn complete_startup_observation(
     identity: &super::ClusterIdentity,
     role: ClusterRole,
     observer: Option<&dyn StartupClockObserver>,
-) -> Result<(MembershipManager, super::clock::OwnedClockAcquisitionTicket), StoreError> {
+) -> Result<
+    (
+        MembershipManager,
+        super::membership::StartupActivationAdmission,
+    ),
+    StoreError,
+> {
     let observer = observer.ok_or_else(|| {
         StoreError::Database(
             "this startup consumer has no authenticated clock-observation transport; \
@@ -436,6 +442,11 @@ async fn complete_startup_observation(
             .await
             .map_err(|error| StoreError::Database(format!("startup promotion: {error}")))?;
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::Database(
+                    "startup promotion is not applied before original deadline".into(),
+                ));
+            }
             let snapshot = client
                 .local_db_raft_metrics()
                 .map_err(|error| StoreError::Database(error.to_string()))?
@@ -444,11 +455,6 @@ async fn complete_startup_observation(
             {
                 break;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(StoreError::Database(
-                    "startup promotion is not applied before original deadline".into(),
-                ));
-            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         // Promotion changes the authoritative roster generation. It must be
@@ -456,7 +462,7 @@ async fn complete_startup_observation(
         wait_startup_clock_readiness(&guard, deadline).await?;
     }
     membership
-        .finish_clock_observation()
+        .finish_clock_observation(deadline)
         .await
         .map_err(|error| StoreError::Database(error.to_string()))
 }
@@ -467,14 +473,14 @@ async fn wait_startup_clock_readiness(
     deadline: tokio::time::Instant,
 ) -> Result<(), StoreError> {
     loop {
-        if guard.acquire().is_ok() {
-            return Ok(());
-        }
         if tokio::time::Instant::now() >= deadline {
             return Err(StoreError::Database(
                 "authenticated startup clock evidence is unavailable before original deadline"
                     .into(),
             ));
+        }
+        if guard.acquire().is_ok() && tokio::time::Instant::now() < deadline {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
