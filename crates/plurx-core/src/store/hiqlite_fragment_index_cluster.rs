@@ -2609,6 +2609,76 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn analysis_reconciliation_page(
+        &self,
+        after: &str,
+        limit: i64,
+    ) -> Result<Vec<AnalysisRequest>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<RequestRow, _>(
+                format!(
+                    "SELECT {REQUEST_COLS} FROM analysis_requests
+                WHERE state IN ('queued','running','submitted') AND request_id > $1
+                ORDER BY request_id LIMIT $2"
+                ),
+                params!(after, limit.clamp(1, 100)),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect())
+    }
+
+    async fn analysis_reconciliation_forced_slot(
+        &self,
+        r: &NewAnalysisRequest,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<RequestRow, _>(
+                format!(
+                    "SELECT {REQUEST_COLS} FROM analysis_requests
+                WHERE file_id=$1 AND source_size=$2 AND source_mtime=$3
+                  AND component='fragment_index' AND pipeline_version=$4 AND video_identity=$5
+                  AND force_rebuild=1 AND state IN ('queued','running','submitted') LIMIT 1"
+                ),
+                params!(
+                    r.file_id,
+                    r.source_size,
+                    r.source_mtime,
+                    &r.pipeline_version,
+                    &r.video_identity
+                ),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0))
+    }
+
+    async fn reconcile_analysis_request(
+        &self,
+        expected: &AnalysisRequest,
+        replacement: &NewAnalysisRequest,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        use super::fragment_index_cluster::{reconciliation_parameters, ANALYSIS_RECONCILE_SQL};
+        let (old, new) = reconciliation_parameters(expected, replacement)?;
+        let statements: Vec<_> = ANALYSIS_RECONCILE_SQL
+            .split("\n-- next\n")
+            .map(|sql| (sql.to_owned(), params!(&old, &new, now_ms)))
+            .collect();
+        let counts = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(counts.last() == Some(&1))
+    }
+
     async fn reopenable_analysis_requests(
         &self,
         component: Option<&str>,

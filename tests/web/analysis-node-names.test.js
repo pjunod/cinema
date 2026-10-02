@@ -60,6 +60,7 @@ const BORROWED = [
   "analysisDiagnosticText",
   "copyAnalysisDetails",
   "analysisAttentionGroups",
+  "analysisReconcileHtml",
   "paintAnalysis",
 ];
 
@@ -73,6 +74,7 @@ const PRELUDE = `
   const copied = [];
   const navigator = { clipboard: { writeText: (text) => { copied.push(text); } } };
   function toast(){}
+  const ANALYSIS_RECONCILE={open:false};
   let ANALYSIS_SNAPSHOT = null, ANALYSIS_ROW_LOOKUP = new Map();
   let ANALYSIS_VIEW = {filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
 `;
