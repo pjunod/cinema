@@ -176,6 +176,8 @@ enum AttemptFence: String, CaseIterable, Sendable {
     case autoQualityOffer = "auto_quality_offer"
     /// Failed exposure may restore only the incumbent belonging to this owner.
     case autoQualityRollback = "auto_quality_rollback"
+    /// Preserve newer transport intent; the caller separately fences the recipe.
+    case preparedPipelineRollback = "prepared_pipeline_rollback"
 
     /// The epochs this fence depends on — exactly the fields its old
     /// conjunction compared.
@@ -195,6 +197,7 @@ enum AttemptFence: String, CaseIterable, Sendable {
         case .autoCatalogRefresh: return [.lifecycle, .viewerAction]
         case .autoQualityOffer: return [.lifecycle, .viewerAction]
         case .autoQualityRollback: return [.lifecycle, .open, .viewerAction]
+        case .preparedPipelineRollback: return [.lifecycle, .open, .seek]
         }
     }
 }

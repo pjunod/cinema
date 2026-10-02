@@ -717,6 +717,8 @@ struct PlayerView: View {
 
             PlayerSurface(
                 player: controller.player,
+                stagedPlayer: controller.stagedSurfacePlayer,
+                surfaceChanged: { surface, attached in controller.attachPlaybackSurface(surface, attached: attached) },
                 pictureInPicture: pictureInPicture,
                 pgsOverlay: controller.pgsOverlayWindow,
                 allowsPictureInPicture: PlayerSurface.shouldAllowPictureInPicture(

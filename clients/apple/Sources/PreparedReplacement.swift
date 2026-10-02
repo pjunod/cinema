@@ -4,7 +4,7 @@ import Foundation
 /// A stale failure cannot restore a recipe over a newer viewer command.
 struct ManualQualityRetention: Equatable {
     struct Attempt: Equatable {
-        let viewerEpoch: Int
+        var viewerEpoch: Int
         let incumbent: QualitySelection
         let seekGeneration: Int
         let carryingSeek: Bool
@@ -16,6 +16,13 @@ struct ManualQualityRetention: Equatable {
     mutating func begin(_ attempt: Attempt) {
         pending = attempt
         retained = nil
+    }
+
+    /// Only the transport owner can advance this fence. A seek or recipe
+    /// choice keeps the old attempt stale and cannot inherit its incumbent.
+    mutating func transportChanged(from oldEpoch: Int, to newEpoch: Int) {
+        if pending?.viewerEpoch == oldEpoch { pending?.viewerEpoch = newEpoch }
+        if retained?.viewerEpoch == oldEpoch { retained?.viewerEpoch = newEpoch }
     }
 
     mutating func retain(viewerEpoch: Int, incumbentHealthy: Bool) -> Attempt? {
@@ -356,6 +363,8 @@ enum PreparedReplacementBounds {
     /// the picture is frozen and the only way out is a reopen, so this is
     /// generous where the readiness bounds are mean.
     static let firstFrameMs = 6_000
+    /// Absolute dual-pipeline lifetime; Pause parks frame observation, not resources.
+    static let overlapMs = 12_000
     /// From the commit's alignment seek to the seek coming back.
     ///
     /// The successor is already playable and buffered past the point it was

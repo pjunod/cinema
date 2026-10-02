@@ -103,6 +103,7 @@ final class AttemptScopesTests: XCTestCase {
         .autoCatalogRefresh: [.lifecycle, .viewerAction],
         .autoQualityOffer: [.lifecycle, .viewerAction],
         .autoQualityRollback: [.lifecycle, .open, .viewerAction],
+        .preparedPipelineRollback: [.lifecycle, .open, .seek],
     ]
 
     func testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid() {
@@ -178,6 +179,7 @@ final class AttemptScopesTests: XCTestCase {
             .autoCatalogRefresh: .lifecycle,
             .autoQualityOffer: .lifecycle,
             .autoQualityRollback: .lifecycle,
+            .preparedPipelineRollback: .lifecycle,
         ]
         for fence in AttemptFence.allCases {
             // The intent fences are intentionally scoped to the seek and

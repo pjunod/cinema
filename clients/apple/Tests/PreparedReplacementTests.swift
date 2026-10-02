@@ -1171,6 +1171,22 @@ final class ManualQualityRetentionTests: XCTestCase {
         XCTAssertNil(state.retained)
     }
 
+    func testTransportAdvanceKeepsRetentionButCannotReviveAnOlderChoice() {
+        var retention = ManualQualityRetention()
+        retention.begin(.init(viewerEpoch: 4, incumbent: .manual(height: 720),
+            seekGeneration: 2, carryingSeek: false, incumbentRecipeAttached: true))
+        retention.transportChanged(from: 4, to: 5)
+        XCTAssertNil(retention.retain(viewerEpoch: 4, incumbentHealthy: true))
+        XCTAssertEqual(retention.retain(viewerEpoch: 5, incumbentHealthy: true)?.incumbent, .manual(height: 720))
+        retention.transportChanged(from: 5, to: 6)
+        XCTAssertEqual(retention.retained?.viewerEpoch, 6)
+        retention.begin(.init(viewerEpoch: 9, incumbent: .manual(height: 1080),
+            seekGeneration: 3, carryingSeek: false, incumbentRecipeAttached: true))
+        retention.transportChanged(from: 6, to: 7)
+        XCTAssertNil(retention.retain(viewerEpoch: 7, incumbentHealthy: true))
+        XCTAssertEqual(retention.pending?.viewerEpoch, 9)
+    }
+
     func testUnattachedRecipeCannotBeDeclaredRetained() {
         var state = ManualQualityRetention()
         state.begin(.init(viewerEpoch: 4, incumbent: .original, seekGeneration: 7,

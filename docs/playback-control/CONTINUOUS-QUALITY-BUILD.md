@@ -1927,3 +1927,33 @@ End. The manager regression covers exact byte-boundary acceptance/refusal
 for video and AAC. Pinned compilation and normal hooks apply; unit execution
 remains deferred. Durable family descriptors, controlled scheduling and
 production client integration remain unfinished.
+
+
+### 10.50 Apple warm player and layer ownership
+
+Prepared Apple playback keeps its item in its original player and attaches
+that player to a muted staging layer. The inline surface promotes the
+already-ready layer synchronously; it never moves the item into another
+player. Layer warm-up precedes the final playhead sample and alignment, and
+an alignment that falls more than 250 ms behind current playback is refused.
+Promotion refuses active or starting PiP and external playback rather than
+rebinding those surfaces optimistically; the healthy incumbent stays owned.
+The staging player cannot claim external playback. Ordinary external playback
+is restored after successful inline frame proof.
+
+Player ownership, periodic observation, item observation, subtitles, audio
+controls and current session identity move together. The muted predecessor
+keeps its player and layer until proof, follows latest Pause/Play and rate,
+and can be promoted back without an item transfer. Rollback fences title,
+open, seek and recipe identity while preserving newer transport commands.
+Explicit transport changes advance manual retention without reviving an
+older quality choice. Predecessor health is sampled before entering the
+transition. An absolute 12-second overlap bound releases the second pipeline
+even when Pause parks the active-time frame budget.
+
+The existing attempt-fence matrix covers the new rollback scope, and a pure
+retention regression covers transport advancement and stale choices.
+iOS production/test-source and tvOS production compilation apply without
+unit execution. AVPlayerLayer readiness and decoded output remain software
+facts; physical display and audible continuity still require device
+qualification. The Android warm-surface path remains unfinished.
