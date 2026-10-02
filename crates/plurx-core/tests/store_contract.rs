@@ -515,6 +515,7 @@ const SHARED_CACHE_METHODS: &[&str] = &[
     "finalize_retired_shared_cache_generation",
 ];
 const BACKGROUND_JOB_METHODS: &[&str] = &[
+    "media_preparation_history",
     "join_analysis_viewer",
     "join_artifact_viewer",
     "analysis_preparation_observation",
@@ -18176,7 +18177,8 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
-    assert_eq!(declared.len(), 450, "review the Store method count");
+    // Media info adds the source-aware preparation history projection.
+    assert_eq!(declared.len(), 451, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
