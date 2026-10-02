@@ -1280,7 +1280,7 @@ async function main() {
       "const document={getElementById:()=>video}; const window={Hls:true}; const TOKEN=null;",
       "class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',BUFFER_APPENDED:'append'}; static isSupported(){return true;} constructor(){this.events={};instances.push(this);} on(e,f){this.events[e]=f;} loadSource(){} attachMedia(){} destroy(){}}",
       "const PlaybackPolicy={bandwidthSeedBps:()=>null,HLS_STARTUP:{cold_deadline_ms:40000,manifest_load_policy:{default:{}}}}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
-      "function setTimeout(){return 0;}function clearTimeout(){} function parseSegTimes(){return [8,16,24,32];}function nativeHlsPlaylists(){return Promise.resolve({url:\"/session/index.m3u8\",text:\"#EXTM3U\\n#EXTINF:8,\\nseg00000.ts\\n\"});}function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
+      "const nextTasks=[];function setTimeout(fn,delay){if(delay===0)nextTasks.push(fn);return 0;}function clearTimeout(){} function parseSegTimes(){return [8,16,24,32];}function nativeHlsPlaylists(){return Promise.resolve({url:\"/session/index.m3u8\",text:\"#EXTM3U\\n#EXTINF:8,\\nseg00000.ts\\n\"});}function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
       // Teardown now settles a staged successor before it destroys the
       // incumbent, so the scope carries that path rather than a stub of it.
       "function clientLog(){} function playbackContext(){return {};} function notifyPlaybackControl(){}",
@@ -1306,13 +1306,13 @@ async function main() {
       shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
       shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
       shippedSource("attachNativeHls"),shippedSource("hlsStartupCurrent"),
-      shippedSource("nativeHlsCurrent"),shippedSource("armNativeHlsDeadline"),
+      shippedSource("nativeHlsCurrent"),shippedSource("armNativeHlsDeadline"),shippedSource("armNativeHlsReadiness"),
       shippedSource("nativeHlsRecoverAuthority"),shippedSource("recoverServingFencedAttachment"),
       shippedSource("nativeHlsAuthenticationRefused"),shippedSource("runNativeHlsReadiness"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
-      "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
+      "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),runNextTasks:()=>nextTasks.splice(0).forEach(fn=>fn()),teardownHls};",
     ].join("\n"))(native);
-    h.attach();
+    h.attach();h.runNextTasks();
     if(native)await new Promise(resolve=>setImmediate(resolve));
     h.p.controlSeekSequence=2;
     h.p.controlSeek={sequence:2,targetMs:90_000,executed:true};

@@ -1319,7 +1319,10 @@ function attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment){
   armNativeHlsDeadline(attachedPlayer,startup);
   attachedPlayer.segSrc=null; attachedPlayer.segTimes=null; attachedPlayer._segIdx=null;
   if(attachedPlayer.wantsPlayback===false) startup.state='paused';
-  else runNativeHlsReadiness(video,attachedPlayer,startup).catch(()=>{});
+  // The caller still owns pendingOpenAttempt / pendingMediaChange until its
+  // attachment continuation settles. Start on the next task, after that
+  // handover, rather than cancelling the only fetch before it can dispatch.
+  else armNativeHlsReadiness(video,attachedPlayer,startup,0);
 }
 // Use the current startup episode; no source assignment or decoder fallback
 // occurs until the master and selected media playlist have become usable.
@@ -1422,9 +1425,9 @@ async function nativeHlsPlaylists(player,episode){
   episode.manifestState='parsed';
   return media;
 }
-function armNativeHlsReadiness(video,player,episode){
+function armNativeHlsReadiness(video,player,episode,delayMs){
   clearTimeout(episode.retry.timer);
-  const wait=Math.min(4000,1000*2**Math.min(episode.native.retries++,2));
+  const wait=delayMs??Math.min(4000,1000*2**Math.min(episode.native.retries++,2));
   episode.retry.timer=setTimeout(()=>{
     episode.retry.timer=null;
     if(hlsStartupCurrent(player,episode)&&episode.state==='active')
@@ -1450,6 +1453,10 @@ function nativeHlsAuthenticationRefused(player,episode){
 async function runNativeHlsReadiness(video,player,episode){
   if(episode.native.busy||episode.state!=='active'||!hlsStartupCurrent(player,episode)) return;
   if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+  // An asynchronous handover may still be pending at the first wakeup.
+  // Retain one bounded retry under the original deadline; do not dispatch
+  // for a player that does not yet own the media, or abandon its startup.
+  if(!playbackOwnsAttachedMedia(player)) return armNativeHlsReadiness(video,player,episode);
   const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
   const readinessAt=performance.now();
   episode.native.busy=true;
