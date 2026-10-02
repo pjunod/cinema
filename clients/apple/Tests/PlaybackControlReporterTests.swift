@@ -1451,6 +1451,55 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
+        let nonce = "12345678-1234-1234-1234-123456789abc"
+        XCTAssertTrue(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: true, remainingMs: 1))
+        for values in [[], [nonce, nonce], [nonce + "," + nonce], ["other"], [nonce.uppercased()]] {
+            XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: values, status: 204, sameEndpoint: true, remainingMs: 1))
+        }
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: "malformed", values: ["malformed"], status: 204, sameEndpoint: true, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 200, sameEndpoint: true, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: false, remainingMs: 1))
+        XCTAssertFalse(autoNegativeLinkAcknowledgement(receipt: nonce, values: [nonce], status: 204, sameEndpoint: true, remainingMs: 0))
+        let item = NSObject(), other = NSObject()
+        let ticket = AutoRecoveryCauseTicket(session: "incumbent", attachment: ObjectIdentifier(item), incumbentCandidate: "a", proposedCandidate: "b", cause: .link, observedAtMs: 100, linkReceipt: nonce)
+        XCTAssertEqual(ticket.receiptForRequest(previous: "incumbent", candidate: "b", cause: "link"), nonce)
+        XCTAssertNil(ticket.receiptForRequest(previous: "other", candidate: "b", cause: "link"))
+        XCTAssertNil(ticket.receiptForRequest(previous: "incumbent", candidate: "c", cause: "link"))
+        XCTAssertNil(ticket.receiptForRequest(previous: "incumbent", candidate: "b", cause: "decode"))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(other), candidate: "a", proposed: "b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "a", proposed: "b", nowMs: 15_101))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "a", proposed: "b", nowMs: 99))
+    }
+    func testA05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals() {
+        let item = NSObject(), replacement = NSObject()
+        var window = AutoDecodePressureWindow()
+        func sample(_ now: Int, _ position: Int, _ drops: Int, _ eligible: Bool = true) -> Bool {
+            window.observe(attachment: ObjectIdentifier(item), candidate: "full-recipe-a",
+                nowMs: now, positionMs: position, cumulativeDropped: drops, eligible: eligible)
+        }
+        XCTAssertFalse(sample(0, 0, 0))
+        XCTAssertFalse(sample(2_000, 2_000, 3))
+        XCTAssertTrue(sample(4_000, 4_000, 6))
+        XCTAssertEqual(window.evidence?.elapsedMs, 4_000)
+        XCTAssertEqual(window.evidence?.progressMs, 4_000)
+        XCTAssertEqual(window.evidence?.droppedFrames, 6)
+        XCTAssertFalse(sample(6_000, 4_000, 10), "a stagnant clock is not rendered progress")
+        XCTAssertFalse(sample(8_000, 6_000, 13, false), "supply/pause/seek contamination discards the interval")
+        XCTAssertFalse(sample(10_000, 8_000, 16))
+        XCTAssertFalse(window.observe(attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a",
+            nowMs: 12_000, positionMs: 10_000, cumulativeDropped: 20, eligible: true))
+        XCTAssertFalse(window.observe(attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a",
+            nowMs: 11_000, positionMs: 11_000, cumulativeDropped: 23, eligible: true), "rollback is Unknown")
+        let ticket = AutoRecoveryCauseTicket(session: "incumbent", attachment: ObjectIdentifier(item),
+            incumbentCandidate: "full-recipe-a", proposedCandidate: "full-recipe-b", cause: .decode, observedAtMs: 100)
+        XCTAssertTrue(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 15_100))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 15_101))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(replacement), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "other-recipe", proposed: "full-recipe-b", nowMs: 200))
+        XCTAssertFalse(ticket.isCurrent(session: "incumbent", attachment: ObjectIdentifier(item), candidate: "full-recipe-a", proposed: "full-recipe-b", nowMs: 99))
+        XCTAssertEqual([AutoRecoveryCause.link, .encode, .decode, .hold, .authority].map(\.rawValue), ["link", "encode", "decode", "hold", "authority"])
+    }
     func testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes() throws {
         func attempt(lifecycle: Int = 1, open: Int = 2, viewer: Int = 3,
                      seek: Int = 7, decision: Int = 4) -> Attempt {
