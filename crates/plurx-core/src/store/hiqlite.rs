@@ -152,7 +152,9 @@ const OFFLINE_AUDIO_SCHEMA_VERSION: i64 = 66;
 const OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
 const COPY_OUTPUT_SCHEMA_VERSION: i64 = 67;
 const COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_AUDIO_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = COPY_OUTPUT_SCHEMA_VERSION;
+const CANDIDATE_RECOVERY_SCHEMA_VERSION: i64 = 68;
+const CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = COPY_OUTPUT_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = CANDIDATE_RECOVERY_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -3303,6 +3305,18 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn([
+                        (super::candidate_recovery::SCHEMA, params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3", params!(CANDIDATE_RECOVERY_SCHEMA_VERSION, now, CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -5380,7 +5394,8 @@ fn schema_migration_action(
         | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
         | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
         | OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE
-        | COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE => {
+        | COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE
+        | CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
