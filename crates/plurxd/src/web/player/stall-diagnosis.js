@@ -396,6 +396,10 @@ async function switchAutoRung(currentHeight,decision){
     }
     const outcome=await requestQualityChange(p,"auto-quality",reopen,
       {from:currentHeight,to:decision.height,switchReason:decision.reason});
+    if(outcome==="continuous"&&p.directedChange&&!p.directedChange.settled){
+      retainClaim=true;
+      return;
+    }
     if(outcome==="prepared"&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,"commit_timeout"),
@@ -677,13 +681,17 @@ async function switchAutoCandidate(p,v,current,decision){
     p.autoRequestedHeight=null;
     p.abr.switching=true;
     const outcome=await requestQualityChange(p,'auto-quality',reopen,move,standingSelection);
+    if(outcome==='continuous'&&p.directedChange&&!p.directedChange.settled){
+      retained=true;
+      return true;
+    }
     if(outcome==='prepared'&&p.directedChange&&!p.directedChange.settled){
       const change=p.directedChange;
       change.commitTimer=setTimeout(()=>fallBackDirectedChange(p,change,'commit_timeout'),
         Math.max(0,10000-(performance.now()-change.tappedAt)));
       retained=true;
     }
-    return outcome==='prepared';
+    return outcome==='prepared'||outcome==='continuous';
   }finally{
     if(!retained){p.abr.switching=false;releaseAutoFallback(p);}
   }

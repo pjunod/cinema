@@ -193,7 +193,11 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
       &&(p.controlIntentGeneration||0)===change.intentGeneration);
     if(p.directedChange!==change)return "superseded";
     if(outcome==="continuous"){
-      change.settled=true;change.outcome=outcome;change.outcomeAt=performance.now();
+      change.outcome=outcome;change.outcomeAt=performance.now();
+      change.continuousCandidateId=candidate.id;
+      const ledger=p.continuousQuality.protocol.ledger;
+      change.continuousTransactionId=ledger?.transactions.find(tx=>tx.intent_revision===ledger.latest_intent_revision)?.transaction_id;
+      settleContinuousDirectedChange(p);
       notifyPlaybackControl();return outcome;
     }
     if(outcome==="superseded")return outcome;
@@ -334,6 +338,18 @@ function applyQualityWithRestart(){
   PENDING_ATTEMPT_REASON="quality";
   beginPlaybackControlSeek(p,pos);
   return play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+}
+function settleContinuousDirectedChange(p){
+  const change=p?.directedChange,ledger=p?.continuousQuality?.protocol?.ledger;
+  if(!change||change.settled||change.outcome!=="continuous"||!ledger
+     ||p.continuousQualityPresented?.candidate_id!==change.continuousCandidateId) return false;
+  const transaction=ledger.transactions.find(tx=>tx.transaction_id===change.continuousTransactionId);
+  if(!transaction||transaction.intent_revision!==ledger.latest_intent_revision
+     ||transaction.intent_superseded||transaction.cancel_requested
+     ||transaction.first_presented_tick==null||transaction.first_presented_at_ms==null) return false;
+  const committed=settleDirectedChange(p,change,"committed","continuous");
+  if(committed) p.autoRequestedHeight=null;
+  return committed;
 }
 function settleDirectedChange(p,change,why,detail){
   const owned=change||(p&&p.directedChange);

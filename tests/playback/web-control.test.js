@@ -7255,3 +7255,31 @@ test("prepared frame boundary uses decoded cadence and playback-rate display pro
   assert.equal(cadence({mediaTime:8,presentedFrames:10},{mediaTime:7,presentedFrames:11}),null);
   assert.equal(meet(current,{filmSeconds:10,displayMs:1000},null,1),false);
 });
+
+
+test("continuous Auto settlement waits for the exact current durable presentation and records once",()=>{
+  const committed=[],released=[];
+  let now=100;
+  const p={abr:{switches:[]},autoRequestedHeight:1080,
+    directedChange:{settled:false,outcome:"continuous",continuousCandidateId:"target",continuousTransactionId:"tx",
+      autoMove:{from:720,to:1080,candidateId:"target",previousCandidateId:"old",switchReason:"display fit"}},
+    continuousQuality:{protocol:{ledger:{latest_intent_revision:2,transactions:[{
+      transaction_id:"tx",intent_revision:2,intent_superseded:false,cancel_requested:false,
+      first_presented_tick:null,first_presented_at_ms:null}]} }},
+    continuousQualityPresented:{candidate_id:"old"}};
+  const settle=new Function("performance","document","recordAutoSwitch","positionForPlaybackIntent","releaseAutoFallback",
+    [shippedSource("settleDirectedChange"),shippedSource("settleContinuousDirectedChange"),"return settleContinuousDirectedChange;"].join("\n"))(
+      {now:()=>now},{getElementById:()=>({})},(...args)=>committed.push(args),()=>72,owner=>released.push(owner));
+  assert.equal(settle(p),false,"scheduling is not presentation");
+  p.continuousQualityPresented.candidate_id="target";
+  assert.equal(settle(p),false,"a frame cannot stand in for its lost durable receipt");
+  const tx=p.continuousQuality.protocol.ledger.transactions[0];tx.first_presented_tick=1728;tx.first_presented_at_ms=200;
+  tx.intent_superseded=true;assert.equal(settle(p),false,"old intent cannot settle current choice");
+  tx.intent_superseded=false;p.directedChange.continuousTransactionId="other";
+  assert.equal(settle(p),false,"same-rung history cannot settle another transaction");
+  p.directedChange.continuousTransactionId="tx";now=300;
+  assert.equal(settle(p),true);assert.equal(p.directedChange.outcome,"committed");
+  assert.equal(p.abr.lastSwitchAtMs,300);assert.equal(p.abr.candidateState.lastSwitchMs,300);
+  assert.equal(p.autoRequestedHeight,null);assert.equal(committed.length,1);assert.equal(released.length,1);
+  assert.equal(settle(p),false);assert.equal(committed.length,1);
+});

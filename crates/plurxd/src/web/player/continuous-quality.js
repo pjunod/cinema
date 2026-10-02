@@ -474,6 +474,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
               const candidate=(player.qualityCandidates||[]).find(candidate=>candidate.id===row.candidate_id);
               player.autoHeight=candidate?.target_height||row.height;
               player.continuousQualityPresented={candidate_id:row.candidate_id,width,height,film_tick:tick,timescale:row.timescale};
+              if(player.directedChange?.outcome==='continuous')settleContinuousDirectedChange(player);
             }
           }).catch(note);
         }

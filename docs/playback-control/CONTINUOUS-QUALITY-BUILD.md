@@ -3549,3 +3549,26 @@ folder, with fixture and probe digests. This measures autonomous native fixture
 playback only: no requested 720p switch, production transaction enrollment,
 physical display capture or audio output is qualified. The experiment's tab
 and local server were closed; production Safari pages were not changed.
+
+
+### 10.116 Auto settles on durable target presentation
+
+The frontier-repair Chrome series prepared and appended its second target,
+then durably presented 1080p at film tick 1632. Its full series is still
+running; this intermediate observation is not a qualification pass.
+
+Web Auto previously released its move claim when continuous scheduling
+returned, before the buffered target reached presentation. That path also
+missed Auto's completion record and cooldown update. A continuous directed
+change now retains its owner until its exact latest transaction has a durable
+Presented receipt and the target candidate has an actual frame observation.
+The existing settlement reducer records one Auto move and cooldown, then
+releases ownership. A superseded, canceled or different same-rung transaction
+cannot settle it. Continuous settlement clears the temporary requested height;
+prepared handoff retains its existing acknowledgment rule. No ten-second
+prepared timeout is attached to a healthy future buffered boundary.
+
+The regression source covers scheduled-only, frame-without-receipt,
+superseded, wrong-transaction, exact presentation and duplicate callbacks.
+JavaScript syntax and normal commit checks run before committed-source
+qualification; no unit execution is performed before final adversarial review.
