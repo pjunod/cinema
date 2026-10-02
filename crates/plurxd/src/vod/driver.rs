@@ -814,6 +814,10 @@ pub(super) fn playback_demands(
                 (Some(reader), None) if reader.preparation_frontier.is_some() => false,
                 _ => oldest.get(&blocked.session) == Some(&blocked.arrival_order),
             };
+            demand.bounded_preparation = demand.foreground
+                && readers
+                    .get(&blocked.session)
+                    .is_some_and(|reader| reader.preparation_frontier.is_some());
             demand
         })
         .collect::<Vec<_>>();
@@ -831,6 +835,7 @@ pub(super) fn playback_demands(
                     // speculative capacity or another viewer's arrival order.
                     let mut demand = Demand::waiting_on(frontier);
                     demand.foreground = true;
+                    demand.bounded_preparation = true;
                     demand
                 }
                 None => Demand::idle_at(reader.frontier),

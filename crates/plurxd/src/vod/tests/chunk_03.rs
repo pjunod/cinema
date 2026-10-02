@@ -1398,6 +1398,10 @@
             let manifest = rendition.manifest.lock().await;
             let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
             assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 24 });
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(24) && demand.bounded_preparation));
+            let running = Position { positioned_at: Some(21), ..position };
+            assert_eq!(decide(&manifest, &demands, running, &[]), Action::Reposition { to: 24 },
+                "an already-running target cannot spend the copy horizon on old gaps");
             assert!(demands.iter().any(|demand| demand.blocked_on == Some(7) && !demand.foreground), "the old obligation is retained");
             assert_eq!(readers["target"].frontier, 7, "ordinary playback reporting does not move");
         }

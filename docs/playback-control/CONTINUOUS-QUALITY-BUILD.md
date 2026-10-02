@@ -3868,3 +3868,35 @@ verification of the new capture path remains open. No unit tests executed. The t
 needs runtime evidence. Native input confirmed the Mac remains locked,
 despite readable Safari accessibility state; the longer-pressure native
 experiment did not start and its owned loopback server was closed.
+
+
+### 10.129 A running target must reach its bounded preparation boundary
+
+Exact-source `1301cafac` compiled locally, passed its corrected normal hook,
+and built on Linux in 3m12s. The cold probe still missed initial placement:
+VOD create took 15,739 ms. A separately labeled warmed-engine diagnostic
+reached playback with 7,767 ms creation, but failed the return to 1080p before
+rapid-choice/pause or seek. The new capture path therefore has no successful
+runtime qualification yet; cold and warmed failures are preserved.
+
+The failed target needed film tick 1680 / plan index 35, while its producer
+was already running from index 10. The preparation demand outranks old GETs,
+but the ordinary scheduler lets a running producer read forward across a
+60-second gap. That policy suits fast copy; an optional encoded preparation
+cannot spend its bounded readiness wait producing every old gap in between.
+
+Admitted preparation demands now carry an explicit bounded-preparation fact.
+When that demand wins scheduling, the producer targets its boundary directly
+rather than using the copy restart horizon. A producer already positioned at
+the target is not restarted again. Foreign foreground GETs retain arrival
+priority and ordinary policy; old obligations remain protected, and settled
+preparation restores ordinary scheduling. No capacity or deadline changed.
+
+Authored regression
+`bounded_quality_preparation_repositions_an_already_running_producer` covers
+ordinary forward production, preparation reposition, repeated wake stability,
+foreign priority and settlement. The actual wait-pool regression now also
+checks a running target inside the ordinary restart horizon. Pinned
+workspace/all-target compilation of the scheduling change passed in 21.99s;
+the extended wait-pool test source is compiling through the normal hook. No
+unit tests executed. Runtime qualification remains open.
