@@ -250,7 +250,15 @@ Each short trial had no observed waiting event after the first frame in its
 first frame 8.683 s, 1,869.208 s of advancing playback, and zero observed
 post-first-frame waiting, native errors or fatal HLS errors. The full receipt
 SHA-256 is `58b7a6a0e5c6676cb43df1cdd03ea3f9b7cb1e6fa8f17f61167a27929ef23448`.
-Safari native qualification is now running in the authorized separate window.
+Safari native completed its generated 30-minute window: composited frame
+8.665 s, first `playing` 8.664 s, and 1,800.742 s of advancing playback.
+There were zero waiting events after 0.5 s advancing progress within that
+window, no native errors and no classification errors. An initial waiting
+bounce at 8.673 s is retained. The full receipt continues beyond the window:
+Safari waits at 1,895.913 s because the fixture caps its complete prefix at
+237 × 8 s = 1,896 s without ENDLIST; this is recorded harness exhaustion,
+not a daemon EOF qualification. The receipt SHA-256 is
+`893fd4967cbf5c494511504281c66235de4e142b2b30f3d9c1113a1c257b5aa4`.
 Record initial composited frame and advancing playback separately: Safari
 can show the first frame while still buffering. Do not infer native/HEVC
 qualification or production startup timing from these AVC trials.

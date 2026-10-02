@@ -1,5 +1,5 @@
 {
-  "status": "generated hls.js 30-minute continuity passed; Safari native sweep and continuity in progress",
+  "status": "generated hls.js and Safari native 30-minute continuity passed; fleet and live HEVC/DV qualification pending",
   "build_base": "dea1a403e9a650fc51e35909b36e596be5a5ed13",
   "target_ms": 16000,
   "writer_gate_ms": 12000,
@@ -125,7 +125,7 @@
     }
   ],
   "hlsjs_sweep_receipt_sha256": "ad457f5957ab54a09df9868188b9cc9927bfdcc35de7ae79f7b09dc3d423b083",
-  "native_status": "running in an authorized separate Safari window; no native qualification pass yet",
+  "native_status": "generated AVC/AAC 30-minute continuity passed; physical/live source qualification not claimed",
   "physical_apple_android_status": "not qualified; absent transport metadata retains conservative policy",
   "limits": [
     "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
@@ -273,5 +273,37 @@
     "passed_policy_tests": 249,
     "failed_policy_tests": 4,
     "fix": "Four owner inventory counts updated with explicit deadline/task/timer/status-read provenance; no test rerun yet"
+  },
+  "native_generated_continuity": {
+    "transport": "Safari native HLS / shipped native readiness",
+    "threshold_media_s": 32,
+    "fixed_target_s": 16,
+    "post_bootstrap_production_ratio": 1.05,
+    "first_composited_frame_ms": 8665,
+    "first_playing_ms": 8664,
+    "first_advancing_sample_ms": 9242,
+    "observed_playback_s": 1800.7420423330236,
+    "elapsed_ms": 1809414,
+    "waiting_after_first_frame": 1,
+    "waiting_after_advancing_half_second": 0,
+    "native_errors": 0,
+    "classification_errors": 0,
+    "receipt_sha256": "893fd4967cbf5c494511504281c66235de4e142b2b30f3d9c1113a1c257b5aa4",
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-qualification-20261002.json",
+    "passes_generated_30min_continuity": true,
+    "captured_at_utc": "2026-10-02T07:09:19.532790+00:00",
+    "limits": "Generated AVC/AAC at local transfer and 1x; daemon actor/flow/scratch, live HEVC/DV, source resume and physical TV classes are not qualified. One waiting bounce occurs before 0.5s advancing progress and is retained separately.",
+    "full_capture_last_position_s": 1895.912615518059,
+    "full_capture_elapsed_ms": 1908809,
+    "post_window_events": [
+      {
+        "run": "6",
+        "event": "waiting",
+        "detail": "",
+        "elapsed_ms": 1904588,
+        "position": 1895.912615518059
+      }
+    ],
+    "post_window_limit": "After the 30-minute acceptance window, Safari waits at 1895.913s: the fixture caps its complete prefix at 237 x 8s = 1896s and does not emit ENDLIST. This harness exhaustion is retained and is not a daemon EOF qualification."
   }
 }
