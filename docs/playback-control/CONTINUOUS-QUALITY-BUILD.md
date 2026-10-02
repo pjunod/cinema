@@ -3838,3 +3838,33 @@ contention, but do not establish the cause. Bounded debug timings now identify
 capability discovery, normative plan storage and rendition construction
 separately. Admission, deadline and selection behavior are unchanged. The
 startup delay remains under investigation; no unit tests executed.
+
+
+### 10.128 Encoder captures share a bounded, revalidated attestation
+
+Instrumented source `fde80eb27` failed initial placement again. Its capability
+read took 0 ms, normative plan storage 0 ms per role, and rendition setup
+2–3 ms per role. Most of the 13,922 ms VOD create preceded those phases.
+An explicitly labeled warmed diagnostic issued the ordinary Activity detail
+read before playback; engine attestation there took 6,784 ms. Creation still
+took 10,033 ms and missed its placement deadline. Neither attempt reached
+quality switching; cold and warmed failures remain separate failed receipts.
+
+Recipe preparation captures the same configured encoder separately for the
+video, AAC and companion recipes. Encoder capture now retains one attestation
+and serializes concurrent captures. Every reuse checks the same exact object
+identity used by production launch and publication fences. A changed object
+is rehashed; missing or unreadable objects cannot return the cached digest.
+The cache keeps one executable rather than growing with paths or recipes.
+No deadline or admission rule changed.
+
+Authored regression
+`encoded_executable_capture_shares_hash_and_rechecks_replacement` covers
+concurrent captures performing one actual hash, same-size / same-mtime atomic
+replacement producing a new digest, and deletion refusing cached evidence.
+The existing executable and dependency replacement regressions remain in the
+final lane. Pinned workspace/all-target compilation passed in 1m05s; runtime
+verification of the new capture path remains open. No unit tests executed. The transport pause/resume repair still
+needs runtime evidence. Native input confirmed the Mac remains locked,
+despite readable Safari accessibility state; the longer-pressure native
+experiment did not start and its owned loopback server was closed.
