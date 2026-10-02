@@ -2376,6 +2376,7 @@ pub(crate) enum ReadinessFailure {
     Maintenance,
     QuorumUnavailable,
     StoreUnavailable,
+    ClockUnbounded,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -2383,6 +2384,20 @@ pub(crate) struct ReadinessEvaluation {
     pub(crate) ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// Shared Store-free clock consequence for readiness and operations status.
+fn clock_readiness_failure(state: &AppState) -> Option<ReadinessEvaluation> {
+    state
+        .membership
+        .clock_guard()
+        .snapshot()
+        .readiness
+        .is_unbounded()
+        .then_some(ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::ClockUnbounded),
+        })
 }
 
 /// One typed readiness decision shared by `/readyz` and cluster status.
@@ -2401,10 +2416,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
     // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
         return if state.serving.is_ready() {
-            ReadinessEvaluation {
+            clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
                 ready: true,
                 reason: None,
-            }
+            })
         } else {
             ReadinessEvaluation {
                 ready: false,
@@ -2413,10 +2428,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
         };
     }
     match state.store.ping().await {
-        Ok(()) => ReadinessEvaluation {
+        Ok(()) => clock_readiness_failure(state).unwrap_or(ReadinessEvaluation {
             ready: true,
             reason: None,
-        },
+        }),
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
             ReadinessEvaluation {
@@ -2443,6 +2458,10 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
             reason: Some(ReadinessFailure::StoreUnavailable),
             ..
         } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::ClockUnbounded),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "clock unbounded\n"),
         ReadinessEvaluation {
             ready: false,
             reason: None,
@@ -4843,6 +4862,88 @@ mod tests {
             b = b.header("authorization", format!("Bearer {t}"));
         }
         b.body(Body::empty()).expect("req")
+    }
+
+    #[tokio::test]
+    async fn readiness_clock_guard_requires_two_positive_rounds_and_preserves_unknown() {
+        use plurx_core::cluster::clock::PeerClockOffset;
+        let (app, state) = test_app_with_state();
+        state.serving.validation_set_ready(true).await;
+        let clock = state.membership.clock_guard();
+        let publish = |offset_us| {
+            let ticket = clock.roster(&["peer".to_owned()]);
+            assert!(clock.publish(
+                ticket,
+                std::collections::BTreeMap::from([(
+                    "peer".to_owned(),
+                    PeerClockOffset::Bounded {
+                        offset_us,
+                        uncertainty_us: 1_000,
+                        observed_at: std::time::Instant::now(),
+                    },
+                )]),
+            ));
+        };
+        assert!(evaluate_readiness(&state).await.ready, "standalone NoPeers");
+        publish(2_500_000);
+        for _ in 0..3 {
+            assert!(
+                evaluate_readiness(&state).await.ready,
+                "reads are not rounds"
+            );
+        }
+        publish(2_500_000);
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::ClockUnbounded)
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::ClockUnbounded),
+            "the Store-free operations projection uses the same consequence"
+        );
+        assert_eq!(
+            call_text(&app, get("/readyz", None)).await,
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "clock unbounded\n".to_owned()
+            )
+        );
+        assert_eq!(
+            call_text(&app, get("/healthz", None)).await.0,
+            StatusCode::OK
+        );
+        state.serving.validation_set_ready(false).await;
+        assert_eq!(
+            evaluate_readiness(&state).await.reason,
+            Some(ReadinessFailure::QuorumUnavailable),
+            "the existing quorum failure keeps precedence"
+        );
+        assert_eq!(
+            cluster_operations::operations_readiness(&state).reason,
+            Some(ReadinessFailure::QuorumUnavailable)
+        );
+        state.serving.validation_set_ready(true).await;
+        clock.roster_failed();
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "Unknown is not positive violation"
+        );
+        publish(2_500_000);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "failed round reset the streak"
+        );
+        publish(0);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "healthy round resets the streak"
+        );
+        clock.roster(&["replacement".to_owned()]);
+        assert!(
+            evaluate_readiness(&state).await.ready,
+            "new peer remains Unknown"
+        );
     }
 
     #[tokio::test]

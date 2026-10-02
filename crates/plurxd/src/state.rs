@@ -724,6 +724,9 @@ pub struct AppState {
     pub(crate) serving: crate::serving_fence::ServingFence,
     /// Join/add/remove lifecycle and privacy-safe per-node health.
     pub membership: plurx_core::cluster::membership::MembershipManager,
+    /// Shared complete observation owner. Pending startup hands this exact
+    /// handle to normal HTTP; a second loop cannot claim its receiver.
+    pub(crate) clock_observer: crate::clock_offset::ClockObserver,
     /// Bounded authenticated client for node-local activity snapshots.
     #[allow(dead_code)] // aggregation child #326 is the first consumer
     pub peer_activity: crate::http::internal_activity::PeerActivityClient,
@@ -1180,6 +1183,7 @@ impl AppState {
             peer_status_cache: Default::default(),
             membership_status_cache: Default::default(),
             serving,
+            clock_observer: crate::clock_offset::ClockObserver::new(membership.clone()),
             membership,
             media_pool,
             media_sessions,

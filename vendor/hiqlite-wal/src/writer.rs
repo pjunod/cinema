@@ -90,6 +90,7 @@ pub fn spawn(
     wal_size: u32,
     wal_deep_integrity_check: bool,
     meta: Arc<RwLock<Metadata>>,
+    staged: bool,
 ) -> Result<
     (
         flume::Sender<Action>,
@@ -171,12 +172,41 @@ pub fn spawn(
         result
     });
 
+    let mut partial = PartialStartupWriter::new(staged, &tx);
     if let LogSync::IntervalMillis(millis) = &sync {
         let interval = time::interval(Duration::from_millis(*millis));
         spawn_syncer(tx.clone(), interval);
     }
 
+    partial.handoff();
     Ok((tx, wal_locked, status))
+}
+
+/// Used only inside the owned blocking constructor. Failure cannot abandon
+/// the writer while its interval syncer retains a sender.
+pub(crate) struct PartialStartupWriter(Option<flume::Sender<Action>>);
+
+impl PartialStartupWriter {
+    pub(crate) fn new(staged: bool, writer: &flume::Sender<Action>) -> Self {
+        Self(staged.then(|| writer.clone()))
+    }
+
+    pub(crate) fn handoff(&mut self) {
+        self.0.take();
+    }
+}
+
+impl Drop for PartialStartupWriter {
+    fn drop(&mut self) {
+        if let Some(writer) = self.0.take() {
+            let (tx, ack) = oneshot::channel();
+            if writer.send(Action::Shutdown(tx)).is_err() || ack.blocking_recv().is_err() {
+                tracing::error!(
+                    "staged partial WAL writer shutdown failed; no clean termination claim"
+                );
+            }
+        }
+    }
 }
 
 fn spawn_syncer(tx_writer: flume::Sender<Action>, mut interval: Interval) {
@@ -445,6 +475,7 @@ mod tests {
             WAL_SIZE,
             false,
             meta.clone(),
+            false,
         )?;
         Ok((writer, meta, wal))
     }
@@ -635,6 +666,7 @@ mod tests {
             WAL_SIZE,
             false,
             meta,
+            false,
         )?;
         // The interval's first tick is immediate. Let that empty sync pass so
         // the assertion below measures this append rather than scheduler order.
@@ -707,6 +739,7 @@ mod tests {
             WAL_SIZE,
             true,
             meta,
+            false,
         )?;
 
         let startup = status.snapshot();

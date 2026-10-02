@@ -1533,7 +1533,10 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"
 pattern = "PendingTakeoverSettlement"
-expected_occurrences = 8
+# K06 original-clock preparation: +1 is the shared scripted fixture's return
+# type, carrying the same original claim and exact mock worker into NEW
+# clock-boundary regressions. No production settlement/recovery owner is added.
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-takeover-worker-cleanup-owner"
@@ -2477,11 +2480,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # no producer authority; link_receipts.rs's intake race task is test-only,
 # paused per instance and joined after retirement/owner replacement.
 # S10 optional retained collection: three bounded blocking I/O owners (link, playlist, directory) plus existing rolling actor attachment; no scheduler.
+# K06 causal startup: +4 net joined/retained tasks in main.rs. Startup owns
+# the HTTP/probe handles through shutdown drain; normal activation transfers
+# the same observer, not a second producer or recovery owner. Two socket
+# transfer fixture tasks are joined or drained by their test.
+# Review64 R4 causal fixture: +9 test-only namespaced tasks in internal_clock.rs.
+# The test retains/joins its real HTTP listeners, observer and signed callers;
+# waiter cancellation does not cancel the observer owner. No production owner.
 # +1 S-07 PR #727: `scan::library_root_available` awaits one
 # `tokio::task::spawn_blocking` for the root's canonicalise-and-list read, the
 # same blocking-I/O shape the scanner's own root fingerprint uses. Awaited by
 # the frame luminance backfill inside its lease; no producer, timer or child.
-expected_occurrences = 704
+expected_occurrences = 717
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -2658,7 +2668,8 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 54
+# Review64 R4: +1 owned/joined finite-stack test thread. No production task.
+expected_occurrences = 55
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -3677,7 +3688,16 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # six authenticated fault/memory/current-incumbent helpers, one prepared
 # memory read, one negative-ack fold. None renew a playback/producer budget.
 # Additive composition: existing S10 1173 plus the eight A05 waits above.
-expected_occurrences = 1181
+# K06 causal startup: +11 net bounded clock-service/ownership waits. Five
+# timeout_at calls share the original two-second receipt deadline; three
+# shutdown drains use the existing bound, and three startup fixture waits
+# are test-owned. The periodic probe keeps its existing interval; no media
+# deadline or producer life is renewed.
+# Review64 R4 combines sender-fence/directory proof in the last read: removes
+# one preceding timeout, retaining the SAME original two-second deadline.
+# Review64 R4: +7 bounded real-handler/test waits, preserving original receipt
+# deadlines and test-owned cleanup. No production timer or renewed clock age.
+expected_occurrences = 1199
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4498,9 +4518,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # response assertion, not a child launch, task or lifecycle owner.
 # +1 same58 final exact-readback control: another in-process Response.status()
 # verifies older-completion refusal without ACK. No child or new owner.
+# Review64 R4: +3 actual HTTP response status assertions and the same +1
+# owned/joined finite-stack test thread; none launches a process.
 # +1 S-07 PR #727: the matching awaited `.output()` of pipeprobe's test-only
 # untagged-primaries tone-map fixture counted under process-command-construction.
-expected_occurrences = 425
+expected_occurrences = 429
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

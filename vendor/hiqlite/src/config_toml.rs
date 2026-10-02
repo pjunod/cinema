@@ -396,6 +396,7 @@ impl NodeConfig {
             raft_config: NodeConfig::default_raft_config(logs_until_snapshot),
             snapshot_chunk_timeout: crate::config::DEFAULT_SNAPSHOT_CHUNK_TIMEOUT,
             snapshot_transfer_timeout: crate::config::DEFAULT_SNAPSHOT_TRANSFER_TIMEOUT,
+            snapshot_storage_deferral: std::time::Duration::from_secs(600),
             tls_raft,
             tls_api,
             secret_raft,
