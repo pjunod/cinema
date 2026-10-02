@@ -324,6 +324,7 @@ struct SessionDir {
     grants: Option<WriteGrants>,
     measurement:
         Option<std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
+    retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
 }
 
 impl SessionDir {
@@ -344,6 +345,7 @@ impl SessionDir {
             writer_started_at: std::time::Instant::now(),
             grants,
             measurement: None,
+            retained: None,
         }
     }
 
@@ -387,6 +389,21 @@ impl SessionDir {
             // still bytes the directory owes, so charging the slice is the
             // conservative answer and cleanup owns what is actually there.
             authorized.landed(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        }
+        if written.is_ok() && name != "index.m3u8" {
+            if let Some(collector) = &self.retained {
+                use sha2::Digest;
+                collector
+                    .capture(
+                        self.dir.join(name),
+                        name,
+                        crate::rolling_output::CommittedObject {
+                            bytes: bytes.len() as u64,
+                            digest: sha2::Sha256::digest(bytes).into(),
+                        },
+                    )
+                    .await;
+            }
         }
         written
     }
@@ -624,7 +641,35 @@ pub async fn run<R: AsyncRead + Unpin>(
 }
 
 #[allow(clippy::too_many_arguments)] // the same writer plus optional metadata observer
+#[cfg(test)]
 pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
+    src: R,
+    dir: PathBuf,
+    session_id: &str,
+    limits: Limits,
+    source: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+    grants: Option<WriteGrants>,
+    measurement: Option<
+        std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>,
+    >,
+) -> Outcome {
+    run_observed_retained(
+        src,
+        dir,
+        session_id,
+        limits,
+        source,
+        video,
+        grants,
+        measurement,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)] // existing writer plus private optional retained owner
+pub(crate) async fn run_observed_retained<R: AsyncRead + Unpin>(
     mut src: R,
     dir: PathBuf,
     session_id: &str,
@@ -635,6 +680,7 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
     measurement: Option<
         std::sync::Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>,
     >,
+    retained: Option<std::sync::Arc<crate::vodserve::retained::RollingCollection>>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     let retain_hevc_parameter_sets = video.retains_hevc_parameter_sets();
@@ -656,6 +702,7 @@ pub(crate) async fn run_observed<R: AsyncRead + Unpin>(
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
     out.measurement = measurement;
+    out.retained = retained;
     out.diagnostic_session = Some(crate::transcode::session_log_id(session_id));
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the

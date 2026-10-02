@@ -1,6 +1,20 @@
 use super::*;
 
 impl TranscodeManager {
+    pub(super) async fn rolling_retained_budget(&self) -> Option<u64> {
+        let settings = self
+            .store
+            .get_settings(&[plurx_core::store::keys::CACHE_MAX_GB])
+            .await
+            .ok()?;
+        settings
+            .get(plurx_core::store::keys::CACHE_MAX_GB)?
+            .trim()
+            .parse::<u64>()
+            .ok()?
+            .checked_mul(1 << 30)
+            .filter(|bytes| *bytes > 0)
+    }
     /// The rolling producer owns route-specific initial negotiation. A retained
     /// producer answer is already authoritative, even if catalog facts changed.
     pub(super) fn rolling_start_audio_options(
@@ -707,9 +721,47 @@ impl TranscodeManager {
             &self.measured_decoders,
             automatic_decoder_recovery,
         );
-        let execution = TranscodeExecution::from_options(&file, &opts, pacing, &upload.base_url(0))
-            .map_err(|error| error.to_string())?
-            .observing_qualified_grammar(observation.qualified_logging());
+        let mut execution =
+            TranscodeExecution::from_options(&file, &opts, pacing, &upload.base_url(0))
+                .map_err(|error| error.to_string())?
+                .observing_qualified_grammar(observation.qualified_logging());
+        let mut canonical_execution = execution.clone();
+        canonical_execution.out_dir = "retained-output".to_owned();
+        let logical = serde_json::to_vec(&serde_json::json!({
+            "file": &file,
+            "kind": SessionKind::Transcode { height: target_height },
+            "audio": &opts.audio,
+            "plan": plan.plan_digest(),
+            "args": transcode::hls_args(&plan, &canonical_execution),
+        }))
+        .ok();
+        let rolling_provenance = if start_seconds == 0.0
+            && takeover.is_none()
+            && opts.subtitle_burn.is_none()
+            && self.rolling_retained_budget().await.is_some()
+        {
+            match logical {
+                Some(logical) => {
+                    crate::rolling_provenance::RollingProduction::capture(
+                        &file,
+                        &logical,
+                        false,
+                        &producer_ffmpeg_bin(),
+                    )
+                    .await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        if let Some(provenance) = &rolling_provenance {
+            execution.source_path = provenance.input_path();
+        }
+        let mut execution_file = file.clone();
+        if let Some(provenance) = &rolling_provenance {
+            execution_file.path = provenance.input_path();
+        }
         let args = transcode::hls_args(&plan, &execution);
         if plan.input_is_hdr()
             && plan.options().pipeline == Pipeline::Cpu
@@ -773,6 +825,35 @@ impl TranscodeManager {
             Some(plan.output_contract()),
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        if let Some(production) = &rolling_provenance {
+            if let Some(attached) = self
+                .attach_rolling_retained(
+                    production,
+                    frozen_presentation.clone(),
+                    session_kind,
+                    Some(plan.output_contract()),
+                    opts.audio.clone(),
+                    opts.pipeline.output_grade(),
+                    target_height,
+                    user_name,
+                    supersession_user,
+                    playback_id,
+                    &item_title,
+                    automatic,
+                )
+                .await
+            {
+                start_settlement.disarm();
+                let _ = tokio::fs::remove_dir(&dir).await;
+                return Ok(attached);
+            }
+        }
+        let rolling_collection = self
+            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms)
+            .await;
+        if let Some(collection) = &rolling_collection {
+            upload.bind_retained(Arc::clone(collection));
+        }
         let retry = if encoder == Encoder::Software {
             None
         } else {
@@ -794,7 +875,7 @@ impl TranscodeManager {
                     .await
                 {
                     Ok(retry_plan) => PrepublicationTranscodeRetry::build(
-                        &file,
+                        &execution_file,
                         prepared,
                         &retry_plan,
                         pacing,
@@ -847,7 +928,7 @@ impl TranscodeManager {
                                 prepared
                                     .map(|prepared| {
                                         PrepublicationTranscodeRetry::build(
-                                            &file,
+                                            &execution_file,
                                             prepared,
                                             &alternate_plan,
                                             pacing,
@@ -1008,6 +1089,10 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            rolling_provenance,
+            rolling_collection,
+            rolling_artifact: None,
+            copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -1141,6 +1226,9 @@ impl TranscodeManager {
                 ));
             }
         };
+        if let Some(provenance) = &session.rolling_provenance {
+            provenance.bind_initial_attempt(generation);
+        }
         session.bind_retry_compatibility_attempt(generation).await;
         if let Err(reason) = session
             .spawn_and_install_prepublication_child(generation, || {
@@ -1158,7 +1246,10 @@ impl TranscodeManager {
                     {
                         #[cfg(unix)]
                         let descriptors = FfmpegDescriptors::from_raw_fds(
-                            None,
+                            session
+                                .rolling_provenance
+                                .as_ref()
+                                .map(|proof| proof.source_fd()),
                             None,
                             session
                                 .subtitle_handle
@@ -1458,9 +1549,75 @@ impl TranscodeManager {
             );
         }
         let pacing = self.pacing(true).await;
+        let canonical_args = if segmenting {
+            transcode::copy_pipe_args_with_audio_delivery(
+                &file,
+                start_seconds,
+                audio_index,
+                options.transcode_audio,
+                pacing,
+                video_options,
+                audio_delivery,
+            )
+        } else {
+            transcode::hls_copy_args_with_audio_delivery(
+                &file,
+                start_seconds,
+                audio_index,
+                options.transcode_audio,
+                pacing,
+                video_options,
+                0,
+                "init.mp4",
+                "retained-output",
+                audio_delivery,
+            )
+        };
+        let logical = serde_json::to_vec(&serde_json::json!({
+            "file": &file,
+            "kind": SessionKind::Copy {
+                aac: options.transcode_audio,
+                preserve_dolby_vision: options.preserve_dolby_vision,
+                convert_dolby_vision: options.convert_dolby_vision,
+            },
+            "audio_index": audio_index,
+            "audio": audio_delivery,
+            "args": canonical_args,
+        }))
+        .ok();
+        let rolling_provenance = if start_seconds == 0.0
+            && takeover.is_none()
+            && self.rolling_retained_budget().await.is_some()
+        {
+            match logical {
+                Some(logical) => {
+                    crate::rolling_provenance::RollingProduction::capture(
+                        &file,
+                        &logical,
+                        file.audio_offset_ms != 0
+                            && !file.audio_streams.is_empty()
+                            && audio_delivery
+                                .map_or(!options.transcode_audio, |audio| !audio.transcodes()),
+                        &if segmenting {
+                            ffmpeg_bin()
+                        } else {
+                            producer_ffmpeg_bin()
+                        },
+                    )
+                    .await
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut execution_file = file.clone();
+        if let Some(provenance) = &rolling_provenance {
+            execution_file.path = provenance.input_path();
+        }
         let legacy_args = |output: &str| match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_audio_delivery(
-                &file,
+                &execution_file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
@@ -1472,7 +1629,7 @@ impl TranscodeManager {
                 audio_delivery,
             ),
             None => transcode::hls_copy_args_with_audio_delivery(
-                &file,
+                &execution_file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
@@ -1493,7 +1650,7 @@ impl TranscodeManager {
         // replacement itself.
         let initial_args = if segmenting {
             transcode::copy_pipe_args_with_audio_delivery(
-                &file,
+                &execution_file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
@@ -1550,6 +1707,35 @@ impl TranscodeManager {
             &copy_kind,
         );
         let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        if let Some(production) = &rolling_provenance {
+            if let Some(attached) = self
+                .attach_rolling_retained(
+                    production,
+                    frozen_presentation.clone(),
+                    copy_kind,
+                    None,
+                    audio_delivery.cloned(),
+                    OutputGrade::Sdr,
+                    file.height.unwrap_or(0),
+                    user_name,
+                    supersession_user,
+                    playback_id,
+                    &item_title,
+                    automatic,
+                )
+                .await
+            {
+                start_settlement.disarm();
+                let _ = tokio::fs::remove_dir(&dir).await;
+                return Ok(attached);
+            }
+        }
+        let rolling_collection = self
+            .begin_rolling_retention(rolling_provenance.as_ref(), file.duration_ms)
+            .await;
+        if let Some(collection) = &rolling_collection {
+            upload.bind_retained(Arc::clone(collection));
+        }
         let retry = build_prepublication_copy_retry(
             segmenting,
             video_options,
@@ -1603,6 +1789,10 @@ impl TranscodeManager {
             dir: dir.clone(),
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            rolling_provenance,
+            rolling_collection,
+            rolling_artifact: None,
+            copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
             actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
@@ -1724,6 +1914,9 @@ impl TranscodeManager {
                 ));
             }
         };
+        if let Some(provenance) = &session.rolling_provenance {
+            provenance.bind_initial_attempt(generation);
+        }
         session.bind_retry_compatibility_attempt(generation).await;
         let pipe_stdout = if segmenting {
             match session
@@ -1740,7 +1933,15 @@ impl TranscodeManager {
                         &self.runtime_cache,
                         {
                             #[cfg(unix)]
-                            let descriptors = FfmpegDescriptors::default();
+                            let descriptors = FfmpegDescriptors::from_raw_fds(
+                                session
+                                    .rolling_provenance
+                                    .as_ref()
+                                    .map(|proof| proof.source_fd()),
+                                None,
+                                None,
+                                false,
+                            );
                             #[cfg(windows)]
                             let descriptors = windows_session_descriptors(&session)?;
                             descriptors
@@ -1777,7 +1978,15 @@ impl TranscodeManager {
                         &self.runtime_cache,
                         {
                             #[cfg(unix)]
-                            let descriptors = FfmpegDescriptors::default();
+                            let descriptors = FfmpegDescriptors::from_raw_fds(
+                                session
+                                    .rolling_provenance
+                                    .as_ref()
+                                    .map(|proof| proof.source_fd()),
+                                None,
+                                None,
+                                false,
+                            );
                             #[cfg(windows)]
                             let descriptors = windows_session_descriptors(&session)?;
                             descriptors

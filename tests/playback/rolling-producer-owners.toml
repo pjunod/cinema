@@ -72,7 +72,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # test-only stores in `path_owner_sample_point_follows_the_marker_check_and_precedes_the_sample`,
 # which sets the mask so a marked path reader must answer before the hook point and clears it
 # again. No production reader or writer was added and nothing elects a replacement.
-expected_occurrences = 37
+# S10 rolling retained attachment: one false initializer, not a replacement election.
+expected_occurrences = 38
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -484,7 +485,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # 250 ms stop-file poll is bounded by its 600 s deadline; the enclosing test
 # stops its actual manager session. This timer adds no separate producer or
 # recovery owner, and the external acquisition supervisor bounds drain.
-expected_occurrences = 52
+# S10 new real Copy and PUT consumers: two bounded fixture polls, no production timer.
+expected_occurrences = 54
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -613,7 +615,8 @@ pattern = "child_transition"
 # `shared-child-transition-lock` above.
 # 34 -> 35 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same
 # test-only failing `try_lock()` probe at the retirement handoff point.
-expected_occurrences = 35
+# S10 retained attachment initializes its existing response transition mutex.
+expected_occurrences = 36
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -630,7 +633,8 @@ pattern = "replacing_child"
 # +2 are the publication/lookup read fences reviewed under that same symbol.
 # 35 -> 37 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: the same two
 # test-only stores of the mask in the path-owner position test. No production owner added.
-expected_occurrences = 37
+# S10 retained attachment initializes false; no replacement owner is introduced.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -734,7 +738,8 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "m4-cache-integrity-cleanup-latch"
 pattern = "cache_integrity_cleanup_started"
-expected_occurrences = 12
+# S10 retained attachment initializes the existing integrity-cleanup latch.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-cache-integrity-cleanup-owner"
@@ -861,7 +866,8 @@ pattern = "actor_prepublication_producer"
 # 22 -> 23: the actor-managed HLS status fixture marks its synthetic session
 # after admitting the exact attempt. The retained executor registration owns
 # the actor for the fixture lifetime; no shipped ownership projection changed.
-expected_occurrences = 23
+# S10 retained attachment initializes false: it owns no producer.
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -884,7 +890,8 @@ pattern = "actor_managed_prepublication_process"
 # 12 -> 13 for that same synthetic actor-managed fixture. It is the test's
 # declaration that status authorization must cross the production actor path,
 # not a new process scope or a bypass around that owner.
-expected_occurrences = 13
+# S10 retained attachment initializes false: existing actor still owns response publication.
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
@@ -892,7 +899,8 @@ pattern = "first_media_handoff_applied"
 # 18 -> 19 with S-14 M8 (`Session`, `TranscodeManager`), measured from the validation unittests' actual count: one test-only
 # read in `first_media_owner_point_follows_an_accepted_settlement`, asserting a refused
 # settlement leaves the latch unset. No production reader or writer added.
-expected_occurrences = 19
+# S10 retained attachment initializes the existing first-media settlement latch.
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-published-attempt-cleanup-owner"
@@ -919,7 +927,8 @@ id = "m4-producer-completion-disposition"
 pattern = "RollingProducerCompletionDisposition"
 # S10 remaining output: +2 normal-completion variants in the existing
 # Copy executor's observation callback. This grants no retained authority.
-expected_occurrences = 22
+# S10 retained collection requires the existing CompleteVerifiedDuration verdict.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-expected-executor-settlement"
@@ -1355,7 +1364,8 @@ pattern = "(?:spawn_rolling_scratch_cleanup_owner|scratch_cleanup_started)"
 # directly (test-only), and `seam_census_of_the_workspace` names it among the M8-migrated owners
 # (a string). The three production calls are unchanged apart from losing their `cfg(test)` pause
 # argument; the owner now takes its point where it is spawned.
-expected_occurrences = 15
+# S10 retained attachment initializes the existing cleanup latch; cached bodies are not scratch.
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-bounded-rolling-scratch-cleanup"
@@ -2444,7 +2454,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # A05 #683: +2: system.rs detaches optional ClientLog proof persistence with
 # no producer authority; link_receipts.rs's intake race task is test-only,
 # paused per instance and joined after retirement/owner replacement.
-expected_occurrences = 698
+# S10 optional retained collection: three bounded blocking I/O owners (link, playlist, directory) plus existing rolling actor attachment; no scheduler.
+expected_occurrences = 702
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3632,7 +3643,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one bounds its modeled fixture wait, one the actual PUT fixture playlist,
 # one the existing inner completion deadline, one real preparation fixture.
 # No extra spawned task or producer loop; all fixture waits are awaited.
-expected_occurrences = 1161
+# S10 optional link timeout + Copy/PUT fixture timeouts and polls; no additional production timer.
+expected_occurrences = 1166
 
 [[module_structures]]
 id = "bare-time-constructor"

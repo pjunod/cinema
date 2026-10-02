@@ -1205,8 +1205,44 @@ claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
+**2026-10-02 rolling-copy/PUT retained-consumer continuation:** actual successful
+copyseg and lane-zero PUT commits optionally hardlink their complete output
+members under the existing retained namespace OS lease. Existing configured
+allowance is reserved before linking; refusal leaves ordinary playback and
+scratch accounting unchanged. A collection reserves at most the remaining
+allowance, with the existing 64-artifact limit, 8,192-object GET-inventory
+limit (including the playlist), and a finite deadline of four source durations
+plus 300 seconds, capped at 24 hours. The same collector releases charges only
+after exact owned unlink. Pending collection and body owners retain their
+leases; no second registry, scheduler, or payload buffer is introduced.
+
+Only the original normal successful child/reader completion, verified source
+duration, full canonical zero-origin ENDLIST and exact committed inventory can
+mint this process-private artifact. Source bytes are inherited through the
+actual producer descriptor; full resolved source/audio/offset/grade/route/argv
+and executable/engine facts bind its lookup. Retry refuses predecessor proof.
+On non-Linux Unix, two source demuxers remain unqualified because `/dev/fd`
+shares offsets; ordinary arguments and playback remain available.
+
+A compatible NEW local attachment reacquires actual retained bytes and current
+source/engine facts before sealing measured average/contiguous-window peak in
+its frozen presentation. Existing cached GET snapshot validation and body
+leases authenticate the actual playlist/media bytes. No old attachment is
+rebound, and no restart manifest, queue result, telemetry row, or remote field
+creates rolling acquisition authority. The registry's memory-only GET
+inventory is not a serialized cache-health or durable recovery proof.
+
+The new real-copy consumer and refusal/source-replacement controls each passed
+once; the original inventory control remains source-bound. Independent review,
+current-source compiler/static/hook checks and the effort gate still precede
+landing. This is bounded implementation, not original S10 completion:
+unseen-tail exact first-publication without whole-film foreground waiting,
+fetched-wire corpus equality, per-segment burst acceptance, named-device codec
+compatibility and fleet qualification remain open.
+
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | pending draft | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five new focused IDs passed once, including real Copy and TS PUT body consumers and refusal controls. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
