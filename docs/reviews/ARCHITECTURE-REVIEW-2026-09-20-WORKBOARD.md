@@ -151,6 +151,20 @@ control authentication/accepted-actor/staged registration, typed recovery and
 physical acceptance remain explicitly open; see combined plan §9.10. Missing
 observational proof remains Unknown, never an ordinary-playback enable gate.
 
+The 2026-10-02 S-10 rolling retained-consumer continuation uses actual
+copyseg/lane-zero PUT commits, original verified completion and inherited
+source descriptors. The existing retained namespace/count/allowance/collector
+owns optional hardlinks and exact cleanup; a compatible NEW local attachment
+captures measured full-mux cost before sealing and serves authenticated body
+snapshots. No restart/remote metadata authority or old-owner rebinding is
+introduced. Five original successes retain historical source attribution;
+five new review59 controls passed once for non-blocking optional capture,
+actual executable selection, permanent corruption refusal, pre-resource
+attachment and post-source-await refusal. Same sole review59 disposition and
+final current checks remain required; no successful ID was replayed.
+Unseen-tail first-publication and original corpus/device/fleet acceptance stay
+open. See the dated canonical S-10 ruling below.
+
 The S-10 remaining-output claim uses real rolling-copy/PUT commits and a
 distinct finite `CopyOutputPrepare` in the existing worker/VOD-driver lane.
 Private full-body reservation, successful exact settlement and independent
