@@ -34899,6 +34899,35 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
+    async fn rewind_non_idempotent_columns(client: &Client) {
+        downgrade_dv_request_provenance(client).await;
+        // v60 also adds a column. Remove its dependent triggers before replaying
+        // that step, including when the v48 index migration itself is a no-op.
+        client
+            .txn([
+                (
+                    "DROP TRIGGER background_transcode_producer_recorded",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_transcode_producer_backfill",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_job_verify_transcode_command",
+                    hiqlite::params!(),
+                ),
+                (
+                    "ALTER TABLE background_transcode_artifacts DROP COLUMN producer_payload",
+                    hiqlite::params!(),
+                ),
+            ])
+            .await
+            .expect("rewind producer provenance")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("commit producer provenance rewind");
+    }
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -34927,7 +34956,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
         "a fresh cluster is created with them"
     );
 
-    downgrade_dv_request_provenance(&client).await;
+    rewind_non_idempotent_columns(&client).await;
     let mut rewind = ITEM_READ_INDEXES
         .iter()
         .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
@@ -34968,7 +34997,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     // The indexes present with the marker behind: the step is `IF NOT
     // EXISTS` throughout, so a repeated attempt moves the marker instead of
     // refusing.
-    downgrade_dv_request_provenance(&client).await;
+    rewind_non_idempotent_columns(&client).await;
     client
         .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
