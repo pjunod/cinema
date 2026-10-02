@@ -1017,6 +1017,24 @@ pub async fn scan_library_with_publication_and_prune_limit(
     Ok(report)
 }
 
+/// Whether a library root is mounted and readable here: the scanner's own
+/// root identity read ([`library_root_fingerprint`], which canonicalises it)
+/// succeeds, and the root lists at least one entry. The second half is what
+/// tells an unmounted share from a mounted one, since an unmounted NAS leaves
+/// an empty mountpoint that canonicalises perfectly well. A job that finds a
+/// catalogued file missing asks this before concluding the file is gone.
+pub async fn library_root_available(root: &Path) -> bool {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        library_root_fingerprint(std::slice::from_ref(&root)).is_ok()
+            && std::fs::read_dir(&root)
+                .map(|mut entries| entries.next().is_some())
+                .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false)
+}
+
 /// Stable identity for the configured root set.
 ///
 /// The canonical path prevents two differently configured mount points from
