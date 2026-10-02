@@ -3219,7 +3219,7 @@
 .pi-hero>.pi-fact+ .pi-fact{border-left:1px solid #343d4d;padding-left:24px}
 .pi-explanation{padding:14px 16px;border-radius:10px;background:#1e232d;margin:20px 0}
 .pi-tracks{border-bottom:1px solid #343d4d;padding-bottom:20px}.pi-tracks strong{font-size:16px}
-.pi-metrics{margin-top:20px}.pi-metrics strong{font-size:25px}
+.pi-metrics{margin-top:20px;grid-template-columns:repeat(3,minmax(0,1fr))}.pi-metrics strong{font-size:25px}
 .pi-group{border-bottom:1px solid #343d4d}.pi-group summary{cursor:pointer;font-weight:600;padding:16px 0;min-height:48px}
 .pi-group summary:focus-visible{outline:2px solid #8bb8ff;outline-offset:2px}
 .pi-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;padding:12px 0;border-top:1px solid #343d4d;overflow-wrap:anywhere}

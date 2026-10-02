@@ -582,7 +582,7 @@ function catalogItemBody(p){
     const r=it.rollup;
     chips.push(`<span>${r.watched===r.leaves?`all ${r.leaves} watched`:`${r.watched} of ${r.leaves} watched`}</span>`);
   }
-  const kick = it.kind ? `<div class="px-kick">${esc(it.kind)}</div>` : '';
+  const kick = it.kind ? `<div class="px-kick">${esc(itemKindLabel(it))}</div>` : '';
   // Video badges show once: in the hero for a single version; per-version
   // below when there are several.
   const heroBadges = (best && !multi) ? specBadges(best) : "";

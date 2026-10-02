@@ -1,4 +1,5 @@
 "use strict";
+const test = require("node:test");
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const {shellSource} = require("./shell-source.js");
@@ -27,6 +28,31 @@ assert.doesNotMatch(source, /function viewingItemBody\(|function viewingKind\(|f
 assert.doesNotMatch(source, /calm-item|watch-hero|watch-resume|item-quality|media-tracks|series-continue/);
 assert.match(declaration('specBlock'), /\$\{audRow\}\n\s*\$\{subRow\}\n\s*\$\{hlsRow\}/);
 console.log('Item pages use the original per-layout bodies with open track facts.');
+
+test("episode item labels include their number across all layouts", () => {
+  const vm = require("node:vm");
+  const context = vm.createContext({
+    ME: null, NAV_ORIGIN: null, esc: value => String(value ?? ""),
+    pageHead: () => "", artHtml: () => "", bookByline: () => "", bookEditionSection: () => "",
+  });
+  const renderers = ["classicItemBody", "catalogItemBody", "theaterItemBody"];
+  for (const name of ["itemKindLabel", ...renderers]) vm.runInContext(declaration(name), context);
+  for (const renderer of renderers) {
+    for (const [kind, number, expected] of [
+      ["episode", 10, "episode 10"], ["episode", 0, "episode 0"],
+      ["episode", null, "episode"], ["episode", undefined, "episode"], ["movie", 10, "movie"],
+    ]) {
+      const markup = context[renderer]({
+        item: {id: 1, kind, episode_number: number, title: "The Beast in Me"},
+        files: [], children: [], ancestors: [], shape: "empty",
+      });
+      const label = renderer === "classicItemBody"
+        ? markup.match(/class="chips"><span>([^<]*)<\/span>/)
+        : markup.match(/class="(?:px|th)-kick">([^<]*)<\/div>/);
+      assert.equal(label?.[1], expected, `${renderer}: ${kind} ${number}`);
+    }
+  }
+});
 
 const hero = new Function(
   `const THEATER_HERO_KINDS={movie:1,episode:1,video:1}; ${declaration('theaterHeroPick')}; return theaterHeroPick;`)();
