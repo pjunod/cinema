@@ -117,6 +117,7 @@ struct Shared {
     /// and the bookkeeping after it.
     commit: tokio::sync::Mutex<()>,
     state: Mutex<State>,
+    retained: Mutex<Option<Arc<crate::vodserve::retained::RollingCollection>>>,
     next_request: AtomicU64,
 }
 
@@ -253,6 +254,7 @@ impl PutSink {
             changed: tokio::sync::Notify::new(),
             commit: tokio::sync::Mutex::new(()),
             state: Mutex::new(State::default()),
+            retained: Mutex::new(None),
             next_request: AtomicU64::new(0),
         });
         let (drains, requests) = tokio::sync::mpsc::unbounded_channel();
@@ -315,6 +317,24 @@ impl PutSink {
     pub(crate) fn observed_complete_output(
         &self,
     ) -> Option<plurx_core::output_measurement::CompleteOutputRates> {
+        self.observed_complete_inventory()
+            .map(|(rates, _, _)| rates)
+    }
+
+    pub(crate) fn bind_retained(
+        &self,
+        collector: Arc<crate::vodserve::retained::RollingCollection>,
+    ) {
+        *self
+            .shared
+            .retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(collector);
+    }
+
+    pub(crate) fn observed_complete_inventory(
+        &self,
+    ) -> Option<crate::rolling_output::CompleteRollingInventory> {
         if !self.shared.exited.load(Ordering::Acquire)
             || self.shared.in_flight.load(Ordering::Acquire) != 0
             || self.shared.is_closed()
@@ -327,7 +347,7 @@ impl PutSink {
         }
         state
             .measurement
-            .complete(state.measured_playlist.as_deref()?)
+            .complete_inventory(state.measured_playlist.as_deref()?)
     }
 
     async fn drain_queued(&self) {
@@ -892,6 +912,24 @@ async fn commit_object(
             let reason = format!("publishing {}: {error}", request.name);
             shared.fail_lane(request.lane, reason.clone());
             return Err(Refused::new("500 Internal Server Error", reason));
+        }
+        let collector = shared
+            .retained
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        if let Some(collector) = collector {
+            if request.lane == 0 {
+                collector
+                    .capture(
+                        shared.dir.join(&request.name),
+                        &request.name,
+                        observed.clone(),
+                    )
+                    .await;
+            } else {
+                collector.refuse();
+            }
         }
         let pending = {
             let mut state = shared.lock();

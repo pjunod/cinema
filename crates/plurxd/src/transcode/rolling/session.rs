@@ -8,6 +8,13 @@ pub(super) struct Session {
     /// additional immutable coordinate.
     pub(super) response_incarnation: uuid::Uuid,
     pub(super) frozen_presentation: Option<FrozenHlsPresentation>,
+    /// Actual held producer input and execution identity, never wire metadata.
+    pub(super) rolling_provenance: Option<Arc<crate::rolling_provenance::RollingProduction>>,
+    pub(super) rolling_collection: Option<Arc<crate::vodserve::retained::RollingCollection>>,
+    pub(super) rolling_artifact: Option<Arc<crate::vodserve::retained::RollingArtifact>>,
+    pub(super) copy_output_measurement: std::sync::Mutex<
+        Option<Arc<std::sync::Mutex<crate::rolling_output::RollingOutputMeasurement>>>,
+    >,
     /// True for every rolling generation whose response publication is
     /// admitted by the actor. Producer recovery may still remain compatibility
     /// owned; response ownership does not imply prepublication retry policy.

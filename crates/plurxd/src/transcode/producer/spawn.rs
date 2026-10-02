@@ -392,7 +392,7 @@ impl ObservedFfmpeg {
 /// The binary a transcode producer runs: the configured FFmpeg, except where a
 /// test on this thread has put a stand-in in its place (see
 /// [`with_producer_ffmpeg_for_test`]).
-fn producer_ffmpeg_bin() -> String {
+pub(super) fn producer_ffmpeg_bin() -> String {
     #[cfg(test)]
     if let Some(bin) = PRODUCER_FFMPEG_FOR_TEST.with(|bin| bin.borrow().clone()) {
         return bin;
