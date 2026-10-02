@@ -380,6 +380,94 @@ Acceptance: the before/after table in the PR body shows the outbox's
 proposals/day below 10,000 per cluster and the takeover loop's authority
 reads below 1,500 per node per day on an idle fleet.
 
+#### Strict AFTER input and readout protocol
+
+The historical default sampler/evaluator remains M0 tooling. It cannot
+retroactively supply the takeover-start numerator or establish M4 from a
+point sample. Opt-in `--after` requires a new, create-only capture and a
+full independently verified deployed source commit, not just a build label.
+Unknown, dirty, tag-only or source-prefix-mismatched builds are refused.
+If the actual source binding is unavailable, report that deficit; do not
+infer it from the workstation's HEAD or invent it in a receipt.
+
+An independently admitted **external read-only observer** must acquire and
+atomically refresh one sanitized JSON manifest. This tooling does not
+implement that observer, read settings credentials, deploy, change a
+switch, or authorize a capture. The exact schema is:
+
+- Top-level fields: `schema: "k03-after-acquisition-v1"` and `observations`.
+- Exactly one observation each for `nuc4`, `m6`, `nynuc`, with only `node`,
+  `build`, `source_commit`, integer UTC `epoch`, boolean
+  `cluster_media_pool_enabled` and boolean `cluster_session_takeover_enabled`.
+- Every build/full-source binding must match the independently verified
+  expected deployment. At least one switch must actually be off on each
+  node; missing values, strings such as `"false"`, and on/on are refused.
+- Every observation must be no more than95 seconds old and not future-dated
+  at the actual metrics observation. A one-time starting receipt goes stale
+  and cannot qualify a twelve-hour capture. Refresh at least every60 seconds
+  with enough allowance for all three node requests.
+
+The sampler reads and hash-retains the manifest **each tick**, plus the
+original selected metrics lines, before appending their hashes to
+`samples.tsv`. The evaluator reopens those exact regular, nonsymlink files,
+checks every hash, and binds every row to both retained sources. It checks
+supplied acquisition bytes and sampled continuity. It does **not**
+cryptographically prove HTTP origin, independently establish the receipt's
+full-source assertion, or prove no switch flip occurred between observations.
+The future acquisition handoff must retain its real origin/build evidence;
+this input contract is not a substitute for that evidence.
+
+After a separate capture admission, set `K03_BUILD` and `K03_SOURCE_SHA` from
+the verified deployed build receipt, and `K03_OWNER` / `K03_MANIFEST` to
+explicit approved owned paths. `K03_OWNER` must not exist already:
+
+```sh
+scripts/replicated-write-capture-sampler --after \
+  --output-dir "$K03_OWNER" --acquisition-manifest "$K03_MANIFEST" \
+  --expected-build "$K03_BUILD" --source-commit "$K03_SOURCE_SHA" \
+  --max-seconds 46800
+scripts/replicated-write-capture evaluate "$K03_OWNER/samples.tsv" --after \
+  --evidence-dir "$K03_OWNER/evidence" \
+  --expected-build "$K03_BUILD" --source-commit "$K03_SOURCE_SHA" --json
+```
+
+The POSIX sampler is one foreground process, with no child process or
+restart/resume loop. Its explicit monotonic allowance is at most25 hours;
+the command above admits13 hours. A real-time signal bounds each complete
+metrics request, including a dripping body, to5 seconds within that original
+allowance. It polls the three fixed unauthenticated metrics URLs every60
+seconds, forbids redirects and ignores proxy configuration. Bounds are1 MiB
+per response,16 KiB per acquisition,8 MiB TSV,512 MiB retained bytes and8192
+files. Budgets are checked before appending/retaining. Regular-file checks
+reject FIFO/device/symlink inputs rather than waiting for a writer. Completion,
+failure or cancellation closes owned I/O; partial evidence is retained, never
+deleted or silently restarted. A future live admission still needs an owned
+external watchdog/process/RSS/log/cleanup plan; these input/disk bounds are
+not a claim of OS resource isolation or permission to start collection now.
+
+Strict evaluation refuses incomplete rosters, missing or malformed series,
+duplicates, saturation, resets, build/source/role changes, uptime discontinuity,
+gaps over95 seconds and any unbound row. Common observed overlap must reach
+43,200 seconds. Per node, the reported numerator/denominator is exactly
+`delta × 86400 / actual_observed_elapsed_seconds`, not an hourly estimate
+rounded into a pass. The takeover decision compares integer quantities
+against the strict `<1500/day` bound. A valid high-rate window remains
+measurement evidence with `takeover_bound_met: false`; incompleteness is a
+measurement refusal, never a product-feature gate. Missing is never zero.
+Watched-outcome rates are retained separately. The result explicitly leaves
+the outbox/WAL proposal bound **not assessed**: copied-WAL integrity,
+attribution/shares and comparison to the accepted M0 readout remain owed.
+
+One new offline control,
+`GateCase.test_strict_after_requires_fresh_bound_evidence_and_exact_elapsed_rates`,
+pins exact arithmetic and all refusal cases with retained synthetic bytes.
+It also exercises the real sampler loop with finite synthetic time/I/O to
+prove per-tick refresh, expiry cleanup and create-only ownership. That fixture
+is neither a twelve-hour runtime nor an authenticated fleet acquisition.
+Its actual once-only command, frozen source and pass receipt belong to the
+task PR. Earlier M0/attribution controls and successful evidence are retained;
+this task does not rerun them or close original M4 acceptance.
+
 ## 6. Verification and rollout
 
 Fast lane: `make unit` per PR plus the named filters. M1 and M3 are safe on
@@ -445,31 +533,38 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M4 | #405 | **needs: fleet** — the after-measurement runs only on a deployed build; steps below. The CLUSTER-PERFORMANCE-PLAN §6.5 rows wait for its numbers. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source | #646 (draft) | Delegated continuation: fixed exact unordered settings-pair attribution through the production consistent-read retry path counts first-polled attempts, including retries and in-flight work, with fixed terminal outcomes. SQL, retry policy and M3 cache/cadence are unchanged. Pinned rustc 1.97.1 affected baseline check passed on effort base `3f4999c4` before Rust edits; After synchronizing actual effort `32561d613`, the three attribution regressions and two retained authority retry/budget tests pass with `--features hiqlite-store`; affected all-target core check and Clippy `-D warnings`, formatting and four docs-index tests pass. Initial local Clippy rejected one redundant test closure, corrected before push; macOS test linking reports a nonfatal compact-unwind size warning. Normal pinned hook remains mandatory. Future admitted deployment and a fresh attributed window are required; current passive capture cannot retroactively gain this numerator. M4 remains open. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/remaining_executable_sol61 | M4 attribution source — sole-review P2 | #646 (draft) | Review 18 / comment 6614 found the isolated selector/retry tests did not pin both production handoffs. `takeover_authority_attribution_settings_pair_reaches_timed_client_retries` now calls actual `HiqliteAuthStore::get_setting_pair` through scoped `TimedClient`, its real timeout and retry path, in both key orders and for an unrelated pair. Only consistent-query I/O is injected; the local metric sink starts at zero and receives real attempt increments. Each pair executes timeout, quorum failure and empty success; takeover starts are 3, unrelated retries add 0. Independent temporary mutations of the actual getter scope to `Unattributed` and actual TimedClient retry scope to `None` each fail this test at starts 0 versus 3 (exit 101). Neither mutation is committed; restored source SHA-256 `8efacd8ceb1285ad2730ccf655f05ffaf0ca2854a0e35127394f125f3a2e06e3` matches the positive source. Raw logs retained in agent-owned `/private/tmp/k03-attribution-mutations-20260930.c7TQYJ/`. Restored attribution tests 4/4 and retained authority retry/budget tests 2/2 pass on current effort `32561d613`; affected core `hiqlite-store` all-target check and Clippy `-D warnings`, fmt and four docs-index tests pass. Exact committed-head recheck follows the normal hook; root owns disposition, gate and integration. No fleet, capture, WAL or M4 acceptance added. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/k06_pr725_adversarial_sol61 | M4 strict AFTER tooling | Task PR forthcoming | Opt-in sampler/evaluator and one combined offline control; legacy M0/WAL functions remain unchanged. Per-tick sanitized externally refreshed switch/build/full-source receipts and selected metrics are hash-bound; missing, stale, reset, saturated, gapped or mismatched evidence is refused. Actual elapsed integer rate arithmetic is separate from measurement completeness; WAL shares stay unassessed. Current source/hook/once-only control evidence is recorded in the task PR and real hash-named local proof. No observer, live capture, credential read, deployment, Rust behavior or original M4 qualification supplied. |
 
 ### needs: M4 fleet after-measurement (GPT)
 
 ```text
-GPT prompt (fleet, K-03 M4). After the merge commit carrying K-03 M1–M3
-(branch plan/K-03, PR #405) is deployed with the usual ansible playbook to
-nuc4, m6, nynuc and nuc3:
+GPT prompt (fleet, K-03 M4). This is a separately admitted post-deploy
+measurement, not permission to deploy or start a capture from this document.
+After the exact source carrying K-03 M1–M3 and the takeover-start attribution
+is deployed and independently build/source-bound on nuc4, m6, nynuc and nuc3:
 1. On each voter, `curl -s http://<ip>:32400/metrics | grep
    plurx_watched_outbox_ticks_total` must list five outcomes. Over five
    minutes exactly one voter's claimed+empty_claim+skipped_hint grows; the
    other two grow only not_owner (every 15 s). Report which voter owns it.
-2. Start a fresh capture: copy scripts/replicated-write-capture-sampler to
-   ~/code/plurx-agent/workspaces/k03-m4-<UTC stamp>/capture.sh on the Mac and
-   run it under launchd or nohup (read-only; it exits 0 after one qualifying
-   12-hour idle window). Do not touch the M0 workspace
-   k03-m0-20260921T032002Z.
-3. When status.txt says complete, run
-   `scripts/replicated-write-capture evaluate <dir>/samples.tsv --json` and
+2. Admit a finite owned strict-AFTER capture and the separate external
+   read-only observer described in §5.5. Acquire/refresh actual sanitized
+   per-node switch/build/full-source receipts every tick; a starting off
+   receipt alone is insufficient. Do not touch the M0 workspace
+   k03-m0-20260921T032002Z. No settings switch or service restart is implied.
+3. On sampler terminal completion, run the strict --after evaluator with
+   retained evidence-dir and exact expected build/full source per §5.5 and
    report, per voter, proposals/day, store writes/day, authority reads/day and
    snapshot builds/day beside docs/cluster/REPLICATED-WRITE-RATE-HYGIENE-M0.md
-   §2. Also report the owner's plurx_watched_outbox_ticks_total claimed +
+   §2. Report actual takeover-start delta×86400/elapsed separately from
+   aggregate authority reads. Also report the owner's
+   plurx_watched_outbox_ticks_total claimed +
    empty_claim delta over the same window scaled to a day.
 4. Copy (read-only, cp) the learner nuc3's /srv/plurx/hiqlite/logs/*.wal to
    /tmp and run `scripts/replicated-write-capture attribute <copies>`; report
    the `UPDATE watched_outbox` and `job_leases ... watched:outbox` shares.
+   Independently retain bounded-copy identity, window span and WAL integrity
+   evidence before using those diagnostic classifications for acceptance;
+   the legacy attribute parser does not validate copied-WAL integrity.
 Acceptance (§5.5): outbox proposals (claims + watched:outbox lease writes)
-< 10,000/day per cluster; authority reads per voter down by ≈ 85,000/day.
+< 10,000/day per cluster; attributed takeover starts < 1,500/day per voter.
 ```
