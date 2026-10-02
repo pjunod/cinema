@@ -2091,6 +2091,26 @@ pub struct DecisionBody {
 /// Validate the additive packaging claim before any caller can fall through
 /// to a legacy trust path or allocate playback work.
 pub(crate) fn validate_device_caps(caps: &playback::DeviceCaps) -> Result<(), ApiError> {
+    if let Some(contract) = caps.decoder_compaction.as_deref() {
+        if contract != playback::DECODER_COMPACTION_CONTRACT
+            || caps.v != playback::DeviceCaps::VERSION
+        {
+            return Err(ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                "invalid_capabilities",
+                "unsupported decoder compaction contract",
+            ));
+        }
+        if caps.video.len() > playback::MAX_CLIENT_DECODER_ENTRIES {
+            return Err(ApiError::typed_detail(
+                StatusCode::BAD_REQUEST,
+                "invalid_capabilities",
+                "compacted decoder evidence exceeds its negotiated bound",
+                serde_json::json!({"clause": "video_entries", "observed": caps.video.len(), "limit": playback::MAX_CLIENT_DECODER_ENTRIES}),
+            ));
+        }
+    }
+
     if let Err(message) = caps.validate_audio_sinks() {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,

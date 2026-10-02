@@ -1566,6 +1566,15 @@ async fn create_with_purpose(
                 .and_then(|display| display.presentation_target)
                 .map_or(1, |target| target.revision),
         )
+        .map_err(|cause| {
+            tracing::warn!(
+                file_id = id,
+                video_entries = caps.video.len(),
+                cause,
+                "optional decoder snapshot unavailable; legacy playback admission preserved"
+            );
+        })
+        .ok()
     });
     let candidate_target = req.caps.as_ref().and_then(|caps| {
         caps.display

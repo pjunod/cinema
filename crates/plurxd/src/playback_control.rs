@@ -665,7 +665,7 @@ impl DecoderCapsSnapshot {
     pub(crate) fn from_device_caps(
         caps: &plurx_core::playback::DeviceCaps,
         revision: u64,
-    ) -> Option<Self> {
+    ) -> Result<Self, &'static str> {
         let video: Vec<_> = caps.video.iter().map(|entry| serde_json::json!({
             "codec": entry.codec, "profiles": entry.profiles, "available": true,
             "dynamic_ranges": entry.present.iter().filter_map(|transfer| match transfer {
@@ -674,7 +674,8 @@ impl DecoderCapsSnapshot {
             "dv_profiles": entry.dv_profiles, "max_width": entry.max_width, "max_height": entry.max_height,
             "max_frame_rate": entry.max_frame_rate, "max_bitrate_bps": entry.max_bitrate_bps,
         })).collect();
-        serde_json::from_value(serde_json::json!({"revision": revision, "video": video})).ok()
+        serde_json::from_value(serde_json::json!({"revision": revision, "video": video}))
+            .map_err(|_| "decoder_snapshot_unavailable")
     }
 
     pub(crate) fn device_caps(&self) -> plurx_core::playback::DeviceCaps {
@@ -692,7 +693,9 @@ impl TryFrom<DecoderCapsSnapshotWire> for DecoderCapsSnapshot {
     type Error = &'static str;
 
     fn try_from(wire: DecoderCapsSnapshotWire) -> Result<Self, Self::Error> {
-        if !(1..=9_007_199_254_740_991).contains(&wire.revision) || wire.video.len() > 16 {
+        if !(1..=9_007_199_254_740_991).contains(&wire.revision)
+            || wire.video.len() > plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
+        {
             return Err("invalid decoder snapshot revision or entry count");
         }
         for entry in &wire.video {

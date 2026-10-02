@@ -208,11 +208,11 @@ impl QualityCatalogRequest {
         if self.caps.v != plurx_core::playback::DeviceCaps::VERSION {
             return Err(failure("caps_version", usize::from(self.caps.v), 2));
         }
-        if self.caps.video.len() > MAX_CAPABILITIES {
+        if self.caps.video.len() > plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES {
             return Err(failure(
                 "video_entries",
                 self.caps.video.len(),
-                MAX_CAPABILITIES,
+                plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES,
             ));
         }
         if self.caps.validate_audio_sinks().is_err() {
@@ -1846,7 +1846,7 @@ mod tests {
     #[test]
     fn catalog_validation_retains_video_count_clause() {
         let caps = serde_json::from_value(serde_json::json!({
-            "v": 2, "video": (0..17).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
+            "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
         })).expect("valid decoder rows");
         let request = QualityCatalogRequest {
             copy_contract: None,
@@ -1863,8 +1863,8 @@ mod tests {
             request.validate(),
             Err(CatalogValidationError {
                 clause: "video_entries",
-                observed: 17,
-                limit: 16,
+                observed: 65,
+                limit: 64,
             })
         );
     }

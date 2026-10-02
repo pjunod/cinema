@@ -11,6 +11,41 @@ import org.junit.Test
 class CapsPolicyTest {
 
     @Test
+    fun mediatekRegistryCompactsThroughActualWirePolicyWithoutDroppingProfiles() {
+        // Review registry: six AVC, four HEVC, four AV1, five VP9 and one MPEG2
+        // mapped profiles, each exposed by regular, low-latency and software components.
+        val profiles = mapOf("h264" to listOf("baseline", "constrained_baseline", "main", "high", "constrained_high", "high10"),
+            "hevc" to listOf("main", "main10", "main10_hdr10", "main_still"),
+            "av1" to listOf("main8", "main10", "main10_hdr10", "main10_hdr_plus"),
+            "vp9" to listOf("0", "1", "2", "2_hdr", "2_hdr_plus"), "mpeg2video" to listOf("main"))
+        val registry = profiles.flatMap { (codec, values) -> values.flatMap { profile ->
+            listOf(
+                VideoDecoderLimit(codec, 2160, profiles = listOf(profile), maxWidth = 3840, maxFrameRate = DecoderFrameRate(60, 1)),
+                VideoDecoderLimit(codec, 2160, profiles = listOf(profile), maxWidth = 3840, maxFrameRate = DecoderFrameRate(60000, 1000)),
+                VideoDecoderLimit(codec, 1080, hardwareAccelerated = false, profiles = listOf(profile), maxWidth = 1920, maxFrameRate = DecoderFrameRate(30, 1)),
+            )
+        } }
+        assertEquals(60, registry.size)
+        val wire = videoCodecCaps(registry).videoEntries(listOf("sdr", "pq"), listOf(8))
+        assertEquals(20, wire.size)
+        assertTrue(wire.size <= MAX_CLIENT_DECODER_ENTRIES)
+        assertEquals(profiles.flatMap { (codec, values) -> values.map { codec to listOf(it) } }.toSet(),
+            wire.map { it.codec to it.profiles }.toSet())
+        assertTrue(wire.all { it.max_width == 3840 && it.max_height == 2160 && it.max_frame_rate == DecoderFrameRate(60, 1) })
+    }
+
+    @Test
+    fun compactionPreservesCrossingUnknownAndDifferentGradeEnvelopes() {
+        val row = VideoEntry("h264", listOf("high"), 1080, 3840, DecoderFrameRate(60, 1), listOf("sdr"))
+        val crossing = row.copy(max_height = 2160, max_width = 1920)
+        val unknown = row.copy(max_width = null)
+        val grade = row.copy(present = listOf("pq"))
+        val rows = listOf(row, crossing, unknown, grade, row.copy(max_frame_rate = DecoderFrameRate(60000, 1000)))
+        assertEquals(setOf(row, crossing, unknown, grade), compactVideoEntries(rows).toSet())
+        assertFalse(compactVideoEntries(rows).any { it.max_width == 3840 && it.max_height == 2160 })
+    }
+
+    @Test
     fun videoCapsKeepTheBestHeightForEachCodec() {
         val caps = videoCodecCaps(
             listOf(

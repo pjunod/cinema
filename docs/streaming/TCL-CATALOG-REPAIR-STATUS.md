@@ -20,8 +20,8 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Preserve RCA and source replay | done | Copied only this effort's three untracked files |
 | Pinned Rust loop | done | Rust 1.97.1; current-main all-target compile passed |
 | Typed diagnostics and accounting | done | Diagnostic commit retained before bound repair |
-| One catalog per create | building | Canonical caps and recipe/worker identities retained |
-| Android compaction and shared contract | pending | No legacy blanket 400 |
+| One catalog per create | done | Canonical caps and recipe/worker identities retained |
+| Android compaction and shared contract | building | No legacy blanket 400 |
 | Snapshot, generation and budgets | pending | Parameters recorded before dependent changes |
 | Partial selection through existing owners | pending | No new watchdog/retry owner |
 | Review and fast lane | pending | No tests claimed yet |
@@ -43,3 +43,31 @@ measured against recorded client/server revisions.
 
 Diagnostic milestone: `3bc3567a8`, compiled and Clippy-clean with Rust 1.97.1.
 Its 16-entry gate remains unchanged for the physical confirmation run.
+
+Concrete implementation decisions, 2026-10-02:
+
+1. Shared client bound is 64 rows; node capability limits remain 16. The review
+   registry fixture models 60 components/profile rows and compacts to 20. Sixty-four
+   permits additional crossing envelopes without assuming every registry compacts
+   to 20. Parsing retains the internal 64 KiB bound and never truncates rows.
+2. `compact-v1` is an additive capability contract advertised by server identity.
+   Android advertises it only after observing that server support and fitting the
+   bound. Existing v2 alone is legacy. Old servers ignore additive DeviceCaps
+   fields; control and worker envelope parsers are separately strict.
+3. Server create allowance is 10,000 ms from handler entry through response.
+   Catalog retains its 2,000 ms maximum within that allowance. Worker budgets
+   reserve 250 ms for outbound transit and 250 ms for return/serialization.
+   These are conservative engineering allocations, not measured p95 claims.
+   Apple has a 30 s request/resource limit; Android/web create retry owners have
+   a 60 s total sequence. Android's 30 s presentation stall clock starts at its
+   first attached-player observation; web's 40 s cold HLS episode starts at attach.
+   Neither is an enclosing create clock. Existing owners retain retries and
+   first-frame handling. A shorter incoming remaining-duration allowance wins.
+4. Settings generation covers all `playback.*` and `transcode.*` setting writes,
+   including insert/update/delete through import and migration SQL, using database
+   triggers in the same transaction. Job/history settings do not invalidate plans.
+   File/probe/source facts and generation/settings are read in one statement.
+   Rate-control evidence and engine/source bindings remain required at dispatch.
+5. Initial Auto may select fully validated local partial rows. Explicit identity
+   cannot become absent on incomplete discovery; no remote partial substitution.
+   The existing sustainable-quality owner handles later upgrades.
