@@ -364,6 +364,11 @@ pub(crate) struct EncodedExecutable {
 }
 
 impl EncodedExecutable {
+    pub(crate) async fn capture_program(program: &str) -> Result<Self, String> {
+        let path =
+            resolve_executable_path(program).ok_or("cannot resolve the producer executable")?;
+        Self::capture_at(path).await
+    }
     pub async fn capture() -> Result<Self, String> {
         let path = encoder_executable_path().ok_or("cannot resolve the encoder executable")?;
         Self::capture_at(path).await

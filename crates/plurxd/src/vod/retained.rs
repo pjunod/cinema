@@ -6,6 +6,10 @@ use super::*;
 const MAX_ARTIFACTS: usize = 64;
 const RETAINED_GC_BATCH: usize = 32;
 
+#[path = "rolling_retained.rs"]
+mod rolling_retained;
+pub(crate) use rolling_retained::{RollingArtifact, RollingCollection};
+
 /// Process-private measured authority. Serialized rates cannot construct it.
 pub(crate) struct MeasuredCandidateCostProof {
     artifact: Arc<RetainedVodArtifact>,
@@ -381,6 +385,8 @@ impl Drop for AssemblyReservation {
 struct RetainedState {
     entries: HashMap<[u8; 32], RetainedEntry>,
     retired: VecDeque<Arc<RetainedVodArtifact>>,
+    rolling: HashMap<[u8; 32], rolling_retained::RollingEntry>,
+    rolling_retired: VecDeque<Arc<RollingArtifact>>,
     bytes: u64,
     preparations: HashMap<uuid::Uuid, u64>,
     assembling: bool,
@@ -389,6 +395,16 @@ struct RetainedState {
     startup_scan: Option<std::fs::ReadDir>,
     startup_done: bool,
     orphans: VecDeque<PathBuf>,
+}
+
+impl RetainedState {
+    fn artifact_count(&self) -> usize {
+        self.entries.len()
+            + self.retired.len()
+            + self.rolling.len()
+            + self.rolling_retired.len()
+            + self.preparations.len()
+    }
 }
 
 struct PreparationAssemblyOutcome {
@@ -454,7 +470,7 @@ impl RetainedArtifactRegistry {
             .try_fold(0_u64, |sum, cap| sum.checked_add(*cap))?;
         if !state.startup_done
             || !state.orphans.is_empty()
-            || state.entries.len() + state.retired.len() + state.preparations.len() >= MAX_ARTIFACTS
+            || state.artifact_count() >= MAX_ARTIFACTS
             || state.bytes.checked_add(reserved)?.checked_add(cap)? > budget
         {
             return None;
@@ -607,7 +623,7 @@ impl RetainedArtifactRegistry {
             // Cancellation leaves None, causing a conservative restart.
             let room = MAX_ARTIFACTS.saturating_sub({
                 let state = self.state.lock().expect("retained registry lock");
-                state.orphans.len() + state.entries.len() + state.retired.len()
+                state.orphans.len() + state.artifact_count()
             });
             let batch = tokio::task::spawn_blocking(move || {
                 let mut paths = Vec::new();
@@ -950,9 +966,7 @@ impl RetainedArtifactRegistry {
         let reserved = reserved.checked_sub(own_cap)?;
         if state.assembling
             || state.entries.contains_key(&rates.identity)
-            || state.entries.len() + state.retired.len() + state.preparations.len()
-                - usize::from(own_cap > 0)
-                >= MAX_ARTIFACTS
+            || state.artifact_count() - usize::from(own_cap > 0) >= MAX_ARTIFACTS
             || state
                 .bytes
                 .checked_add(reserved)
@@ -1245,6 +1259,7 @@ impl RetainedArtifactRegistry {
             return;
         }
         self.collect_orphans().await;
+        self.collect_rolling().await;
         {
             let mut state = self.state.lock().expect("retained registry lock");
             for entry in state.entries.values_mut() {
@@ -1337,6 +1352,7 @@ async fn remove_artifact_batch(path: &Path) -> io::Result<bool> {
             && planned_index(name).is_none()
             && name != super::retained_manifest::MANIFEST_NAME
             && name != ".complete.tmp"
+            && !rolling_retained::owned_name(name)
         {
             return Err(io::ErrorKind::InvalidData.into());
         }

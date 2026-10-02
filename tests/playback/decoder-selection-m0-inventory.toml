@@ -42,6 +42,20 @@ m2_anchor = "struct LiveTvTranscodePlan {"
 # Process owners and consumers. Support-only subprocesses remain explicit so
 # their success cannot be mistaken for decoded-video producer health.
 [[surfaces]]
+id = "identity.retained_lookup_hls"
+kind = "hls_identity"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "transcode::hls_args(&retained_plan, &execution)"
+obligation = "compare exact canonical retained argv before producer admission; this does not launch a producer"
+
+[[surfaces]]
+id = "identity.retained_capture_hls"
+kind = "hls_identity"
+source = "crates/plurxd/src/transcode.rs"
+anchor = "transcode::hls_args(&plan, &canonical_execution)"
+obligation = "bind original rolling output to canonical argv without issuing a second producer command"
+
+[[surfaces]]
 id = "process.settings_ffmpeg_version"
 kind = "support_process"
 source = "crates/plurxd/src/main.rs"
@@ -59,7 +73,7 @@ obligation = "return one owned child and joined diagnostic observation"
 id = "process.fragmented_ffmpeg"
 kind = "process_owner"
 source = "crates/plurxd/src/transcode.rs"
-anchor = "fn spawn_ffmpeg_pipe("
+anchor = "fn spawn_ffmpeg_pipe_at("
 obligation = "preserve the media pipe while joining progress and diagnostics"
 
 [[surfaces]]

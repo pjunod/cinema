@@ -142,6 +142,9 @@ impl TranscodeManager {
         session.fail(PlaylistError::SessionFailed(
             CACHED_MEDIA_INTEGRITY_FAILURE.to_owned(),
         ));
+        if let Some(artifact) = &session.rolling_artifact {
+            self.vod.refuse_rolling_output(artifact);
+        }
         if session
             .cache_integrity_cleanup_started
             .compare_exchange(false, true, AcqRel, Acquire)
@@ -901,6 +904,10 @@ impl TranscodeManager {
             dir,
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
+            rolling_provenance: None,
+            rolling_collection: None,
+            rolling_artifact: None,
+            copy_output_measurement: std::sync::Mutex::new(None),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
             actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
