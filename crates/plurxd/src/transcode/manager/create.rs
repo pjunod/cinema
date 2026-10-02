@@ -1170,6 +1170,7 @@ impl TranscodeManager {
             .expect("continuous video");
         role.autonomous_companion = None;
         role.companion_context = None;
+        role.family_descriptor = None;
         companion.kind = SessionKind::Transcode {
             height: context.height,
         };
@@ -1212,6 +1213,7 @@ impl TranscodeManager {
             .expect("shared soundtrack role");
         role.autonomous_companion = None;
         role.companion_context = None;
+        role.family_descriptor = None;
         let mut soundtrack = self.prepare_vod_encoding(&audio, file).await?;
         if let (Some(soundtrack), Some(video)) = (soundtrack.as_mut(), video) {
             Arc::get_mut(soundtrack)

@@ -502,6 +502,9 @@ pub struct ContinuousMediaRequest {
     /// Omitted for a standalone role or the controlled active video/audio pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomous_companion: Option<plurx_core::playback::candidate::CandidateId>,
+    /// Owner-verified immutable output proof, bound once in the durable parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family_descriptor: Option<plurx_core::store::ContinuousFamilyDescription>,
     /// Reconstructed from the same worker catalog and retained decoder caps.
     #[serde(skip)]
     pub companion_context: Option<Box<ContinuousCompanionContext>>,
@@ -523,6 +526,22 @@ pub enum ContinuousMediaRole {
 impl ContinuousMediaRequest {
     pub fn valid_for(&self, request: &SessionRequest) -> bool {
         self.version == 1
+            && self.family_descriptor.as_ref().is_none_or(|description| {
+                description.valid()
+                    && self.role == ContinuousMediaRole::Video
+                    && self.autonomous_companion.is_some_and(|companion| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == companion)
+                    })
+                    && request.candidate_context.as_ref().is_none_or(|primary| {
+                        description
+                            .video
+                            .iter()
+                            .any(|row| row.candidate_id == primary.candidate_id)
+                    })
+            })
             && uuid::Uuid::parse_str(&self.family_generation).is_ok()
             && request.presentation == Presentation::Vod
             && matches!(request.kind, SessionKind::Transcode { .. })

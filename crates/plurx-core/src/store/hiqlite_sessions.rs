@@ -3451,6 +3451,29 @@ impl MediaSessionStore for HiqliteAuthStore {
         }
     }
 
+    async fn bind_continuous_family(
+        &self,
+        generation: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        description: &crate::store::ContinuousFamilyDescription,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let json = crate::store::continuous_family::encode(
+            description,
+            generation,
+            owner_node_id,
+            owner_epoch,
+            now_ms,
+        )?;
+        let applied = timeout_store(self.client().execute(
+            crate::store::continuous_family::BIND,
+            params!(generation, owner_node_id, owner_epoch, json, now_ms),
+        ))
+        .await?;
+        Ok(applied == 1)
+    }
+
     async fn quality_ledger(
         &self,
         generation: &str,

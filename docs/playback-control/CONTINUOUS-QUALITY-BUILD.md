@@ -2285,3 +2285,31 @@ blocking the application looper, closes every acquired fence, and bounds
 pending observation by the same physical overlap allowance. An invalid fence
 uses the platform's completed-transaction receipt on devices that do not
 supply present fences. No committed-only callback is accepted as presentation.
+
+
+### 10.65 Verified family proof survives durable parent restoration
+
+Before master or family metadata exposure, the owner now binds a strict
+32 KiB-bounded description into the existing durable parent recipe. It names
+the exact candidate/rendition/init mapping, raster, AVC/AAC codecs, rational
+grid, playlists and conservative delivery ceilings. The Store write requires
+that exact active generation, owner epoch and unexpired lease, and that both
+advertised candidates match the recipe's primary and companion. An existing
+description can replay exactly; it can never be replaced by different media.
+This uses the existing recipe column and requires no schema migration.
+
+Source, capabilities, intent and worker recipes remain unchanged JSON values.
+The proof does not renew playback or allocate capacity. It is omitted from
+ordinary requests, does not change intent fingerprints, and is removed from
+private companion/AAC worker recipes. Restored parent requests retain it and
+rebuild catalog contexts as before; actual verified exposure must reproduce
+the same proof. Changed init, membership or delivery facts refuse exposure
+instead of reinterpreting the old family authority. End and owner changes
+fence the write. Header/body ownership still revalidates the response owner.
+
+A cross-backend regression covers owner/epoch refusal, exact replay, changed
+init and candidate refusal, durable roundtrip, source/intent preservation and
+post-End refusal. Pinned all-target compilation includes both Store backends.
+Unit execution remains deferred. Controlled cold-rung admission and native
+continuous adapters remain unfinished; this closes the autonomous family's
+durable description path, not physical-media qualification.

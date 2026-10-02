@@ -2678,6 +2678,7 @@ scope = "test"
         let legacy_identity = request.intent_fingerprint("viewer");
         request.continuous_media = Some(Box::new(ContinuousMediaRequest {
             autonomous_companion: None,
+            family_descriptor: None,
             companion_context: None,
             version: 1,
             family_generation: uuid::Uuid::new_v4().to_string(),

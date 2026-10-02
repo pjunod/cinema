@@ -24,12 +24,16 @@ pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
 };
 pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEMA};
+mod continuous_family;
 mod fragindex;
 mod fragment_index_cluster;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
 mod quality_cancellation;
 mod quality_ledger;
+pub use continuous_family::{
+    ContinuousAudioDescription, ContinuousFamilyDescription, ContinuousVideoDescription,
+};
 pub use quality_cancellation::QualityCancellationReceipt;
 pub use quality_ledger::QualityLedgerSnapshot;
 mod renditionplan;
@@ -4963,6 +4967,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         user_id: i64,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Bind actual verified family media into the exact active parent recipe.
+    /// Existing descriptions are immutable across restoration and owner epochs.
+    async fn bind_continuous_family(
+        &self,
+        generation: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        description: &ContinuousFamilyDescription,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Read the durable rendition transaction facts with their CAS revision.
     async fn quality_ledger(

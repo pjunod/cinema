@@ -1503,6 +1503,7 @@ async fn resolve_plan_with_continuous(
                     family_generation: family.family_generation.clone(),
                     role: crate::transcode::ContinuousMediaRole::Video,
                     autonomous_companion: Some(family.companion_candidate_id),
+                    family_descriptor: None,
                     companion_context: Some(Box::new(
                         crate::transcode::ContinuousCompanionContext {
                             height: i64::from(companion.candidate.target_height),

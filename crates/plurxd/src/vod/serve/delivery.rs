@@ -406,19 +406,23 @@ impl VodServe {
         let publication = self
             .verified_continuous_family_before(session_id, deadline)
             .await?;
+        let result = async {
+            let Some(family) = publication.result? else {
+                return Ok(None);
+            };
+            self.bind_family_description_before(session_id, &publication.owner, &family, deadline)
+                .await?;
+            family
+                .family
+                .master_playlist(&family.video_budgets, family.audio_budget.as_ref())
+                .map(String::into_bytes)
+                .map(Some)
+                .map_err(|error| VodError::ProducerFailed(error.to_string()))
+        }
+        .await;
         Some(VodPublication {
             owner: publication.owner,
-            result: publication.result.and_then(|family| {
-                family
-                    .map(|family| {
-                        family
-                            .family
-                            .master_playlist(&family.video_budgets, family.audio_budget.as_ref())
-                            .map(String::into_bytes)
-                            .map_err(|error| VodError::ProducerFailed(error.to_string()))
-                    })
-                    .transpose()
-            }),
+            result,
         })
     }
 
@@ -437,12 +441,64 @@ impl VodServe {
                 result: root.result.map(|_| None),
             });
         };
+        let result = async {
+            let Some(family) = publication.result? else {
+                return Ok(None);
+            };
+            self.bind_family_description_before(session_id, &publication.owner, &family, deadline)
+                .await
+                .map(Some)
+        }
+        .await;
         Some(VodPublication {
             owner: publication.owner,
-            result: publication
-                .result
-                .and_then(|family| family.map(|family| family.description()).transpose()),
+            result,
         })
+    }
+
+    async fn bind_family_description_before(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        family: &VerifiedContinuousFamily,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, VodError> {
+        let bytes = family.description()?;
+        let description: plurx_core::store::ContinuousFamilyDescription =
+            serde_json::from_slice(&bytes)
+                .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+        let binding = async {
+            if !self.response_owner_is_live(session_id, owner).await {
+                return Ok(false);
+            }
+            let Some(route) = self.shared.store.media_session_route(session_id).await? else {
+                return Ok(false);
+            };
+            let now_ms = now_ms();
+            self.shared
+                .store
+                .bind_continuous_family(
+                    &route.incarnation_id,
+                    &route.owner_node_id,
+                    route.owner_epoch,
+                    &description,
+                    now_ms,
+                )
+                .await
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let accepted = tokio::time::timeout(remaining, binding)
+            .await
+            .map_err(|_| VodError::ProducerFailed("continuous family binding deadline".into()))?
+            .map_err(|error: plurx_core::error::StoreError| {
+                VodError::ProducerFailed(error.to_string())
+            })?;
+        if !accepted || !self.response_owner_is_live(session_id, owner).await {
+            return Err(VodError::ProducerFailed(
+                "durable continuous family changed or its owner retired".into(),
+            ));
+        }
+        Ok(bytes)
     }
 
     pub(crate) async fn verified_continuous_family_before(

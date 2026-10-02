@@ -35760,6 +35760,61 @@ async fn quality_cancellation_after_staging_fences_commit_and_requires_cleanup()
 }
 
 #[tokio::test]
+async fn verified_continuous_family_binding_is_owner_fenced_and_immutable() {
+    use plurx_core::store::ContinuousFamilyDescription;
+    for_each_backend(|store, backend| async move {
+        let user = store.create_user("verified-family-user", "hash", false).await.expect("user");
+        let generation = "00000000-0000-4000-8000-00000000df01";
+        let session = "00000000-0000-4000-8000-00000000df02";
+        let primary = "1".repeat(32); let companion = "2".repeat(32);
+        let description: ContinuousFamilyDescription = serde_json::from_value(serde_json::json!({
+            "version": 1, "family_id": "f".repeat(64), "mode": "autonomous_reserved", "master": "master.m3u8",
+            "video": [
+                { "candidate_id": primary, "rendition_id": "a".repeat(64), "init_id": "b".repeat(64),
+                    "width": 1280, "height": 720, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 5000000,
+                    "playlist": format!("video/{}/index.m3u8", "a".repeat(64)) },
+                { "candidate_id": companion, "rendition_id": "c".repeat(64), "init_id": "d".repeat(64),
+                    "width": 1920, "height": 1080, "codec": "avc1.640032", "timescale": 24000,
+                    "frame_ticks": 1001, "segment_ticks": 48048, "peak_bps": 8000000,
+                    "playlist": format!("video/{}/index.m3u8", "c".repeat(64)) }
+            ], "audio": null
+        })).expect("verified family");
+        let recipe = serde_json::json!({"candidate_id": primary, "source_object": "retained-source",
+            "request": {"preserved_intent": {"audio_offset_ms": 50}, "continuous_media": {
+                "version": 1, "role": "video", "family_generation": generation, "autonomous_companion": companion
+            }} });
+        let activation = MediaSessionActivation {
+            recovery_epoch: String::new(), expected_desired_revision: None,
+            incarnation_id: generation.into(), session_id: session.into(), user_id: user.id,
+            playback_id: "verified-family".into(), expected_predecessor_incarnation_id: None,
+            fence_predecessor: false, request_id: None, request_fingerprint: "a".repeat(64),
+            owner_node_id: "staged-node".into(), recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: r#"{"session":"current"}"#.into(), publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0, now_ms: 1000, lease_expires_at_ms: 900000,
+        };
+        store.activate_media_session(&activation).await.expect("activate").expect("route");
+        store.settle_media_session_activation(&activation, MediaSessionActivationSettlement::Confirm { publication_ready_at_ms: 0 }, 1000).await.expect("confirm").expect("published route");
+        assert!(!store.bind_continuous_family(generation, "wrong-owner", 1, &description, 1500).await.expect("wrong owner"), "{backend}");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 2, &description, 1500).await.expect("wrong epoch"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1500).await.expect("bind"), "{backend}");
+        assert!(store.bind_continuous_family(generation, "staged-node", 1, &description, 1600).await.expect("exact replay"), "{backend}");
+        let mut changed = description.clone(); changed.video[0].init_id = "e".repeat(64);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed init refused"), "{backend}");
+        changed = description.clone(); changed.video[0].candidate_id = plurx_core::playback::candidate::CandidateId([9; 16]);
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &changed, 1700).await.expect("changed catalog refused"), "{backend}");
+        let route = store.media_session_route(session).await.expect("read proof").expect("route");
+        let mut durable: serde_json::Value = serde_json::from_str(&route.recipe_json).expect("durable recipe");
+        assert_eq!(serde_json::from_value::<ContinuousFamilyDescription>(durable["request"]["continuous_media"]["family_descriptor"].take()).expect("restored proof"), description, "{backend}");
+        durable["request"]["continuous_media"].as_object_mut().expect("media").remove("family_descriptor");
+        assert_eq!(durable, recipe, "{backend}: binding changed source or intent");
+        assert_eq!(route.lease_expires_at_ms, 900000, "{backend}: proof renewed playback lease");
+        store.end_media_session(session, "deleted", 1800).await.expect("End");
+        assert!(!store.bind_continuous_family(generation, "staged-node", 1, &description, 1900).await.expect("terminal proof refused"), "{backend}");
+    }).await;
+}
+
+#[tokio::test]
 async fn shared_continuous_artifacts_remain_reserved_until_each_consumer_disposes() {
     use plurx_core::playback::continuous_quality::{
         QualityAttachment, QualityInterval, QualityLedger, QualityOperation,

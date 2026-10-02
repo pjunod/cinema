@@ -1219,6 +1219,9 @@ impl RemoteStartRequest {
 fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
     request.request.continuous_media.as_ref().is_none_or(|media| {
         media.autonomous_companion.is_none_or(|companion| request.candidate_id.is_some_and(|primary| primary != companion))
+            && media.family_descriptor.as_ref().is_none_or(|description| {
+                request.candidate_id.is_some_and(|primary| description.video.iter().any(|row| row.candidate_id == primary))
+            })
     })
         && (request.request.continuous_media.is_none() || request.library_channel.is_none())
         && (request.candidate_id.is_none() || request.decoder_caps.is_some())

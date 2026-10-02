@@ -434,6 +434,7 @@ paths = [
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
   "crates/plurx-core/src/store/quality_cancellation.rs",
   "crates/plurx-core/src/store/quality_ledger.rs",
+  "crates/plurx-core/src/store/continuous_family.rs",
   "crates/plurx-core/src/store/hiqlite_shared_cache.rs",
   "crates/plurx-core/src/store/sqlite/reading.rs",
   "crates/plurx-core/src/store/sqlite/telemetry.rs",

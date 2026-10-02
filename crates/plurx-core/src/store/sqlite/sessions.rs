@@ -2745,6 +2745,32 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn bind_continuous_family(
+        &self,
+        generation: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        description: &crate::store::ContinuousFamilyDescription,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        let json = crate::store::continuous_family::encode(
+            description,
+            generation,
+            owner_node_id,
+            owner_epoch,
+            now_ms,
+        )?;
+        let generation = generation.to_owned();
+        let owner = owner_node_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                crate::store::continuous_family::BIND,
+                params![generation, owner, owner_epoch, json, now_ms],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn quality_ledger(
         &self,
         generation: &str,
