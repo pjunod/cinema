@@ -63,6 +63,19 @@ class PreparedSurfaceReceiptsTest {
         slot.offer(afterSeek); assertSame(afterSeek, slot.snapshot())
     }
 
+    @Test fun tunneledCodecClockMapsToTheSameItemFrameBoundary() {
+        val offset = 1_000_000_000_000L
+        val position = requireNotNull(preparedItemFramePositionUs(offset + 10_000_000, offset))
+        val slot = PreparedFirstFrameSlot()
+        slot.offer(PreparedSurfaceReceipts.Frame(position, 1920, 1080, 1_000_000.0 / 24))
+        val owner = PreparedSurfaceReceipts<Any>(); val output = Any(); owner.attach(output)
+        owner.rendered(output, requireNotNull(slot.snapshot()))
+        assertTrue(owner.ready(output, 10_000)); assertFalse(owner.ready(output, 10_042))
+        assertNull(preparedItemFramePositionUs(Long.MAX_VALUE, offset))
+        assertNull(preparedItemFramePositionUs(10, 20))
+        assertNull(preparedItemFramePositionUs(Long.MIN_VALUE, 1))
+    }
+
     @Test fun outputOverlapIsBoundedAndRetirementAllowsTheNextPreparation() {
         val owner = PreparedSurfaceReceipts<Any>()
         val first = Any(); val second = Any(); val third = Any()

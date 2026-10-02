@@ -2813,3 +2813,24 @@ PTS proof still needs its renderer integration. It is not claimed from a
 format change or the first-frame event alone. The inspected paths are in
 [the pinned video renderer](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/MediaCodecVideoRenderer.java).
 Physical-device and audible/display qualification remain outstanding.
+
+
+### 10.89 Tunneled Android rendering supplies its actual frame timestamp
+
+Finite and prepared players now use a narrow subclass of the pinned codec
+video renderer. Its tunneled hardware callback resolves the decoded format
+for that timestamp, subtracts the renderer's stream offset and sends the
+item-local frame metadata before the usual first-render event is posted.
+The ordinary metadata path stays with Media3. Unset, negative, end-of-stream
+and overflowed timestamps cannot satisfy alignment. The authored regression
+maps a large codec offset into the same one-frame boundary as ordinary output.
+
+The factory preserves the inspected 1.10.1 defaults: codec adapter, decoder
+selection/fallback, joining allowance, 50-frame dropped-frame reporting,
+AV1 dependency parsing, late-input threshold, duration scheduling and TV
+tunneling. Audio/text construction remains inherited. Explicit extension
+renderer configuration keeps its existing factory path; the application
+currently requests the bundled codec renderer. No new decoder or permanent
+audio graph is added. Android production and test-source compilation passed.
+This is implemented timestamp integration, not physical presentation proof.
+No phone/TV appears in ADB or its mDNS inventory; device qualification remains.
