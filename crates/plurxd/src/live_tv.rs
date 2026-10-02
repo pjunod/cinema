@@ -9559,10 +9559,9 @@ async fn run_graph_probe(
     .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
     .map_err(|error| format!("could not start live-TV FFmpeg probe: {error}"))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "live-TV FFmpeg graph failed: {}",
-            stderr.lines().take(3).collect::<Vec<_>>().join(" ")
+            graph_failure_summary(&String::from_utf8_lossy(&output.stderr))
         ));
     }
     let manifest = tokio::fs::read_to_string(&playlist)
@@ -9580,6 +9579,20 @@ async fn run_graph_probe(
         return Err("live-TV probe published an invalid live playlist".to_owned());
     }
     Ok(())
+}
+
+/// The first three actionable stderr lines of a failed readiness graph. On
+/// VA-API and QSV, libva's own `libva info:` banner comes first and was all the
+/// error used to say (review 76, P3-1); it is shown only when nothing else was
+/// printed.
+fn graph_failure_summary(stderr: &str) -> String {
+    let classified = crate::ffmpeg::classify_diagnostic(stderr);
+    let lines = if classified.actionable.is_empty() {
+        classified.informational
+    } else {
+        classified.actionable
+    };
+    lines.lines().take(3).collect::<Vec<_>>().join(" ")
 }
 
 fn graph_probe_delivery(height: u16) -> LiveDeliveryPlan {
@@ -9662,6 +9675,30 @@ mod caption_probe;
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// Review 76, P3-1: a QSV or VA-API readiness failure names its cause, not
+    /// libva's start-up banner, which is printed first.
+    #[test]
+    fn a_failed_readiness_graph_reports_its_cause_not_the_libva_banner() {
+        let stderr = "libva info: VA-API version 1.24.0\n\
+                      libva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\n\
+                      libva info: Found init function __vaDriverInit_1_24\n\
+                      libva info: va_openDriver() returns 0\n\
+                      [h264_qsv @ 0x1] Error initializing an internal MFX session: unsupported (-3)\n\
+                      Error while opening encoder - maybe incorrect parameters\n\
+                      Conversion failed!\n\
+                      Exiting with status 1\n";
+        assert_eq!(
+            super::graph_failure_summary(stderr),
+            "[h264_qsv @ 0x1] Error initializing an internal MFX session: unsupported (-3) \
+             Error while opening encoder - maybe incorrect parameters Conversion failed!"
+        );
+        // A banner and nothing else is still something to report.
+        assert_eq!(
+            super::graph_failure_summary("libva info: VA-API version 1.24.0\n"),
+            "libva info: VA-API version 1.24.0"
+        );
+    }
 
     /// Review 76, P2-1: class and budget travel together. A viewer keeps the
     /// two-second budget and the realtime class; the self-test gets the
