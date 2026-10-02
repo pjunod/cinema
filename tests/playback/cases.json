@@ -59,6 +59,24 @@
       "opt_in": true,
       "description": "210s 720p MPEG-4 Part 2 + MP3 in AVI; forces the transcode ladder and leaves two independent 75s recovery windows after the initial cliff",
       "tags": ["transcode", "mpeg4", "mp3", "avi", "720p", "sdr", "ladder", "shaping"]
+    },
+    {
+      "id": "continuous-h264-aac-1080",
+      "filename": "continuous-h264-aac-1080.mp4",
+      "builder": "h264_aac_mp4",
+      "duration_seconds": 1500,
+      "opt_in": true,
+      "description": "25 minutes of 1080p SDR H.264 and shared AAC for 20 future-load switches with the normal 60-second forward buffer",
+      "tags": [
+        "transcode",
+        "h264",
+        "aac",
+        "mp4",
+        "1080p",
+        "sdr",
+        "continuous",
+        "ladder"
+      ]
     }
   ],
   "suites": {
@@ -186,6 +204,48 @@
           "suspend_seconds": 8,
           "maximum_session_creates": 1,
           "maximum_keeper_fires": 0
+        }
+      ]
+    },
+    "continuous": {
+      "requires_vod": true,
+      "cases": [
+        {
+          "fixture": "continuous-h264-aac-1080",
+          "quality": "1080",
+          "operation": "quality-cycle",
+          "switches": [
+            {
+              "quality": "720",
+              "expected_method": "transcode",
+              "expected_height": 720
+            },
+            {
+              "quality": "1080",
+              "expected_method": "transcode",
+              "expected_height": 1080
+            }
+          ],
+          "repetitions": 10,
+          "switch_hold_seconds": 0.25,
+          "switch_wait_timeout_seconds": 90,
+          "maximum_switch_ready_ms": 90000,
+          "maximum_landing_error_seconds": 0.25,
+          "minimum_runway_seconds": 2,
+          "require_same_session": true,
+          "require_same_player_generation": true,
+          "require_vod": true,
+          "maximum_session_creates": 1,
+          "require_continuous": true,
+          "evidence_scope": "browser_video_partial",
+          "transition": {
+            "p95_video_gap_ms": 100,
+            "maximum_video_gap_ms": 250,
+            "maximum_wait_events": 0,
+            "maximum_reopen_events": 0,
+            "maximum_stalls": 0,
+            "maximum_hitches": 0
+          }
         }
       ]
     }

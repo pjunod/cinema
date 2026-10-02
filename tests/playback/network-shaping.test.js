@@ -2596,6 +2596,61 @@ test("quality-cycle scoring rejects missing runway and a single excessive gap", 
   assert.match(score.errors.join("; "), /video-gap max 300 ms/);
 });
 
+test("continuous switch evidence refuses replacement, future removal and stale presentation", () => {
+  const before = { family_id: "family", closed: false, element: 1, hls: 2, media_source: 3,
+    buffers: ["video", "audio"].map((type, index) => ({ type, identity: index + 4, removal_sequence: 0, completed_removals: [] })) };
+  const after = { ...before, wanted_candidate: "target", presented: { candidate_id: "target", height: 720 },
+    transaction: { first_presented_tick: 50, first_presented_at_ms: 1100,
+      appended: [{ from_tick: 40, through_tick: 60, timescale: 24 }] } };
+  assert.deepEqual(lab.continuousSwitchErrors(before, after, 1000, 720), []);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, hls: 99 }, 1000, 720).join(";"), /hls.*replaced/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_at_ms: 900 } }, 1000, 720).join(";"), /fresh presented receipt/);
+  assert.match(lab.continuousSwitchErrors(before, { ...after, transaction: { ...after.transaction,
+    first_presented_tick: 60 } }, 1000, 720).join(";"), /actual appended interval/);
+  const removed = { ...after, buffers: after.buffers.map((row) => row.type === "audio" ? { ...row,
+    removal_sequence: 1, completed_removals: [{ sequence: 1, from: 20, through: 22, playhead: 10 }] } : row) };
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /audio removed media ahead/);
+  removed.buffers[1].completed_removals[0].through = 9;
+  assert.deepEqual(lab.continuousSwitchErrors(before, removed, 1000, 720), [], "ordinary back-buffer eviction is allowed");
+  removed.buffers[1].completed_removals = [];
+  assert.match(lab.continuousSwitchErrors(before, removed, 1000, 720).join(";"), /evidence was truncated/);
+  assert.match(lab.continuousSwitchErrors(before, after, undefined, 720).join(";"), /fresh presented receipt/);
+});
+
+test("continuous snapshots count only completed removals and keep weak transport identities", () => {
+  const listeners = {};
+  const buffer = { updating: false, remove() {}, addEventListener(name, fn) { listeners[name] = fn; } };
+  const video = { currentTime: 20 };
+  const player = { hls: { bufferController: { mediaSource: {}, tracks: { audio: { buffer } } } } };
+  const objects = { next: 0, ids: new WeakMap() };
+  const before = lab.continuousTransportSnapshot(player, video, objects);
+  buffer.remove(0, 10);
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 0);
+  listeners.updateend();
+  const completed = lab.continuousTransportSnapshot(player, video, objects);
+  assert.equal(completed.element, before.element);
+  assert.equal(completed.hls, before.hls);
+  assert.equal(completed.media_source, before.media_source);
+  assert.equal(completed.buffers[0].removal_sequence, 1);
+  buffer.remove(10, 12); listeners.error(); listeners.updateend();
+  assert.equal(lab.continuousTransportSnapshot(player, video, objects).buffers[0].removal_sequence, 1);
+  player.hls.bufferController.tracks.audio.buffer = { ...buffer, addEventListener() {} };
+  assert.notEqual(lab.continuousTransportSnapshot(player, video, objects).buffers[0].identity, before.buffers[0].identity);
+});
+
+test("the continuous suite requires actual production proof for twenty future-load switches", () => {
+  const manifest = lab.loadManifest();
+  const [testCase] = lab.expandCases(manifest, "continuous");
+  assert.equal(testCase.require_continuous, true);
+  assert.equal(testCase.require_vod, true);
+  assert.equal(testCase.repetitions * testCase.switches.length, 20);
+  assert.equal(manifest.suites.continuous.requires_vod, true);
+  const fixture = manifest.fixtures.find((row) => row.id === testCase.fixture);
+  assert.equal(fixture.opt_in, true);
+  assert.ok(fixture.duration_seconds > 20 * 60, "the normal sixty-second frontier must fit without shortening playback buffers");
+});
+
 test("the VOD suite makes native seeking and resume invariants executable", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites.vod;

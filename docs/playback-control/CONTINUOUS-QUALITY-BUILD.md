@@ -2325,3 +2325,33 @@ both new predecessors, and independent web control regressions are retained.
 Pinned workspace/all-target compilation checks the integrated source; unit
 execution remains deferred to final review and the fast lane. Controlled and
 native integration and physical qualification remain unfinished.
+
+
+### 10.67 Production continuity evidence belongs to playback-lab
+
+The existing `scripts/playback-lab` now has a `continuous` suite. It exercises
+the shipped player and daemon, requires VOD and one session, and records weak
+identities for the actual element, Hls, MediaSource and video/audio buffers.
+Completed buffer removals are observed at updateend, with error/abort refusal;
+normal eviction behind the playhead is allowed, while removal of future media
+or a replaced buffer fails the continuous contract. Truncated removal evidence
+also fails. The target needs a fresh durable Presented receipt inside an
+actual appended interval and the independently decoded target raster.
+
+The suite performs twenty alternating 720/1080 selections. Its opt-in
+25-minute SDR fixture leaves room for the existing sixty-second forward buffer;
+qualification does not shorten that buffer or flush it to make switches look
+fast. Each selection may wait up to ninety seconds for future media. Existing
+video-gap, clock, runway and reopen scoring still applies. Shared audio-buffer
+identity is recorded, but physical audio output remains a separate evidence
+requirement. The prototype remains historical feasibility evidence.
+
+```bash
+scripts/playback-lab run --suite continuous --browser chrome \
+  --server target/debug/plurxd --json target/playback-lab/reports/continuous-chrome.json
+# Repeat with Firefox; retain Safari/native API limitations separately.
+```
+
+The suite and observer/scorer regressions are authored and syntax-checked;
+no unit execution or twenty-switch production qualification is claimed yet.
+Controlled cold-rung ownership and native adapters remain unfinished.

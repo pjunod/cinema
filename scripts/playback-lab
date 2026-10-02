@@ -132,9 +132,9 @@ Usage:
   scripts/playback-lab safari-seek-server [--observe SECONDS] [--duration SECONDS] [--rate 1|2] [--fixtures DIR]
       [--seek-count COUNT]
                               [--server PATH] [--json PATH]
-  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod]
+  scripts/playback-lab plan [--suite smoke|full|stall-recovery|vod|continuous]
                              [--case TEXT] [--exclude-case TEXT]
-  scripts/playback-lab run [--suite smoke|full|stall-recovery|vod]
+  scripts/playback-lab run [--suite smoke|full|stall-recovery|vod|continuous]
                              [--browser chrome|safari|edge|firefox]
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
@@ -419,7 +419,9 @@ function ffmpegPrefix() {
 }
 
 function fixtureCommand(fixture, output, directory, fixtures) {
-  const seconds = fixture.builder === "hevc_hdr_open_gop_mkv" ? "18" : "24";
+  const duration = Number(fixture.duration_seconds ?? (fixture.builder === "hevc_hdr_open_gop_mkv" ? 18 : 24));
+  if (!Number.isInteger(duration) || duration < 18 || duration > 3600) throw new Error("fixture duration must be 18–3600 whole seconds");
+  const seconds = String(duration);
   switch (fixture.builder) {
     case "h264_aac_mp4":
       return [
@@ -546,7 +548,8 @@ function verifyFixture(fixture, file) {
   if (want.hdr && video && video.color_transfer !== "smpte2084") failures.push(`transfer ${video.color_transfer || "none"}, want smpte2084`);
   const bitrate = Number(probe.format.bit_rate || video?.bit_rate || 0);
   const duration = Number(probe.format.duration || 0);
-  if (want.minDuration && duration < want.minDuration) failures.push(`duration ${duration.toFixed(1)}s, want >= ${want.minDuration}s`);
+  const minimumDuration = Math.max(want.minDuration || 0, Number(fixture.duration_seconds || 0) - 0.1);
+  if (duration < minimumDuration) failures.push(`duration ${duration.toFixed(1)}s, want >= ${minimumDuration}s`);
   if (want.minBitrate && bitrate < want.minBitrate) failures.push(`bitrate ${(bitrate / 1e6).toFixed(1)} Mb/s, want >= ${(want.minBitrate / 1e6).toFixed(0)} Mb/s`);
   if (failures.length) throw new Error(`${fixture.id}: ${failures.join("; ")}`);
   return {
@@ -2006,6 +2009,106 @@ function qualityForce(quality) {
   return "transcode";
 }
 
+// Observe the real production graph. Weak identities survive snapshots without
+// retaining retired players; completed removals are media facts, not intentions.
+function continuousTransportSnapshot(player, video, objects) {
+  const identity = (object) => {
+    if (!object || (typeof object !== "object" && typeof object !== "function")) return null;
+    if (!objects.ids.has(object)) objects.ids.set(object, ++objects.next);
+    return objects.ids.get(object);
+  };
+  if (!objects.bufferObservers) objects.bufferObservers = new WeakMap();
+  const controller = player.hls?.bufferController;
+  const buffers = [];
+  for (const type of ["video", "audio"]) {
+    const buffer = controller?.tracks?.[type]?.buffer;
+    if (!buffer) continue;
+    let observer = objects.bufferObservers.get(buffer);
+    if (!observer) {
+      observer = { sequence: 0, completed: [], pending: null };
+      objects.bufferObservers.set(buffer, observer);
+      const remove = buffer.remove.bind(buffer);
+      buffer.remove = (from, through) => {
+        if (buffer.updating) return remove(from, through);
+        const operation = { from, through, failed: false };
+        observer.pending = operation;
+        try { return remove(from, through); }
+        catch (error) { if (observer.pending === operation) observer.pending = null; throw error; }
+      };
+      const failed = () => { if (observer.pending) observer.pending.failed = true; };
+      buffer.addEventListener("error", failed, true);
+      buffer.addEventListener("abort", failed, true);
+      buffer.addEventListener("updateend", () => {
+        const operation = observer.pending;
+        observer.pending = null;
+        if (!operation || operation.failed) return;
+        observer.completed.push({ sequence: ++observer.sequence,
+          from: operation.from, through: operation.through,
+          playhead: Number(video.currentTime), at_ms: Math.round(performance.now()) });
+        if (observer.completed.length > 64) observer.completed.shift();
+      }, true);
+    }
+    buffers.push({ type, identity: identity(buffer), removal_sequence: observer.sequence,
+      completed_removals: observer.completed.map((row) => ({ ...row })) });
+  }
+  const adapter = player.continuousQuality;
+  const ledger = adapter?.protocol?.ledger;
+  const wanted = adapter?.wanted;
+  const transaction = ledger?.transactions?.findLast((row) =>
+    row.target_rendition_id === wanted?.rendition_id && !row.intent_superseded && !row.cancel_requested);
+  return {
+    element: identity(video), hls: identity(player.hls), media_source: identity(controller?.mediaSource),
+    buffers, family_id: adapter?.family?.family_id || null,
+    mode: adapter?.family?.mode || null, closed: adapter ? adapter.closed : null,
+    frontier: adapter?.frontier ?? null, wanted_candidate: wanted?.candidate_id || null,
+    presented: player.continuousQualityPresented ? { ...player.continuousQualityPresented } : null,
+    transaction: transaction ? {
+      id: transaction.transaction_id, state: transaction.state,
+      target: transaction.target_rendition_id, first_presented_tick: transaction.first_presented_tick,
+      first_presented_at_ms: transaction.first_presented_at_ms,
+      appended: transaction.appended.map((row) => ({ artifact_id: row.artifact_id,
+        from_tick: row.from_tick, through_tick: row.through_tick, timescale: row.timescale })),
+    } : null,
+    observation: player.continuousQualityObservation || null,
+  };
+}
+
+function continuousSwitchErrors(before, after, requestedAtMs, expectedHeight) {
+  const errors = [];
+  if (!before || !after || !before.family_id || before.family_id !== after.family_id
+      || after.closed !== false) errors.push("continuous family identity was absent, changed or closed");
+  for (const key of ["element", "hls", "media_source"]) {
+    if (before?.[key] == null || before[key] !== after?.[key]) errors.push(`continuous ${key} was absent or replaced`);
+  }
+  for (const type of ["video", "audio"]) {
+    const previous = before?.buffers?.find((row) => row.type === type);
+    const current = after?.buffers?.find((row) => row.type === type);
+    if (!previous || !current || previous.identity !== current.identity) {
+      errors.push(`continuous ${type} buffer was absent or replaced`);
+      continue;
+    }
+    const completed = current.completed_removals.filter((row) => row.sequence > previous.removal_sequence);
+    if (completed.length !== current.removal_sequence - previous.removal_sequence) {
+      errors.push(`continuous ${type} removal evidence was truncated`);
+    }
+    if (completed.some((row) => row.through > row.playhead + 0.001)) {
+      errors.push(`continuous ${type} removed media ahead of the playhead`);
+    }
+  }
+  const tx = after?.transaction;
+  const presented = after?.presented;
+  if (!Number.isFinite(requestedAtMs) || !tx || !Number.isFinite(tx.first_presented_at_ms) || tx.first_presented_at_ms < requestedAtMs
+      || !Number.isSafeInteger(tx.first_presented_tick)
+      || !tx.appended.some((row) => row.from_tick <= tx.first_presented_tick && tx.first_presented_tick < row.through_tick)) {
+    errors.push("continuous target has no fresh presented receipt within an actual appended interval");
+  }
+  if (!presented || presented.candidate_id !== after?.wanted_candidate
+      || (expectedHeight && presented.height !== Number(expectedHeight))) {
+    errors.push("continuous target has no matching decoded raster evidence");
+  }
+  return errors;
+}
+
 function playerSnapshotExpression() {
   return `(()=>{
     const p=(typeof PLAYER!=='undefined'&&PLAYER)||{};
@@ -2040,6 +2143,8 @@ function playerSnapshotExpression() {
     const mediaError=v&&v.error?{code:v.error.code,message:v.error.message||null}:null;
     return {
       sampled_at_ms:Math.round(performance.now()),
+      sampled_unix_ms:Date.now(),
+      continuous:(${continuousTransportSnapshot.toString()})(p,v,labPlayers),
       file_id:p.fileId||null, started:!!p.started, decided_method:p.decidedMethod||null,
       method:p.method||null, copy_hls:!!p.copyHls, tried_fallback:!!p.triedFallback,
       encoder:p.encoder||null, vod:!!p.vod, attempt_id:p.attemptId||null,
@@ -2425,6 +2530,9 @@ async function performOperation(driver, testCase, start) {
           if (spec.expected_height && Number(frame.height) !== Number(spec.expected_height)) return null;
           if (frame.session_id !== state.session_id || frame.attempt_id !== state.attempt_id) return null;
         }
+        if (testCase.require_continuous && (!state.continuous?.transaction
+            || state.continuous.transaction.first_presented_at_ms == null
+            || state.continuous.transaction.first_presented_at_ms < before.sampled_unix_ms)) return null;
         return state;
       }, Number(testCase.switch_wait_timeout_seconds || 30) * 1000, `committed quality switch to ${quality}`, 50);
       const targetFrame = committed.frame_probe?.supported ? committed.frame_probe.last_frame : null;
@@ -2450,6 +2558,11 @@ async function performOperation(driver, testCase, start) {
         runway_seconds: committed.video.runway,
         committed_frame_sequence: committed.frame_probe?.last_frame?.sequence ?? null,
         video_gap_ms: null,
+        ...(testCase.require_continuous ? {
+          continuous_before: before.continuous,
+          continuous_after: committed.continuous,
+          continuous_requested_at_ms: before.sampled_unix_ms,
+        } : {}),
       };
       let evidenceEnd = committed;
       const holdSeconds = Number(testCase.switch_hold_seconds || 0);
@@ -2468,6 +2581,7 @@ async function performOperation(driver, testCase, start) {
           sampledVideoGap(timeline.slice(timelineStartIndex)).maximum_clock_gap_ms,
         );
       }
+      if (testCase.require_continuous) change.continuous_after = evidenceEnd.continuous;
       change.video_gap_ms = measuredTransition.maximum_video_gap_ms;
       change.frame_probe_operative = frameProbeOperative;
       changes.push(change);
@@ -2847,6 +2961,10 @@ function scoreCase(
       errors.push(`${changes.length}/${expectedChanges} quality switches completed`);
     }
     for (const change of changes) {
+      if (testCase.require_continuous) errors.push(...continuousSwitchErrors(
+        change.continuous_before, change.continuous_after,
+        change.continuous_requested_at_ms, change.expected_height,
+      ).map((error) => `${change.quality}: ${error}`));
       const deadlineMs = Number(testCase.maximum_switch_ready_ms ?? 2_000);
       if (change.ready_ms > deadlineMs) {
         errors.push(`${change.quality} switch took ${change.ready_ms} ms, want <= ${deadlineMs} ms`);
@@ -4870,6 +4988,8 @@ module.exports = {
   peakUpgradeRate,
   performOperation,
   playerSnapshotExpression,
+  continuousTransportSnapshot,
+  continuousSwitchErrors,
   rungHistory,
   scoreRecovery,
   scoreCase,
