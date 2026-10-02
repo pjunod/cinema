@@ -1809,6 +1809,7 @@ struct StartupObservationHttp {
 
 struct StartupObservationTasks {
     server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    observer: crate::clock_offset::ClockObserver,
     probe: Option<tokio::task::JoinHandle<()>>,
     probe_stop: tokio_util::sync::CancellationToken,
 }
@@ -1839,6 +1840,14 @@ impl StartupObservationHttp {
         }
     }
 
+    async fn observer(&self) -> Option<crate::clock_offset::ClockObserver> {
+        self.tasks
+            .lock()
+            .await
+            .as_ref()
+            .map(|tasks| tasks.observer.clone())
+    }
+
     async fn stop_and_drain(&self) {
         self.stop.cancel();
         self.stop_probe().await;
@@ -1865,7 +1874,6 @@ impl StartupObservationHttp {
             .router
             .write()
             .map_err(|_| anyhow::anyhow!("startup router ownership poisoned"))? = app;
-        self.stop_probe().await;
         let mut tasks = self
             .tasks
             .lock()
@@ -1873,13 +1881,25 @@ impl StartupObservationHttp {
             .take()
             .ok_or_else(|| anyhow::anyhow!("startup observation socket was not installed"))?;
         tokio::pin!(shutdown);
-        tokio::select! {
-            result = &mut tasks.server => result.context("startup HTTP task")?,
+        let result = tokio::select! {
+            result = &mut tasks.server => result.context("startup HTTP task").and_then(|result| result),
             () = &mut shutdown => {
                 self.stop.cancel();
-                tasks.server.await.context("startup HTTP task")?
+                (&mut tasks.server).await.context("startup HTTP task").and_then(|result| result)
+            }
+        };
+        self.stop.cancel();
+        tasks.probe_stop.cancel();
+        if let Some(mut probe) = tasks.probe.take() {
+            if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                .await
+                .is_err()
+            {
+                probe.abort();
+                let _ = probe.await;
             }
         }
+        result
     }
 }
 
@@ -1909,6 +1929,7 @@ impl StartupClockObserver for StartupObservationHttp {
             let listener = bind_listener(self.bind)
                 .await
                 .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            let observer = crate::clock_offset::ClockObserver::new(membership.clone());
             let pending = axum::Router::new()
                 .route(
                     http::internal_clock::PATH,
@@ -1917,6 +1938,7 @@ impl StartupClockObserver for StartupObservationHttp {
                 .with_state(http::internal_clock::ObservationContext {
                     membership: membership.clone(),
                     node_id,
+                    observer: observer.clone(),
                 });
             *self.router.write().map_err(|_| {
                 plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
@@ -1945,12 +1967,12 @@ impl StartupClockObserver for StartupObservationHttp {
                 HTTP_TIMEOUTS,
             ));
             let probe_stop = self.stop.child_token();
-            let probe = tokio::spawn(crate::clock_offset::run_membership(
-                membership,
-                probe_stop.clone(),
-            ));
+            let probe_owner = observer.clone();
+            let probe_shutdown = probe_stop.clone();
+            let probe = tokio::spawn(async move { probe_owner.run(probe_shutdown).await });
             *tasks = Some(StartupObservationTasks {
                 server,
+                observer,
                 probe: Some(probe),
                 probe_stop,
             });
@@ -2019,7 +2041,7 @@ async fn boot_observing(
 
     let instance_id = identity.cluster_id;
     let node_id = identity.node_id;
-    let state = build_state(
+    let mut state = build_state(
         &config,
         node_id.clone(),
         instance_id.clone(),
@@ -2034,6 +2056,16 @@ async fn boot_observing(
         system,
         logs,
     );
+    if let Some(owner) = &observation {
+        let observer = owner.observer().await.ok_or_else(|| {
+            anyhow::anyhow!("startup observation owner disappeared before activation")
+        })?;
+        anyhow::ensure!(
+            observer.belongs_to(&state.membership),
+            "foreign startup clock owner"
+        );
+        state.clock_observer = observer;
+    }
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.
@@ -2053,9 +2085,6 @@ async fn boot_observing(
         .await
         .context("seed playback telemetry settings")?;
     let background_loops = BackgroundLoopGuard::new();
-    if let Some(owner) = &observation {
-        owner.stop_probe().await;
-    }
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
@@ -4521,6 +4550,7 @@ mod startup_tests {
             .with_state(http::internal_clock::ObservationContext {
                 membership: manager.clone(),
                 node_id: source.identity.node_id.clone(),
+                observer: source_owner.observer().await.expect("source clock owner"),
             });
         let app = axum::Router::new()
             .route("/api/v1/cluster/join/redeem", axum::routing::post(redeem))
@@ -4539,12 +4569,6 @@ mod startup_tests {
                 })
                 .await
         });
-        source_owner.stop_probe().await;
-        let probe_stop = tokio_util::sync::CancellationToken::new();
-        let probe = tokio::spawn(crate::clock_offset::run_membership(
-            manager.clone(),
-            probe_stop.clone(),
-        ));
         let original = manager
             .clock_guard()
             .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
@@ -4596,8 +4620,6 @@ mod startup_tests {
         );
         joining_owner.stop_and_drain().await;
         let joined_shutdown = joined.shutdown().await;
-        probe_stop.cancel();
-        let _ = probe.await;
         stop.send(()).expect("source stop");
         server.await.expect("HTTP task").expect("HTTP drain");
         source.shutdown().await.expect("source Raft drain");

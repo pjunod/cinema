@@ -191,6 +191,26 @@ controls and the failed-only two-node retry remain unexecuted for this slice;
 compiler success is not runtime acceptance. No enforcing source is promoted
 or deployed by this private preparation.
 
+**2026-10-02 private complete-observer wiring:** pending HTTP now retains
+one `ClockObserver` handle through activation into normal `AppState`.
+Only its owner can claim the bounded demand receiver. Periodic ticks and
+authenticated leader-from-learner clock requests coalesce into the same
+full-roster round and reuse its minimum-delay filters; a waiter owns neither
+the round nor its cancellation. The handler's original two-second receipt
+deadline includes body/auth/demand/revalidation, and the unchanged startup
+deadline remains45seconds. Inverse requests to learners respond immediately.
+
+Complete receipts bind actual applied membership, leader/term, normalized
+UUID/Raft/origin directory and completed clock/state generations. Changed
+origin resets the affected filter; Unknown peers still invalidate admission.
+After the final awaited directory read, identity/continuity and original
+authentication freshness are rechecked without consuming the nonce again.
+Responder service remains between t2/t3, not counted as network RTT.
+An obsolete publication no longer calls an unconditional `roster_failed`
+that could erase newer evidence. This source is private preparation, not
+runtime or operational acceptance; original causal controls, exact current
+composition, sole review and unchanged measurement gate remain owed.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances
