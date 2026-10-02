@@ -350,13 +350,15 @@ ready-PR fast lane supplies the broad `make unit` result.
 
 GPT prompt after the M1 deploy (corrected 2026-10-02: the first text used
 `pgrep`, which the image does not have, a placeholder title, and "the
-journal", which a Docker node does not write to):
+journal", which a Docker node does not write to; the loop selects children by
+`readlink $p/exe`, since a `cmdline` match also finds the loop's own
+`sh -c`):
 
 > On media1 (a Docker deployment): start any title that has a *text*
 > subtitle track as an encoded VOD session with that track burned in
 > (choose a quality that transcodes). While it plays, run on the host:
-> `docker exec plurxd sh -c 'for p in /proc/[0-9]*; do grep -q ffmpeg
-> $p/cmdline 2>/dev/null && { echo "== ${p#/proc/}"; tr "\0" "\n"
+> `docker exec plurxd sh -c 'for p in /proc/[0-9]*; do readlink $p/exe
+> 2>/dev/null | grep -q ffmpeg && { echo "== ${p#/proc/}"; tr "\0" "\n"
 > <$p/environ | grep -E "XDG_CACHE_HOME|AV_LOG_FORCE_NOCOLOR|FONTCONFIG_";
 > tr "\0" " " <$p/cmdline | grep -o "/dev/fd/[345]"; ls -l $p/fd/3
 > $p/fd/4 2>/dev/null; }; done'` and paste it (both variables must be
