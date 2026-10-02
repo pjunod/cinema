@@ -1042,6 +1042,58 @@ mod tests {
         assert!(why.contains("the CPU chain"), "wrong rejection: {why}");
     }
 
+    /// A decoded PQ frame that carries no primaries tag still tone-maps. With
+    /// `pin=` but no output `p=` on the linearising zscale, zimg took the
+    /// output primaries from the frame and refused the graph ("no path between
+    /// colorspaces"), producing no frames at all; the chain names `p=bt709`
+    /// there now. `testsrc2` frames carry no primaries, and `setparams` tags
+    /// everything else a PQ decode would.
+    #[tokio::test]
+    async fn the_cpu_tone_map_survives_a_frame_without_primaries() {
+        crate::transcode::require_ffmpeg();
+        if !has_filters(&["zscale", "tonemap", "setparams"]).await {
+            eprintln!(
+                "skipping the_cpu_tone_map_survives_a_frame_without_primaries: `{}` has \
+                 no zscale/tonemap/setparams",
+                ffmpeg_bin()
+            );
+            return;
+        }
+        let graph = format!(
+            "setparams=range=tv:color_trc=smpte2084:colorspace=bt2020nc,{}",
+            zscale_tone_map_filter("smpte2084", 1_000)
+        );
+        let output = tokio::process::Command::new(ffmpeg_bin())
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24:duration=0.25,format=yuv420p10le",
+                "-vf",
+                &graph,
+                "-f",
+                "framemd5",
+                "-",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg runs");
+        assert!(
+            output.status.success(),
+            "the chain refused an untagged-primaries frame: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let frames = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count();
+        assert!(frames > 0, "no frames came out of the chain");
+    }
+
     fn exit_status(code: u32) -> std::process::ExitStatus {
         #[cfg(unix)]
         {
