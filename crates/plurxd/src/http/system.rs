@@ -946,10 +946,19 @@ pub async fn client_log(
         None
     };
     let recovery_sample = ev.candidate_recovery.take();
-    if let Some(identity) = network
-        .clone()
-        .filter(|_| link_sample.is_some() || recovery_sample.is_some())
-    {
+    let acknowledged_recovery =
+        if let (Some(identity), Some(sample)) = (network.as_ref(), recovery_sample.as_ref()) {
+            super::hls::candidate_recovery::accept_sample(
+                &state,
+                identity,
+                ev.session_id.as_deref(),
+                sample,
+            )
+            .await
+        } else {
+            None
+        };
+    if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
         tokio::spawn(async move {
@@ -960,15 +969,6 @@ pub async fn client_log(
                 .ok()
                 .flatten()
                 .is_some_and(|value| value.trim() == "1");
-            if let Some(sample) = recovery_sample {
-                super::hls::candidate_recovery::accept_sample(
-                    &proof_state,
-                    &identity,
-                    proof_session.as_deref(),
-                    &sample,
-                )
-                .await;
-            }
             if let Some(sample) = link_sample.filter(|_| enabled) {
                 if let Some(value) = proof_state
                     .link_receipts
@@ -1029,6 +1029,13 @@ pub async fn client_log(
         emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
     let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(value) =
+        acknowledged_recovery.and_then(|event| axum::http::HeaderValue::from_str(&event).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-recovery-accepted", value);
+    }
     if let Some(value) =
         acknowledged_link.and_then(|nonce| axum::http::HeaderValue::from_str(&nonce).ok())
     {

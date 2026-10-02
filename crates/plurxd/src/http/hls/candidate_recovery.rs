@@ -9,6 +9,35 @@ use plurx_core::{
 };
 use std::time::Duration;
 
+pub(super) struct AcceptedDecoderProof {
+    scope: CandidateRecoveryScope,
+    session: String,
+    incarnation: String,
+    owner_epoch: i64,
+    owner: String,
+    recipe: [u8; 32],
+    observed: std::time::Instant,
+}
+impl AcceptedDecoderProof {
+    pub(super) fn session(&self) -> &str {
+        &self.session
+    }
+    pub(super) fn fresh(&self) -> bool {
+        std::time::Instant::now()
+            .checked_duration_since(self.observed)
+            .is_some_and(|age| age <= Duration::from_secs(15))
+    }
+    pub(super) fn matches(&self, bound: &BoundRecovery) -> bool {
+        self.fresh()
+            && self.scope == bound.scope
+            && self.session == bound.route.session_id
+            && self.incarnation == bound.route.incarnation_id
+            && self.owner_epoch == bound.route.owner_epoch
+            && self.owner == bound.route.owner_node_id
+            && self.recipe == bound.candidate.recipe_digest
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ClientRecoverySample {
@@ -30,9 +59,14 @@ pub(crate) async fn accept_sample(
     network: &NetworkIdentity,
     session: Option<&str>,
     sample: &ClientRecoverySample,
-) {
+) -> Option<String> {
     use plurx_core::store::{CandidateRecoveryCause, CandidateRecoveryObservation};
     if sample.age_ms > 15_000
+        || uuid::Uuid::parse_str(&sample.event_id)
+            .ok()
+            .map(|id| id.to_string())
+            .as_deref()
+            != Some(sample.event_id.as_str())
         || sample.cause != CandidateRecoveryCause::Decode
         || !(sample.decoder_failed
             || (sample.rendered_elapsed_ms >= 4_000
@@ -40,9 +74,11 @@ pub(crate) async fn accept_sample(
                 && sample.dropped_frames >= 6
                 && sample.runway_ms >= 10_000))
     {
-        return;
+        return None;
     }
-    let _ = tokio::time::timeout(Duration::from_millis(100), async {
+    let observed =
+        std::time::Instant::now().checked_sub(Duration::from_millis(u64::from(sample.age_ms)))?;
+    tokio::time::timeout(Duration::from_millis(100), async {
         let session = session?;
         let route = state.store.media_session_route(session).await.ok()??;
         if route.user_id != network.user_id? || route.recipe_json.len() > 64 * 1024 {
@@ -60,8 +96,8 @@ pub(crate) async fn accept_sample(
             .store
             .observe_candidate_recovery(
                 &CandidateRecoveryObservation {
-                    scope: bound.scope,
-                    route: bound.route,
+                    scope: bound.scope.clone(),
+                    route: bound.route.clone(),
                     recipe_digest: sample.recipe_digest,
                     event_id: sample.event_id.clone(),
                     cause: sample.cause,
@@ -70,10 +106,28 @@ pub(crate) async fn accept_sample(
                 super::unix_ms(),
             )
             .await
-            .ok()?;
-        Some(())
+            .ok()??;
+        // Reconstruct again after the durable await; stale accepted writes
+        // remain memory, never a live admission proof for another attachment.
+        let current = incumbent(state, network, &file, &route.playback_id, Some(session)).await?;
+        let proof = AcceptedDecoderProof {
+            scope: bound.scope,
+            session: bound.route.session_id,
+            incarnation: bound.route.incarnation_id,
+            owner_epoch: bound.route.owner_epoch,
+            owner: bound.route.owner_node_id,
+            recipe: sample.recipe_digest,
+            observed,
+        };
+        if !proof.matches(&current) {
+            return None;
+        }
+        state.link_receipts.record_decoder(proof)?;
+        Some(sample.event_id.clone())
     })
-    .await;
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Consume a typed cause only after the create's durable request was acquired.
@@ -133,6 +187,9 @@ pub(super) async fn observe(
             Cause::Encode
         }
         ReopenReason::Decode => {
+            if !state.link_receipts.decoder_current(&bound) {
+                return Err("Decode recovery has no accepted current decoder evidence".into());
+            }
             let memory = tokio::time::timeout(
                 Duration::from_millis(100),
                 state.store.candidate_recovery_memory(&bound.scope),
@@ -178,6 +235,16 @@ pub(super) async fn observe(
         return Ok(());
     }
     let now = super::unix_ms();
+    let current = incumbent(state, network, file, &request.playback_id, Some(previous))
+        .await
+        .ok_or("decoder incumbent changed before response admission")?;
+    if !state.link_receipts.decoder_current(&current)
+        || current.scope != bound.scope
+        || current.route.incarnation_id != bound.route.incarnation_id
+        || current.route.owner_epoch != bound.route.owner_epoch
+    {
+        return Err("decoder evidence changed before response admission".into());
+    }
     let observation = CandidateRecoveryObservation {
         scope: bound.scope,
         route: bound.route,

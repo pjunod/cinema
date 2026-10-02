@@ -136,6 +136,7 @@ impl Receipt {
 }
 #[derive(Default)]
 struct Rows {
+    decoder: HashMap<String, super::candidate_recovery::AcceptedDecoderProof>,
     staged: HashMap<String, super::prepared_link::StagedProof>,
     sessions: HashMap<String, SessionRow>,
     receipts: HashMap<String, Receipt>,
@@ -198,6 +199,30 @@ pub(crate) async fn binding(
 }
 
 impl LinkReceipts {
+    pub(super) fn record_decoder(
+        &self,
+        proof: super::candidate_recovery::AcceptedDecoderProof,
+    ) -> Option<()> {
+        let mut rows = self.0.lock().ok()?;
+        rows.decoder.retain(|_, value| value.fresh());
+        if rows.decoder.len() >= NONCES {
+            return None;
+        }
+        if rows.decoder.contains_key(proof.session()) {
+            return None;
+        }
+        rows.decoder.insert(proof.session().to_owned(), proof);
+        Some(())
+    }
+
+    pub(super) fn decoder_current(&self, bound: &super::candidate_recovery::BoundRecovery) -> bool {
+        self.0.lock().ok().is_some_and(|rows| {
+            rows.decoder
+                .get(&bound.route.session_id)
+                .is_some_and(|proof| proof.matches(bound))
+        })
+    }
+
     /// A native recovery may await one explicit negative acknowledgement;
     /// ordinary diagnostics remain detached. This never mints from a cause
     /// label, renews EOF or turns an absent proof into a playback error.
@@ -229,6 +254,21 @@ impl LinkReceipts {
                 .observe_candidate_link(&value, crate::media_sessions::unix_ms())
                 .await
                 .ok()?;
+            // Ok(()) also covers a refused/no-op fold. Only an exact durable
+            // readback can acknowledge this immutable completion's negative.
+            let saved = state
+                .store
+                .candidate_link_prior(&value.binding)
+                .await
+                .ok()??;
+            if saved.binding != value.binding
+                || saved.body_bytes != value.body_bytes
+                || saved.body_duration_ms != value.body_duration_ms
+                || saved.completed_at_ms != value.completed_at_ms
+                || saved.negative_at_ms != Some(value.completed_at_ms)
+            {
+                return None;
+            }
             let file = state.store.get_file(value.binding.file_id).await.ok()??;
             let route = state.store.media_session_route(session).await.ok()??;
             let proof = self
@@ -966,6 +1006,15 @@ mod tests {
 
     #[tokio::test]
     async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
+        client_log_ack_controls(false).await;
+    }
+
+    #[tokio::test]
+    async fn a05_client_log_ack_refuses_conflicting_durable_fold() {
+        client_log_ack_controls(true).await;
+    }
+
+    async fn client_log_ack_controls(conflicting_fold: bool) {
         use axum::{extract::State, http::HeaderMap, Json};
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
         let (state, user, file, _root) = actual_intake_state().await;
@@ -1074,6 +1123,39 @@ mod tests {
         assert_eq!(positive.status(), 204);
         assert!(!positive.headers().contains_key("x-plurx-link-accepted"));
         body["link_sample"]["negative"] = true.into();
+        if conflicting_fold {
+            // The durable namespace key deliberately conflicts with this exact
+            // source binding. Store returns Ok for the refused fold, not proof.
+            let mut conflicting = session.source.clone();
+            conflicting.source_object_version.push_str("-foreign");
+            state
+                .store
+                .observe_candidate_link(
+                    &CandidateLinkObservation {
+                        binding: conflicting.clone(),
+                        body_bytes: 8192,
+                        body_duration_ms: 6000,
+                        completed_at_ms: now,
+                        negative: true,
+                    },
+                    now,
+                )
+                .await
+                .expect("foreign durable row");
+            let refused = send(&state, &user, &headers, peer, body.clone()).await;
+            assert_eq!(refused.status(), 204);
+            assert!(!refused.headers().contains_key("x-plurx-link-accepted"));
+            let saved = state
+                .store
+                .candidate_link_prior(&conflicting)
+                .await
+                .expect("readback")
+                .expect("unchanged row");
+            assert!(saved.binding == conflicting);
+            assert_eq!(saved.body_bytes, 8192);
+            assert_eq!(saved.completed_at_ms, now);
+            return;
+        }
         let mut malformed = body.clone();
         malformed["link_sample"]["receipt"] = "bad,nonce".into();
         let unknown = send(&state, &user, &headers, peer, malformed).await;
@@ -1109,6 +1191,15 @@ mod tests {
 
     #[tokio::test]
     async fn a05_typed_recovery_authenticates_candidate_and_spends_only_one_decoder_response() {
+        typed_recovery_controls(false).await;
+    }
+
+    #[tokio::test]
+    async fn a05_decode_label_requires_accepted_exact_fault_without_replay_or_refresh() {
+        typed_recovery_controls(true).await;
+    }
+
+    async fn typed_recovery_controls(review_controls: bool) {
         use crate::transcode::{
             CandidateExecutionContext, ReopenReason, SessionKind, SessionRequest,
         };
@@ -1299,6 +1390,104 @@ mod tests {
         )
         .await
         .is_err());
+        if review_controls {
+            assert!(
+                crate::http::hls::candidate_recovery::observe(
+                    &state,
+                    Some(&network),
+                    Some(&file),
+                    &request,
+                    None,
+                    &event
+                )
+                .await
+                .is_err(),
+                "authenticated Decode label cannot mint evidence"
+            );
+        }
+        let mut fault = crate::http::hls::candidate_recovery::ClientRecoverySample {
+            cause: plurx_core::store::CandidateRecoveryCause::Decode,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            candidate_id: incumbent.id,
+            recipe_digest: incumbent.recipe_digest,
+            age_ms: 0,
+            decoder_failed: true,
+            rendered_elapsed_ms: 0,
+            position_progress_ms: 0,
+            dropped_frames: 0,
+            runway_ms: 0,
+        };
+        if review_controls {
+            fault.decoder_failed = false;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            fault.decoder_failed = true;
+            fault.age_ms = 15_001;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            fault.age_ms = 0;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some("foreign-session"),
+                &fault
+            )
+            .await
+            .is_none());
+            let mut foreign = network.clone();
+            foreign.user_id = Some(user.id + 1);
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &foreign,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            // The new case exercises the actual supplied progressing-pressure
+            // alternative, without inventing a fatal decoder flag.
+            fault.decoder_failed = false;
+            fault.rendered_elapsed_ms = 4_000;
+            fault.position_progress_ms = 2_000;
+            fault.dropped_frames = 6;
+            fault.runway_ms = 10_000;
+        }
+        assert_eq!(
+            crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await,
+            Some(fault.event_id.clone()),
+            "only actual accepted exact decoder failure is acknowledged"
+        );
+        if review_controls {
+            assert!(
+                crate::http::hls::candidate_recovery::accept_sample(
+                    &state,
+                    &network,
+                    Some(&session),
+                    &fault
+                )
+                .await
+                .is_none(),
+                "replay cannot acknowledge or refresh its original proof"
+            );
+        }
         assert!(crate::http::hls::candidate_recovery::observe(
             &state,
             Some(&network),

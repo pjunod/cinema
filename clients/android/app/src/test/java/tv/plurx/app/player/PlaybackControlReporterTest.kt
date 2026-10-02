@@ -1728,6 +1728,19 @@ class PlaybackControlSettleTest {
 }
 
 class DisplayAwareAutoEvidenceTest {
+    @Test fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget() {
+        val event = "12345678-1234-1234-1234-123456789abc"
+        assertTrue(autoNegativeLinkAcknowledgement(event, listOf(event), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, emptyList(), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, listOf(event, event), 204, true, 250))
+        assertTrue(autoDecoderAcknowledgementCurrent(true, 100, 349, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(false, 100, 101, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 350, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 99, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 101, 0, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 101, 250, false))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 120, 20, true))
+    }
     @Test fun a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
         val nonce = "12345678-1234-1234-1234-123456789abc"
         assertTrue(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, true, 1))

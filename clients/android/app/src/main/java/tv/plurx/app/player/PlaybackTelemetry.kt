@@ -127,6 +127,21 @@ internal fun autoNegativeLinkAcknowledgement(receipt: String, values: List<Strin
 
 internal suspend fun acknowledgeNegativeLink(event: PlaybackClientLog, receipt: String, remainingMs: Long): Boolean {
     if (remainingMs <= 0 || event.linkSample?.negative != true || event.linkSample.receipt != receipt) return false
+    return acknowledgeClientEvidence(event, receipt, "X-Plurx-Link-Accepted", remainingMs)
+}
+
+internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean, observedAtMs: Long, nowMs: Long,
+    remainingMs: Long, sameAttachment: Boolean): Boolean = accepted && sameAttachment && remainingMs > 0 &&
+    nowMs >= observedAtMs && nowMs - observedAtMs < minOf(remainingMs, 250L)
+
+internal suspend fun acknowledgeDecoderFailure(event: PlaybackClientLog, remainingMs: Long): Boolean {
+    val sample = event.candidateRecovery ?: return false
+    if (sample.cause != "decode") return false
+    return acknowledgeClientEvidence(event, sample.event_id, "X-Plurx-Recovery-Accepted", remainingMs)
+}
+
+private suspend fun acknowledgeClientEvidence(event: PlaybackClientLog, receipt: String, header: String, remainingMs: Long): Boolean {
+    if (remainingMs <= 0) return false
     val origin = Session.origin
     val token = Session.token?.takeIf { it.isNotBlank() } ?: return false
     if (origin.isBlank()) return false
@@ -142,7 +157,7 @@ internal suspend fun acknowledgeNegativeLink(event: PlaybackClientLog, receipt: 
                 }
                 override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                     val accepted = response.use {
-                        autoNegativeLinkAcknowledgement(receipt, it.headers.values("X-Plurx-Link-Accepted"),
+                        autoNegativeLinkAcknowledgement(receipt, it.headers.values(header),
                             it.code, it.request.url == request.url, remainingMs) &&
                             Session.origin == origin && Session.token == token
                     }
