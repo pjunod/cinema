@@ -67,7 +67,27 @@ class KnownRedContractTest(unittest.TestCase):
         capture = captures[0]
         self.assertEqual(capture.reason, "explicit owned rolling campaign only; requires validated manifest and real browser")
         self.assertEqual(capture.cargo_name, "transcode::tests::rolling_grid_campaign::owned_real_rolling_cell")
-        self.assertEqual(len(tuple(item for item in ignored if item.identity != capture_identity)), 20)
+        # S10 is also an explicitly admitted acquisition, not a known-red
+        # product regression. Unlike S11, its source is not feature-gated:
+        # it must resolve once in an ordinary Cargo listing, never be absent.
+        public_wire_identity = (
+            "crates/plurxd/src/http/tests/public_copy_wire.rs::"
+            "http::tests::public_copy_wire::"
+            "public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire"
+        )
+        public_wires = tuple(item for item in ignored if item.identity == public_wire_identity)
+        self.assertEqual(len(public_wires), 1)
+        public_wire = public_wires[0]
+        self.assertEqual(public_wire.reason, "requires explicit frozen-source and externally bounded runtime admission")
+        self.assertEqual(
+            public_wire.cargo_name,
+            "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
+        )
+        admitted_identities = {capture_identity, public_wire_identity}
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 20)
+        validate_listed_tests(public_wires, (public_wire.cargo_name,))
+        with self.assertRaisesRegex(KnownRedError, "absent"):
+            validate_listed_tests(public_wires, ())
         # Optional absence is exact-identity only, and feature-enabled presence
         # must still resolve once. A similarly named unknown source refuses.
         validate_listed_tests(captures, ())
