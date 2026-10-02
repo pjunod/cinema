@@ -7,8 +7,11 @@ policy changes repeated Python unit execution, not current-source compilation.
 
 The effort preflight discovers the validation and operations suites on every
 candidate. Each discovered test ID must have passed once for this repository
-and PR. Previously successful IDs are not executed again after a head or base
-refresh. Failed tests and newly introduced IDs execute. A skipped test, an
+and PR. Applicable successful methods are not executed again after a head or
+base refresh. A changed assertion body or shared local fixture is not proved
+by an old success under the same ID. Failed, newly introduced and genuinely
+source-invalidated methods execute; unchanged sibling methods stay retained.
+A skipped test, an
 expected failure, discovery error, empty suite or unknown outcome is not a
 success. Removing a test does not erase its historical evidence.
 
@@ -23,6 +26,91 @@ Every success retains its original commit and workflow run. Reuse is
 historical unit evidence, never a statement that the test executed on the
 current source. Compiler, history, catalog and static web checks continue on
 the current candidate. There is no bypass flag or product setting.
+
+## Current applicability — genuine history is not proof of new assertions
+
+CLI `prepare` supplies the mandatory source-applicability consumer before
+either CI or locally attested candidates enter the retained union. It reads
+the recorded commit's immutable test blob and the dispatched commit's blob
+from the local full-history checkout; the existing workflow already uses
+`fetch-depth: 0`. It neither fetches source nor transfers a credential. The
+current worktree must also equal the dispatched blob. A production `run`
+requires that current prepare marker and rechecks its retained pass map before
+discovery or method execution, so an unfiltered historical map cannot skip
+new assertions. Explicitly injected fake suites remain a test seam, not a CLI
+flag or production execution path.
+
+The fingerprint binds the named method's normalized AST, decorators and the
+module's non-test fixture context: class bases/decorators, setup/teardown,
+helper methods, module fixtures and import declarations. Line numbers,
+comments and sibling test method bodies are excluded. Sibling decorators,
+default expressions, annotations and type-parameter metadata remain as
+body-stripped declaration stubs, in their original order: they can mutate a
+fixture when defined or inspected. Bare sibling declarations without that
+metadata are omitted. Thus adding or changing
+a sibling method does not invalidate a method whose assertions and local
+context are unchanged. Shared context changes conservatively invalidate the
+methods in that module. Local base classes are source-bound; unsupported
+external/dynamic bases, custom discovery or class execution semantics refuse
+rather than inventing an applicability result. Removed IDs remain in the
+original historical artifacts and do not become pending methods.
+
+Each candidate is checked **before** union, not after the first old ID wins.
+A newer matching CI or local candidate can therefore satisfy the current
+method even if an older candidate changed or its source is unavailable.
+Unknown evidence is deferred only until other authenticated candidates have
+been considered. If no applicable candidate resolves it, prepare refuses
+before any method runs. An old known-changed body alone becomes pending;
+missing source, unsupported normalization or a missing original worktree
+witness never authorizes replaying every historical success.
+
+A null-commit worktree proof applies only if its attested whole-file SHA256
+equals the actual current file. A mismatch cannot be narrowed to a method
+without the original bytes; recover that hash-bound witness or a genuine
+current candidate instead of guessing. A local proof with a recorded commit
+must also match that commit's exact file hash. Writer authentication and
+the existing 64-proof bound remain unchanged. Accepted passes keep their
+actual original commit/run/comment; no current execution is fabricated.
+
+**Bounds:** source files ≤1 MiB; cache ≤512 files /32 MiB of source and
+1,000,000 AST nodes, with ≤100,000 nodes per file; inheritance depth <16;
+fingerprints ≤40,000. Each local Git read has a five-second timeout. Current
+POSIX file readers use no-follow/nonblocking opens and verify regular files
+before bounded reads. Exhausted bounds refuse evidence; they do not grow
+automatically. These are input/cache bounds, not a reserved OS RSS or CPU
+allocation.
+
+**How to read output:** `Unit applicability changed` names only a
+source-invalidated ID and its old/current fingerprint. Original journals are
+unchanged. An `applicability unavailable` refusal names the first unresolved
+ID and its evidence boundary; repair that boundary, never reset PR identity
+or delete journals to turn unknown history into new work.
+
+**Deliberate limit:** this is a method/local-fixture source guard, not a
+universal semantic cache. Import declarations are bound, but imported product
+implementations, arbitrary files scanned by a test, environment values and
+external services are not transitively fingerprinted. Their applicability
+still requires identified source/input evidence and targeted coordination;
+this mechanism must not label arbitrary dependency changes proved. The raw
+`restore` API without an applicability consumer remains historical diagnostic
+attribution only; only the guarded CLI prepare/run path qualifies retained
+passes for production execution.
+
+The one combined fake-source control
+`tests/validation/test_python_unit_receipts.py::test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates`
+exercises actual restore filtering, local/CI candidate selection, changed-only
+execution, preserved siblings/provenance, fixture/decorator/base changes,
+null-file witnesses, missing/dynamic source, bounds and the production guard.
+Its synthetic API/source/runner fixtures are not an actual workflow run or a
+claim of arbitrary production-dependency coverage.
+
+The separately new focused edge control
+`tests/validation/test_python_unit_receipts.py::test_sibling_definition_metadata_binds_fixture_without_replaying_bodies`
+executes only controlled synthetic class definitions to demonstrate decorator,
+positional/keyword-default and parameter/return-annotation fixture mutations,
+including async sibling declarations. It refuses their changed applicability
+while retaining body-only edits. The earlier combined control remains actual
+historical evidence; it is not replayed or relabelled as covering this edge.
 
 ## Publish before execution, preserve after failure
 

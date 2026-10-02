@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import argparse
 import ast
+import copy
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -25,6 +27,11 @@ MAX_TESTS = 20000
 MAX_PAGES = 20
 SUITES = {"validation": "tests/validation", "operations": "tests/operations"}
 JOB_PREFIX = "Python unit receipts"
+MAX_TEST_SOURCE = 1024 * 1024
+MAX_SOURCE_CACHE_BYTES = 32 * 1024 * 1024
+MAX_SOURCE_CACHE_FILES = 512
+MAX_SOURCE_AST_NODES = 100000
+MAX_SOURCE_CACHE_AST_NODES = 1000000
 
 
 class ReceiptError(RuntimeError):
@@ -448,8 +455,247 @@ def recover_discovery_passes(api, scope, prior, job, marker, marker_raw,
     return True
 
 
-def restore(api, scope, run):
-    legacy = {**legacy_pr663(api, scope), **local_receipts(api, scope)}
+def test_source_path(test_key):
+    match = re.fullmatch(
+        r"(validation|operations):(test_[A-Za-z0-9_]+)\."
+        r"([A-Za-z_][A-Za-z0-9_]*)\.(test[A-Za-z0-9_]*)", test_key)
+    require(match is not None, "Unsupported unit source identity; preserve evidence")
+    suite, module, class_name, method = match.groups()
+    return SUITES[suite] + "/" + module + ".py", class_name, method
+
+
+def read_git_test_source(commit, path):
+    """Read immutable local Git blobs, never fetch, execute or import old tests."""
+    sha(commit)
+    require(re.fullmatch(r"tests/(operations|validation)/test_[A-Za-z0-9_]+\.py", path),
+            "Unsafe unit source path")
+    object_name = commit + ":" + path
+    try:
+        size = subprocess.check_output(
+            ["git", "cat-file", "-s", object_name], stderr=subprocess.DEVNULL,
+            timeout=5, text=True).strip()
+        require(size.isascii() and size.isdigit() and 0 < int(size) <= MAX_TEST_SOURCE,
+                "Unit source exceeds byte bound")
+        raw = subprocess.check_output(
+            ["git", "cat-file", "blob", object_name], stderr=subprocess.DEVNULL,
+            timeout=5)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise ReceiptError("Historical unit source unavailable; retain receipts and recover exact source") from None
+    require(len(raw) == int(size), "Immutable unit source size mismatch")
+    return raw
+
+
+def read_worktree_test_source(path):
+    require(re.fullmatch(r"tests/(operations|validation)/test_[A-Za-z0-9_]+\.py", path),
+            "Unsafe current unit source path")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            require(stat.S_ISREG(metadata.st_mode), "Current unit source is not a regular file")
+            require(0 < metadata.st_size <= MAX_TEST_SOURCE, "Current unit source exceeds byte bound")
+            raw = stream.read(MAX_TEST_SOURCE + 1)
+    except OSError:
+        raise ReceiptError("Current unit source unavailable; preserve evidence") from None
+    require(0 < len(raw) <= MAX_TEST_SOURCE, "Current unit source exceeds byte bound")
+    return raw
+
+
+class SourceApplicability:
+    """Method/local-fixture applicability, not arbitrary production-input proof."""
+
+    def __init__(self, current_commit, source_reader=read_git_test_source,
+                 worktree_reader=read_worktree_test_source):
+        self.current_commit = sha(current_commit)
+        self.source_reader = source_reader
+        self.worktree_reader = worktree_reader
+        self.files = {}
+        self.fingerprints = {}
+        self.byte_count = 0
+        self.node_count = 0
+        self.changed = set()
+        self.refusals = {}
+
+    def source(self, commit, path):
+        key = (sha(commit), path)
+        if key in self.files:
+            return self.files[key]
+        require(len(self.files) < MAX_SOURCE_CACHE_FILES,
+                "Unit applicability source-cache file bound exhausted")
+        raw = self.source_reader(commit, path)
+        require(isinstance(raw, bytes) and 0 < len(raw) <= MAX_TEST_SOURCE,
+                "Unit applicability source exceeds byte bound")
+        if commit == self.current_commit:
+            require(self.worktree_reader(path) == raw,
+                    "Current unit worktree differs from dispatched Git source")
+        require(self.byte_count + len(raw) <= MAX_SOURCE_CACHE_BYTES,
+                "Unit applicability source-cache byte bound exhausted")
+        try:
+            tree = ast.parse(raw, filename=path)
+        except (SyntaxError, ValueError, RecursionError):
+            raise ReceiptError("Unit source cannot be normalized; preserve evidence") from None
+        nodes = sum(1 for _ in ast.walk(tree))
+        require(nodes <= MAX_SOURCE_AST_NODES,
+                "Unit applicability AST node bound exhausted")
+        require(self.node_count + nodes <= MAX_SOURCE_CACHE_AST_NODES,
+                "Unit applicability aggregate AST bound exhausted")
+        require(not any(isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and node.name in ("load_tests", "__getattr__") for node in tree.body),
+                "Unsupported dynamic unit discovery; preserve evidence")
+        classes = [node for node in tree.body if isinstance(node, ast.ClassDef)]
+        require(len({node.name for node in classes}) == len(classes),
+                "Ambiguous unit class definition")
+        # Bind helpers, setup/teardown, module fixtures, imports, class bases
+        # and decorators. Omit sibling bodies, not definition-time effects.
+        context = copy.deepcopy(tree)
+        for node in context.body:
+            if isinstance(node, ast.ClassDef):
+                bound = []
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                            and item.name.startswith("test"):
+                        metadata = (item.decorator_list or item.args.defaults
+                                    or any(value is not None for value in item.args.kw_defaults)
+                                    or item.returns is not None or getattr(item, "type_params", [])
+                                    or any(isinstance(arg, ast.arg) and arg.annotation is not None
+                                           for arg in ast.walk(item.args)))
+                        if not metadata:
+                            continue
+                        # Keep ordering/signature and annotation/decorator/default
+                        # expressions; they can mutate fixtures or be introspected.
+                        item.body = [ast.Pass()]
+                    bound.append(item)
+                node.body = bound
+                if not node.body:
+                    node.body = [ast.Pass()]
+        context_hash = hashlib.sha256(
+            ast.dump(context, include_attributes=False).encode()).hexdigest()
+        unittest_names, case_names = {"unittest"}, set()
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                unittest_names.update(alias.asname or alias.name for alias in node.names
+                                      if alias.name == "unittest")
+            if isinstance(node, ast.ImportFrom) and node.module == "unittest":
+                case_names.update(alias.asname or alias.name for alias in node.names
+                                  if alias.name in ("TestCase", "IsolatedAsyncioTestCase"))
+        value = (hashlib.sha256(raw).hexdigest(), {node.name: node for node in classes},
+                 context_hash, unittest_names, case_names,
+                 {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)},
+                 {alias.asname or alias.name for node in tree.body
+                  if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names})
+        self.files[key] = value
+        self.byte_count += len(raw)
+        self.node_count += nodes
+        return value
+
+    def fingerprint(self, commit, test_key):
+        key = (commit, test_key)
+        if key in self.fingerprints:
+            return self.fingerprints[key]
+        path, class_name, method = test_source_path(test_key)
+        _, classes, context, unittest_names, case_names, all_classes, imported = self.source(commit, path)
+        if class_name not in classes:
+            require(class_name not in all_classes,
+                    "Unsupported nested/dynamic unit class; preserve evidence")
+            require(class_name not in imported,
+                    "Unsupported imported unit class; preserve evidence")
+            return None  # Removed IDs remain in historical artifacts, not current pending work.
+        methods = []
+
+        def visit(name, seen):
+            require(name not in seen and len(seen) < 16, "Unsupported unit inheritance graph")
+            node = classes[name]
+            require(not node.keywords and not any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name in ("run", "id", "__init__", "__getattribute__", "__getattr__")
+                for item in node.body), "Unsupported custom unit class semantics")
+            direct = [item for item in node.body
+                      if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                      and item.name == method]
+            require(len(direct) <= 1, "Ambiguous unit method source")
+            if not direct:
+                require(not any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                and item.name == method for item in ast.walk(node)),
+                        "Unsupported conditional unit method; preserve evidence")
+                require(not any(isinstance(item, ast.Name) and isinstance(item.ctx, ast.Store)
+                                and item.id == method for item in ast.walk(node)),
+                        "Unsupported assigned unit method; preserve evidence")
+            local_bases = []
+            for base in node.bases:
+                standard = (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                            and base.value.id in unittest_names
+                            and base.attr in ("TestCase", "IsolatedAsyncioTestCase"))
+                standard |= isinstance(base, ast.Name) and base.id in case_names | {"object"}
+                if isinstance(base, ast.Name) and base.id in classes:
+                    local_bases.append(base.id)
+                else:
+                    require(standard, "Unsupported external/dynamic unit base; preserve evidence")
+            inherited = []
+            for base in local_bases:
+                inherited.extend(visit(base, seen | {name}))
+            return direct or inherited
+
+        methods = visit(class_name, set())
+        if not methods:
+            return None
+        require(len(methods) == 1, "Ambiguous inherited unit method; preserve evidence")
+        normalized = ast.dump(methods[0], include_attributes=False)
+        result = hashlib.sha256((context + "\n" + normalized).encode()).hexdigest()
+        require(len(self.fingerprints) < MAX_TESTS * 2, "Unit fingerprint bound exhausted")
+        self.fingerprints[key] = result
+        return result
+
+    def __call__(self, test_key, source):
+        try:
+            return self.matches(test_key, source)
+        except ReceiptError as error:
+            # A later authenticated candidate may prove this current method.
+            # Otherwise finish refuses BEFORE any method can execute.
+            self.refusals[test_key] = str(error)
+            return False
+
+    def finish(self, passes):
+        unresolved = sorted(set(self.refusals) - set(passes))
+        if unresolved:
+            test_key = unresolved[0]
+            raise ReceiptError(f"Unit applicability unavailable: {test_key}: "
+                               f"{self.refusals[test_key]}; retain historical evidence")
+
+    def matches(self, test_key, source):
+        current = self.fingerprint(self.current_commit, test_key)
+        if current is None:
+            return False
+        if source["commit"] is None:
+            provenance = source.get("provenance", "")
+            match = re.fullmatch(r"attested-local:[0-9a-f]{64}:([0-9a-f]{64}):comment-[1-9][0-9]*",
+                                 provenance)
+            require(match is not None, "Null unit source lacks a bound local file witness")
+            path, _, _ = test_source_path(test_key)
+            require(self.source(self.current_commit, path)[0] == match.group(1),
+                    "Null-source unit file changed; recover original bytes, never guess or replay")
+            return True
+        if source.get("provenance", "").startswith("attested-local:"):
+            match = re.fullmatch(r"attested-local:[0-9a-f]{64}:([0-9a-f]{64}):comment-[1-9][0-9]*",
+                                 source["provenance"])
+            require(match is not None, "Local unit source lacks a bound file witness")
+            path, _, _ = test_source_path(test_key)
+            require(self.source(sha(source["commit"]), path)[0] == match.group(1),
+                    "Local unit file witness differs from its recorded commit")
+        prior = self.fingerprint(sha(source["commit"]), test_key)
+        require(prior is not None, "Historical passing method source missing; preserve evidence")
+        if current == prior:
+            return True
+        if test_key not in self.changed:
+            print(f"Unit applicability changed: {test_key}; prior={prior}; current={current}")
+            self.changed.add(test_key)
+        return False
+
+
+def restore(api, scope, run, applicability=None):
+    """Authenticate history; the CI prepare consumer also filters applicability."""
+    local_attributions = set()
+    legacy = {**legacy_pr663(api, scope),
+              **local_receipts(api, scope, applicability, local_attributions)}
     artifacts = api.pages("/actions/artifacts", {"name": key(scope)})
     indexed = {}
     for artifact in artifacts:
@@ -459,7 +705,8 @@ def restore(api, scope, run):
                 f"Expired/oversize receipt artifact {aid}; recover evidence before retry")
         require(rid not in indexed, "Multiple final journals for one run: ambiguous attempt")
         indexed[rid] = artifact
-    passes = dict(legacy)
+    passes = {test_key: source for test_key, source in legacy.items()
+              if applicability is None or applicability(test_key, source)}
     runs = api.pages("/actions/runs", {"workflow_id": "effort-ci.yml",
                                      "ref": "refs/heads/" + scope["branch"]},
                      "workflow_runs")
@@ -506,13 +753,17 @@ def restore(api, scope, run):
     for journal in journals:
         for test_key, source in journal["passes"].items():
             require((source["run"], source["commit"]) in trusted_sources
-                    or legacy.get(test_key) == source,
+                    or legacy.get(test_key) == source
+                    or (test_key, json.dumps(source, sort_keys=True)) in local_attributions,
                     "Success source has no trusted completed journal")
-            passes.setdefault(test_key, source)
+            if applicability is None or applicability(test_key, source):
+                passes.setdefault(test_key, source)
+    if applicability is not None:
+        applicability.finish(passes)
     return passes
 
 
-def local_receipts(api, scope):
+def local_receipts(api, scope, applicability=None, attributions=None):
     """Only exact receipt hashes attested by authenticated repository writers."""
     directory = Path("validation/python-unit-local")
     if not directory.exists():
@@ -535,6 +786,7 @@ def local_receipts(api, scope):
         return {}
     comments = api.pages(f"/issues/{scope['pr']}/comments")
     passes = {}
+    attested = set()
     for comment in comments:
         claims = [line.removeprefix("Python-Unit-Receipt: ")
                   for line in comment["body"].splitlines()
@@ -570,13 +822,19 @@ def local_receipts(api, scope):
             require(isinstance(test_id, str) and len(test_id) <= 1024
                     and test_id.startswith(Path(proof["test_file"]).stem + "."),
                     "Local receipt ID does not belong to named suite/module")
-            passes[proof["suite"] + ":" + test_id] = {
+            test_key = proof["suite"] + ":" + test_id
+            source = {
                 "commit": sha(proof["source_commit"]) if proof.get("source_commit") else None, "run": None,
                 "provenance": f"attested-local:{claim['sha256']}:{proof['test_file_sha256']}:comment-{positive(comment['id'])}"}
+            attested.add(test_key)
+            if attributions is not None:
+                attributions.add((test_key, json.dumps(source, sort_keys=True)))
+            if applicability is None or applicability(test_key, source):
+                passes[test_key] = source
     # A present but unattested proof must not quietly rerun its successful IDs.
     claimed = {test_id for proof in documents.values()
                for test_id in (proof["suite"] + ":" + item for item in proof["test_ids"])}
-    require(claimed.issubset(passes), "Local pass receipts await authenticated PR hash attestation")
+    require(claimed.issubset(attested), "Local pass receipts await authenticated PR hash attestation")
     return passes
 
 
@@ -734,6 +992,15 @@ class RecordingResult(unittest.TextTestResult):
 
 
 def execute(journal, path, suites=None):
+    if suites is None:
+        require(journal.get("applicability_commit") == journal.get("commit"),
+                "Production unit execution requires current CLI applicability prepare")
+        applicability = SourceApplicability(sha(journal["commit"]))
+        applicable = {test_key: source for test_key, source in journal["passes"].items()
+                      if applicability(test_key, source)}
+        applicability.finish(applicable)
+        require(applicable == journal["passes"],
+                "Prepared passes lack current applicability; retain evidence and prepare again")
     require(not journal.get("fixture_errors"), "Unresolved fixture error; never rerun successful methods")
     journal.setdefault("fixture_errors", [])
     # Discovery is an all-suite precondition: no first-suite successes before
@@ -789,7 +1056,8 @@ def main(argv=None):
     if args.command == "prepare":
         journal = {"version": VERSION, "scope": scope, "run": run,
                    "commit": commit, "complete": False, "fixture_errors": [],
-                   "passes": restore(api, scope, run)}
+                   "passes": restore(api, scope, run, applicability=SourceApplicability(commit)),
+                   "applicability_commit": commit}
         atomic_json(path, journal)
         with open(os.environ["GITHUB_OUTPUT"], "a") as output:
             output.write(f"receipt_key={key(scope)}\nreceipt_job={job_name(scope)}\n")
