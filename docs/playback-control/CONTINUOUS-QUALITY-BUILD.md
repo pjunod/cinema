@@ -3269,3 +3269,28 @@ inspection also corrected the restoration fixture's simulated presentation to
 include its accepted append, observed timestamp and ever-appended flag; a
 first tick alone is not a valid presentation receipt. Production and test
 sources compile in twelve seconds. No unit tests were executed.
+
+
+### 10.105 Android separates End from physical cleanup and bounds control work
+
+Ending the active server session now closes admission and sends captured-profile
+End immediately, without unsubscribing output observers or starting the physical
+cleanup clock while the controller is still constructing a replacement. Actual
+player stop, source removal or player release starts the bounded reconciliation
+phase. That phase awaits the durable End and then observes loader, queue, codec
+and actual AudioTrack retirement before sending disposal. Unknown retirement
+remains unacknowledged. Unadopted sources still finish directly because no player
+ever acquired them.
+
+Unappended scheduling and revalidation now have a thirty-second active-time
+budget per intent. Pause and background do not consume it. Expiry attempts the
+same proven-unexposed restoration path; any byte exposure or physical alias
+refuses retained-current, and committed target media stays on the independent
+observation deadline. Authored regression source covers pause, independent
+revisions, one expiry per intent and committed-target exclusion. Production and
+test sources compile in twelve seconds. No unit tests were executed.
+
+The remote main has advanced from the prior integrated c63859963 to 4f55ae17e
+with native startup/readiness and producer-capacity fixes. Completed CQ commits
+are backed up through a73f0add9; this newer main needs integration and matching
+compiler evidence before runtime qualification or final review.

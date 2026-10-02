@@ -393,8 +393,7 @@ class Controller internal constructor(
         if (pending != null) { pending.owner.finishAfterRelease(); return }
         val attached = continuousAttachment
         if (attached?.start?.playback?.session_id == id) {
-            attached.closeAdmission()
-            attached.finishAfterRelease()
+            attached.end()
         } else vm.endHlsSession(id)
     }
 

@@ -71,6 +71,7 @@ internal class ContinuousAttachment(
     private val audioHead = AtomicReference<Long?>(null)
     private val playbackClock = AtomicReference<ContinuousObservationDeadline.Clock?>()
     private val observationDeadline = ContinuousObservationDeadline()
+    private val controlDeadline = ContinuousControlDeadline()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val pending = Channel<ContinuousQueueOwnership.Appended>(128)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -78,6 +79,8 @@ internal class ContinuousAttachment(
     private val awaiting = LinkedHashMap<String, ContinuousQueueOwnership.Appended>()
     private var pump: Job? = null
     private var deliveredRevision = -1L
+    private val ending = AtomicBoolean()
+    private val endAcknowledged = CompletableDeferred<Unit>()
     private val finishing = AtomicBoolean()
     private val finished = CompletableDeferred<Unit>()
 
@@ -222,7 +225,21 @@ internal class ContinuousAttachment(
         }
         retirePassedMedia()
         retireUnexposedTargets()
+        checkControlDeadline()
         checkObservation()
+    }
+
+    private suspend fun checkControlDeadline() {
+        val clock = playbackClock.get() ?: return
+        val revision = protocol.ledger?.number("latest_intent_revision") ?: return
+        val tx = transactions().lastOrNull { it.number("intent_revision") == revision } ?: return
+        val unappended = tx["ever_appended"]?.wireBoolean() == false && tx["cancel_requested"]?.wireBoolean() == false
+        if (!controlDeadline.sample(revision, unappended, clock.nowMs, clock.active)) return
+        val row = rows.singleOrNull { it.text("rendition_id") == tx.text("target_rendition_id") } ?: return
+        val pin = tx.getValue("ready").jsonArray.firstOrNull()?.jsonObject ?: return
+        val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
+        val result = reservations.retainUnexposed(ContinuousQualityMedia.Resource("video", row, false, entry))
+        if (result != null) retained(result.failedRow, result.request)
     }
 
     private fun checkObservation() {
@@ -315,16 +332,32 @@ internal class ContinuousAttachment(
         if (closed.compareAndSet(false, true)) { mediaCalls.cancel(); loads.cancel(); pump?.cancel(); wake.trySend(Unit) }
     }
 
+    /** Fence the server immediately, but retain physical release observers
+     * while the controller creates or exposes the replacement pipeline. */
+    fun end() {
+        closeAdmission()
+        if (!ending.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                withTimeout(5000) { Net.api(profile.origin, profile.http).endHlsSession(start.playback.session_id) }
+                endAcknowledged.complete(Unit)
+            } catch (error: Exception) {
+                endAcknowledged.completeExceptionally(error)
+                runCatching { failed(error) }
+            }
+        }
+    }
+
     /** Own scope survives composition cancellation. End fences the server;
      * actual loader, queue, decoder and AudioTrack facts authorize disposal. */
     fun finishAfterRelease() {
-        closeAdmission()
+        end()
         if (!finishing.compareAndSet(false, true)) return
         scope.launch {
             try {
                 withTimeout(5000) {
                     pump?.join()
-                    Net.api(profile.origin, profile.http).endHlsSession(start.playback.session_id)
+                    endAcknowledged.await()
                     protocol.reconcileTerminal()
                     while (true) {
                         output.audioOutputs.collectReleased()
