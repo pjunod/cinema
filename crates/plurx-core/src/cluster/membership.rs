@@ -13236,26 +13236,64 @@ mod tests {
     #[cfg(feature = "cluster-read-cost-validation")]
     #[test]
     fn k06_actual_activation_transaction_commits_after_phase_expiry_without_next_submission() {
+        let hold = Arc::new(std::sync::Mutex::new(None));
+        let worker_hold = Arc::clone(&hold);
+        let (completed, completion) = std::sync::mpsc::channel();
         let worker = std::thread::Builder::new()
             .name("k06-precommit-owner".into())
             .stack_size(8 * 1024 * 1024)
-            .spawn(|| {
-                tokio::runtime::Builder::new_multi_thread()
+            .spawn(move || {
+                let root = tempfile::tempdir().expect("actual precommit fixture");
+                let runtime = tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(4)
                     .thread_stack_size(8 * 1024 * 1024)
                     .enable_all()
                     .build()
-                    .expect("actual precommit fixture")
-                    .block_on(Box::pin(actual_precommit_activation_fixture()));
+                    .expect("actual precommit fixture");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(Box::pin(actual_precommit_activation_fixture(
+                        Arc::clone(&worker_hold),
+                        root.path(),
+                    )));
+                }));
+                if result.is_err() {
+                    // Failure is not terminal-drain evidence. Release the injection,
+                    // but retain the runtime owning accepted tasks/Client/lock.
+                    drop(worker_hold.lock().expect("owned writer hold").take());
+                    std::mem::forget(root);
+                    std::mem::forget(runtime);
+                } else {
+                    drop(runtime);
+                    drop(root);
+                }
+                let _ = completed.send(result);
             })
             .expect("actual precommit fixture");
+        let result = completion.recv_timeout(Duration::from_secs(110));
+        drop(hold.lock().expect("owned writer hold").take());
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("precommit worker did not complete; ownership retained: {error}"),
+        }
+        let finished_by = std::time::Instant::now() + Duration::from_secs(1);
+        while !worker.is_finished() && std::time::Instant::now() < finished_by {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            worker.is_finished(),
+            "precommit worker terminal return missing"
+        );
         if let Err(panic) = worker.join() {
             std::panic::resume_unwind(panic);
         }
     }
 
     #[cfg(feature = "cluster-read-cost-validation")]
-    async fn actual_precommit_activation_fixture() {
+    async fn actual_precommit_activation_fixture(
+        hold: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        root: &std::path::Path,
+    ) {
         use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
         use crate::error::StoreError;
         struct CapturedWriter {
@@ -13367,7 +13405,6 @@ mod tests {
             .expect("actual precommit fixture");
             connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='cluster_node_removal_insert_guard'", [], |row| row.get(0)).expect("actual precommit fixture")
         }
-        let root = tempfile::tempdir().expect("actual precommit fixture");
         let held: Vec<_> = (0..3)
             .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("actual precommit fixture"))
             .collect();
@@ -13376,7 +13413,7 @@ mod tests {
             .map(|listener| listener.local_addr().expect("actual precommit fixture"))
             .collect();
         let mut config = crate::config::Config::default();
-        config.storage.data_dir = root.path().into();
+        config.storage.data_dir = root.into();
         config.server.bind = addresses[0];
         config.cluster.raft_bind = addresses[1];
         config.cluster.api_bind = addresses[2];
@@ -13385,11 +13422,11 @@ mod tests {
         config.cluster.artwork_url = config.cluster.join_url.clone();
         drop(held);
         drop(
-            crate::store::SqliteStore::open(&root.path().join("plurx.db"))
+            crate::store::SqliteStore::open(&root.join("plurx.db"))
                 .expect("actual precommit fixture"),
         );
         let (capture, captured) = tokio::sync::oneshot::channel();
-        let pending = tokio::spawn(async move {
+        let mut pending = tokio::spawn(async move {
             let observer = Observer(std::sync::Mutex::new(Some(capture)));
             Box::pin(select_daemon_store_observing(&config, Some(&observer))).await
         });
@@ -13399,11 +13436,16 @@ mod tests {
             deadline,
             manager,
             baseline_submissions,
-        } = captured.await.expect("actual precommit fixture");
-        entered
+        } = tokio::time::timeout(Duration::from_secs(15), captured)
             .await
+            .expect("bounded actual observer capture")
+            .expect("actual precommit fixture");
+        *hold.lock().expect("owned writer hold") = Some(release);
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .expect("bounded actual precommit entry")
             .expect("actual transaction statements completed before commit");
-        let database = root.path().join("hiqlite/state_machine/db/plurx.db");
+        let database = root.join("hiqlite/state_machine/db/plurx.db");
         assert_eq!(
             trigger_count(&database),
             0,
@@ -13413,7 +13455,7 @@ mod tests {
         let lock = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(root.path().join(".plurxd.lock"))
+            .open(root.join(".plurxd.lock"))
             .expect("actual precommit fixture");
         assert!(matches!(
             lock.try_lock(),
@@ -13428,8 +13470,16 @@ mod tests {
             lock.try_lock(),
             Err(std::fs::TryLockError::WouldBlock)
         ));
-        release.send(()).expect("release actual uncommitted writer");
-        let error = match pending.await.expect("actual precommit fixture") {
+        let release = hold.lock().expect("owned writer hold").take();
+        release
+            .expect("actual writer release owner")
+            .send(())
+            .expect("release actual uncommitted writer");
+        let error = match tokio::time::timeout(Duration::from_secs(15), &mut pending)
+            .await
+            .expect("bounded post-release activation completion; no cancellation proof")
+            .expect("actual precommit fixture")
+        {
             Ok(_) => panic!("expired activation succeeded"),
             Err(error) => error,
         };
