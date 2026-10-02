@@ -707,6 +707,23 @@ pub struct ProbeResult {
     pub creation_time: Option<String>,
 }
 
+impl ProbeResult {
+    /// The field-order value a catalogue write stores for this result.
+    ///
+    /// A parsed probe already carries a token ([`FIELD_ORDER_UNKNOWN`] when
+    /// FFprobe reported none), but a result can reach a write boundary from a
+    /// binary that predates that rule — an older probe worker's published
+    /// facts during a rolling deploy. A result with a probe document is a
+    /// probed row, so it is stored as `unknown` rather than stranded as
+    /// `NULL`; only a result with no document (never probed, or a failed
+    /// probe) stores `NULL`.
+    pub fn stored_field_order(&self) -> Option<&str> {
+        self.field_order
+            .as_deref()
+            .or_else(|| self.raw_json.is_some().then_some(FIELD_ORDER_UNKNOWN))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Users & auth
 // ---------------------------------------------------------------------------

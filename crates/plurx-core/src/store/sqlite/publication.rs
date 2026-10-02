@@ -1245,7 +1245,7 @@ fn upsert_file(
             probe.dolby_vision.el_present.map(i64::from),
             probe.dolby_vision.rpu_present.map(i64::from),
             probe.video_codec_tag,
-            probe.field_order,
+            probe.stored_field_order(),
         ],
         |row| row.get(0),
     )?)
