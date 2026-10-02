@@ -343,7 +343,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
 | Role | Load control | Focus + noisy | Decoder fallback | Tunneling | Wake mode | Text disabled by default |
 |---|---|---|---|---|---|---|
 | Finite | Incumbent | yes | yes | TV only | none | yes |
-| Successor | Successor | yes | yes | TV only (inherits — comment at `:3975`) | none | yes |
+| Successor | Successor | **no** — handed over at commit (§5.10) | yes | TV only (inherits — comment at `:3975`) | none | yes |
 | LiveTv | Live | yes | yes | **no** | none | yes |
 | LibraryChannel | Incumbent | yes | yes | no | none | yes |
 | Offline | Incumbent | yes | yes | no | none | yes |
@@ -508,8 +508,9 @@ failover, existing session-gone handling.
 ### 5.7 M7 — `PlurxPlayerBuilder`
 
 The class, the role table, the four sites migrated, the construction-site
-test. Byte-identical behaviour for `Finite`/`Successor`; the three other
-roles gain focus, noisy and decoder fallback and nothing else.
+test. Byte-identical behaviour for `Finite`; the three other roles gain
+focus, noisy and decoder fallback and nothing else. *(2026-10-02: `Successor`
+no longer handles focus or noisy until its commit — §5.10.)*
 
 Acceptance: `make android-test`; `grep -rn "ExoPlayer.Builder(" clients/android/app/src/main`
 returns one line; on the Google TV, Live TV and a library channel pause
@@ -568,6 +569,10 @@ workspace.
   == false`; the commit hands focus over, release first, and a rollback hands
   it back). Regression: `AudioFocusOwnershipTest`. The device re-run of a
   prepared quality change is owed on a build that carries the fix.
+- Known limit of the handover: a commit while the incumbent is ducked by a
+  transient `CAN_DUCK` holder (a navigation prompt) requests full focus, so
+  the ducking app loses it and the successor plays at full volume. A full
+  transient loss suppresses playback, so no commit happens then.
 - Picture-in-picture did not auto-enter once, ~40 s after that cold reopen,
   and did later in the same session — recorded, unproven, not changed.
 

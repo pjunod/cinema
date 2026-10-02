@@ -44,9 +44,11 @@ internal fun ExoPlayer.asAudioFocusOwner(): AudioFocusOwner = AudioFocusOwner { 
 }
 
 /**
- * Move focus from the player going silent to the player becoming audible:
- * release first, so the two never both hold it and the new owner's request
- * cannot read as a loss to the old one.
+ * Move focus from the player going silent to the player becoming audible.
+ * The release is issued first, but each player applies it on its own
+ * playback thread, so the platform may still see the new request before the
+ * old abandon; a late loss on the outgoing player is harmless because it is
+ * already paused (commit) or being retired (rollback).
  */
 internal fun handOverAudioFocus(from: AudioFocusOwner, to: AudioFocusOwner) {
     from.ownAudioFocus(false)
