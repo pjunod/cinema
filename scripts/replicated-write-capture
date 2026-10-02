@@ -27,10 +27,19 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+from decimal import Decimal, InvalidOperation
+import hashlib
+import io
 import json
+import os
+from pathlib import Path
 import re
+import signal
+import stat
 import struct
 import sys
+import time
+import urllib.request
 from collections import Counter, OrderedDict
 
 GATE_HOURS = 12
@@ -177,6 +186,400 @@ def evaluate(lines, gate_hours: float = GATE_HOURS) -> dict:
     }
 
 
+# Strict AFTER is deliberately separate: historical M0 parsing and windows
+# above retain their original contract. These are measurement predicates,
+# never feature-enable predicates or rollout policy.
+AFTER_SCHEMA = "k03-after-acquisition-v1"
+AFTER_TTL = 95
+AFTER_MAX_SECONDS = 25 * 3600
+AFTER_MAX_BYTES = 512 * 1024 * 1024
+AFTER_MAX_FILES = 8192
+AFTER_MAX_TSV = 8 * 1024 * 1024
+AFTER_MAX_RESPONSE = 1024 * 1024
+U64_LIMIT = (1 << 64) - 1
+OUTCOMES = ("skipped_hint", "skipped_unconfigured", "claimed", "empty_claim", "not_owner")
+AFTER_MONOTONIC = MONOTONIC + ("takeover_started",) + tuple("watched_" + x for x in OUTCOMES)
+AFTER_FIELDS = (
+    "timestamp_utc", "epoch", "node", "url", "reachable", "build",
+) + NUMERIC + ("observed_epoch", "uptime_seconds", "takeover_started") + tuple(
+    "watched_" + x for x in OUTCOMES
+) + ("acquisition_sha256", "metrics_sha256")
+METRIC_NAMES = {
+    "plurx_build_info", "plurx_uptime_seconds", "plurx_cluster_local_is_voter",
+    "plurx_raft_commit_index", "plurx_store_operations_total",
+    "plurx_raft_snapshot_seconds_count", "plurx_watched_outbox",
+    "plurx_transcode_sessions_active", "plurx_live_tv_sessions",
+    "plurx_cache_protected_entries", "plurx_takeover_settings_authority_reads_started_total",
+    "plurx_watched_outbox_ticks_total",
+}
+AFTER_URLS = dict(zip(NODES, (
+    "http://192.168.4.8:32400/metrics", "http://192.168.4.14:32400/metrics",
+    "http://192.168.5.236:32400/metrics",
+)))
+
+
+def after_integer(value, field):
+    """Never round a float or treat missing, malformed or saturation as zero."""
+    if not isinstance(value, str) or len(value) > 64:
+        raise ValueError(f"{field}: missing/oversized integer")
+    try:
+        number = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError(f"{field}: malformed integer") from error
+    if not number.is_finite() or not 0 <= number < U64_LIMIT or number != number.to_integral_value():
+        raise ValueError(f"{field}: fractional/negative/saturated integer")
+    return int(number)
+
+
+def after_source(build, source):
+    if not isinstance(build, str) or not re.fullmatch(r"[A-Za-z0-9._+/-]{1,128}", build):
+        raise ValueError("exact expected build label required")
+    if build == "unknown" or build.endswith("-dirty"):
+        raise ValueError("unknown/dirty build is not AFTER evidence")
+    if not isinstance(source, str) or not re.fullmatch(r"[0-9a-f]{40}", source):
+        raise ValueError("full expected source commit required")
+    stamp = re.search(r"(?:^|g)([0-9a-f]{7,40})$", build)
+    if stamp is None or not source.startswith(stamp[1]):
+        raise ValueError("build label does not bind the expected source prefix")
+    # A build label alone is not source attestation. The external acquisition
+    # must truthfully bind this full source; the tool never invents that link.
+
+
+def after_metrics(raw):
+    """Select actual fixed metrics; preserve their original lines as evidence."""
+    if len(raw) > AFTER_MAX_RESPONSE:
+        raise ValueError("metrics response exceeds 1 MiB")
+    text = raw.decode("utf-8")
+    series = {}
+    retained = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name = re.split(r"[ {]", line, maxsplit=1)[0]
+        if name not in METRIC_NAMES:
+            continue
+        match = re.fullmatch(r"([a-zA-Z_:][\w:]*)(?:\{(.*)\})?\s+(\S+)", line)
+        if match is None:
+            raise ValueError("malformed selected metric")
+        labels = {}
+        label_text = match[2] or ""
+        position = 0
+        while position < len(label_text):
+            label = re.match(r'([a-zA-Z_]\w*)=("(?:\\.|[^"\\])*")(?:,|$)', label_text[position:])
+            if label is None or label[1] in labels:
+                raise ValueError("malformed/duplicate metric label")
+            labels[label[1]] = json.loads(label[2])
+            position += label.end()
+        key = (name, tuple(sorted(labels.items())))
+        if key in series:
+            raise ValueError("duplicate selected metric series")
+        series[key] = match[3]
+        retained.append(line)
+
+    def values(name, required=None):
+        return [value for (metric, labels), value in series.items()
+                if metric == name and all(dict(labels).get(k) == v for k, v in (required or {}).items())]
+
+    def scalar(name, required=None):
+        found = values(name, required)
+        if len(found) != 1:
+            raise ValueError(f"{name}: missing/ambiguous series")
+        return str(after_integer(found[0], name))
+
+    def total(name, required):
+        found = values(name, required)
+        if not found:
+            raise ValueError(f"{name}: missing series")
+        number = sum(after_integer(value, name) for value in found)
+        return str(after_integer(str(number), name))
+
+    info = [(dict(labels), value) for (name, labels), value in series.items() if name == "plurx_build_info"]
+    if len(info) != 1 or after_integer(info[0][1], "build info") != 1 or "build" not in info[0][0]:
+        raise ValueError("missing/ambiguous actual build")
+    row = {
+        "build": info[0][0]["build"],
+        "local_is_voter": scalar("plurx_cluster_local_is_voter"),
+        "uptime_seconds": scalar("plurx_uptime_seconds"),
+        "commit_index": scalar("plurx_raft_commit_index"),
+        "authority_reads": total("plurx_store_operations_total", {"class": "authority_read"}),
+        "writes": total("plurx_store_operations_total", {"class": "write"}),
+        "snapshot_builds": total("plurx_raft_snapshot_seconds_count", {"operation": "build"}),
+        "pending_outbox": scalar("plurx_watched_outbox", {"status": "pending"}),
+        "transcode_active": scalar("plurx_transcode_sessions_active"),
+        "live_tv_starting": scalar("plurx_live_tv_sessions", {"state": "starting"}),
+        "live_tv_active": scalar("plurx_live_tv_sessions", {"state": "active"}),
+        "active_playback_entries": scalar("plurx_cache_protected_entries", {"reason": "active_playback"}),
+        "takeover_started": scalar("plurx_takeover_settings_authority_reads_started_total"),
+    }
+    for outcome in OUTCOMES:
+        row["watched_" + outcome] = scalar("plurx_watched_outbox_ticks_total", {"outcome": outcome})
+    return row, ("\n".join(retained) + "\n").encode()
+
+
+def after_acquisition(raw, epoch, node, expected_build, source):
+    if len(raw) > 16 * 1024:
+        raise ValueError("acquisition exceeds 16 KiB")
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate acquisition key")
+            result[key] = value
+        return result
+    data = json.loads(raw, object_pairs_hook=unique_pairs)
+    if not isinstance(data, dict) or set(data) != {"schema", "observations"} or data["schema"] != AFTER_SCHEMA:
+        raise ValueError("wrong acquisition schema")
+    observations = data["observations"]
+    if not isinstance(observations, list) or len(observations) != len(NODES):
+        raise ValueError("incomplete acquisition roster")
+    facts = {}
+    required = {"node", "build", "source_commit", "epoch", "cluster_media_pool_enabled", "cluster_session_takeover_enabled"}
+    for observation in observations:
+        if not isinstance(observation, dict) or set(observation) != required:
+            raise ValueError("acquisition fields must be exact and sanitized")
+        identity = observation["node"]
+        if identity not in NODES or identity in facts:
+            raise ValueError("duplicate/unknown acquisition node")
+        if observation["build"] != expected_build or observation["source_commit"] != source:
+            raise ValueError("acquisition build/source mismatch")
+        observed = observation["epoch"]
+        if type(observed) is not int or not 0 <= epoch - observed <= AFTER_TTL:
+            raise ValueError("stale/future acquisition")
+        pair = (observation["cluster_media_pool_enabled"], observation["cluster_session_takeover_enabled"])
+        if any(type(value) is not bool for value in pair) or all(pair):
+            raise ValueError("missing/malformed/on-on switch pair")
+        facts[identity] = observation
+    return facts[node]
+
+
+def after_read_regular(path, limit):
+    # Refuse FIFO/device/symlink inputs before any potentially blocking read.
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("AFTER input must be a bounded regular file")
+        raw = handle.read(limit + 1)
+    if len(raw) > limit:
+        raise ValueError("AFTER input exceeds its byte allowance")
+    return raw
+
+
+def after_evidence(directory, digest, suffix):
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("missing/malformed evidence hash")
+    path = Path(directory) / (digest + suffix)
+    raw = after_read_regular(path, AFTER_MAX_RESPONSE)
+    if len(raw) > AFTER_MAX_RESPONSE or hashlib.sha256(raw).hexdigest() != digest:
+        raise ValueError("missing/changed/oversized retained evidence")
+    return raw
+
+
+def after_continuity(row, prior):
+    observed = int(row["observed_epoch"])
+    elapsed = observed - int(prior["observed_epoch"])
+    uptime_elapsed = int(row["uptime_seconds"]) - int(prior["uptime_seconds"])
+    if not 0 < elapsed <= AFTER_TTL or uptime_elapsed <= 0 or abs(elapsed - uptime_elapsed) > 2:
+        raise ValueError("uptime/observation continuity lost")
+    for field in AFTER_MONOTONIC:
+        if int(row[field]) < int(prior[field]):
+            raise ValueError(f"{field}: counter reset")
+
+
+def evaluate_after(lines, evidence_dir, expected_build, source):
+    """Reject an incomplete AFTER capture; never rehabilitate M0 point data."""
+    after_source(expected_build, source)
+    text = lines.read(AFTER_MAX_TSV + 1)
+    if len(text.encode()) > AFTER_MAX_TSV:
+        raise ValueError("AFTER samples exceed 8 MiB")
+    reader = csv.DictReader(text.splitlines(), delimiter="\t")
+    if tuple(reader.fieldnames or ()) != AFTER_FIELDS:
+        raise ValueError("AFTER header missing/changed")
+    ticks = OrderedDict()
+    previous_epoch = None
+    row_count = 0
+    previous = {}
+    for row in reader:
+        row_count += 1
+        if row_count > 16384 or None in row or any(value is None for value in row.values()):
+            raise ValueError("incomplete/oversized AFTER row")
+        epoch = after_integer(row["epoch"], "epoch")
+        node = row["node"]
+        if node not in NODES or row["reachable"] != "1" or row["url"] != AFTER_URLS[node]:
+            raise ValueError("missing/repeated/non-voter observation")
+        if previous_epoch is not None and (epoch < previous_epoch or epoch - previous_epoch > AFTER_TTL):
+            raise ValueError("AFTER gap/order violation")
+        rows = ticks.setdefault(epoch, {})
+        if node in rows:
+            raise ValueError("duplicate node/tick")
+        previous_epoch = epoch
+        observed = after_integer(row["observed_epoch"], "observed epoch")
+        if not 0 <= observed - epoch <= 20:
+            raise ValueError("metrics observation outside bounded tick")
+        try:
+            if row["timestamp_utc"] != iso(observed):
+                raise ValueError("observation timestamp mismatch")
+        except (OverflowError, OSError) as error:
+            raise ValueError("observation epoch out of range") from error
+        metrics, _ = after_metrics(after_evidence(evidence_dir, row["metrics_sha256"], ".prom"))
+        if row["build"] != expected_build or any(row[field] != value for field, value in metrics.items()):
+            raise ValueError("sample does not match retained actual metrics/build")
+        after_acquisition(after_evidence(evidence_dir, row["acquisition_sha256"], ".json"), observed, node, expected_build, source)
+        if row["local_is_voter"] != "1" or any(row[field] != "0" for field in IDLE_ZERO):
+            raise ValueError("not continuously idle/current voter")
+        for field in AFTER_MONOTONIC:
+            after_integer(row[field], field)
+        after_integer(row["uptime_seconds"], "uptime")
+        if node in previous:
+            after_continuity(row, previous[node])
+        previous[node] = row
+        rows[node] = row
+    if not ticks or any(set(rows) != set(NODES) for rows in ticks.values()):
+        raise ValueError("incomplete AFTER tick roster")
+    first, last = next(iter(ticks.values())), next(reversed(ticks.values()))
+    if next(reversed(ticks)) - next(iter(ticks)) > AFTER_MAX_SECONDS:
+        raise ValueError("AFTER span exceeds the finite 25-hour allowance")
+    overlap = min(int(last[n]["observed_epoch"]) for n in NODES) - max(int(first[n]["observed_epoch"]) for n in NODES)
+    per_node = {}
+    for node in NODES:
+        seconds = int(last[node]["observed_epoch"]) - int(first[node]["observed_epoch"])
+        rates = {}
+        for field in AFTER_MONOTONIC:
+            delta = int(last[node][field]) - int(first[node][field])
+            rates[field] = {"delta": delta, "elapsed_seconds": seconds, "per_day_numerator": delta * 86400,
+                            "per_day_denominator": seconds, "per_day": delta * 86400 / seconds if seconds else None}
+        rates["takeover_below_1500_per_day"] = bool(seconds and rates["takeover_started"]["per_day_numerator"] < 1500 * seconds)
+        per_node[node] = rates
+    eligible = overlap >= 43200
+    return {"mode": "strict_after", "source_commit": source, "expected_build": expected_build,
+            "ticks": len(ticks), "overlap_seconds": overlap, "measurement_eligible": eligible,
+            "takeover_bound_met": eligible and all(row["takeover_below_1500_per_day"] for row in per_node.values()),
+            "per_node": per_node, "outbox_wal_proposal_bound": "not assessed; attributed WAL proof remains required"}
+
+
+class _NoAfterRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        raise ValueError("AFTER metrics redirects are forbidden")
+
+
+def sample_after(output_dir, acquisition_path, expected_build, source, max_seconds):
+    """One finite POSIX owner; external observer is explicitly not this tool."""
+    after_source(expected_build, source)
+    if not 1 <= max_seconds <= AFTER_MAX_SECONDS:
+        raise ValueError("AFTER requires an explicit 1..90000 second allowance")
+    if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        raise ValueError("AFTER requires a dedicated POSIX process with no existing timer")
+    root = Path(output_dir)
+    # Create-only: no resume, cleanup, truncation or deletion of another capture.
+    root.mkdir(mode=0o700)
+    evidence = root / "evidence"
+    evidence.mkdir(mode=0o700)
+    deadline = time.monotonic() + max_seconds
+    byte_count = 0
+    sample_bytes = 0
+    file_count = 1  # samples.tsv
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoAfterRedirect())
+
+    def expired(_number, _frame):
+        raise TimeoutError("owned AFTER measurement allowance expired")
+
+    previous_handler = signal.signal(signal.SIGALRM, expired)
+
+    def arm(seconds=None):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("owned AFTER measurement allowance expired")
+        signal.setitimer(signal.ITIMER_REAL, min(remaining, seconds) if seconds else remaining)
+
+    def retain(raw, suffix):
+        nonlocal byte_count, file_count
+        digest = hashlib.sha256(raw).hexdigest()
+        path = evidence / (digest + suffix)
+        if path.exists():
+            if after_evidence(evidence, digest, suffix) != raw:
+                raise ValueError("existing evidence differs")
+            return digest
+        if byte_count + sample_bytes + len(raw) > AFTER_MAX_BYTES or file_count + 1 > AFTER_MAX_FILES:
+            raise ValueError("owned AFTER disk/file allowance exceeded")
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(raw)
+        byte_count += len(raw)
+        file_count += 1
+        return digest
+
+    try:
+        arm()
+        descriptor = os.open(root / "samples.tsv", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", newline="") as samples_file:
+            writer = csv.DictWriter(samples_file, fieldnames=AFTER_FIELDS, delimiter="\t", lineterminator="\n")
+            writer.writeheader()
+            samples_file.flush()
+            sample_bytes = samples_file.tell()
+            first_observed = {}
+            last_observed = {}
+            previous = {}
+            while True:
+                arm()
+                tick = int(time.time())
+                acquisition = after_read_regular(acquisition_path, 16 * 1024)
+                # A stale manifest fails before any requests or retained writes.
+                for node in NODES:
+                    after_acquisition(acquisition, tick, node, expected_build, source)
+                acquisition_hash = retain(acquisition, ".json")
+                for node, url in AFTER_URLS.items():
+                    # A real-time signal bounds total request time, including a
+                    # slowly dripping body; socket timeout alone does not.
+                    arm(5)
+                    try:
+                        with opener.open(url, timeout=5) as response:
+                            if response.status != 200:
+                                raise ValueError("AFTER metrics non-200")
+                            body = response.read(AFTER_MAX_RESPONSE + 1)
+                    finally:
+                        arm()
+                    observed = int(time.time())
+                    if not 0 <= observed - tick <= 20:
+                        raise ValueError("actual metrics observation exceeds bounded tick")
+                    after_acquisition(acquisition, observed, node, expected_build, source)
+                    metrics, retained = after_metrics(body)
+                    if metrics["build"] != expected_build:
+                        raise ValueError("actual AFTER build mismatch")
+                    if metrics["local_is_voter"] != "1" or any(metrics[field] != "0" for field in IDLE_ZERO):
+                        raise ValueError("actual AFTER node is not an idle voter")
+                    row = dict(metrics, timestamp_utc=iso(observed), epoch=str(tick), node=node, url=url,
+                               reachable="1", observed_epoch=str(observed), acquisition_sha256=acquisition_hash,
+                               metrics_sha256=retain(retained, ".prom"))
+                    if node in previous:
+                        after_continuity(row, previous[node])
+                    previous[node] = row
+                    # Check budgets BEFORE append, not after an overshoot.
+                    buffer = io.StringIO()
+                    csv.DictWriter(buffer, fieldnames=AFTER_FIELDS, delimiter="\t", lineterminator="\n").writerow(row)
+                    encoded = buffer.getvalue()
+                    proposed = sample_bytes + len(encoded.encode())
+                    if proposed > AFTER_MAX_TSV or byte_count + proposed > AFTER_MAX_BYTES:
+                        raise ValueError("owned AFTER samples/disk allowance exceeded")
+                    samples_file.write(encoded)
+                    samples_file.flush()
+                    sample_bytes = proposed
+                    first_observed.setdefault(node, observed)
+                    last_observed[node] = observed
+                overlap = min(last_observed.values()) - max(first_observed.values())
+                if overlap >= 43200:
+                    break
+                arm()
+                time.sleep(max(0, 60 - (time.time() - tick)))
+        text = after_read_regular(root / "samples.tsv", AFTER_MAX_TSV).decode("utf-8")
+        result = evaluate_after(io.StringIO(text), evidence, expected_build, source)
+        print(json.dumps(result, indent=2))
+        return 0 if result["takeover_bound_met"] else 1
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        # All contexts settle/close; retain partial evidence, never delete it.
+
+
 # --- hiqlite-wal attribution ------------------------------------------------
 
 WAL_HEADER = 7 + 1 + 8 + 8 + 4 + 4
@@ -250,12 +653,42 @@ def main(argv=None) -> int:
     ev.add_argument("samples")
     ev.add_argument("--gate-hours", type=float, default=GATE_HOURS)
     ev.add_argument("--json", action="store_true")
+    ev.add_argument("--after", action="store_true", help="strict AFTER evidence; legacy M0 is unchanged")
+    ev.add_argument("--evidence-dir")
+    ev.add_argument("--expected-build")
+    ev.add_argument("--source-commit")
+    sample = sub.add_parser("sample-after")
+    sample.add_argument("--output-dir", required=True)
+    sample.add_argument("--acquisition-manifest", required=True)
+    sample.add_argument("--expected-build", required=True)
+    sample.add_argument("--source-commit", required=True)
+    sample.add_argument("--max-seconds", type=int, required=True)
     at = sub.add_parser("attribute")
     at.add_argument("wal", nargs="+")
     at.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.command == "sample-after":
+        try:
+            return sample_after(args.output_dir, args.acquisition_manifest, args.expected_build,
+                                args.source_commit, args.max_seconds)
+        except (ValueError, OSError, TimeoutError) as error:
+            print(f"AFTER capture refused; partial owned evidence retained: {error}", file=sys.stderr)
+            return 1
     if args.command == "evaluate":
+        if args.after:
+            if not all((args.evidence_dir, args.expected_build, args.source_commit)) or args.gate_hours != GATE_HOURS:
+                parser.error("--after requires evidence/build/full source and the unchanged 12-hour gate")
+            try:
+                text = after_read_regular(args.samples, AFTER_MAX_TSV).decode("utf-8")
+                result = evaluate_after(io.StringIO(text), args.evidence_dir, args.expected_build, args.source_commit)
+            except (ValueError, OSError) as error:
+                print(f"AFTER evidence refused: {error}", file=sys.stderr)
+                return 1
+            print(json.dumps(result, indent=2))
+            return 0 if result["takeover_bound_met"] else 1
+        if any((args.evidence_dir, args.expected_build, args.source_commit)):
+            parser.error("AFTER inputs require explicit --after")
         with open(args.samples, newline="") as handle:
             result = evaluate(handle, args.gate_hours)
         if args.json:
