@@ -25,6 +25,7 @@ class ContinuousReservationsTest {
         var ledgerRevision = 0L
         var tx: JsonObject? = null
         var failedTargetCalls = 0
+        var failedRestoreCalls = 0
         var blockOptional = false
         val optionalEntered = CompletableDeferred<Unit>()
         val optionalBlocked = CompletableDeferred<Unit>()
@@ -32,6 +33,10 @@ class ContinuousReservationsTest {
             requests += request
             val transition = request.obj("transition")
             val operation = transition?.obj("operation")
+            if (failedRestoreCalls > 0 && operation?.text("kind") == "prepare" && operation.text("target_rendition_id") == "c".repeat(64)) {
+                failedRestoreCalls--
+                throw java.io.IOException("lost restorative acknowledgement")
+            }
             if (blockOptional && operation?.text("kind") == "prepare" && operation.text("target_rendition_id") == "b".repeat(64)) {
                 blockOptional = false
                 optionalEntered.complete(Unit)
@@ -97,6 +102,8 @@ class ContinuousReservationsTest {
         assertTrue(reservations.change("c".repeat(64), 48, true, setOf("b".repeat(64), "c".repeat(64))))
         failedTargetCalls = 2
         assertTrue(runCatching { reservations.change("b".repeat(64), 96, false, setOf("b".repeat(64), "c".repeat(64))) }.isFailure)
+        failedRestoreCalls = 2
+        assertTrue(runCatching { reservations.recoverFailedChange() }.isFailure)
         reservations.recoverFailedChange()
         // Replay the uncertain low target first, then restore high using a
         // newer intent; its actual scheduled choice remains usable.

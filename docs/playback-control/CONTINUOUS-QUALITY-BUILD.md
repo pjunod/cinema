@@ -3356,3 +3356,28 @@ again after this commit against origin/main. Physical app and output evidence
 remain separate from compilation. The local ADB inventory is empty and the
 read-only node inventory found no existing ADB service; no remote ADB service
 was started and no source was transferred.
+
+
+### 10.109 Coalesced actor wakeups preserve actual active-time budgets
+
+The controller records every transport and lifecycle sample before actor wakeups
+coalesce. Its accumulated active clock excludes a pause/background interval
+even when a network exchange prevents the actor from observing both transitions.
+Deadline consumers distinguish that accumulated metric from ordinary wall time,
+so a previously observed pause cannot discard later active time either. Film
+position and playback rate remain observed values; an invalid rate cannot
+produce a speculative boundary crossing.
+
+Restorative prepare acknowledgment can also arrive only on exact replay. The
+recovery owner now reuses that live acknowledged transaction instead of issuing
+another intent on every retry or after the incumbent loader restored it. The
+regression loses two restorative acknowledgments and verifies the revision does
+not grow on replay. Clock source regression covers a long background interval,
+coalesced resume, active control and presentation budgets, and invalid rate.
+
+Production and test sources compile in eleven seconds. One earlier invocation
+pointed ANDROID_HOME at the Gradle cache, failed before compilation and was
+corrected to the existing SDK; no SDK package or license directory was created
+in that cache. Unit execution remains deferred to final review and fast lane.
+Committed mobile counter validation passed against origin/main before these
+source-only changes. The branch is backed up through 0515f1d2a.

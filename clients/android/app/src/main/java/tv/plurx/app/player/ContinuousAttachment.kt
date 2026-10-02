@@ -70,6 +70,7 @@ internal class ContinuousAttachment(
     private val audioDecoderOwned = AtomicBoolean()
     private val frame = AtomicReference<ContinuousOutputEvidence.Event.Frame?>()
     private val audioHead = AtomicReference<Long?>(null)
+    private val sampledClock = ContinuousPlaybackClock()
     private val playbackClock = AtomicReference<ContinuousObservationDeadline.Clock?>()
     private val observationDeadline = ContinuousObservationDeadline()
     private val controlDeadline = ContinuousControlDeadline()
@@ -141,7 +142,7 @@ internal class ContinuousAttachment(
     fun playback(positionMs: Long, rate: Double, active: Boolean, nowMs: Long) {
         if (closed.get() || positionMs < 0) return
         val position = try { Math.multiplyExact(positionMs, 1000) } catch (_: ArithmeticException) { return }
-        playbackClock.set(ContinuousObservationDeadline.Clock(nowMs, position, rate, active))
+        playbackClock.set(sampledClock.sample(ContinuousObservationDeadline.Clock(nowMs, position, rate, active)))
         wake.trySend(Unit)
     }
 
@@ -236,7 +237,7 @@ internal class ContinuousAttachment(
         val revision = protocol.ledger?.number("latest_intent_revision") ?: return
         val tx = transactions().lastOrNull { it.number("intent_revision") == revision } ?: return
         val unappended = tx["ever_appended"]?.wireBoolean() == false && tx["cancel_requested"]?.wireBoolean() == false
-        if (!controlDeadline.sample(revision, unappended, clock.nowMs, clock.active)) return
+        if (!controlDeadline.sample(revision, unappended, clock.nowMs, clock.active, clock.activeElapsed)) return
         val row = rows.singleOrNull { it.text("rendition_id") == tx.text("target_rendition_id") } ?: return
         val pin = tx.getValue("ready").jsonArray.firstOrNull()?.jsonObject ?: return
         val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))

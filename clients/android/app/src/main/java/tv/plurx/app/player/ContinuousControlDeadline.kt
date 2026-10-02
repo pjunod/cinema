@@ -8,12 +8,12 @@ internal class ContinuousControlDeadline(private val budgetMs: Long = 30_000) {
     private var previousActive = false
     private var elapsedMs = 0L
     private var fired = false
-    fun sample(intent: Long, eligible: Boolean, nowMs: Long, active: Boolean): Boolean {
+    fun sample(intent: Long, eligible: Boolean, nowMs: Long, active: Boolean, activeElapsed: Boolean = false): Boolean {
         if (revision != intent) {
             revision = intent; previousMs = null; elapsedMs = 0; fired = false
         }
         val previous = previousMs
-        if (eligible && previousActive && previous != null && nowMs > previous)
+        if (eligible && (previousActive || activeElapsed) && previous != null && nowMs > previous)
             elapsedMs = minOf(budgetMs, elapsedMs + minOf(budgetMs, nowMs - previous))
         previousMs = nowMs
         previousActive = eligible && active

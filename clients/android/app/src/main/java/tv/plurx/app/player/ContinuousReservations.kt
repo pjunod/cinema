@@ -78,7 +78,16 @@ internal class ContinuousReservations(
             tx.getValue("appended").jsonArray.isEmpty()) && cancelUnexposed(failed.transaction.orEmpty(), proof)
         if (unexposed && tx != null && tx["cancel_requested"]?.wireBoolean() != true) protocol.transition(requireNotNull(failed.transaction),
             buildJsonObject { put("kind", "cancel_unappended"); put("completed", JsonArray(emptyList())) })
-        prepare(failed.previous.row, failed.through)
+        // A restorative prepare may have been acknowledged only on replay.
+        // Reuse that live owner rather than allocating another intent on each
+        // retry, or when the incumbent loader already restored the same choice.
+        val existing = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().map { it.jsonObject }
+            .singleOrNull { it.text("transaction_id") == transaction &&
+                it["intent_revision"] == protocol.ledger?.get("latest_intent_revision") &&
+                it["target_rendition_id"] == failed.previous.row["rendition_id"] &&
+                it["intent_superseded"]?.wireBoolean() == false && it["cancel_requested"]?.wireBoolean() == false &&
+                it.getValue("ready").jsonArray.isNotEmpty() }
+        if (existing == null) prepare(failed.previous.row, failed.through)
         reserveWindow(failed.through)
         failedChange = null
         if (unexposed) Retained(failed.row, failed.previous.request) else null
