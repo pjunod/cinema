@@ -74,7 +74,9 @@ scratch after retaining minimized fixtures and findings.
 | Android TV connect/browse/HLS/remux | Not tested | Required J0 client gate |
 | Both clients' image/subtitle/media credential carriers and version-implied calls | Not measured | Required policy/design evidence before J2 |
 | Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Not tested | Required lifecycle evidence before advancing J0 |
-| Plurx unindexed copy versus encoded VOD, missing duration, capacity and first-minute engine attestation | Not exercised through the prototype | Required J0 hard-seam experiments |
+| Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
+| Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
+| Missing duration, first-minute engine attestation, long-pause real-client resurrection and VOD-only worker/relay propagation | Not exercised through the prototype | Required J0 hard-seam experiments |
 
 ## 3. Compiler loop — available before Rust changes
 
@@ -88,6 +90,22 @@ The existing `vodserve::tests::idle_reap_and_same_id_resurrection_are_one_reader
 regression passed: one test executed, 3,137 filtered. It proves the native
 reader-transition race is fenced. It does not prove either external client's
 pause/resume behavior or the new facade's adapter, which has not been built.
+
+Additional native service regressions ran on the integrated base, each with
+one test executed and 3,137 filtered:
+
+| Test (`cargo test -p plurxd --bin plurxd <name> -- --nocapture`) | What actually passed |
+|---|---|
+| `encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts` | Encoded VOD attaches without a copy index; fetched init/segment bytes decode after 0, 90.09 and 3-second starts, with stable initialization bytes |
+| `encoded_vod_capacity_read_has_one_deadline_and_no_orphaned_wait` | Existing capacity policy has a bounded read deadline and no orphaned wait |
+| `first_play_queues_missing_source_preparation_with_discovery_off` | Missing HEVC copy preparation refuses; repeated first play queues one existing preparation request and attaches no incomplete VOD session |
+
+These are existing native tests, not a new compatibility adapter or a proof
+that an external client will request the resurrection path. The per-create
+VOD-only policy and client-side timing remain unbuilt/unmeasured. Test linking
+reported the macOS compact-unwind size warning; execution passed. Workspace
+Clippy with `-D warnings`, formatting, catalog lint and served JavaScript
+syntax passed through the normal tracked hook.
 
 ## 4. Milestone admission — J0 remains open
 
