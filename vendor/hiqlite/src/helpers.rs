@@ -74,16 +74,27 @@ pub async fn add_new_learner(
     state: &Arc<AppState>,
     raft_type: &RaftType,
     node: Node,
+    admission: Option<&dyn crate::membership_admission::PreparedMembershipAdmission>,
 ) -> Result<(), Error> {
     info!("Adding Node as new {:?} Learner: {:?}", raft_type, node);
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            let metrics = state.raft_db.raft.metrics().borrow().clone();
+            if metrics.membership_config.membership().get_node(&node.id) == Some(&node) {
+                return Ok(());
+            }
+            redeem_membership_acquisition(state, admission)?;
             state.raft_db.raft.add_learner(node.id, node, true).await?;
             Ok(())
         }
         #[cfg(feature = "cache")]
         RaftType::Cache => {
+            let metrics = state.raft_cache.raft.metrics().borrow().clone();
+            if metrics.membership_config.membership().get_node(&node.id) == Some(&node) {
+                return Ok(());
+            }
+            redeem_membership_acquisition(state, admission)?;
             state
                 .raft_cache
                 .raft
@@ -100,11 +111,21 @@ pub async fn change_membership(
     raft_type: &RaftType,
     members: BTreeSet<u64>,
     retain: bool,
+    admission: Option<&dyn crate::membership_admission::PreparedMembershipAdmission>,
 ) -> Result<(), Error> {
     info!("Changing {:?} Raft membership to: {:?}", raft_type, members);
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            let metrics = state.raft_db.raft.metrics().borrow().clone();
+            if members.iter().any(|id| {
+                !metrics
+                    .membership_config
+                    .voter_ids()
+                    .any(|voter| voter == *id)
+            }) {
+                redeem_membership_acquisition(state, admission)?;
+            }
             state
                 .raft_db
                 .raft
@@ -114,6 +135,15 @@ pub async fn change_membership(
         }
         #[cfg(feature = "cache")]
         RaftType::Cache => {
+            let metrics = state.raft_cache.raft.metrics().borrow().clone();
+            if members.iter().any(|id| {
+                !metrics
+                    .membership_config
+                    .voter_ids()
+                    .any(|voter| voter == *id)
+            }) {
+                redeem_membership_acquisition(state, admission)?;
+            }
             state
                 .raft_cache
                 .raft
@@ -122,6 +152,29 @@ pub async fn change_membership(
             Ok(())
         }
         RaftType::Unknown => panic!("neither `sqlite` nor `cache` feature enabled"),
+    }
+}
+
+pub(crate) fn membership_is_applied(metrics: &RaftMetrics<u64, Node>) -> bool {
+    metrics.running_state.is_ok()
+        && metrics
+            .membership_config
+            .log_id()
+            .as_ref()
+            .zip(metrics.last_applied.as_ref())
+            .is_some_and(|(entry, applied)| entry.index < applied.index || entry == applied)
+}
+
+fn redeem_membership_acquisition(
+    state: &AppState,
+    prepared: Option<&dyn crate::membership_admission::PreparedMembershipAdmission>,
+) -> Result<(), Error> {
+    match (state.membership_admission.as_ref(), prepared) {
+        (Some(_), Some(prepared)) => prepared.redeem(),
+        (Some(_), None) => Err(Error::Error(
+            "membership acquisition has no original admission".into(),
+        )),
+        (None, _) => Ok(()),
     }
 }
 

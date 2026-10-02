@@ -50,6 +50,7 @@ fn kind_slot(kind: JobKind) -> usize {
         JobKind::SemanticEmbedding => 8,
         JobKind::MediaProbe => 9,
         JobKind::CopyOutputPrepare => 10,
+        JobKind::EncodedOutputPrepare => 11,
     }
 }
 

@@ -93,8 +93,17 @@ impl Filter {
 }
 
 pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::CancellationToken) {
-    let guard = state.membership.clock_guard();
-    let transport = crate::http::peer_transport::PeerTransport::new(state.membership.clone());
+    run_membership(state.membership, shutdown).await;
+}
+
+/// The observation phase needs no media/store AppState or normal background
+/// loops. It shares the eventual manager's exact auth caches and clock guard.
+pub(crate) async fn run_membership(
+    membership_manager: plurx_core::cluster::membership::MembershipManager,
+    shutdown: tokio_util::sync::CancellationToken,
+) {
+    let guard = membership_manager.clock_guard();
+    let transport = crate::http::peer_transport::PeerTransport::new(membership_manager.clone());
     let mut filters = BTreeMap::<String, Filter>::new();
     let mut generation = guard.ticket().clock_generation;
     let mut membership = None;
@@ -103,19 +112,17 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
     loop {
         tokio::select! { () = shutdown.cancelled() => break, _ = interval.tick() => {} }
         // Roster discovery is bounded independently of the common 2 s peer deadline.
-        let peer_roster = match tokio::time::timeout(
-            Duration::from_secs(2),
-            state.membership.clock_peers(),
-        )
-        .await
-        {
-            Ok(Ok(peers)) => peers,
-            _ => {
-                guard.roster_failed();
-                filters.clear();
-                continue;
-            }
-        };
+        let peer_roster =
+            match tokio::time::timeout(Duration::from_secs(2), membership_manager.clock_peers())
+                .await
+            {
+                Ok(Ok(peers)) => peers,
+                _ => {
+                    guard.roster_failed();
+                    filters.clear();
+                    continue;
+                }
+            };
         let mut roster = peer_roster
             .peers
             .iter()
@@ -178,7 +185,7 @@ pub(crate) async fn run(state: AppState, shutdown: tokio_util::sync::Cancellatio
             .await;
         // A membership change during fanout cannot publish complete coverage for the old roster.
         let final_peers =
-            tokio::time::timeout(Duration::from_secs(2), state.membership.clock_peers()).await;
+            tokio::time::timeout(Duration::from_secs(2), membership_manager.clock_peers()).await;
         let same_roster = match final_peers {
             Ok(Ok(final_roster)) => {
                 let mut ids = final_roster

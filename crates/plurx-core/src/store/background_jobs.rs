@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::background_jobs_copy_output::PUBLISH_COPY_OUTPUT_SQL;
-pub use super::background_jobs_copy_output::{CopyOutputJobOutput, PublishCopyOutputJob};
+pub use super::background_jobs_copy_output::{
+    CopyOutputJobOutput, PublishCopyOutputJob, PublishEncodedOutputJob,
+};
 pub use super::background_jobs_delivery::{
     hydration_identity, DeliveryIntent, JobWaiter, WaiterCursor, WaiterPage, WaiterQuery,
 };
@@ -78,6 +80,8 @@ pub(crate) const RECEIPT_PRESSURE_SCHEMA: &str =
 pub(crate) const VIEWER_ANALYSIS_SCHEMA: &str = include_str!("background_jobs_viewer_analysis.sql");
 /// Replicated v67 / SQLite v91: source cancellation for full copy preparation.
 pub(crate) const COPY_OUTPUT_SCHEMA: &str = include_str!("background_jobs_copy_output.sql");
+/// Replicated v69 / SQLite v93, following candidate-recovery v68/v92.
+pub(crate) const ENCODED_OUTPUT_SCHEMA: &str = include_str!("background_jobs_encoded_output.sql");
 
 // Scheduled full-library ticks reuse an equivalent pending request inside this
 // same admission statement. Reads on individual schedulers cannot deduplicate
@@ -584,6 +588,7 @@ WHERE id = json_extract($1, '$.token.job_id')
 pub enum JobKind {
     TranscodePrepare,
     CopyOutputPrepare,
+    EncodedOutputPrepare,
     FragmentIndexBuild,
     ArtifactHydrate,
     SubtitleExtract,
@@ -602,6 +607,7 @@ impl JobKind {
         match self {
             Self::TranscodePrepare
             | Self::CopyOutputPrepare
+            | Self::EncodedOutputPrepare
             | Self::FragmentIndexBuild
             | Self::ArtifactHydrate
             | Self::SubtitleExtract
@@ -668,10 +674,86 @@ impl CopyOutputIntent {
     }
 }
 
+/// Exact selected encoded delivery inputs. Digests are equality constraints,
+/// not producer, filesystem or retained-output authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EncodedOutputIntent {
+    pub target_node_id: String,
+    pub target_height: u32,
+    pub requested_height: Option<u32>,
+    pub copy_for_burn: Option<(bool, bool, bool)>,
+    pub audio_index: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub audio_claim: crate::playback::audio::AudioClaim,
+    pub audio_delivery: crate::playback::audio::AudioDelivery,
+    pub subtitle_burn: Option<i64>,
+    pub subtitle_digest: Option<String>,
+    pub hdr10_requested: bool,
+    pub grade: crate::transcode::OutputGrade,
+    pub normalized_geometry: bool,
+    pub profile: Option<CopyOutputProfile>,
+    pub width: u32,
+    pub height: u32,
+    pub plan_digest: String,
+    pub executable_digest: String,
+    pub engine_digest: String,
+    pub candidate_id: Option<crate::playback::candidate::CandidateId>,
+    pub candidate_digest: Option<[u8; 32]>,
+}
+
+impl EncodedOutputIntent {
+    pub fn valid(&self) -> bool {
+        identifier(&self.target_node_id)
+            && (2..=8_640).contains(&self.target_height)
+            && match (self.requested_height, self.copy_for_burn) {
+                (Some(height), None) => (1..=8_640).contains(&height),
+                (None, Some((_, preserve, convert))) => {
+                    self.subtitle_burn.is_some() && (!convert || preserve)
+                }
+                _ => false,
+            }
+            && self.audio_index.is_none_or(|index| index >= 0)
+            && (-15_000..=15_000).contains(&self.audio_offset_ms)
+            && self.audio_claim.valid_snapshot()
+            && self.audio_delivery.valid_snapshot()
+            && self.subtitle_burn.is_none_or(|index| index >= 0)
+            && self.subtitle_burn.is_some() == self.subtitle_digest.is_some()
+            && self
+                .subtitle_digest
+                .as_ref()
+                .is_none_or(|value| digest(value))
+            && (1..=16_384).contains(&self.width)
+            && (1..=16_384).contains(&self.height)
+            && digest(&self.plan_digest)
+            && digest(&self.executable_digest)
+            && digest(&self.engine_digest)
+            && match (self.candidate_id, self.candidate_digest) {
+                (None, None) => !self.normalized_geometry && self.profile.is_none(),
+                (Some(id), Some(value)) => {
+                    id == crate::playback::candidate::CandidateId::for_recipe_digest(value)
+                }
+                _ => false,
+            }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 /// Closed payloads contain identifiers, never executable text or caller-selected paths.
 pub enum JobPayload {
+    EncodedOutputPrepare {
+        encoded_output_version: u16,
+        file_id: i64,
+        source_generation: String,
+        source_size: i64,
+        source_mtime: i64,
+        source_object_version: String,
+        policy_generation: String,
+        intent: EncodedOutputIntent,
+        scratch_bytes: i64,
+        reason: String,
+    },
     CopyOutputPrepare {
         copy_output_version: u16,
         file_id: i64,
@@ -749,6 +831,7 @@ pub enum JobPayload {
 impl JobPayload {
     pub const fn kind(&self) -> JobKind {
         match self {
+            Self::EncodedOutputPrepare { .. } => JobKind::EncodedOutputPrepare,
             Self::CopyOutputPrepare { .. } => JobKind::CopyOutputPrepare,
             Self::TranscodePrepare { .. } => JobKind::TranscodePrepare,
             Self::FragmentIndexBuild { .. } => JobKind::FragmentIndexBuild,
@@ -765,6 +848,7 @@ impl JobPayload {
 
     pub fn target_node_id(&self) -> Option<&str> {
         match self {
+            Self::EncodedOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::CopyOutputPrepare { intent, .. } => Some(&intent.target_node_id),
             Self::ArtifactHydrate { target_node_id, .. }
             | Self::ArtifactVerify { target_node_id, .. } => Some(target_node_id),
@@ -781,6 +865,31 @@ impl JobPayload {
 
     pub fn validate(&self) -> Result<(), StoreError> {
         let valid = match self {
+            Self::EncodedOutputPrepare {
+                encoded_output_version,
+                file_id,
+                source_generation,
+                source_size,
+                source_object_version,
+                policy_generation,
+                intent,
+                scratch_bytes,
+                reason,
+                ..
+            } => {
+                *encoded_output_version == 1
+                    && *file_id > 0
+                    && *source_size > 0
+                    && identifier(source_generation)
+                    && identifier(source_object_version)
+                    && identifier(policy_generation)
+                    && intent.valid()
+                    && *scratch_bytes > 0
+                    && matches!(
+                        reason.as_str(),
+                        "recent_demand" | "next_up" | "recent" | "channel_next"
+                    )
+            }
             Self::CopyOutputPrepare {
                 copy_output_version,
                 file_id,
@@ -1608,6 +1717,10 @@ pub trait BackgroundJobStore: Send + Sync {
         &self,
         request: PublishCopyOutputJob,
     ) -> Result<JobPublishOutcome, StoreError>;
+    async fn publish_encoded_output_job(
+        &self,
+        request: PublishEncodedOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError>;
     async fn publish_fragment_job(
         &self,
         request: PublishFragmentJob,
@@ -2283,6 +2396,45 @@ LIMIT 1
         decode(
             rows.first()
                 .ok_or_else(|| invalid("copy publication returned no verdict"))?,
+        )
+    }
+
+    async fn publish_encoded_output_job(
+        &self,
+        request: PublishEncodedOutputJob,
+    ) -> Result<JobPublishOutcome, StoreError> {
+        request.token.validate()?;
+        let output = &request.output;
+        if request.now_ms < 0
+            || !request.intent.valid()
+            || uuid::Uuid::parse_str(&output.artifact_id).is_err()
+            || !digest(&output.output_identity)
+            || !identifier(&output.source_object_version)
+            || output.wire_bytes <= 0
+            || output.duration_micros <= 0
+            || output.average_bps == 0
+            || output.peak_bps < output.average_bps
+            || output.peak_bps > i64::MAX as u64
+            || (output.wire_bytes > 0
+                && output.duration_micros > 0
+                && u128::from(output.average_bps)
+                    != (output.wire_bytes as u128 * 8_000_000)
+                        .div_ceil(output.duration_micros as u128))
+        {
+            return Err(invalid("invalid completed encoded publication"));
+        }
+        let body = serde_json::to_value(request).map_err(|error| invalid(&error.to_string()))?;
+        let rows = self
+            .queue_sql(
+                super::background_jobs_copy_output::encoded_publication_sql(),
+                encode(&body)?,
+                true,
+                true,
+            )
+            .await?;
+        decode(
+            rows.first()
+                .ok_or_else(|| invalid("encoded publication returned no verdict"))?,
         )
     }
 
