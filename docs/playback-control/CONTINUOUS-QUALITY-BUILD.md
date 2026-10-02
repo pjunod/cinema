@@ -3572,3 +3572,18 @@ The regression source covers scheduled-only, frame-without-receipt,
 superseded, wrong-transaction, exact presentation and duplicate callbacks.
 JavaScript syntax and normal commit checks run before committed-source
 qualification; no unit execution is performed before final adversarial review.
+
+
+### 10.117 Auto source coverage preserves the real policy
+
+The AVC manual fixture also offers a compatible Original route to the normal
+Auto catalog. That choice is outside the normalized two-rung family, so
+forcing five continuous Auto changes by hiding Original would change the
+policy being qualified. A separate thirty-minute 1080p MPEG-4 Part 2/AAC
+fixture forces video encoding through ordinary capability negotiation. Its
+catalog can exercise real Auto decisions between normalized encoded rungs
+without removing candidates or replacing the policy. It has a deterministic
+24 fps grid, two-second keyframes and a continuous 48 kHz sine soundtrack;
+source generation is bounded to one encoder thread. The existing manual AVC
+fixture and its qualification criteria remain unchanged. The new fixture is
+source coverage; its switches and physical output are not yet qualified.

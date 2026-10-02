@@ -445,6 +445,16 @@ function fixtureCommand(fixture, output, directory, fixtures) {
         "-g", "48", "-keyint_min", "48", "-sc_threshold", "0", "-b:v", "8M",
         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", output,
       ];
+    case "mpeg4_aac_mp4_continuous":
+      return [
+        ...ffmpegPrefix(),
+        "-f", "lavfi", "-i", `testsrc2=size=1920x1080:rate=24:duration=${seconds}`,
+        "-f", "lavfi", "-i", `sine=frequency=440:sample_rate=48000:duration=${seconds}`,
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-c:v", "mpeg4", "-threads", "1", "-b:v", "4M", "-g", "48", "-bf", "0",
+        "-pix_fmt", "yuv420p", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-shortest", output,
+      ];
     case "h264_multitrack_mkv": { // video is copied so this case differs only where intended
       const source = path.join(directory, fixtures.get(fixture.depends_on).filename);
       const subtitle = path.join(directory, "playback-lab.srt");
@@ -545,6 +555,7 @@ function verifyFixture(fixture, file) {
   if (!video) failures.push("no video stream");
   const want = {
     h264_aac_mp4: { video: "h264", audio: ["aac"], width: 1920, height: 1080, minDuration: 20 },
+    mpeg4_aac_mp4_continuous: { video: "mpeg4", audio: ["aac"], width: 1920, height: 1080, minDuration: 1800 },
     h264_multitrack_mkv: { video: "h264", audio: ["aac", "ac3"], subtitles: 1, width: 1920, height: 1080, minDuration: 20 },
     mpeg4_mp3_avi: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 20 },
     mpeg4_mp3_avi_long: { video: "mpeg4", audio: ["mp3"], width: 1280, height: 720, minDuration: 200 },
