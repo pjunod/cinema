@@ -1311,7 +1311,15 @@ mod tests {
         assert_eq!(admissions.software_in_use(), 4);
         assert_eq!(admissions.snapshot().hardware_used, 2);
         let parent = crate::vodencode::EncodePermit::from(permits.remove(0));
-        let retiring_worker = parent.clone();
+        let retiring_worker = parent.clone().try_claim_worker().expect("first worker");
+        assert!(parent.clone().try_claim_worker().is_none());
+        assert_eq!(admissions.software_in_use(), 4);
+        drop(retiring_worker);
+        let retiring_worker = parent
+            .clone()
+            .try_claim_worker()
+            .expect("reaped predecessor");
+        assert!(parent.clone().try_claim_worker().is_none());
         drop(parent);
         drop(permits);
         assert_eq!(

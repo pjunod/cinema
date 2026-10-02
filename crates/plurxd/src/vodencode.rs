@@ -266,6 +266,39 @@ pub(crate) struct EncodePermit {
 struct EncodeReservation {
     _hardware: Option<HwSlot>,
     _software: Option<SwPermit>,
+    worker_claimed: std::sync::atomic::AtomicBool,
+}
+
+/// Exclusive process ownership, retained by the producer slot until reap.
+/// Retaining a family reservation never grants concurrent use of its capacity.
+#[derive(Debug)]
+pub(crate) struct EncodeWorkerPermit {
+    reservation: Arc<EncodeReservation>,
+}
+
+impl EncodePermit {
+    pub(crate) fn try_claim_worker(self) -> Option<EncodeWorkerPermit> {
+        self._reservation
+            .worker_claimed
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .ok()?;
+        Some(EncodeWorkerPermit {
+            reservation: self._reservation,
+        })
+    }
+}
+
+impl Drop for EncodeWorkerPermit {
+    fn drop(&mut self) {
+        self.reservation
+            .worker_claimed
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
 }
 
 impl From<crate::admission::TranscodePermit> for EncodePermit {
@@ -275,6 +308,7 @@ impl From<crate::admission::TranscodePermit> for EncodePermit {
             _reservation: Arc::new(EncodeReservation {
                 _hardware: hardware,
                 _software: software,
+                worker_claimed: std::sync::atomic::AtomicBool::new(false),
             }),
         }
     }

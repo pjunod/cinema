@@ -1644,3 +1644,16 @@ nothing. Regressions cover durable backend projection/takeover/disposal,
 capacity refusal and cached AAC bytes. HTTP/peer and parent actor callers,
 shared-cache pins and final qualification remain unfinished. Unit execution
 is deferred.
+
+### 10.33 Exclusive use of retained producer reservations
+
+A retained family CPU/GPU reservation now grants one exclusive worker claim.
+The real VOD generation claims it before opening inputs or launching FFmpeg,
+and the producer slot holds that claim until process cleanup releases it.
+Cloning the reservation preserves capacity but cannot launch a second worker
+under the same credit. A duplicate launch refuses before spawning; a later
+generation can claim the reservation after the previous worker is reaped.
+The existing bounded producer-group regression now covers duplicate refusal,
+claim reuse and capacity retained through parent teardown. Pinned compiler
+checks and the normal hook apply; unit execution remains deferred until final
+adversarial review. Parent integration remains outstanding.

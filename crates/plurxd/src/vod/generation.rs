@@ -32,6 +32,24 @@ pub(super) async fn spawn_generation(
     let start_seconds = entry.start_ticks as f64 / f64::from(rendition.timescale);
     let recipe = &rendition.recipe;
     debug_assert_eq!(recipe.encoding.is_some(), permit.is_some());
+    // A family may retain this reservation through several generations, but
+    // only the exact unreaped process may use it. Refuse a duplicate launch
+    // before opening inputs or spawning a second producer under one credit.
+    let permit = match permit {
+        Some(reservation) => match reservation.try_claim_worker() {
+            Some(worker) => Some(worker),
+            None => {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    "the producer reservation still belongs to an unreaped worker".to_owned(),
+                );
+                return;
+            }
+        },
+        None => None,
+    };
     let attested = attested_source_setup(rendition);
     let audio_source = match reopen_encoded_audio(rendition.source.as_ref(), recipe).await {
         Ok(source) => source,
