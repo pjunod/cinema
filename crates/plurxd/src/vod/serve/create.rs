@@ -238,7 +238,11 @@ impl VodServe {
                 "the file has no probed duration, so no immutable plan can be built",
             ));
         };
+        let phase_started = Instant::now();
         let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        tracing::debug!(target: "plurxd::vodserve", file_id = file.id,
+            phase = "pipeline_capability", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition preparation phase completed");
         // An encoded rendition never carries the source's parameter sets, so
         // only a copy waits on the census.
         let probe_json = if prepared.encoding.is_none() {

@@ -3819,3 +3819,22 @@ The previous End census found no FFmpeg children five seconds after End,
 but did not prove that the daemon remained alive. That result is incomplete
 cleanup evidence. The next probe must verify the daemon identity throughout
 that interval and preserve failed-stage snapshots before returning a verdict.
+
+
+### 10.127 Initial placement blocks the fresh transport qualification
+
+Commit `66488b13a` passed the normal hook and its exact-source Linux build
+in 3m41s. Its fresh Chrome probe failed before initial playback: the local
+worker exceeded the placement deadline. The trace also showed background
+indexing of an older AVC fixture, so the retry used a library containing only
+the MPEG-4 fixture. That retry failed the same placement deadline; background
+indexing was therefore not the full explanation. Both failed receipts and
+bounded daemon logs are preserved separately. Neither run exercised the
+pause/resume repair or the improved live-daemon End census.
+
+In the fixture-isolated attempt, VOD creation completed in 17,562 ms, after
+the request had already returned 503. Aggregate node readings showed CPU
+contention, but do not establish the cause. Bounded debug timings now identify
+capability discovery, normative plan storage and rendition construction
+separately. Admission, deadline and selection behavior are unchanged. The
+startup delay remains under investigation; no unit tests executed.

@@ -409,15 +409,23 @@ impl Shared {
             }
         }
 
+        let phase_started = Instant::now();
         let plan = self
             .stored_plan(key, &identity, &index, &recipe, duration_ms)
             .await?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            phase = "stored_plan", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition attachment phase completed");
         if plan.is_empty() {
             return Ok(None);
         }
+        let phase_started = Instant::now();
         let rendition = self
             .build_rendition(key, index, recipe, plan, &settings)
             .await?;
+        tracing::debug!(target: "plurxd::vodserve", rendition = %key,
+            phase = "build_rendition", elapsed_ms = phase_started.elapsed().as_millis(),
+            "rendition attachment phase completed");
         let adopted_bytes = rendition.manifest.lock().await.materialized_bytes();
         let (rendition, installed) = {
             let mut renditions = self.renditions.lock().await;
