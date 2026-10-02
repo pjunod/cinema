@@ -6,6 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::{FromRef, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use axum::Json;
 use plurx_core::auth;
 #[cfg(test)]
@@ -705,6 +706,7 @@ pub struct ClientLog {
     pub session_id: Option<String>,
     /// Exact local completed-body claim; never inferred from bandwidth or detail.
     pub(crate) link_sample: Option<super::hls::link_receipts::ClientLinkSample>,
+    pub(crate) candidate_recovery: Option<super::hls::candidate_recovery::ClientRecoverySample>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
     /// Client-reported last accepted protocol state preceding this event.
@@ -878,7 +880,7 @@ pub async fn client_log(
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
     Json(mut ev): Json<ClientLog>,
-) -> StatusCode {
+) -> axum::response::Response {
     let suppressed = match CLIENT_LOG_LIMITER.lock() {
         Ok(mut limiter) => limiter.admit(user.id, std::time::Instant::now()),
         // Fail open: a poisoned lock must not silence diagnostics.
@@ -887,7 +889,7 @@ pub async fn client_log(
     // Still 204 when dropped. The client is reporting, not asking, and an error
     // response would only give it something new to report about.
     let Some(suppressed) = suppressed else {
-        return StatusCode::NO_CONTENT;
+        return StatusCode::NO_CONTENT.into_response();
     };
     let line = client_log_line(&ev, suppressed);
 
@@ -929,7 +931,34 @@ pub async fn client_log(
             &user.password_hash,
         ));
     }
-    if let (Some(sample), Some(identity)) = (ev.link_sample.take(), network.clone()) {
+    let mut link_sample = ev.link_sample.take();
+    let acknowledged_link = if link_sample.as_ref().is_some_and(|sample| sample.negative) {
+        let sample = link_sample.take();
+        if let (Some(identity), Some(sample)) = (network.as_ref(), sample.as_ref()) {
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, identity, ev.session_id.as_deref(), sample)
+                .await
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let recovery_sample = ev.candidate_recovery.take();
+    let acknowledged_recovery =
+        if let (Some(identity), Some(sample)) = (network.as_ref(), recovery_sample.as_ref()) {
+            super::hls::candidate_recovery::accept_sample(
+                &state,
+                identity,
+                ev.session_id.as_deref(),
+                sample,
+            )
+            .await
+        } else {
+            None
+        };
+    if let Some(identity) = network.clone().filter(|_| link_sample.is_some()) {
         let proof_state = state.clone();
         let proof_session = ev.session_id.clone();
         tokio::spawn(async move {
@@ -940,7 +969,7 @@ pub async fn client_log(
                 .ok()
                 .flatten()
                 .is_some_and(|value| value.trim() == "1");
-            if enabled {
+            if let Some(sample) = link_sample.filter(|_| enabled) {
                 if let Some(value) = proof_state
                     .link_receipts
                     .accept(&proof_state, &identity, proof_session.as_deref(), &sample)
@@ -999,7 +1028,22 @@ pub async fn client_log(
         };
         emit_client_playback_event(store, event, info.as_ref(), network, Some(client));
     });
-    StatusCode::NO_CONTENT
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Some(value) =
+        acknowledged_recovery.and_then(|event| axum::http::HeaderValue::from_str(&event).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-recovery-accepted", value);
+    }
+    if let Some(value) =
+        acknowledged_link.and_then(|nonce| axum::http::HeaderValue::from_str(&nonce).ok())
+    {
+        response
+            .headers_mut()
+            .insert("x-plurx-link-accepted", value);
+    }
+    response
 }
 
 fn vod_marker_prewarm_placeholder(event: &PlaybackEvent) -> Option<(i64, &str)> {
@@ -6414,6 +6458,7 @@ mod tests {
             session_id: None,
             snapshot: None,
             link_sample: None,
+            candidate_recovery: None,
             control: None,
             control_trigger: None,
             delivered_range: None,

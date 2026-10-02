@@ -1530,3 +1530,40 @@ does not yet wire that caller, the native typed-cause senders or sustained
 incumbent decode-pressure behavior. Those remain source work, alongside the
 original decoder/recovery and shaped-network physical acceptance. It does not
 close A-05 or restore the superseded numeric-height controller.
+
+### 9.15 Authenticated recovery consumers and native pressure (2026-10-02 UTC)
+
+The follow-on reconstructs credential generation, physical source version,
+full incumbent candidate and recovery lifetime from the authenticated current
+route. Private Auto create, Decision and preparation readers consult durable
+decoder rejection memory; the public/manual catalog remains unchanged. A
+fault observation does not spend the single decoder quality response. Its
+actual changed-candidate create claims that response atomically; replay or a
+second response cannot rearm it. This leaves further codec recovery with the
+existing compatibility owner rather than creating another height controller.
+
+Apple and Android send the closed Link, Encode, Decode, Hold and Authority
+cause vocabulary at their existing evidence writers. Hold and Authority are
+diagnostic deferrals/terminal observations, not quality failures. Encode needs
+fresh actual active producer pressure; Decode needs an actual decoder failure
+or sustained dropped-frame intervals while the incumbent advances with at
+least ten seconds of supply. Pause, seek, replacement, stagnant progress and
+clock rollback discard that pressure window. Legacy `stall` stays legacy.
+
+A native Link recovery awaits an exact nonce acknowledgement within its
+original recovery budget, capped at 250 milliseconds, and rechecks the
+captured attachment and attempt afterward. The ClientLog intake emits
+`X-Plurx-Link-Accepted` only after the authenticated completed-body negative
+was actually accepted and durably folded. Unknown, positive or duplicate
+claims remain ordinary 204 without that header. The immutable acknowledged
+nonce accompanies only its matching predecessor/candidate create; a newer
+sample cannot substitute for it. No acknowledgement renews the original EOF,
+recovery deadline or failure lifetime.
+
+Focused source cases exercise the native acknowledgement predicates and
+attachment tickets, real SQLite/route/body claim folding, and authenticated
+single-response decoder memory with manual catalog preservation. These are
+source proofs, not physical decoder or shaped-network qualification. Current
+committed-source checks, one independent review and the exact effort gate
+precede landing; the original 14-versus-20 Mbit/s, decoder/recovery and complete
+platform acceptance matrix remain open. No saved feature choice is gated.
