@@ -2104,3 +2104,22 @@ The ownership regression covers a route without legacy control, exact endpoint
 binding, terminal/expired ownership and JavaScript-unsafe epochs. Source and
 normal-hook compilation apply; unit execution remains deferred. Production
 web append and presentation integration is the next step.
+
+
+### 10.58 Production sample provenance inspection
+
+The served web app now includes a bounded, single-track AVC/AAC fMP4 inspector
+for the verified family. It reads exact sample clocks, composition offsets,
+lengths and payload locations; checks init clocks/raster/configuration, mdat
+bounds, overlapping payloads and safe integers; and hashes sample lengths
+plus elementary bytes independently of container headers. Invalid parses
+cannot replace retained init context. Payload, box and sample counts are
+bounded and overlap verification sorts offsets rather than scanning every
+earlier sample. This is the provenance helper for the production adapter; it
+does not install callbacks or alter playback by itself.
+
+Synthetic regressions cover real sample boundaries, container header changes,
+changed elementary payload, signed composition, truncated/out-of-mdat data,
+and failed-init context isolation. Syntax and source compilation apply; unit
+execution remains deferred. The loader and completed SourceBuffer receipts
+still need wiring.
