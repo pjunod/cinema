@@ -379,6 +379,118 @@ impl ActivationFailpoint {
 /// of a caller that awaits it overflowed a 2 MiB test thread's stack.
 #[cfg(feature = "hiqlite-store")]
 pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, StoreError> {
+    select_daemon_store_observing(config, None).await
+}
+
+/// Own the authenticated clock-only transport during pending startup. The
+/// callback receives the same manager later activated for normal service;
+/// it must not publish general application readiness or replace its guard.
+#[cfg(feature = "hiqlite-store")]
+pub trait StartupClockObserver: Send + Sync {
+    fn start(
+        &self,
+        membership: MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StoreError>> + Send + '_>>;
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn complete_startup_observation(
+    client: &Client,
+    membership: MembershipManager,
+    identity: &super::ClusterIdentity,
+    role: ClusterRole,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<
+    (
+        MembershipManager,
+        super::membership::StartupActivationAdmission,
+    ),
+    StoreError,
+> {
+    let observer = observer.ok_or_else(|| {
+        StoreError::Database(
+            "this startup consumer has no authenticated clock-observation transport; \
+         pending membership cannot be activated"
+                .into(),
+        )
+    })?;
+    let installed = client
+        .local_membership_admission()
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    let deadline = installed
+        .as_any()
+        .downcast_ref::<super::membership::StartupMembershipAdmission>()
+        .and_then(super::membership::StartupMembershipAdmission::startup_deadline)
+        .ok_or_else(|| {
+            StoreError::Database("clock observation has no original startup deadline".into())
+        })?;
+    tokio::time::timeout_at(
+        deadline,
+        observer.start(membership.clone(), identity.node_id.clone()),
+    )
+    .await
+    .map_err(|_| StoreError::Database("clock observation startup budget expired".into()))??;
+    let guard = membership.clock_guard();
+    // Readiness is not a proposal: no ticket is carried across this wait and
+    // no production refusal is counted. The actual operation below captures
+    // its own original proof only after observation becomes available.
+    wait_startup_clock_readiness(&guard, deadline).await?;
+    if role == ClusterRole::Voter {
+        client
+            .promote_after_clock_observation(deadline)
+            .await
+            .map_err(|error| StoreError::Database(format!("startup promotion: {error}")))?;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::Database(
+                    "startup promotion is not applied before original deadline".into(),
+                ));
+            }
+            let snapshot = client
+                .local_db_raft_metrics()
+                .map_err(|error| StoreError::Database(error.to_string()))?
+                .membership_snapshot();
+            if snapshot.running && snapshot.committed && snapshot.voters.contains(&identity.raft_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Promotion changes the authoritative roster generation. It must be
+        // observed again; the learner-era proof cannot activate voter service.
+        wait_startup_clock_readiness(&guard, deadline).await?;
+    }
+    membership
+        .finish_clock_observation(deadline)
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn wait_startup_clock_readiness(
+    guard: &super::clock::ClusterClockGuard,
+    deadline: tokio::time::Instant,
+) -> Result<(), StoreError> {
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StoreError::Database(
+                "authenticated startup clock evidence is unavailable before original deadline"
+                    .into(),
+            ));
+        }
+        if guard.acquire().is_ok() && tokio::time::Instant::now() < deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub async fn select_daemon_store_observing(
+    config: &Config,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<SelectedStore, StoreError> {
     install_default_crypto_provider();
     std::fs::create_dir_all(&config.storage.data_dir)
         .map_err(|error| migration_io("creating", &config.storage.data_dir, error))?;
@@ -391,10 +503,10 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return Box::pin(join_fresh_store(config, daemon_lock)).await;
+            return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
+        let selected = Box::pin(open_active_store(config, daemon_lock, observer)).await?;
         Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
@@ -429,7 +541,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return Box::pin(join_fresh_store(config, daemon_lock)).await;
+        return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -479,6 +591,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
         daemon_lock,
         identity,
         credential_key,
+        observer,
     ))
     .await
     {
@@ -488,7 +601,11 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
 }
 
 #[cfg(feature = "hiqlite-store")]
-async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<SelectedStore, StoreError> {
+async fn join_fresh_store(
+    config: &Config,
+    daemon_lock: File,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<SelectedStore, StoreError> {
     let source = config.storage.data_dir.join(SQLITE_FILENAME);
     if path_exists(&source)? {
         return Err(StoreError::Migration(format!(
@@ -629,39 +746,37 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     )?;
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     // A verified activation marker, not the directory name, is the commit bit.
-    // Hiqlite 0.14 cannot stop and rebind fully-TLS listeners in one process,
-    // so the joiner starts at its final path. A crash before the marker leaves
+    // The joiner starts at its final path; failed post-Client startup now
+    // retains the directory lock through real listener/storage drainage.
+    // A crash before the marker leaves
     // the token and node id in place; the next boot re-enters this path, redeems
     // idempotently for the same node, and resumes the partial voter.
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     std::fs::create_dir_all(&active).map_err(|error| migration_io("creating", &active, error))?;
     sync_directory(&config.storage.data_dir)?;
-    let (client, _) = start_voter(
+    let cleanup_lock = daemon_lock
+        .try_clone()
+        .map_err(|error| migration_io("retaining daemon lock", &config.storage.data_dir, error))?;
+    let (client, _, mut pending_client) = start_voter(
         config,
         &active,
         &secrets,
         &identity,
         Some(&membership),
         true,
+        Some(cleanup_lock),
         false,
+        true,
     )
     .await?;
     let store = open_joined_store(client.clone(), &active.join("telemetry.db")).await?;
     verify_store_identity(&store, payload.cluster_id()).await?;
     let mut activation_marker = payload.activation_marker().clone();
     activation_marker.admitted_role = Some(role);
-    publish_join_activation(
-        &config.storage.data_dir,
-        &active,
-        &activation_marker,
-        &membership,
-        JoinActivationFailpoint::None,
-    )?;
-    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
 
-    // Keep the caught-up voter alive. Fully-TLS Hiqlite listeners have no
-    // graceful-shutdown handle, and no stop/rebind boundary is needed because
-    // every durable file already lives at the final path.
+    // Keep the caught-up voter alive. No stop/rebind boundary is needed because
+    // every durable file already lives at the final path. Pending ownership
+    // remains armed until the final publication/finalization awaits complete.
     let credential_key = open_active_credential_key(config, &store).await?;
     let concrete_store = Arc::new(store);
     let store: Arc<dyn Store> = concrete_store.clone();
@@ -677,7 +792,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         config.cluster.bounded_replica_reads,
         config.cluster.bounded_replica_max_lag_entries,
     );
-    let membership_manager = MembershipManager::replicated(
+    let membership_manager = MembershipManager::clock_observation(
         client.clone(),
         replication.clone(),
         Arc::clone(&store),
@@ -693,12 +808,34 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             )?,
         },
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        activation_marker,
+        activation_marker.clone(),
         role,
         config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
+    let (membership_manager, activation_admission) =
+        complete_startup_observation(&client, membership_manager, &identity, role, observer)
+            .await?;
+    activation_admission
+        .revalidate()
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    publish_join_activation(
+        &config.storage.data_dir,
+        &active,
+        &activation_marker,
+        &membership,
+        JoinActivationFailpoint::None,
+    )?;
+    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
+    if role == ClusterRole::Voter {
+        activation_admission
+            .revalidate()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        client
+            .finish_clock_observation()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+    }
     let selected = SelectedStore {
         store,
         identity,
@@ -711,6 +848,9 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         _daemon_lock: daemon_lock,
     };
     finalize_pending_join_best_effort(config, &selected).await;
+    if let Some(pending) = pending_client.as_mut() {
+        pending.handoff();
+    }
     Ok(selected)
 }
 
@@ -758,7 +898,7 @@ async fn open_joined_store(
                 return Err(StoreError::Database(format!(
                     "joined voter did not regain startup quorum within {:?}",
                     REPLICATED_LEADER_RECOVERY_BUDGET
-                )))
+                )));
             }
         }
     }
@@ -1103,6 +1243,7 @@ async fn activate_fresh_store(
     daemon_lock: File,
     identity: super::ClusterIdentity,
     credential_key: Arc<CredentialKey>,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
     write_activation_attempt(&config.storage.data_dir)?;
     ActivationFailpoint::crash_if(failpoint, ActivationFailpoint::Quiescence);
@@ -1126,9 +1267,12 @@ async fn activate_fresh_store(
     // pre-M3 activation failpoints and lets cleartext staging shut down cleanly.
     // Once the atomic active target exists, the closed-store readdress path
     // below rebuilds sole-voter metadata with an explicitly advertised address.
-    let client = match start_voter(config, &incoming, &secrets, &identity, None, false, true).await
+    let client = match start_voter(
+        config, &incoming, &secrets, &identity, None, false, None, true, false,
+    )
+    .await
     {
-        Ok((client, _)) => client,
+        Ok((client, _, _)) => client,
         Err(error) => {
             remove_abandoned_incoming(&config.storage.data_dir)?;
             return Err(error);
@@ -1192,7 +1336,8 @@ async fn activate_fresh_store(
     remove_activation_attempt(&config.storage.data_dir)?;
 
     readdress_single_voter_if_needed(config)?;
-    let selected = open_active_store_with_key(config, daemon_lock, Some(credential_key)).await?;
+    let selected =
+        open_active_store_with_key(config, daemon_lock, Some(credential_key), observer).await?;
     finish_readdress(&config.storage.data_dir)?;
     Ok(selected)
 }
@@ -2454,8 +2599,9 @@ fn snapshot_sqlite_file(source: &Path, target: &Path) -> Result<(), StoreError> 
 async fn open_active_store(
     config: &Config,
     daemon_lock: File,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
-    open_active_store_with_key(config, daemon_lock, None).await
+    open_active_store_with_key(config, daemon_lock, None, observer).await
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2463,6 +2609,7 @@ async fn open_active_store_with_key(
     config: &Config,
     daemon_lock: File,
     credential_key: Option<Arc<CredentialKey>>,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     require_real_directory(&active)?;
@@ -2493,39 +2640,42 @@ async fn open_active_store_with_key(
     }
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     let force_loopback = should_force_loopback(config, local_membership.as_ref());
-    let (client, local) = start_voter(
+    let cleanup_lock = daemon_lock
+        .try_clone()
+        .map_err(|error| migration_io("retaining daemon lock", &config.storage.data_dir, error))?;
+    let (client, local, mut pending_client) = start_voter(
         config,
         &active,
         &secrets,
         &identity,
         local_membership.as_ref(),
         true,
+        Some(cleanup_lock),
         force_loopback,
+        true,
     )
     .await?;
-    let cleanup_client = client.clone();
     let result = async move {
         let telemetry = active.join("telemetry.db");
-        let store = open_store_for_role(role, client.clone(), &telemetry).await?;
-        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
-            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
-            write_activation_marker(&active, &marker)?;
-            sync_directory(&active)?;
-        }
+        let applied = client
+            .local_db_raft_metrics()
+            .map_err(|error| StoreError::Database(error.to_string()))?
+            .membership_snapshot();
+        let actual_voter =
+            applied.running && applied.committed && applied.voters.contains(&identity.raft_id);
+        let opening_role = if role == ClusterRole::Voter && actual_voter {
+            ClusterRole::Voter
+        } else {
+            ClusterRole::Learner
+        };
+        let store = open_store_for_role(opening_role, client.clone(), &telemetry).await?;
         if let Err(error) = verify_store_identity(&store, &marker.cluster_id).await {
             drop(store);
             return Err(error);
         }
-        if read_readdress_record(&config.storage.data_dir)?.is_some() {
-            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
-        }
         // Written here rather than beside the rename so a crash in between still
         // converges: any boot that successfully opens an active target re-asserts
         // it, and this is the only place that can be reached without one.
-        if let Err(error) = ensure_activated_source_record(&config.storage.data_dir, &marker) {
-            drop(store);
-            return Err(error);
-        }
         let credential_key = match credential_key {
             Some(key) => key,
             None => match open_active_credential_key(config, &store).await {
@@ -2593,7 +2743,7 @@ async fn open_active_store_with_key(
         };
         let credential_key_secret =
             read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
-        let membership = MembershipManager::replicated(
+        let membership = MembershipManager::clock_observation(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
@@ -2607,12 +2757,57 @@ async fn open_active_store_with_key(
                 credential_key: credential_key_secret,
             },
             load_or_create_activity_signing_key(&config.storage.data_dir)?,
-            marker,
+            marker.clone(),
             role,
             config.storage.data_dir.clone(),
         )
         .await
         .map_err(|error| StoreError::Database(error.to_string()))?;
+        let (membership, activation_admission) =
+            complete_startup_observation(&client, membership, &identity, role, observer).await?;
+        if role == ClusterRole::Voter {
+            // A desired voter that booted as a learner cannot migrate until
+            // the actual local watch has proved its committed promotion.
+            if !actual_voter {
+                activation_admission
+                    .revalidate()
+                    .map_err(|error| StoreError::Database(error.to_string()))?;
+                let admit_next = || {
+                    activation_admission
+                        .revalidate()
+                        .map_err(|error| StoreError::Database(error.to_string()))
+                };
+                drop(
+                    HiqliteAuthStore::open_or_migrate_admitted(
+                        client.clone(),
+                        &telemetry,
+                        &admit_next,
+                    )
+                    .await?,
+                );
+            }
+            activation_admission
+                .revalidate()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            client
+                .finish_clock_observation()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+        }
+        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
+            activation_admission
+                .revalidate()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
+            write_activation_marker(&active, &marker)?;
+            sync_directory(&active)?;
+        }
+        if read_readdress_record(&config.storage.data_dir)?.is_some() {
+            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
+        }
+        activation_admission
+            .revalidate()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        ensure_activated_source_record(&config.storage.data_dir, &marker)?;
         Ok(SelectedStore {
             store,
             identity,
@@ -2626,12 +2821,9 @@ async fn open_active_store_with_key(
         })
     }
     .await;
-    if result.is_err() {
-        if let Err(shutdown_error) = shutdown_voter(&cleanup_client, true).await {
-            tracing::error!(
-                %shutdown_error,
-                "failed to stop Hiqlite after active store initialization failed"
-            );
+    if result.is_ok() {
+        if let Some(pending) = pending_client.as_mut() {
+            pending.handoff();
         }
     }
     result
@@ -2990,6 +3182,67 @@ async fn open_store_for_role(
 }
 
 #[cfg(feature = "hiqlite-store")]
+struct PendingStartupClient {
+    owned: Option<(Client, File)>,
+}
+
+// Cancellation, panic and runtime teardown are not terminal drain evidence.
+// Deliberately retain the actual resources if their cleanup owner disappears.
+#[cfg(feature = "hiqlite-store")]
+struct RetainedStartupResources {
+    owned: Option<(Client, File)>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl RetainedStartupResources {
+    async fn drain(mut self) {
+        let client = &self.owned.as_ref().expect("owned startup resources").0;
+        if let Err(error) = client.shutdown_retained_startup().await {
+            tracing::error!(%error, "startup cleanup is not terminal; retaining Client and daemon lock");
+            return;
+        }
+        // Only confirmed terminal drainage permits dropping the actual pair.
+        self.owned.take();
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl Drop for RetainedStartupResources {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            std::mem::forget(owned);
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl PendingStartupClient {
+    fn new(client: Client, daemon_lock: File) -> Self {
+        Self {
+            owned: Some((client, daemon_lock)),
+        }
+    }
+
+    fn handoff(&mut self) {
+        self.owned.take();
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl Drop for PendingStartupClient {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            let retained = RetainedStartupResources { owned: Some(owned) };
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(retained.drain());
+            }
+            // No entered runtime: retained drops here and preserves the pair.
+        }
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+#[allow(clippy::too_many_arguments)]
 async fn start_voter(
     config: &Config,
     target: &Path,
@@ -2997,8 +3250,10 @@ async fn start_voter(
     identity: &super::ClusterIdentity,
     local_membership: Option<&LocalMembership>,
     active_transport: bool,
+    cleanup_lock: Option<File>,
     force_loopback: bool,
-) -> Result<(Client, ClusterPeer), StoreError> {
+    observation_only: bool,
+) -> Result<(Client, ClusterPeer, Option<PendingStartupClient>), StoreError> {
     let raft_bind = if force_loopback {
         local_client_address(config.cluster.raft_bind)
     } else {
@@ -3078,14 +3333,40 @@ async fn start_voter(
         learner_only: role.is_learner(),
         ..production_hiqlite_defaults(config)
     };
-    let client = hiqlite::start_node(node_config)
+    // The phased membership budget starts before vendor startup, not after
+    // its potentially waiting join future returns. Never replenish it for
+    // the subsequent applied-membership reconciliation.
+    let phased_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
+    let admission = Arc::new(if observation_only {
+        super::membership::StartupMembershipAdmission::with_startup_deadline(phased_deadline)
+    } else {
+        super::membership::StartupMembershipAdmission::default()
+    });
+    let client = if observation_only {
+        tokio::time::timeout_at(
+            phased_deadline,
+            hiqlite::start_node_for_clock_observation(node_config, admission),
+        )
         .await
-        .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
+        .map_err(|_| {
+            StoreError::Database(
+                "Hiqlite clock-observation startup exceeded original membership budget".into(),
+            )
+        })?
+    } else {
+        hiqlite::start_node_with_membership_admission(node_config, admission).await
+    }
+    .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
+    // No await between vendor Client handoff and cancellation-safe ownership.
+    // Pre-Client constructor ownership remains the vendor's separate boundary.
+    let pending_client = cleanup_lock.map(|lock| PendingStartupClient::new(client.clone(), lock));
     if tokio::time::timeout(HIQLITE_HEALTH_TIMEOUT, client.wait_until_healthy_db())
         .await
         .is_err()
     {
-        let _ = shutdown_voter(&client, active_transport).await;
+        if pending_client.is_none() {
+            let _ = shutdown_voter(&client, active_transport).await;
+        }
         return Err(StoreError::Database(format!(
             "Hiqlite voter did not become healthy within {HIQLITE_HEALTH_TIMEOUT:?}"
         )));
@@ -3095,29 +3376,30 @@ async fn start_voter(
     // role waits for has to be exactly what admission means for it. A voter
     // waits for its vote. A learner waits to be a committed member, and must
     // never wait for a promotion it was admitted specifically not to receive.
-    let admission_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
+    let admission_deadline = if observation_only {
+        phased_deadline
+    } else {
+        tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT
+    };
     loop {
         let metrics = client
-            .metrics_db()
-            .await
-            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?;
-        let is_voter = metrics
-            .membership_config
-            .voter_ids()
-            .any(|raft_id| raft_id == identity.raft_id);
-        let is_member = metrics
-            .membership_config
-            .nodes()
-            .any(|(raft_id, _)| *raft_id == identity.raft_id);
+            .local_db_raft_metrics()
+            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?
+            .membership_snapshot();
+        let is_voter = metrics.voters.contains(&identity.raft_id);
+        let is_member = metrics.members.contains(&identity.raft_id);
         let admitted = match role {
+            _ if observation_only => is_member,
             ClusterRole::Voter => is_voter,
             ClusterRole::Learner => is_member,
         };
-        if admitted {
+        if metrics.running && metrics.committed && admitted {
             break;
         }
         if tokio::time::Instant::now() >= admission_deadline {
-            let _ = shutdown_voter(&client, active_transport).await;
+            if pending_client.is_none() {
+                let _ = shutdown_voter(&client, active_transport).await;
+            }
             let reason = match (role, is_member) {
                 (ClusterRole::Voter, true) => {
                     "is still a learner and was not promoted before the start timeout"
@@ -3152,7 +3434,9 @@ async fn start_voter(
     let local_metrics = match client.local_db_raft_metrics() {
         Ok(metrics) => metrics,
         Err(error) => {
-            let _ = shutdown_voter(&client, active_transport).await;
+            if pending_client.is_none() {
+                let _ = shutdown_voter(&client, active_transport).await;
+            }
             return Err(StoreError::Database(format!(
                 "reading target-local startup progress: {error}"
             )));
@@ -3195,7 +3479,9 @@ async fn start_voter(
                 tracing::debug!(%error, "waiting for startup quorum watermark");
             }
             Ok(Err(error)) => {
-                let _ = shutdown_voter(&client, active_transport).await;
+                if pending_client.is_none() {
+                    let _ = shutdown_voter(&client, active_transport).await;
+                }
                 return Err(StoreError::Database(format!(
                     "node {} could not obtain a startup quorum watermark within \
                      {catchup_timeout:?}: {error}",
@@ -3203,7 +3489,9 @@ async fn start_voter(
                 )));
             }
             Err(_) => {
-                let _ = shutdown_voter(&client, active_transport).await;
+                if pending_client.is_none() {
+                    let _ = shutdown_voter(&client, active_transport).await;
+                }
                 return Err(StoreError::Database(format!(
                     "node {} could not obtain a startup quorum watermark within \
                      {catchup_timeout:?}: deadline expired",
@@ -3222,7 +3510,9 @@ async fn start_voter(
             break;
         }
         if tokio::time::Instant::now() >= catchup_deadline {
-            let _ = shutdown_voter(&client, active_transport).await;
+            if pending_client.is_none() {
+                let _ = shutdown_voter(&client, active_transport).await;
+            }
             return Err(StoreError::Database(format!(
                 "node {} applied only {applied} of startup quorum watermark {catchup_target} \
                  within {catchup_timeout:?}",
@@ -3248,7 +3538,7 @@ async fn start_voter(
              for leader-singleton work"
         );
     }
-    Ok((client, local))
+    Ok((client, local, pending_client))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -3312,6 +3602,29 @@ fn log_startup_transport_wait(
 #[cfg(all(test, feature = "hiqlite-store"))]
 mod startup_wait_logging_tests {
     use super::*;
+
+    /// Pure original-deadline ordering, not replicated or fleet evidence.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn k06_readiness_checks_original_deadline_before_standalone_clock_success() {
+        let guard = crate::cluster::clock::ClusterClockGuard::new(false);
+        assert_eq!(
+            guard.snapshot().state,
+            crate::cluster::clock::ClusterClockState::NoPeers
+        );
+        assert!(
+            guard.acquire().is_ok(),
+            "actual standalone guard needs no remote sample"
+        );
+        let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+        let refusal = wait_startup_clock_readiness(&guard, expired)
+            .await
+            .expect_err("safe clock state cannot replenish an expired startup budget");
+        assert!(refusal.to_string().contains("original deadline"));
+        wait_startup_clock_readiness(&guard, tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("within-deadline standalone readiness");
+    }
 
     #[tokio::test(start_paused = true)]
     async fn immediate_watermark_errors_cannot_starve_due_startup_log() {
@@ -3512,6 +3825,11 @@ fn stored_peer_port(role: &str, address: &str) -> Result<u16, StoreError> {
 
 #[cfg(feature = "hiqlite-store")]
 async fn shutdown_voter(client: &Client, active_transport: bool) -> Result<(), StoreError> {
+    if client.has_retained_startup_resources() {
+        return client.shutdown_retained_startup().await.map_err(|error| {
+            StoreError::Database(format!("draining staged Hiqlite voter: {error}"))
+        });
+    }
     const TLS_SHUTDOWN_ASSERTION: &str =
         "The global Hiqlite shutdown handler to always listen: SendError { .. }";
 
@@ -4596,6 +4914,15 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hiqlite-store")]
+    use crate as observer_core;
+    #[cfg(feature = "hiqlite-store")]
+    mod startup_observer {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/startup_observer.rs"
+        ));
+    }
     use super::*;
 
     #[cfg(feature = "hiqlite-store")]
@@ -4995,8 +5322,16 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+    #[test]
+    fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-restore",
+            restore_archive_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restore_archive_observation_fixture() {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -5005,7 +5340,7 @@ mod tests {
             SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
                 .expect("legacy source store"),
         );
-        let source = select_daemon_store(&source_config)
+        let source = startup_observer::select_applied_singleton(&source_config)
             .await
             .expect("source voter");
         let client = source.local_client().expect("source local client");
@@ -5058,7 +5393,7 @@ mod tests {
         let report = restore_cluster_backup_archive(&artifact, &target_config, &[], None)
             .await
             .expect("restore real snapshot");
-        let restored = select_daemon_store(&target_config)
+        let restored = startup_observer::select_applied_singleton(&target_config)
             .await
             .expect("restored target starts");
         let status = restored
@@ -6009,6 +6344,204 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_post_client_cancellation_retains_actual_daemon_lock_until_tls_drain() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build cleanup control runtime")
+                    .block_on(Box::pin(async {
+                        let root = tempfile::tempdir().expect("create owned fixture root");
+                        let config = membership_test_config(root.path());
+                        let identity = super::super::initialize_identity(
+                            root.path(),
+                            &uuid::Uuid::now_v7().to_string(),
+                        )
+                        .expect("initialize actual identity");
+                        let secrets = load_or_create_secrets(root.path()).expect("load secrets");
+                        let daemon_lock = acquire_daemon_lock(root.path())
+                            .await
+                            .expect("lock directory");
+                        let retained_lock = daemon_lock.try_clone().expect("duplicate owned lock");
+                        let target = root.path().join(HIQLITE_ACTIVE_DIRNAME);
+                        std::fs::create_dir(&target).expect("create active directory");
+                        let (client, _, pending) = Box::pin(start_voter(
+                            &config,
+                            &target,
+                            &secrets,
+                            &identity,
+                            None,
+                            true,
+                            Some(retained_lock),
+                            true,
+                            true,
+                        ))
+                        .await
+                        .expect("start actual staged client");
+                        let pending =
+                            pending.expect("guard transferred from actual Client receipt");
+                        let membership = client
+                            .local_db_raft_metrics()
+                            .expect("actual local Raft metrics")
+                            .membership_snapshot();
+                        let (ready, entered) = tokio::sync::oneshot::channel();
+                        let requester = tokio::spawn(async move {
+                            let _pending = pending;
+                            let _ = ready.send(());
+                            std::future::pending::<()>().await;
+                        });
+                        entered.await.expect("requester owns pending client");
+                        drop(daemon_lock);
+                        assert!(
+                            acquire_daemon_lock_within(root.path(), Duration::from_millis(20))
+                                .await
+                                .is_err(),
+                            "duplicate owned lock must exclude another daemon"
+                        );
+                        requester.abort();
+                        assert!(requester
+                            .await
+                            .expect_err("cancelled requester")
+                            .is_cancelled());
+                        let replacement_lock =
+                            tokio::time::timeout(Duration::from_secs(15), async {
+                                loop {
+                                    if let Ok(lock) = acquire_daemon_lock_within(
+                                        root.path(),
+                                        Duration::from_millis(20),
+                                    )
+                                    .await
+                                    {
+                                        break lock;
+                                    }
+                                    tokio::time::sleep(Duration::from_millis(5)).await;
+                                }
+                            })
+                            .await
+                            .expect(
+                                "actual cleanup must release the directory lock after drainage",
+                            );
+                        assert!(
+                            !client
+                                .local_db_raft_metrics()
+                                .expect("local metrics")
+                                .snapshot()
+                                .running
+                        );
+                        assert_eq!(
+                            client
+                                .local_db_raft_metrics()
+                                .expect("terminal local metrics")
+                                .membership_snapshot()
+                                .members,
+                            membership.members,
+                            "cancelled startup must not automatically remove membership"
+                        );
+                        let _raft = std::net::TcpListener::bind(config.cluster.raft_bind)
+                            .expect("rebind drained Raft port");
+                        let _api = std::net::TcpListener::bind(config.cluster.api_bind)
+                            .expect("rebind drained API port");
+                        assert!(!client.has_retained_startup_resources());
+                        drop(replacement_lock);
+                    }));
+            })
+            .expect("spawn owned cleanup control thread")
+            .join()
+            .expect("cleanup control thread completes");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_abort() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build actual Client runtime");
+                let root = tempfile::tempdir().expect("owned uncertain-cleanup root");
+                let config = membership_test_config(root.path());
+                let identity = super::super::initialize_identity(
+                    root.path(),
+                    &uuid::Uuid::now_v7().to_string(),
+                )
+                .expect("actual identity");
+                let secrets = load_or_create_secrets(root.path()).expect("actual secrets");
+                let target = root.path().join(HIQLITE_ACTIVE_DIRNAME);
+                std::fs::create_dir(&target).expect("active directory");
+                let (client, _, _) = runtime
+                    .block_on(Box::pin(start_voter(
+                        &config, &target, &secrets, &identity, None, true, None, true, true,
+                    )))
+                    .expect("actual staged Client");
+                let make_owned = |name: &str| {
+                    let path = root.path().join(name);
+                    let lock = File::create(&path).expect("create owned lock");
+                    lock.lock().expect("lock actual file");
+                    let cloned = lock.try_clone().expect("clone actual file lock");
+                    drop(lock);
+                    let probe = File::open(path).expect("independent lock probe");
+                    ((client.clone(), cloned), probe)
+                };
+
+                // No entered runtime: Drop must not panic or release the pair.
+                assert!(tokio::runtime::Handle::try_current().is_err());
+                let (owned, probe) = make_owned("outside-runtime.lock");
+                drop(PendingStartupClient { owned: Some(owned) });
+                assert!(probe.try_lock().is_err(), "missing runtime is not terminal");
+
+                // This real cleanup future is cancelled before its first poll.
+                // The auxiliary runtime is current-thread, so scheduling is exact.
+                let auxiliary = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("unpolled cleanup runtime");
+                let (owned, probe) = make_owned("aborted-drain.lock");
+                let task = auxiliary.spawn(RetainedStartupResources { owned: Some(owned) }.drain());
+                task.abort();
+                assert!(auxiliary
+                    .block_on(task)
+                    .expect_err("aborted cleanup")
+                    .is_cancelled());
+                assert!(
+                    probe.try_lock().is_err(),
+                    "aborted drain retains actual lock"
+                );
+
+                let (owned, probe) = make_owned("runtime-teardown.lock");
+                let _task =
+                    auxiliary.spawn(RetainedStartupResources { owned: Some(owned) }.drain());
+                drop(auxiliary);
+                assert!(
+                    probe.try_lock().is_err(),
+                    "runtime teardown is not terminal"
+                );
+
+                let (owned, probe) = make_owned("successful-handoff.lock");
+                let mut pending = PendingStartupClient { owned: Some(owned) };
+                pending.handoff();
+                drop(pending);
+                probe
+                    .try_lock()
+                    .expect("successful handoff disarms failure guard");
+                runtime
+                    .block_on(client.shutdown_retained_startup())
+                    .expect("actual fixture Client terminal drainage");
+            })
+            .expect("spawn owned uncertain-cleanup control")
+            .join()
+            .expect("uncertain-cleanup control completes");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     fn membership_http_error(error: super::super::membership::MembershipError) -> Response {
         (
             StatusCode::CONFLICT,
@@ -6092,8 +6625,14 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+    #[test]
+    fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+        startup_observer::run_plural_fixture("k06-r1-voter-join", daemon_join_observation_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn daemon_join_observation_fixture() {
+        let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -6106,7 +6645,7 @@ mod tests {
         source_config.server.bind = coordinator_addr;
         source_config.cluster.join_url = format!("http://{coordinator_addr}");
         drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let source = select_daemon_store(&source_config)
+        let source = startup_observer::select_applied_singleton(&source_config)
             .await
             .expect("activate source voter");
         let cluster_id = source.identity.cluster_id.clone();
@@ -6145,7 +6684,8 @@ mod tests {
             .parse()
             .expect("readdressed cluster API bind");
         source_config.cluster.advertise_host = "localhost".to_owned();
-        let source = select_daemon_store(&source_config)
+        let source = observed
+            .select(&source_config, false)
             .await
             .expect("readdress existing source voter");
         assert_eq!(source.identity.cluster_id, cluster_id);
@@ -6199,7 +6739,8 @@ mod tests {
                 "/api/v1/cluster/learner/join/finalize",
                 post(finalize_learner_join_for_test),
             )
-            .with_state(coordinator.clone());
+            .with_state(coordinator.clone())
+            .merge(startup_observer::MeasuredPeers::route(coordinator.clone()));
         let http_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -6262,6 +6803,9 @@ mod tests {
         let token_path = joining_dir.path().join("join.token");
         std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
         let mut joining_config = membership_test_config(joining_dir.path());
+        joining_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+            .parse()
+            .expect("joining clock bind");
         joining_config.cluster.join_token_file = token_path.clone();
         let staged_identity = crate::cluster::initialize_join_identity(
             joining_dir.path(),
@@ -6308,7 +6852,8 @@ mod tests {
             .redeem(&redeem_request)
             .await
             .expect("repeat the expired identity-bound redemption");
-        let joined = select_daemon_store(&joining_config)
+        let joined = observed
+            .select(&joining_config, true)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");
         assert_eq!(joined.identity.cluster_id, cluster_id);
@@ -6583,14 +7128,22 @@ mod tests {
     /// asked for. The refusal that comes after activation is the point of the
     /// whole guard, so it is asserted on the message an operator would read.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+    #[test]
+    fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-protocol-range",
+            deployed_binary_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn deployed_binary_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("protocol activation data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster on this binary");
         let membership = selected.membership_manager();
@@ -7223,8 +7776,17 @@ mod tests {
     /// durable role survives a restart, and while it exists the cluster refuses
     /// to deactivate the protocol that admitted it.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+    #[test]
+    fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+        startup_observer::run_plural_fixture(
+            "k06-r1-learner-join",
+            learner_join_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn learner_join_observation_fixture() {
+        let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -7236,7 +7798,8 @@ mod tests {
         source_config.server.bind = coordinator_addr;
         source_config.cluster.join_url = format!("http://{coordinator_addr}");
         drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let source = select_daemon_store(&source_config)
+        let source = observed
+            .select(&source_config, false)
             .await
             .expect("activate the source voter");
         let coordinator = source.membership_manager();
@@ -7255,7 +7818,8 @@ mod tests {
                 "/api/v1/cluster/learner/join/finalize",
                 post(finalize_learner_join_for_test),
             )
-            .with_state(coordinator.clone());
+            .with_state(coordinator.clone())
+            .merge(startup_observer::MeasuredPeers::route(coordinator.clone()));
         let http_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -7320,8 +7884,12 @@ mod tests {
         std::fs::write(&token_path, format!("{}\n", learner_token.token))
             .expect("learner token file");
         let mut learner_config = membership_test_config(learner_dir.path());
+        learner_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+            .parse()
+            .expect("learner clock bind");
         learner_config.cluster.join_token_file = token_path.clone();
-        let learner = select_daemon_store(&learner_config)
+        let learner = observed
+            .select(&learner_config, true)
             .await
             .expect("admit the learner");
         assert_eq!(learner.identity.raft_id, learner_token.raft_id);
@@ -7493,6 +8061,7 @@ mod tests {
         assert_eq!(persisted.role, ClusterRole::Learner);
         assert_eq!(persisted.version, 2);
         learner.shutdown().await.expect("drain the learner");
+        observed.stop_node(&learner.identity.node_id).await;
         drop(learner);
 
         // The record a restart reads, read back through the same function both
@@ -7502,21 +8071,28 @@ mod tests {
             .expect("still present after shutdown");
         assert_eq!(boot_cluster_role(Some(&resumed)), ClusterRole::Learner);
 
-        // And the restart itself gets as far as binding its listeners, which
-        // is downstream of reading and accepting that version 2 record — the
-        // previous release refuses it before this point. It stops there only
-        // because Hiqlite 0.14 keeps its TLS listener task alive until the
-        // test runtime exits, so this process cannot free its own ports; a
-        // real daemon restart has them back.
-        let restart = select_daemon_store(&learner_config)
+        // Real shutdown drains the vendor listeners; restart observes the
+        // actual cluster again without promoting the durable learner role.
+        let restart = observed
+            .select(&learner_config, true)
             .await
-            .err()
-            .expect("an in-process restart cannot rebind Hiqlite's leaked listener")
-            .to_string();
-        assert!(
-            restart.contains("is not available"),
-            "the restart must fail on the port and not on the learner record: {restart}"
+            .expect("restart the durable learner with real observation");
+        assert_eq!(restart.identity.raft_id, learner_token.raft_id);
+        let restarted_membership = restart.membership_manager();
+        assert!(!restarted_membership
+            .local_node_is_committed_voter()
+            .await
+            .expect("read restarted learner role"));
+        assert!(!restarted_membership.may_run_cluster_jobs().await);
+        assert_eq!(
+            read_local_membership(learner_dir.path())
+                .expect("read restarted learner record")
+                .expect("restarted learner retains durable membership")
+                .role,
+            ClusterRole::Learner
         );
+        restart.shutdown().await.expect("drain restarted learner");
+        observed.stop_node(&restart.identity.node_id).await;
 
         http_task.abort();
         source.shutdown().await.expect("drain the source voter");
@@ -7536,14 +8112,22 @@ mod tests {
     /// voter has to advance it. Either arm collapsing onto the other fails
     /// one of the two halves.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+    #[test]
+    fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-schema-role",
+            learner_schema_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn learner_schema_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("schema role data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster");
         let client = selected
@@ -7637,14 +8221,22 @@ mod tests {
     /// heartbeat coupling exists for — the row is present and looks like a
     /// proof until it is compared with that node's current heartbeat.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+    #[test]
+    fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-capability",
+            capability_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn capability_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("unproven voter data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster");
         let membership = selected.membership_manager();

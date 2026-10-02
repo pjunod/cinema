@@ -66,6 +66,9 @@ pub(crate) struct AppState {
     #[cfg(feature = "cache")]
     pub raft_cache: StateRaftCache,
     pub raft_lock: Arc<Mutex<()>>,
+    pub membership_admission: Option<Arc<dyn crate::membership_admission::MembershipAdmission>>,
+    #[cfg(feature = "backup")]
+    pub startup_backup: std::sync::Mutex<Option<crate::backup::BackupConfig>>,
     #[cfg(feature = "s3")]
     pub s3_config: Option<Arc<S3Config>>,
     pub secret_raft: String,
@@ -94,7 +97,7 @@ impl AppState {
 pub struct StateRaftDB {
     pub raft: openraft::Raft<TypeConfigSqlite>,
     pub(crate) snapshot_executor:
-        crate::network::snapshot_executor::SnapshotExecutor<TypeConfigSqlite>,
+        Arc<crate::network::snapshot_executor::SnapshotExecutor<TypeConfigSqlite>>,
     pub shutdown_handle: hiqlite_wal::ShutdownHandle,
     pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
@@ -107,7 +110,8 @@ pub struct StateRaftDB {
 #[cfg(feature = "cache")]
 pub struct StateRaftCache {
     pub raft: openraft::Raft<TypeConfigKV>,
-    pub(crate) snapshot_executor: crate::network::snapshot_executor::SnapshotExecutor<TypeConfigKV>,
+    pub(crate) snapshot_executor:
+        Arc<crate::network::snapshot_executor::SnapshotExecutor<TypeConfigKV>>,
     pub tx_caches: Vec<flume::Sender<CacheRequestHandler>>,
     #[cfg(feature = "listen_notify")]
     pub tx_notify: flume::Sender<NotifyRequest>,
