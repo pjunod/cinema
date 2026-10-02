@@ -207,8 +207,7 @@ object Caps {
             LiveSinkFacts.MIN_AAC_CHANNELS
         } else {
             try {
-                val manager = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
-                hdmiPcmChannelsOf(manager.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).toList())
+                hdmiPcmChannelsOf(activeOutputDevices(context))
             } catch (_: Exception) {
                 LiveSinkFacts.MIN_AAC_CHANNELS
             }
@@ -217,6 +216,25 @@ object Caps {
             deinterlaces = television,
             aacChannels = channels.coerceIn(LiveSinkFacts.MIN_AAC_CHANNELS, LiveSinkFacts.MAX_AAC_CHANNELS),
         )
+    }
+
+    /**
+     * The outputs media would play to now. On API 33+ that is the active
+     * route, so Bluetooth headphones on a television are not mistaken for its
+     * HDMI receiver; older releases can only list every output.
+     */
+    private fun activeOutputDevices(context: Context): List<AudioDeviceInfo> {
+        val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            manager.getAudioDevicesForAttributes(
+                android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MOVIE)
+                    .build(),
+            )
+        } else {
+            manager.getDevices(AudioManager.GET_DEVICES_OUTPUTS).toList()
+        }
     }
 
     /** The widest PCM channel count an HDMI-class output device advertises, or stereo. */
