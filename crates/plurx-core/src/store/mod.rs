@@ -19,6 +19,10 @@ pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
+mod field_order_backfill;
+pub use field_order_backfill::{
+    field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
+};
 mod file_grants;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
@@ -2072,11 +2076,20 @@ pub mod keys {
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
     /// Node-local strictly-after cursor for the bounded sample-entry walk.
     pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
-    /// Set after the bounded stored-probe walk has assigned every pre-column
-    /// file either its reporter token or the explicit `unknown` value.
-    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled";
+    /// Set after the bounded stored-probe walk has assigned every probed file
+    /// with a `NULL` field order either its reporter token or the explicit
+    /// `unknown` value.
+    ///
+    /// The second pass. The first (`jobs.field_order_backfilled`) stamped
+    /// itself done while the scanner still wrote `NULL` for a probe without
+    /// the key, so every row scanned after its stamp stayed `NULL`. The parsed
+    /// probe now always carries a token, and this pass sweeps those rows. The
+    /// first pass's stamp and cursors are left in place, as every superseded
+    /// backfill's are: deleting them would only make a not-yet-upgraded node
+    /// in a rolling deploy run the first pass again and re-create them.
+    pub const JOB_FIELD_ORDER_BACKFILL_DONE: &str = "jobs.field_order_backfilled_v2";
     /// Node-local strictly-after cursor for the field-order backfill.
-    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_cursor";
+    pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_v2_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON

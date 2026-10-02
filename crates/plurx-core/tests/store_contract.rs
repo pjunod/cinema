@@ -802,6 +802,96 @@ where
     }
 }
 
+/// A raw handle onto a backend's `files` table, for writing the `NULL` field
+/// order a pre-`unknown` binary left on probed rows. Every write path of this
+/// binary refuses to produce that state, which is the point; the backfill that
+/// repairs it still has to be proved against it.
+enum StrandedFieldOrder {
+    Sqlite(PathBuf),
+    #[cfg(feature = "hiqlite-contract-tests")]
+    Hiqlite(Client),
+}
+
+impl StrandedFieldOrder {
+    async fn strand(&self, file_id: i64) {
+        match self {
+            Self::Sqlite(path) => {
+                let connection = rusqlite::Connection::open(path).expect("open raw SQLite handle");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("raw SQLite busy timeout");
+                assert_eq!(
+                    connection
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = ?1",
+                            rusqlite::params![file_id],
+                        )
+                        .expect("strand SQLite field order"),
+                    1
+                );
+            }
+            #[cfg(feature = "hiqlite-contract-tests")]
+            Self::Hiqlite(client) => {
+                assert_eq!(
+                    client
+                        .execute(
+                            "UPDATE files SET field_order = NULL WHERE id = $1",
+                            hiqlite::params!(file_id),
+                        )
+                        .await
+                        .expect("strand replicated field order"),
+                    1
+                );
+            }
+        }
+    }
+}
+
+/// [`for_each_backend`] for the backends a raw handle can reach: the
+/// file-backed SQLite store and, with the feature, the three-voter cluster.
+async fn for_each_strandable_backend<F, Fut>(mut contract: F)
+where
+    F: FnMut(Arc<dyn Store>, &'static str, Arc<StrandedFieldOrder>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let directory = tempfile::tempdir().expect("strandable SQLite directory");
+    let path = directory.path().join("plurx.db");
+    let store = SqliteStore::open(&path).expect("strandable SQLite store");
+    contract(
+        Arc::new(store),
+        "file",
+        Arc::new(StrandedFieldOrder::Sqlite(path)),
+    )
+    .await;
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let _case = HIQLITE_CASE.lock().await;
+        let cluster = ContractCluster::start().await;
+        let store = open_contract_hiqlite_store(&cluster).await;
+        store
+            .validation_reset_contract_state()
+            .await
+            .expect("reset replicated contract state");
+        let raw = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            true,
+            None,
+        )
+        .await
+        .expect("connect raw replicated client");
+        contract(
+            Arc::new(store),
+            "hiqlite-3-voter",
+            Arc::new(StrandedFieldOrder::Hiqlite(raw)),
+        )
+        .await;
+    }
+}
+
 #[tokio::test]
 async fn viewer_analysis_keeps_a_source_slot_across_backend_claims() {
     for_each_backend(|store, backend| async move {
@@ -8084,6 +8174,38 @@ async fn fenced_publication_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: baseline fenced file: {error}"));
         current = replacement;
+        // A fenced publication of probed facts without a field order (an
+        // older probe worker's shape) stores `unknown`; the unprobed baseline
+        // above keeps `NULL`.
+        let replacement = publication_successor(&current);
+        let probed_file = store
+            .upsert_file_fenced(
+                baseline_book,
+                "/contract/fenced/probed.epub",
+                43,
+                8,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+                &current,
+                &replacement,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: probed fenced file: {error}"));
+        current = replacement;
+        for (file_id, expected) in [(baseline_file, None), (probed_file, Some("unknown"))] {
+            assert_eq!(
+                store
+                    .get_file(file_id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: fenced file read: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: fenced field-order write boundary"
+            );
+        }
         let replacement = publication_successor(&current);
         assert_eq!(
             store
@@ -18732,7 +18854,7 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
 
 #[tokio::test]
 async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
-    for_each_backend(|store, backend| async move {
+    for_each_strandable_backend(|store, backend, stranded| async move {
         let library = store
             .create_library(&NewLibrary {
                 name: "Field order".into(),
@@ -18796,6 +18918,9 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        // This binary stores `unknown` for a probed row; the first-pass
+        // backfill existed for rows written before the column did.
+        stranded.strand(legacy).await;
         let pending = store
             .files_missing_field_order(0, 1)
             .await
@@ -18830,6 +18955,7 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: replacement seed: {error}"));
+        stranded.strand(replacement).await;
         let stale = store
             .files_missing_field_order(legacy, 1)
             .await
@@ -18867,6 +18993,236 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .and_then(|file| file.field_order),
             Some("progressive".into()),
             "{backend}: stale snapshot cannot overwrite a newer scan"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn probed_rows_without_a_field_order_store_unknown_at_the_write_boundary() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order boundary".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-boundary".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Write boundary".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        for (path, probe, expected) in [
+            // An older probe worker's facts: a document, no token.
+            (
+                "/field-order-boundary/older-worker.mkv",
+                ProbeResult {
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","codec_name":"hevc"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("unknown"),
+            ),
+            // A reporter token is stored verbatim.
+            (
+                "/field-order-boundary/interlaced.ts",
+                ProbeResult {
+                    field_order: Some("tt".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","field_order":"tt"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+                Some("tt"),
+            ),
+            // No document: never probed (or a failed probe) stays NULL.
+            (
+                "/field-order-boundary/unprobed.mkv",
+                ProbeResult::default(),
+                None,
+            ),
+        ] {
+            let file = store
+                .upsert_file(item, path, 1, 1, &probe)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: upsert {path}: {error}"));
+            assert_eq!(
+                store
+                    .get_file(file)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {path}: {error}"))
+                    .and_then(|file| file.field_order)
+                    .as_deref(),
+                expected,
+                "{backend}: {path}"
+            );
+        }
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rearmed_field_order_backfill_converges_null_rows_left_by_the_first_pass() {
+    for_each_strandable_backend(|store, backend, stranded| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order re-arm".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-rearm".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Re-armed backfill".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        // FFprobe omits `field_order` for this HEVC stream.
+        let hevc = r#"{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160}]}"#;
+        let hevc_value: serde_json::Value = serde_json::from_str(hevc).expect("hevc json");
+
+        // The current scanner's write for that document.
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/scanned.mkv",
+                10,
+                100,
+                &plurx_core::scan::probe::parse_probe_json(&hevc_value),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        // The pre-fix scanner's write for the same document: probed, NULL.
+        // This binary's write boundary stores `unknown` even for a result
+        // that lacks the token, so the stranded state is written raw.
+        let stranded_file = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/stranded.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(hevc.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stranded file: {error}"));
+        assert_eq!(
+            store
+                .get_file(stranded_file)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: boundary read: {error}"))
+                .and_then(|file| file.field_order)
+                .as_deref(),
+            Some("unknown"),
+            "{backend}: the write boundary does not strand a probed row"
+        );
+        stranded.strand(stranded_file).await;
+        // A probed row with a reporter token, which the pass must not touch.
+        let progressive = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/progressive.mkv",
+                30,
+                300,
+                &plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+                    "streams": [{"codec_type":"video","codec_name":"h264","field_order":"progressive"}]
+                })),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: progressive file: {error}"));
+        // A row never probed stays NULL: there is no document to answer from.
+        let unprobed = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/unprobed.mkv",
+                40,
+                400,
+                &ProbeResult::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unprobed file: {error}"));
+
+        // The first pass already stamped itself done; that stamp must not stop
+        // the second pass, and the second pass leaves it where it is.
+        store
+            .put_setting("jobs.field_order_backfilled", "1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed first-pass stamp: {error}"));
+
+        let field_order = |id: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .get_file(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+                    .and_then(|file| file.field_order)
+            }
+        };
+        assert_eq!(field_order(scanned).await.as_deref(), Some("unknown"), "{backend}");
+        assert_eq!(field_order(stranded_file).await, None, "{backend}");
+
+        let first = plurx_core::store::field_order_backfill_page(store.as_ref(), 0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert!(!first.complete, "{backend}");
+        assert!(first.write_error.is_none(), "{backend}");
+        assert_eq!((first.updated, first.fenced), (1, 0), "{backend}");
+        assert_eq!(first.cursor, stranded_file, "{backend}");
+        assert_eq!(
+            field_order(stranded_file).await,
+            field_order(scanned).await,
+            "{backend}: identical media now stores one token whichever path wrote it"
+        );
+        assert_eq!(field_order(progressive).await.as_deref(), Some("progressive"), "{backend}");
+        assert_eq!(field_order(unprobed).await, None, "{backend}");
+        assert_eq!(
+            store
+                .get_setting(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stamp read: {error}")),
+            None,
+            "{backend}: a page that wrote rows is not the completing page"
+        );
+
+        let last = plurx_core::store::field_order_backfill_page(store.as_ref(), first.cursor, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: completing page: {error}"));
+        assert!(last.complete, "{backend}");
+        let settings = store
+            .settings_snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"));
+        assert_eq!(
+            settings.get(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE).map(String::as_str),
+            Some("1"),
+            "{backend}"
+        );
+        assert_eq!(
+            settings.get("jobs.field_order_backfilled").map(String::as_str),
+            Some("1"),
+            "{backend}: the first pass's stamp is left in place, like every superseded backfill's"
         );
     })
     .await;
