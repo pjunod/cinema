@@ -4,6 +4,17 @@ package tv.plurx.app.player
  * budget. Future buffer, pause and background cannot consume that budget. */
 internal class ContinuousObservationDeadline(private val graceMs: Long = 2000) {
     data class Clock(val nowMs: Long, val positionUs: Long, val rate: Double, val active: Boolean, val activeElapsed: Boolean = false)
+    companion object {
+        /** Active playback estimate, never a wall-clock promise across pause. */
+        fun expectedDelayMs(boundaryUs: Long, clock: Clock): Long? {
+            if (!clock.active || !clock.rate.isFinite() || clock.rate <= 0) return null
+            val remaining = try { Math.subtractExact(boundaryUs, clock.positionUs).coerceAtLeast(0) }
+                catch (_: ArithmeticException) { return null }
+            val delay = remaining.toDouble() / clock.rate / 1000
+            if (!delay.isFinite() || delay >= Long.MAX_VALUE.toDouble()) return null
+            return kotlin.math.ceil(delay).toLong()
+        }
+    }
     private var revision: Long? = null
     private var boundary: Long? = null
     private var previous: Clock? = null

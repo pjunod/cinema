@@ -368,6 +368,15 @@ class Controller internal constructor(
                     }
                 }
             } },
+            expectedPresentation = { row, revision, boundaryUs, delayMs -> scope.launch {
+                if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive() &&
+                    (playbackIntent.desiredQuality.rungHeight?.toLong() == row.number("height") ||
+                        playbackIntent.desiredQuality == PlaybackQuality.Auto && autoDesiredCandidate?.id == row.text("candidate_id"))) {
+                    playbackTelemetry.report(event = "continuous_quality_expected_presentation", level = "info",
+                        message = "Target quality is scheduled after retained playable media.", ms = delayMs,
+                        detail = "revision=$revision boundary_us=$boundaryUs expected_active_delay_ms=${delayMs ?: "unknown"}")
+                }
+            } },
             observationUnknown = { row -> scope.launch {
                 if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive() &&
                     (playbackIntent.desiredQuality == PlaybackQuality.Auto || playbackIntent.desiredQuality.rungHeight?.toLong() == row.number("height"))) {

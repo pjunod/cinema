@@ -3415,3 +3415,23 @@ test sources compile in thirteen seconds. No unit tests were executed. Physical
 allocator/codec/audio cleanup and runtime pressure qualification remain pending.
 The Android compiler invocation now uses a temporary script with fixed existing
 SDK and Gradle-cache paths; that script belongs to final task cleanup.
+
+
+### 10.111 Android records the expected committed boundary delay
+
+The attachment records target boundary PTS and expected active delay before
+acknowledging an accepted append, using current film position and playback
+rate. Later boundary, rate or active-state changes refresh that evidence. A
+paused or invalid clock reports an unknown delay rather than promising a wall
+time. Healthy retained prebuffer can legitimately delay presentation beyond
+thirty seconds; it is informational telemetry, not a degraded-playback warning.
+The observation grace still starts only when the actual clock crosses the
+committed boundary. The source regression covers slow and fast playback, pause,
+invalid rate and overflow; production and test sources compile without unit
+execution.
+
+The human explicitly approved committed-source transfer to
+pjunod@192.168.4.7 under /tmp/plurx-cq-cd9bb38ad/, without .git or credentials.
+That resolves the earlier destination-authorization rejection. The next Linux
+qualification build uses this committed tree; older runtime receipts remain
+failed or unqualified and are not reused as current evidence.

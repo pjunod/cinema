@@ -27,6 +27,7 @@ internal class ContinuousAttachment(
     private val transfers: AutoTransferEvidence,
     private val presented: (JsonObject, Long) -> Unit,
     private val observationUnknown: (JsonObject) -> Unit,
+    private val expectedPresentation: (JsonObject, Long, Long, Long?) -> Unit,
     private val retained: (JsonObject, Long) -> Unit,
     private val failed: (Exception) -> Unit,
 ) {
@@ -81,6 +82,8 @@ internal class ContinuousAttachment(
     private val awaiting = LinkedHashMap<String, ContinuousQueueOwnership.Appended>()
     private var pump: Job? = null
     private var deliveredRevision = -1L
+    private data class ExpectedBoundary(val revision: Long, val boundaryUs: Long, val rate: Double, val active: Boolean)
+    private var reportedBoundary: ExpectedBoundary? = null
     private val ending = AtomicBoolean()
     private val endAcknowledged = CompletableDeferred<Unit>()
     private val finishing = AtomicBoolean()
@@ -182,6 +185,7 @@ internal class ContinuousAttachment(
             if (append.video) for (id in append.transactions) {
                 val tx = transaction(id) ?: throw IOException("Continuous append transaction missing")
                 if (tx.getValue("appended").jsonArray.none { it.jsonObject == append.interval }) {
+                    reportExpectedPresentation(tx, append.interval)
                     protocol.transition(id, buildJsonObject { put("kind", "appended"); put("intervals", JsonArray(listOf(append.interval))) })
                 }
             }
@@ -261,7 +265,21 @@ internal class ContinuousAttachment(
             try { Math.multiplyExact(requireNotNull(pin.number("from_tick")), 1_000_000) / requireNotNull(pin.number("timescale")) }
             catch (_: ArithmeticException) { null }
         }
+        if (interval != null) reportExpectedPresentation(target, interval)
         if (observationDeadline.sample(revision, boundary, clock)) observationUnknown(rendition)
+    }
+
+    private fun reportExpectedPresentation(tx: JsonObject, interval: JsonObject) {
+        val revision = tx.number("intent_revision") ?: return
+        if (revision != protocol.ledger?.number("latest_intent_revision") || tx.number("first_presented_tick") != null) return
+        val row = rows.singleOrNull { it.text("rendition_id") == tx.text("target_rendition_id") } ?: return
+        val clock = playbackClock.get() ?: return
+        val boundary = try { Math.multiplyExact(requireNotNull(interval.number("from_tick")), 1_000_000) /
+            requireNotNull(interval.number("timescale")) } catch (_: ArithmeticException) { return }
+        val sample = ExpectedBoundary(revision, boundary, clock.rate, clock.active)
+        if (sample == reportedBoundary) return
+        reportedBoundary = sample
+        expectedPresentation(row, revision, boundary, ContinuousObservationDeadline.expectedDelayMs(boundary, clock))
     }
 
     private suspend fun retirePassedMedia() {

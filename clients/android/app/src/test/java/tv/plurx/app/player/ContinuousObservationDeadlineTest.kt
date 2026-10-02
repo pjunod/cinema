@@ -4,6 +4,18 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ContinuousObservationDeadlineTest {
+    @Test fun expectedPresentationUsesActualRateWithoutPromisingThroughPauseOrOverflow() {
+        fun clock(rate: Double = 1.0, active: Boolean = true, position: Long = 0) =
+            ContinuousObservationDeadline.Clock(0, position, rate, active)
+        assertEquals(40_000L, ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock()))
+        assertEquals(625L, ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock(64.0)))
+        assertEquals(80_000L, ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock(0.5)))
+        assertEquals(0L, ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock(position = 41_000_000)))
+        assertNull(ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock(active = false)))
+        assertNull(ContinuousObservationDeadline.expectedDelayMs(40_000_000, clock(Double.NaN)))
+        assertNull(ContinuousObservationDeadline.expectedDelayMs(Long.MAX_VALUE, clock(position = -1)))
+    }
+
     @Test fun aFarFutureAppendAndPauseDoNotBecomeAFalsePresentationTimeout() {
         val deadline = ContinuousObservationDeadline()
         fun sample(at: Long, position: Long, active: Boolean = true, rate: Double = 1.0) =
