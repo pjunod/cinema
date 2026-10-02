@@ -1255,7 +1255,10 @@ impl TranscodeManager {
         // to retire the authoritative predecessor. If provisional capacity is
         // unavailable, fail this replacement and leave the current player
         // intact. Legacy process-local callers retain their historical sweep.
-        if replacement_deadline.is_none() {
+        // A continuous parent is also make-before-break: group admission
+        // can refuse after preparation, and must not end a healthy incumbent.
+        // Its prepared/CAS owner or explicit client release retires that parent.
+        if replacement_deadline.is_none() && req.continuous_media.is_none() {
             self.reap_superseded_before(None, supersession_user, &req.playback_id)
                 .await?;
         }

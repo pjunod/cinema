@@ -26,6 +26,7 @@ fn encoded_plan(
                 "codec_name": codec,
                 "width": file.width.unwrap_or(320),
                 "height": file.height.unwrap_or(180),
+                "sample_aspect_ratio": "1:1",
                 "pix_fmt": if file.bit_depth.unwrap_or(8) >= 10 { "yuv420p10le" } else { "yuv420p" },
                 "avg_frame_rate": "24000/1001",
                 "r_frame_rate": "24000/1001",

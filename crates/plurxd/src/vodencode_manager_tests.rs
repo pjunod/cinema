@@ -892,6 +892,18 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     let audio_args = audio.args(&file, 0.0, file.duration_ms.expect("fixture duration") as f64 / 1000.0);
     assert!(audio_args.iter().any(|arg| arg == "-vn"));
     assert!(audio_args.iter().any(|arg| arg == "aac"));
+    request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::Video;
+    request.candidate_context = None;
+    let mut incumbent_request = request.clone();
+    incumbent_request.continuous_media = None;
+    incumbent_request.request_id = Some(uuid::Uuid::new_v4().to_string());
+    let incumbent = manager.create_session(&incumbent_request, "test").await.expect("healthy incumbent");
+    manager.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("audio-only capacity");
+    let refused = manager.create_session(&request, "test").await.err().expect("the whole video/audio group does not fit");
+    assert!(refused.contains("vod_family_capacity"));
+    assert!(manager.vod.playlist(&incumbent.session_id).await.expect("incumbent remains registered").result.is_ok(),
+        "failed family admission must not run the legacy supersession sweep");
+    manager.vod.end(&incumbent.session_id, crate::vodserve::Terminal::Deleted).await;
     request.continuous_media.as_mut().expect("continuous role").version = 2;
     assert!(manager.prepare_vod_encoding(&request, &file).await.is_err());
 }

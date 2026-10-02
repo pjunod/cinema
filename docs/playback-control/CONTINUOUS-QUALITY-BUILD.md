@@ -1819,3 +1819,15 @@ all-target compilation and normal hooks apply; unit execution is deferred.
 This connects one video and one soundtrack in production; additional video
 rungs, immutable master exposure, schedule transport, durable family
 descriptors and client switching remain unfinished.
+
+### 10.45 Admission refusal preserves the incumbent
+
+Continuous parent creation skips the legacy pre-create supersession sweep.
+A failed paired admission cannot End the currently healthy parent before a
+replacement exists. The existing prepared/CAS owner or an explicit client
+release remains responsible for retiring the old attachment after success.
+The manager regression now creates an incumbent, lowers capacity to fit only
+AAC, refuses the new video/audio group, and asserts that the incumbent still
+serves its playlist. Synthetic fixture facts also declare their known square
+pixel ratio for normalized AVC planning. Pinned compilation and normal hooks
+apply; unit execution remains deferred.
