@@ -198,3 +198,25 @@ test('fragment loader destruction stays silent across hls abort re-entry',()=>{
  loader.destroy();loader.destroy();loader.abort();
  assert.equal(aborts,1);assert.equal(destroys,2);
 });
+
+
+test('aborted outgoing fragment callbacks cannot authorize after a quality switch',async()=>{
+ const f=fixture();await f.load(f.prefix+`video/${f.primary.rendition_id}/init/${f.primary.init_id}.mp4`);
+ let callbacks,ctx,loader,aborts=0;
+ class Base {
+  constructor(){this.stats={};}
+  load(context,config,handlers){ctx=context;callbacks=handlers;}
+  abort(){aborts++;callbacks.onAbort();}
+  destroy(){}
+ }
+ const Loader=f.adapter.loader(Base);loader=new Loader({});
+ loader.load({url:f.prefix+`video/${f.primary.rendition_id}/segment/0.m4s`},{},{
+  onAbort(){assert.equal(f.hls.loadLevel,1,'future level is selected before abort notification');loader.destroy();},
+  onSuccess(){assert.fail('outgoing payload must stay private');},
+  onError(){assert.fail('an aborted outgoing payload must not fail the current stream');},
+ });
+ assert.equal(await f.adapter.choose(f.target.candidate_id),'continuous');assert.equal(aborts,1);
+ const count=f.requests.length;callbacks.onSuccess({data:bytes(f.firstMedia)},{},ctx,{});
+ await pause();await pause();assert.equal(f.requests.length,count);
+ assert.equal(f.player.continuousQualityObservation,undefined);
+});

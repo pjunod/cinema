@@ -2971,3 +2971,15 @@ runAll().then(() => {
   }
   process.stdout.write(`\n${pending.length} shaping contracts hold\n`);
 });
+
+
+test("VOD attachment census survives console eviction and counts same-session replacement",()=>{
+ const event={event:"session_start",encoder:"vod",file_id:"9007199254740999",
+  at_unix_ms:2000,session_id:"redacted",extra:'{"presentation":"vod"}'};
+ assert.equal(lab.vodAttachmentCensus([event],event.file_id,1000),1);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,at_unix_ms:3000}],event.file_id,1000),2);
+ assert.equal(lab.vodAttachmentCensus([event,{...event,file_id:"9007199254740998"},
+  {...event,at_unix_ms:999},{...event,encoder:"legacy"}],event.file_id,1000),1);
+ assert.throws(()=>lab.vodAttachmentCensus(Array(2000).fill(event),event.file_id,1000),/truncated/);
+ assert.throws(()=>lab.vodAttachmentCensus(null,event.file_id,1000),/unavailable/);
+});

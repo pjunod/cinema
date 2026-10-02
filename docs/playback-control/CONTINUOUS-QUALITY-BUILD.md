@@ -2540,3 +2540,27 @@ requires one abort, one destruction, and silent normal destruction. The
 failed production receipt is `continuous-chrome-partial-linux-controlled.json`.
 Its stack identifies the cause; it does not qualify first-frame playback. The
 fixed committed candidate will receive a fresh isolated production probe.
+
+
+### 10.77 Outgoing callbacks cannot authorize against the target intent
+
+The committed loader fix produced the first real continuous frame. The first
+quality selection then retained an outgoing fragment callback after its loader
+was aborted; authorization ran against the newer wanted rung and reported an
+unreserved superseded load. Both callback entry and its serialized work now
+check the loader's closure before inspecting or reserving bytes. Aborted work
+cannot publish an error into the current stream. Future level selection is
+installed before abort callbacks can synchronously retry outgoing work.
+The authored regression requires outgoing payload privacy and no later
+protocol request or current-stream error.
+
+That partial probe remains failed as `continuous-chrome-partial-linux-loader.json`.
+It also exposed the lab's dependence on a bounded console tail for counting
+session births. Qualification now reads the durable VOD lifecycle stream,
+scoped by exact file identity and case start. Replacement attachments count
+even if the public session identity repeats; a truncated or unavailable
+stream fails qualification. The census regression preserves large file IDs
+and rejects incomplete evidence. The normal-buffer 25-minute fixture was
+generated once on Linux with two encoder threads. Firefox 157.0 and signed
+geckodriver 0.37.1 are staged in an owned temporary folder for qualification.
+Unit execution remains deferred until the final adversarial review.

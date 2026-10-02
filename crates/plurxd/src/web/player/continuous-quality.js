@@ -479,13 +479,17 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       load(context,config,callbacks){
         this.context=context;const captured=transaction;
         const guarded={...callbacks,onProgress:()=>{},onSuccess:(response,stats,ctx,network)=>{
+          if(this.aborted||this.destroyed||!current())return;
           let found;try{found=resource(ctx.url);}catch(error){callbacks.onError({code:0,text:error.message},ctx,network,stats);return;}
           if(!found){if(!this.aborted)callbacks.onSuccess(response,stats,ctx,network);return;}
-          serial(()=>authorize(found,response.data,captured)).then(record=>{
+          serial(()=>this.aborted||this.destroyed||!current()?null:authorize(found,response.data,captured)).then(record=>{
             if(this.aborted||!current())return;
             if(record){record.exposed=true;if(found.type==='video')frontier=Math.max(frontier,record.interval.through_tick);}
             callbacks.onSuccess(response,stats,ctx,network);
-          }).catch(error=>{note(error);if(!this.aborted&&current())callbacks.onError({code:0,text:error.message},ctx,network,stats);});
+          }).catch(error=>{
+            if(this.aborted||this.destroyed||!current())return;
+            note(error);callbacks.onError({code:0,text:error.message},ctx,network,stats);
+          });
         }};
         this.base.load(context,config,guarded);
       }
@@ -534,9 +538,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         }
         // Readiness succeeds before retiring optional old loaders. Payloads
         // already delivered keep their own append and disposal ownership.
+        wanted=next;hls.loadLevel=level;
         for(const loader of loaders){let found;try{found=resource(loader.context?.url||'');}catch(e){}
           if(found?.type==='video'&&found.row.rendition_id===previous.rendition_id)loader.abort();}
-        wanted=next;hls.loadLevel=level;
         if(old)try{
           await protocol.transition(old,{kind:'cancel_unappended',completed:Array.from(records.values())
             .filter(row=>row.appended&&row.transactions.has(old)).map(row=>row.interval)});

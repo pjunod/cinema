@@ -226,6 +226,18 @@ function caseName(testCase) {
   return `${testCase.fixture} :: ${testCase.quality} :: ${testCase.operation}`;
 }
 
+function vodAttachmentCensus(events, fileId, sinceMs) {
+  if (!Array.isArray(events) || events.length >= 2000 || fileId == null) {
+    throw new Error("VOD attachment census is unavailable or truncated");
+  }
+  return events.filter(event => {
+    if (event.event !== "session_start" || event.encoder !== "vod"
+        || String(event.file_id) !== String(fileId)
+        || !Number.isSafeInteger(event.at_unix_ms) || event.at_unix_ms < sinceMs) return false;
+    try { return JSON.parse(event.extra).presentation === "vod"; } catch (_) { return false; }
+  }).length;
+}
+
 function expandCases(manifest, suiteName, filter, excludeFilter) {
   const suite = manifest.suites[suiteName];
   if (!suite) throw new Error(`unknown suite ${suiteName}; choose smoke, full, stall-recovery, or vod`);
@@ -4177,18 +4189,23 @@ async function runSuite(manifest, options, dependencies = {}) {
         result.diagnostics = [];
       }
       if (testCase.require_vod) {
-        const creates = result.server_logs.filter((entry) =>
-          String(entry.message || "").includes("vod session attached"),
-        ).length;
         result.metrics = result.metrics || {};
-        result.metrics.session_creates = creates;
-        const allowed = Number(testCase.maximum_session_creates ?? 1);
-        if (creates !== allowed) {
+        try {
+          // A long browser run can outlive the bounded console ring. The
+          // durable lifecycle stream records every actual parent attachment.
+          const events = await (dependencies.api || api)(server.baseUrl,
+            `/system/playback-events?since=${caseLogStart - 100}&event=session_start&limit=2000`,
+            { token: server.token });
+          const file = server.files.get(fixture.filename);
+          const creates = vodAttachmentCensus(events, file?.id, caseLogStart - 100);
+          result.metrics.session_creates = creates;
+          result.metrics.session_create_evidence = "durable_vod_lifecycle";
+          const allowed = Number(testCase.maximum_session_creates ?? 1);
+          if (creates !== allowed) throw new Error(`${creates} VOD session creates, want exactly ${allowed}`);
+        } catch (error) {
           result.status = "failed";
           result.errors = result.errors || [];
-          result.errors.push(
-            `${creates} VOD session creates in server log, want exactly ${allowed}`,
-          );
+          result.errors.push(error.message);
         }
       }
       results.push(result);
@@ -4991,6 +5008,7 @@ module.exports = {
   playerSnapshotExpression,
   continuousTransportSnapshot,
   continuousSwitchErrors,
+  vodAttachmentCensus,
   rungHistory,
   scoreRecovery,
   scoreCase,
