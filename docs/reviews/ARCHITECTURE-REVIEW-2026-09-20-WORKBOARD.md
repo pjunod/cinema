@@ -157,8 +157,11 @@ source descriptors. The existing retained namespace/count/allowance/collector
 owns optional hardlinks and exact cleanup; a compatible NEW local attachment
 captures measured full-mux cost before sealing and serves authenticated body
 snapshots. No restart/remote metadata authority or old-owner rebinding is
-introduced. Inventory and two new real consumer/refusal controls have each
-passed once; current checks and one independent review remain required.
+introduced. Five original successes retain historical source attribution;
+five new review59 controls passed once for non-blocking optional capture,
+actual executable selection, permanent corruption refusal, pre-resource
+attachment and post-source-await refusal. Same sole review59 disposition and
+final current checks remain required; no successful ID was replayed.
 Unseen-tail first-publication and original corpus/device/fleet acceptance stay
 open. See the dated canonical S-10 ruling below.
 

@@ -161,11 +161,11 @@ impl TranscodeManager {
         });
         // Source/engine equality is checked after actor await and immediately
         // before the real attachment. Received rates/locator never enter here.
-        if !artifact.acquirable() || !production.input_current().await {
+        if !artifact.current_for_attachment(production).await {
             return None;
         }
         self.register_session(&session_id, session, 0).await.ok()?;
-        if !artifact.acquirable() || !production.input_current().await {
+        if !artifact.current_for_attachment(production).await {
             self.stop_session(&session_id, "source_changed").await;
             return None;
         }
