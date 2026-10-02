@@ -1728,6 +1728,67 @@ class PlaybackControlSettleTest {
 }
 
 class DisplayAwareAutoEvidenceTest {
+    @Test fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget() {
+        val event = "12345678-1234-1234-1234-123456789abc"
+        assertTrue(autoNegativeLinkAcknowledgement(event, listOf(event), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, emptyList(), 204, true, 250))
+        assertFalse(autoNegativeLinkAcknowledgement(event, listOf(event, event), 204, true, 250))
+        assertTrue(autoDecoderAcknowledgementCurrent(true, 100, 349, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(false, 100, 101, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 350, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 99, 250, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 101, 0, true))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 101, 250, false))
+        assertFalse(autoDecoderAcknowledgementCurrent(true, 100, 120, 20, true))
+    }
+    @Test fun a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline() {
+        val nonce = "12345678-1234-1234-1234-123456789abc"
+        assertTrue(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, true, 1))
+        for (values in listOf(emptyList(), listOf(nonce, nonce), listOf("$nonce,$nonce"), listOf("other"), listOf(nonce.uppercase()))) {
+            assertFalse(autoNegativeLinkAcknowledgement(nonce, values, 204, true, 1))
+        }
+        assertFalse(autoNegativeLinkAcknowledgement("malformed", listOf("malformed"), 204, true, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 200, true, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, false, 1))
+        assertFalse(autoNegativeLinkAcknowledgement(nonce, listOf(nonce), 204, true, 0))
+        val item = Any()
+        val ticket = AutoRecoveryCauseTicket("incumbent", item, "a", "b", tv.plurx.app.data.ReopenReason.Link, 100, nonce)
+        assertEquals(nonce, ticket.receiptForRequest("incumbent", "b", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("other", "b", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("incumbent", "c", tv.plurx.app.data.ReopenReason.Link))
+        assertNull(ticket.receiptForRequest("incumbent", "b", tv.plurx.app.data.ReopenReason.Decode))
+        assertFalse(ticket.isCurrent("incumbent", Any(), "a", "b", 200))
+        assertFalse(ticket.isCurrent("incumbent", item, "a", "b", 15_101))
+        assertFalse(ticket.isCurrent("incumbent", item, "a", "b", 99))
+    }
+    @Test fun a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals() {
+        val player = Any()
+        val replacement = Any()
+        val window = AutoDecodePressureWindow()
+        fun sample(now: Long, position: Long, drops: Long, eligible: Boolean = true) =
+            window.observe(player, "full-recipe-a", now, position, drops, eligible)
+        assertFalse(sample(0, 0, 0))
+        assertFalse(sample(2_000, 2_000, 3))
+        assertTrue(sample(4_000, 4_000, 6))
+        assertEquals(AutoDecodePressureEvidence(4_000, 4_000, 6), window.evidence)
+        assertFalse(sample(6_000, 4_000, 10))
+        assertFalse(sample(8_000, 6_000, 13, false))
+        assertFalse(sample(10_000, 8_000, 16))
+        assertFalse(window.observe(replacement, "full-recipe-a", 12_000, 10_000, 20, true))
+        assertFalse(window.observe(replacement, "full-recipe-a", 11_000, 11_000, 23, true))
+        val ticket = AutoRecoveryCauseTicket("incumbent", player, "full-recipe-a", "full-recipe-b",
+            tv.plurx.app.data.ReopenReason.Decode, 100)
+        assertTrue(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 15_100))
+        assertFalse(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 15_101))
+        assertFalse(ticket.isCurrent("incumbent", replacement, "full-recipe-a", "full-recipe-b", 200))
+        assertFalse(ticket.isCurrent("incumbent", player, "other-recipe", "full-recipe-b", 200))
+        assertFalse(ticket.isCurrent("incumbent", player, "full-recipe-a", "full-recipe-b", 99))
+        val json = kotlinx.serialization.json.Json
+        val causes = tv.plurx.app.data.ReopenReason.entries.map {
+            json.encodeToString(tv.plurx.app.data.ReopenReason.serializer(), it)
+        }
+        assertEquals(listOf("\"stall\"", "\"link\"", "\"encode\"", "\"decode\"", "\"hold\"", "\"authority\""), causes)
+    }
     @Test fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline() {
         val forwarded = mutableListOf<String>()
         val delegate = java.lang.reflect.Proxy.newProxyInstance(

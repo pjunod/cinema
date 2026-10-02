@@ -1918,9 +1918,14 @@ impl TranscodeManager {
             };
             return Ok((request.clone(), target_height));
         };
-        let Some(ReopenReason::Stall) = request.reopen_reason else {
+        let Some(reason) = request.reopen_reason else {
             return Err(invalid_reopen_error("unsupported reopen reason"));
         };
+        if reason != ReopenReason::Stall && request.candidate_context.is_none() {
+            return Err(invalid_reopen_error(
+                "typed recovery requires a full candidate",
+            ));
+        }
         // A stall reopen bound to a VOD predecessor: validate the binding
         // against the VOD registry and pass the request through untouched. A
         // VOD session has no persisted rung to inherit — the reopen decides

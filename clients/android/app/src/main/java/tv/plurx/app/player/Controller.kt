@@ -205,6 +205,7 @@ class Controller internal constructor(
     private fun preparedSwitchAnalytics(pipeline: ExoPlayer): AnalyticsListener =
         object : AnalyticsListener {
             private val tag = System.identityHashCode(pipeline)
+            private var cumulativeDropped = 0L
 
             override fun onDroppedVideoFrames(
                 eventTime: AnalyticsListener.EventTime,
@@ -212,6 +213,18 @@ class Controller internal constructor(
                 elapsedMs: Long,
             ) {
                 preparedSwitch.noteDroppedFrames(monotonicNowMs(), droppedFrames, tag)
+                if (droppedFrames < 0 || cumulativeDropped > Long.MAX_VALUE - droppedFrames) return
+                cumulativeDropped += droppedFrames
+                if (autoDecodePressure.observe(pipeline, autoActiveCandidateId,
+                        monotonicNowMs(), realPosition(), cumulativeDropped,
+                        pipeline === player && establishedPlayback && presentationForeground && player.isPlaying &&
+                            playbackIntent.pendingSeek == null && directedChange == null &&
+                            player.bufferedPosition - player.currentPosition >= 10_000L)) {
+                    val evidence = autoDecodePressure.evidence
+                    scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+                        if (noteAutoDecodeFailure(pressure = evidence)) restartAt(realPosition(), "decode-quality")
+                    }
+                }
             }
 
             override fun onAudioUnderrun(
@@ -315,7 +328,7 @@ class Controller internal constructor(
      * the user request the server's final replacement as well as the UI's.
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body, currentLinkReceipt()) },
+        createSession = { body -> vm.createHlsSession(plan.fileId, body, recoveryLinkReceipt(body)) },
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
@@ -731,6 +744,9 @@ class Controller internal constructor(
     private var autoMildSamples = 0
     private var autoMildTransferCompletedMs: Long? = null
     private val autoDecoderRejected = playbackIntent.rejectedAutoCandidateIds
+    private val autoDecodePressure = AutoDecodePressureWindow()
+    private var autoDecodeQualityResponseUsed = false
+    private var autoRecoveryCause: AutoRecoveryCauseTicket? = null
     private var autoPreparedTargetRevision: Long? = null
     private var autoPreparedMutationEpoch: Long? = null
     private var autoStagedStatus: PlaybackSessionStatus? = null
@@ -898,6 +914,12 @@ class Controller internal constructor(
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
+            scope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { handlePlayerError(error) }
+        }
+
+        private suspend fun handlePlayerError(error: PlaybackException) {
+            val failureAttachment = player
+            val failureAttempt = stallGuard.observeStall()
             if (!playbackControlBootstrapFence.isActive()) return
             // The departing item's failure does not own a newer requested
             // recipe (or seek create). That create and its target deadline
@@ -985,7 +1007,13 @@ class Controller internal constructor(
                 return
             }
             if (handleAudioSinkFailure(error, refusal)) return
-            if (controlErrorCode(error.errorCode) == ClientErrorCode.DECODER) noteAutoDecodeFailure()
+            val decodeRecovery = controlErrorCode(error.errorCode) == ClientErrorCode.DECODER && noteAutoDecodeFailure()
+            if (player !== failureAttachment || !stallGuard.isCurrent(failureAttempt)) return
+            if (decodeRecovery) {
+                restartAt(realPosition(), "decode-quality")
+                raiseRecoveryStep(refusal, "Retrying a decoder-compatible quality.")
+                return
+            }
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -1806,6 +1834,7 @@ class Controller internal constructor(
             writeViewerDelegate(requested)
         } else {
             val incumbent = player
+            val stalledPosition = realPosition()
             val incumbentSession = sessionId
             val epoch = mediaMutationEpoch
             val targetMs = realPosition()
@@ -2096,9 +2125,11 @@ class Controller internal constructor(
         val recipe = currentRecipe()
         val createBody = sessionBody(ms, recipe = recipe.recipe)
         val endingSession = sessionId
-        endPlaybackControl { endingSession?.let(vm::endHlsSession) }
-        sessionId = null
-        rebindMediaSessionTransport()
+        if (createBody.reopen_reason == null || createBody.reopen_reason == tv.plurx.app.data.ReopenReason.Stall) {
+            endPlaybackControl { endingSession?.let(vm::endHlsSession) }
+            sessionId = null
+            rebindMediaSessionTransport()
+        }
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
@@ -2218,6 +2249,7 @@ class Controller internal constructor(
         event: OpenPlaybackStallTracker.Event,
     ): Boolean = when (verdict.type) {
         "terminal" -> {
+            reportAutoRecoveryCause(tv.plurx.app.data.ReopenReason.Authority)
             // Ruling D1 keeps the verdict from tearing anything down: returning
             // true here is what stops a reopen from starting and a budget from
             // being spent, and that is unchanged.
@@ -2242,6 +2274,7 @@ class Controller internal constructor(
             true
         }
         "hold", "retry_resource" -> {
+            reportAutoRecoveryCause(tv.plurx.app.data.ReopenReason.Hold)
             // Production is deliberately not advancing, or stopped for
             // something that may not recur. Either way a reopen would churn
             // against a server that already knows better, and it must not
@@ -2338,7 +2371,9 @@ class Controller internal constructor(
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
         if (verdict != null && applyStallVerdict(verdict, event)) return
-        selectAutoStallRecoveryCandidate()
+        selectAutoStallRecoveryCandidate(observation,
+            observedAtMs, observedAtMs + openStallTracker.remainingRecoveryMs(event, observedAtMs, observedAtMs))
+        if (sessionId != session || !stallGuard.isCurrent(observation)) return
         // A reopen is a new recovery episode. If the replacement freezes at
         // the same playhead, it must receive its own bounded deadline rather
         // than inheriting the fired latch from the item it replaced.
@@ -2389,9 +2424,12 @@ class Controller internal constructor(
         // [endPlaybackControl] so the abandonment acknowledgement still has a
         // control session to leave on.
         abandonPreparedReplacement(failed = false)
-        endPlaybackControl()
-        sessionId = null
-        rebindMediaSessionTransport()
+        val typedRecovery = currentAutoRecoveryCause()
+        if (typedRecovery == null) {
+            endPlaybackControl()
+            sessionId = null
+            rebindMediaSessionTransport()
+        }
         clearStatusPolling()
         encoder = null
         sessionIsVod = false
@@ -2537,7 +2575,24 @@ class Controller internal constructor(
                         }
                     } ?: if (playbackIntent.automaticCandidateId == null) body.height else null
                 else body.height,
-            ) else body
+            ).let(::applyAutoRecoveryCause) else body
+
+    private fun currentAutoRecoveryCause(): AutoRecoveryCauseTicket? = autoRecoveryCause?.takeIf {
+        playbackIntent.desiredQuality == PlaybackQuality.Auto &&
+            it.isCurrent(sessionId, player, autoActiveCandidateId, autoDesiredCandidate?.id, monotonicNowMs())
+    }
+
+    private fun applyAutoRecoveryCause(body: CreateSessionReq): CreateSessionReq {
+        val ticket = currentAutoRecoveryCause() ?: return body
+        return body.copy(previous_session_id = ticket.session, reopen_reason = ticket.cause)
+    }
+
+    private fun recoveryLinkReceipt(body: CreateSessionReq): String? {
+        if (body.reopen_reason != tv.plurx.app.data.ReopenReason.Link) return currentLinkReceipt()
+        val ticket = currentAutoRecoveryCause() ?: return null
+        return ticket.receiptForRequest(body.previous_session_id,
+            (body.intent?.selection?.quality as? QualitySelection.AutoCandidate)?.candidateId, body.reopen_reason)
+    }
 
     private fun trackFor(index: Long?): SubTrack? =
         index?.let { i -> plan.subtitles.firstOrNull { it.index == i } }
@@ -3160,7 +3215,7 @@ class Controller internal constructor(
         }
     }
 
-    private fun selectAutoStallRecoveryCandidate() {
+    private suspend fun selectAutoStallRecoveryCandidate(observation: ControllerStallGuard.Observation, capturedAtMs: Long, deadlineMs: Long) {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
             autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
@@ -3186,30 +3241,76 @@ class Controller internal constructor(
         val producer = autoActiveProductionPressure(sessionStatus,
             sessionStatusAgeMs?.let { now - it }, now, sessionId, current.id,
             player.bufferedPosition - player.currentPosition)
-        if (!producer && (severe || mild)) reportCandidateLinkSample(negative = true)
         if (!severe && !producer && !mild) return
         autoSwitchTimes.removeAll { now - it >= 3_600_000L }
         if (!severe && (autoSwitchTimes.size >= 6 || autoLastSwitchMs?.let { now - it < 60_000L } == true)) return
         val next = autoRecoveryCandidate(policyCatalog, current, autoDecoderRejected,
             link.takeIf { severe || mild }) ?: return
+        if (!producer) {
+            val incumbent = player
+            val incumbentSession = sessionId ?: return
+            val stalledPosition = realPosition()
+            val sample = transfer ?: return
+            val receipt = sample.receipt ?: return
+            val payload = negativeLinkPayload() ?: return
+            val beforeAck = monotonicNowMs()
+            if (beforeAck < capturedAtMs || !acknowledgeNegativeLink(payload, receipt, deadlineMs - beforeAck) ||
+                monotonicNowMs() >= deadlineMs || monotonicNowMs() < capturedAtMs ||
+                !stallGuard.isCurrent(observation) || player !== incumbent || sessionId != incumbentSession ||
+                autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+                !player.playWhenReady || !presentationForeground || playbackIntent.pendingSeek != null ||
+                player.playbackState != Player.STATE_BUFFERING || preparedPlayer != null || directedChange != null ||
+                kotlin.math.abs(realPosition() - stalledPosition) >= 250L ||
+                latestAutoCompletedTransfer?.receipt != receipt ||
+                latestAutoCompletedTransfer?.completedAtMs != sample.completedAtMs ||
+                sample.ageMs(monotonicNowMs()) > 15_000L) return
+            autoLinkClaims[receipt] = Triple(sample.completedAtMs, true, current.id)
+        }
+        reportAutoRecoveryCause(if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link)
         autoDesiredCandidate = next
+        sessionId?.let { session -> autoRecoveryCause = AutoRecoveryCauseTicket(session, player,
+            current.id, next.id, if (producer) tv.plurx.app.data.ReopenReason.Encode else tv.plurx.app.data.ReopenReason.Link, now,
+            linkReceipt = if (producer) null else latestAutoCompletedTransfer?.receipt) }
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
         autoUpgradeSinceMs = null
         surfaceOwner.logOnly(mediaMutationEpoch, "auto_quality_recovery:${if (severe) "link" else "encode"}:${next.id}")
     }
 
-    private fun noteAutoDecodeFailure() {
+    private var autoDecodeProofPending = false
+    private suspend fun noteAutoDecodeFailure(pressure: AutoDecodePressureEvidence? = null): Boolean {
         if (!tv.plurx.app.data.Session.displayAwareAuto || !tv.plurx.app.data.Session.autoAbr ||
             tv.plurx.app.data.Session.displayAwareAutoProtocol != "route-v1" ||
-            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return
-        val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return
-        if (!autoDecoderRejected.add(current.id)) return
-        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return
+            autoRouteProtocol != "route-v1" || playbackIntent.desiredQuality != PlaybackQuality.Auto) return false
+        val current = autoCatalog.firstOrNull { it.id == autoActiveCandidateId } ?: return false
+        if (autoDecoderRejected.contains(current.id) || autoDecodeProofPending) return false
+        val session = sessionId ?: return false
+        val attachment = player
+        val attempt = stallGuard.observeStall()
+        val observedAt = monotonicNowMs()
+        val event = PlaybackClientLog(level = "warn",
+            event = "candidate_recovery", message = "Candidate decoder evidence", ua = "Android Media3", sessionId = session,
+            candidateRecovery = CandidateRecoverySample(event_id = UUID.randomUUID().toString(), candidate_id = current.id,
+                recipe_digest = current.recipe_digest, decoder_failed = pressure == null,
+                rendered_elapsed_ms = pressure?.elapsedMs ?: 0, position_progress_ms = pressure?.progressMs ?: 0,
+                dropped_frames = pressure?.droppedFrames ?: 0, runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0)))
+        autoDecodeProofPending = true
+        val accepted = try { acknowledgeDecoderFailure(event, 250L) } finally { autoDecodeProofPending = false }
+        if (!autoDecoderAcknowledgementCurrent(accepted, observedAt, monotonicNowMs(), 250L,
+                player === attachment && sessionId == session) || !stallGuard.isCurrent(attempt) ||
+            autoActiveCandidateId != current.id || playbackIntent.desiredQuality != PlaybackQuality.Auto ||
+            monotonicNowMs() < observedAt || monotonicNowMs() - observedAt > 250L) return false
+        autoDecoderRejected.add(current.id)
+        if (autoDecodeQualityResponseUsed) return false
+        val next = autoRecoveryCandidate(autoCatalog, current, autoDecoderRejected, decoderRecovery = true) ?: return false
+        autoDecodeQualityResponseUsed = true
+        autoRecoveryCause = AutoRecoveryCauseTicket(session, player, current.id, next.id,
+            tv.plurx.app.data.ReopenReason.Decode, observedAt)
         autoDesiredCandidate = next
         playbackIntent.requestAutomaticCandidate(next.id, next.target_height)
         autoPreparing = false
         autoUpgradeSinceMs = null
+        return true
     }
 
     private fun tickDisplayAwareAuto() {
@@ -3372,6 +3473,37 @@ class Controller internal constructor(
                 sample.observedMediaDurationMs, establishedPlayback && presentationForeground,
                 player.playbackState == Player.STATE_BUFFERING, runway)))
         autoLinkClaims[receipt] = Triple(sample.completedAtMs, negative, candidate.id)
+    }
+
+    private fun negativeLinkPayload(): PlaybackClientLog? {
+        val sample = latestAutoCompletedTransfer ?: return null
+        val receipt = currentLinkReceipt() ?: return null
+        val currentSession = sessionId ?: return null
+        val duration = sample.bodyDurationMs ?: return null
+        val media = sample.observedMediaDurationMs ?: return null
+        val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        if (autoLinkClaims[receipt]?.second != false || !establishedPlayback || !presentationForeground ||
+            !player.playWhenReady || player.playbackState != Player.STATE_BUFFERING ||
+            playbackIntent.pendingSeek != null || preparedPlayer != null || directedChange != null ||
+            runway > 1500 || duration <= media) return null
+        val uri = android.net.Uri.parse(sample.segmentId)
+        return PlaybackClientLog(level = "warn", event = "candidate_link_sample",
+            message = "Completed candidate body", ua = "Android Media3", sessionId = currentSession,
+            linkSample = CandidateLinkSample(receipt, uri.lastPathSegment.orEmpty(), sample.etag ?: return null,
+                sample.bodyBytes, duration, sample.ageMs(monotonicNowMs()), true, false, false, "link", true,
+                media, true, true, runway))
+    }
+
+    private fun reportAutoRecoveryCause(cause: tv.plurx.app.data.ReopenReason) {
+        val session = sessionId ?: return
+        val candidate = autoCatalog.firstOrNull { it.hasValidIdentity && it.id == autoActiveCandidateId } ?: return
+        postPlaybackClientLog(scope, PlaybackClientLog(level = "warn", event = "candidate_recovery",
+            message = "Candidate recovery evidence", ua = "Android Media3", sessionId = session,
+            candidateRecovery = CandidateRecoverySample(cause = cause.name.lowercase(),
+                event_id = UUID.randomUUID().toString(), candidate_id = candidate.id,
+                recipe_digest = candidate.recipe_digest, decoder_failed = false,
+                rendered_elapsed_ms = 0, position_progress_ms = 0, dropped_frames = 0,
+                runway_ms = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L))))
     }
 
     private fun measuredCostCatalog(): List<tv.plurx.app.data.QualityCandidate> = autoCatalog.map { candidate ->
@@ -5305,6 +5437,54 @@ internal class AutoUpgradeEvidenceWindow {
     fun allowsProposal(nowMs: Long, headroomStartedAtMs: Long?): Boolean =
         headroomStartedAtMs != null && nowMs >= headroomStartedAtMs &&
             nowMs - headroomStartedAtMs >= 45_000L && allowsUpgrade(nowMs)
+}
+
+/** Two progressing supplied intervals, never a wait callback or stale player. */
+internal data class AutoDecodePressureEvidence(val elapsedMs: Long, val progressMs: Long, val droppedFrames: Long)
+internal class AutoDecodePressureWindow {
+    private var attachment: Any? = null
+    private var candidate: String? = null
+    private var previous: Triple<Long, Long, Long>? = null
+    private var intervals = 0
+    private var first: Triple<Long, Long, Long>? = null
+    var evidence: AutoDecodePressureEvidence? = null
+        private set
+    fun observe(attachment: Any?, candidate: String?, nowMs: Long, positionMs: Long,
+                cumulativeDropped: Long?, eligible: Boolean): Boolean {
+        if (this.attachment !== attachment || this.candidate != candidate) {
+            this.attachment = attachment; this.candidate = candidate; previous = null; first = null; evidence = null; intervals = 0
+        }
+        if (attachment == null || candidate == null || !eligible || nowMs < 0 || positionMs < 0 ||
+            cumulativeDropped == null || cumulativeDropped < 0) {
+            previous = null; first = null; evidence = null; intervals = 0; return false
+        }
+        val old = previous
+        previous = Triple(nowMs, positionMs, cumulativeDropped)
+        if (old == null || nowMs < old.first || positionMs < old.second || cumulativeDropped < old.third) {
+            first = null; evidence = null; intervals = 0; return false
+        }
+        val elapsed = nowMs - old.first
+        if (elapsed !in 1_000L..5_000L || positionMs - old.second < elapsed / 2 || cumulativeDropped - old.third < 3) {
+            first = null; evidence = null; intervals = 0; return false
+        }
+        intervals = (intervals + 1).coerceAtMost(2)
+        if (first == null) first = old
+        val start = first ?: return false
+        if (intervals < 2 || nowMs - start.first < 4_000L) return false
+        evidence = AutoDecodePressureEvidence(nowMs - start.first, positionMs - start.second, cumulativeDropped - start.third)
+        return true
+    }
+}
+
+internal data class AutoRecoveryCauseTicket(val session: String, val attachment: Any,
+    val incumbentCandidate: String, val proposedCandidate: String,
+    val cause: tv.plurx.app.data.ReopenReason, val observedAtMs: Long, val linkReceipt: String? = null) {
+    fun receiptForRequest(previous: String?, candidate: String?, cause: tv.plurx.app.data.ReopenReason?): String? =
+        linkReceipt.takeIf { this.cause == tv.plurx.app.data.ReopenReason.Link && cause == this.cause &&
+            previous == session && candidate == proposedCandidate }
+    fun isCurrent(session: String?, attachment: Any?, candidate: String?, proposed: String?, nowMs: Long): Boolean =
+        this.session == session && this.attachment === attachment && incumbentCandidate == candidate &&
+            proposedCandidate == proposed && nowMs >= observedAtMs && nowMs - observedAtMs <= 15_000L
 }
 
 internal fun autoActiveProductionPressure(status: PlaybackSessionStatus?, observedAtMs: Long?, nowMs: Long,

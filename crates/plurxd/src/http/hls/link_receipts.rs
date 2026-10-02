@@ -39,7 +39,7 @@ pub(crate) struct LiveLinkProof {
     transfer: plurx_core::playback::candidate::NetworkTransferEvidence,
 }
 impl LiveLinkProof {
-    pub(super) fn incumbent_session(&self) -> &str {
+    pub(crate) fn incumbent_session(&self) -> &str {
         &self.binding.session
     }
     pub(crate) fn transfer(
@@ -136,6 +136,7 @@ impl Receipt {
 }
 #[derive(Default)]
 struct Rows {
+    decoder: HashMap<String, super::candidate_recovery::AcceptedDecoderProof>,
     staged: HashMap<String, super::prepared_link::StagedProof>,
     sessions: HashMap<String, SessionRow>,
     receipts: HashMap<String, Receipt>,
@@ -198,6 +199,131 @@ pub(crate) async fn binding(
 }
 
 impl LinkReceipts {
+    pub(super) fn record_decoder(
+        &self,
+        proof: super::candidate_recovery::AcceptedDecoderProof,
+    ) -> Option<()> {
+        let mut rows = self.0.lock().ok()?;
+        rows.decoder.retain(|_, value| value.fresh());
+        if rows.decoder.len() >= NONCES {
+            return None;
+        }
+        if rows.decoder.contains_key(proof.session()) {
+            return None;
+        }
+        rows.decoder.insert(proof.session().to_owned(), proof);
+        Some(())
+    }
+
+    pub(super) fn decoder_current(&self, bound: &super::candidate_recovery::BoundRecovery) -> bool {
+        self.0.lock().ok().is_some_and(|rows| {
+            rows.decoder
+                .get(&bound.route.session_id)
+                .is_some_and(|proof| proof.matches(bound))
+        })
+    }
+
+    /// A native recovery may await one explicit negative acknowledgement;
+    /// ordinary diagnostics remain detached. This never mints from a cause
+    /// label, renews EOF or turns an absent proof into a playback error.
+    pub(crate) async fn accept_negative_for_ack(
+        &self,
+        state: &AppState,
+        network: &NetworkIdentity,
+        session: Option<&str>,
+        sample: &ClientLinkSample,
+    ) -> Option<String> {
+        if !sample.negative {
+            return None;
+        }
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            let session = session?;
+            let enabled = state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|value| value.trim() == "1");
+            if !enabled {
+                return None;
+            }
+            let value = self.accept(state, network, Some(session), sample).await?;
+            state
+                .store
+                .observe_candidate_link(&value, crate::media_sessions::unix_ms())
+                .await
+                .ok()?;
+            // Ok(()) also covers a refused/no-op fold. Only an exact durable
+            // readback can acknowledge this immutable completion's negative.
+            let saved = state
+                .store
+                .candidate_link_prior(&value.binding)
+                .await
+                .ok()??;
+            if saved.binding != value.binding
+                || saved.body_bytes != value.body_bytes
+                || saved.body_duration_ms != value.body_duration_ms
+                || saved.completed_at_ms != value.completed_at_ms
+                || saved.negative_at_ms != Some(value.completed_at_ms)
+            {
+                return None;
+            }
+            let file = state.store.get_file(value.binding.file_id).await.ok()??;
+            let route = state.store.media_session_route(session).await.ok()??;
+            let proof = self
+                .current_negative(
+                    state,
+                    network,
+                    &file,
+                    Some(&sample.receipt),
+                    &route.playback_id,
+                )
+                .await?;
+            if proof.incumbent_session() != session
+                || proof.incumbent_recipe().0 != value.binding.recipe_digest
+            {
+                return None;
+            }
+            proof.transfer()?;
+            Some(sample.receipt.clone())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    /// A cause label cannot mint a Link fault. Only this incumbent's already
+    /// accepted exact-negative claim qualifies, with its original live EOF.
+    pub(crate) async fn current_negative(
+        &self,
+        state: &AppState,
+        network: &NetworkIdentity,
+        file: &MediaFile,
+        nonce: Option<&str>,
+        playback: &str,
+    ) -> Option<LiveLinkProof> {
+        let proof = self
+            .current_positive(
+                state,
+                network,
+                file,
+                nonce,
+                Some(playback),
+                Some(&state.node_id),
+            )
+            .await?;
+        let rows = self.0.lock().ok()?;
+        let row = rows.receipts.get(nonce?)?;
+        if !row.negative_claimed
+            || row.binding != proof.binding
+            || row.completion?.0 != proof.completed
+            || proof.transfer().is_none()
+        {
+            return None;
+        }
+        Some(proof)
+    }
     /// Read a live incumbent transfer, not a serialized network prior. Processing
     /// routes may differ for an upgrade, but its delivery owner must stay local.
     pub(crate) async fn current_positive(
@@ -877,6 +1003,732 @@ fn measured_margin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
+        client_log_ack_controls(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn a05_client_log_ack_refuses_conflicting_durable_fold() {
+        client_log_ack_controls(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn a05_client_log_ack_requires_exact_durable_completion_and_refuses_older_sample() {
+        client_log_ack_controls(false, true).await;
+    }
+
+    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool) {
+        use axum::{extract::State, http::HeaderMap, Json};
+        use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("setting");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let peer = "192.168.4.9:1234".parse().expect("socket");
+        let mut network = crate::http::network::identity(&headers, Some(peer)).expect("namespace");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        ));
+        let now = crate::media_sessions::unix_ms();
+        let activation = MediaSessionActivation {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: user.id,
+            playback_id: "http-ack-player".into(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: state.node_id.clone(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        state
+            .store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("accepted");
+        state
+            .store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now,
+            )
+            .await
+            .expect("confirm")
+            .expect("published");
+        let session = SessionBinding {
+            source: binding(&network, &file, [4; 32], CandidateRoute::Encode)
+                .await
+                .expect("source"),
+            session: activation.session_id.clone(),
+            incarnation: activation.incarnation_id.clone(),
+            owner_epoch: 1,
+        };
+        state.link_receipts.register(session.clone());
+        let (nonce, eof) = state
+            .link_receipts
+            .mint(
+                &session.session,
+                "seg00001.m4s",
+                "etag",
+                4096,
+                Some(4000),
+                true,
+            )
+            .expect("receipt");
+        eof(Instant::now(), now);
+        let mut body = serde_json::json!({"level":"warn","event":"candidate_link_sample","message":"actual ack",
+            "session_id":session.session,"link_sample":{"receipt":nonce,"object_name":"seg00001.m4s","etag":"etag",
+            "body_bytes":4096,"body_duration_ms":5000,"age_ms":0,"network_load":true,"from_cache":false,"producer_paced":false,
+            "cause":"link","negative":false,"media_duration_ms":4000,"presenting":true,"stalled":true,"runway_ms":1000}});
+        let raw: ClientLinkSample =
+            serde_json::from_value(body["link_sample"].clone()).expect("sample");
+        assert!(state
+            .link_receipts
+            .accept(&state, &network, Some(&session.session), &raw)
+            .await
+            .is_some());
+        async fn send(
+            state: &AppState,
+            user: &plurx_core::domain::User,
+            headers: &HeaderMap,
+            peer: std::net::SocketAddr,
+            body: serde_json::Value,
+        ) -> axum::response::Response {
+            crate::http::system::client_log(
+                crate::http::extract::AuthUser(user.clone()),
+                State(state.clone()),
+                headers.clone(),
+                crate::http::network::RemoteAddress(Some(peer)),
+                Json(serde_json::from_value(body).expect("single DTO")),
+            )
+            .await
+        }
+        let positive = send(&state, &user, &headers, peer, body.clone()).await;
+        assert_eq!(positive.status(), 204);
+        assert!(!positive.headers().contains_key("x-plurx-link-accepted"));
+        body["link_sample"]["negative"] = true.into();
+        if conflicting_fold {
+            // The durable namespace key deliberately conflicts with this exact
+            // source binding. Store returns Ok for the refused fold, not proof.
+            let mut conflicting = session.source.clone();
+            conflicting.source_object_version.push_str("-foreign");
+            state
+                .store
+                .observe_candidate_link(
+                    &CandidateLinkObservation {
+                        binding: conflicting.clone(),
+                        body_bytes: 8192,
+                        body_duration_ms: 6000,
+                        completed_at_ms: now,
+                        negative: true,
+                    },
+                    now,
+                )
+                .await
+                .expect("foreign durable row");
+            let refused = send(&state, &user, &headers, peer, body.clone()).await;
+            assert_eq!(refused.status(), 204);
+            assert!(!refused.headers().contains_key("x-plurx-link-accepted"));
+            let saved = state
+                .store
+                .candidate_link_prior(&conflicting)
+                .await
+                .expect("readback")
+                .expect("unchanged row");
+            assert!(saved.binding == conflicting);
+            assert_eq!(saved.body_bytes, 8192);
+            assert_eq!(saved.completed_at_ms, now);
+            return;
+        }
+        let mut malformed = body.clone();
+        malformed["link_sample"]["receipt"] = "bad,nonce".into();
+        let unknown = send(&state, &user, &headers, peer, malformed).await;
+        assert_eq!(unknown.status(), 204);
+        assert!(!unknown.headers().contains_key("x-plurx-link-accepted"));
+        assert!(
+            serde_json::from_value::<crate::http::system::ClientLog>(serde_json::json!([
+                body.clone(),
+                body.clone()
+            ]))
+            .is_err()
+        );
+        let accepted = send(&state, &user, &headers, peer, body.clone()).await;
+        assert_eq!(accepted.status(), 204);
+        assert_eq!(
+            accepted
+                .headers()
+                .get_all("x-plurx-link-accepted")
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(
+            accepted.headers()["x-plurx-link-accepted"]
+                .to_str()
+                .expect("nonce"),
+            nonce
+        );
+        let duplicate = send(&state, &user, &headers, peer, body.clone()).await;
+        assert_eq!(duplicate.status(), 204);
+        assert!(!duplicate.headers().contains_key("x-plurx-link-accepted"));
+        if exact_fold {
+            let saved = state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("durable readback")
+                .expect("accepted completion");
+            assert!(saved.binding == session.source);
+            assert_eq!(saved.body_bytes, 4096);
+            assert_eq!(saved.body_duration_ms, 5000);
+            assert_eq!(saved.completed_at_ms, now);
+            assert_eq!(saved.negative_at_ms, Some(now));
+            let (older_nonce, older_eof) = state
+                .link_receipts
+                .mint(
+                    &session.session,
+                    "seg00001.m4s",
+                    "etag",
+                    4096,
+                    Some(4000),
+                    true,
+                )
+                .expect("distinct older completion");
+            older_eof(Instant::now(), now - 1);
+            body["link_sample"]["receipt"] = older_nonce.into();
+            let refused = send(&state, &user, &headers, peer, body).await;
+            assert_eq!(refused.status(), 204);
+            assert!(!refused.headers().contains_key("x-plurx-link-accepted"));
+            let unchanged = state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("durable readback")
+                .expect("original completion remains");
+            assert_eq!(unchanged.completed_at_ms, saved.completed_at_ms);
+            assert_eq!(unchanged.negative_at_ms, saved.negative_at_ms);
+            assert_eq!(unchanged.body_bytes, saved.body_bytes);
+            assert_eq!(unchanged.body_duration_ms, saved.body_duration_ms);
+        }
+    }
+
+    #[tokio::test]
+    async fn a05_typed_recovery_authenticates_candidate_and_spends_only_one_decoder_response() {
+        typed_recovery_controls(false).await;
+    }
+
+    #[tokio::test]
+    async fn a05_decode_label_requires_accepted_exact_fault_without_replay_or_refresh() {
+        typed_recovery_controls(true).await;
+    }
+
+    async fn typed_recovery_controls(review_controls: bool) {
+        use crate::transcode::{
+            CandidateExecutionContext, ReopenReason, SessionKind, SessionRequest,
+        };
+        use axum::{
+            extract::{Path, Query, State},
+            http::HeaderMap,
+        };
+        use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1")
+            .await
+            .expect("Auto");
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let remote = "192.168.4.9:1234".parse().expect("socket");
+        let decision = crate::http::stream::decision(
+            crate::http::extract::AuthUser(user.clone()),
+            State(state.clone()),
+            Path(file.id),
+            Query(crate::http::stream::Caps {
+                caps_v2: Some(
+                    serde_json::from_value(serde_json::json!({"v":2,
+                "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
+                    .expect("caps"),
+                ),
+                force: Some("auto".into()),
+                ..Default::default()
+            }),
+            headers.clone(),
+            crate::http::network::RemoteAddress(Some(remote)),
+        )
+        .await
+        .expect("actual catalog")
+        .0;
+        let catalog = decision.quality_candidates.expect("catalog");
+        assert!(catalog.len() >= 2, "real distinct candidate recipes");
+        let incumbent = catalog[0].clone();
+        let proposed = catalog
+            .iter()
+            .find(|row| row.recipe_digest != incumbent.recipe_digest)
+            .expect("distinct")
+            .clone();
+        let mut network =
+            crate::http::network::identity(&headers, Some(remote)).expect("namespace");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(
+            user.id,
+            user.created_at,
+            &user.password_hash,
+        ));
+        let mut request = SessionRequest {
+            candidate_context: None,
+            file_id: file.id,
+            playback_id: "typed-player".into(),
+            request_id: None,
+            control_sequence: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            audio_delivery: None,
+            audio_claim: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Vod,
+            block_budget_secs: None,
+            transport: Some("hlsjs".into()),
+        };
+        let now = crate::media_sessions::unix_ms();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        let recipe = crate::media_sessions::RemoteStartRequest {
+            retained_output_receiver: None,
+            retained_output: None,
+            candidate_id: Some(incumbent.id),
+            presentation_target: None,
+            decoder_caps: None,
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: incarnation.clone(),
+            user_id: user.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            typeless_playlist: false,
+            library_channel: None,
+            request: request.clone(),
+        };
+        let response = serde_json::json!({"session_id":session,"playlist_url":"owned.m3u8","duration_ms":12000,
+            "start_seconds":0.0,"media_origin_ms":0,"height":720,"encoder":"fixture","vod":true,"ladder":[],
+            "quality_candidate_id":incumbent.id,"quality_candidates":catalog});
+        let activation = MediaSessionActivation {
+            incarnation_id: incarnation,
+            session_id: session.clone(),
+            user_id: user.id,
+            playback_id: request.playback_id.clone(),
+            recovery_epoch: uuid::Uuid::new_v4().to_string(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: state.node_id.clone(),
+            recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: response.to_string(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        state
+            .store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("accepted");
+        state
+            .store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now,
+            )
+            .await
+            .expect("confirm")
+            .expect("published");
+        let bound = crate::http::hls::candidate_recovery::incumbent(
+            &state,
+            &network,
+            &file,
+            &request.playback_id,
+            Some(&session),
+        )
+        .await
+        .expect("authenticated full current candidate");
+        request.previous_session_id = Some(session.clone());
+        request.candidate_context = Some(CandidateExecutionContext {
+            retained_output: None,
+            owner_node_id: Some(state.node_id.clone()),
+            candidate_id: proposed.id,
+            recipe_digest: proposed.recipe_digest,
+            normalized_geometry: proposed.normalized_geometry,
+            grade: proposed.grade,
+            profile: None,
+        });
+        for cause in [
+            ReopenReason::Link,
+            ReopenReason::Encode,
+            ReopenReason::Hold,
+            ReopenReason::Authority,
+        ] {
+            request.reopen_reason = Some(cause);
+            assert!(
+                crate::http::hls::candidate_recovery::observe(
+                    &state,
+                    Some(&network),
+                    Some(&file),
+                    &request,
+                    None,
+                    &uuid::Uuid::new_v4().to_string()
+                )
+                .await
+                .is_err(),
+                "labels cannot mint missing proof or change held authority"
+            );
+        }
+        assert!(state
+            .store
+            .candidate_recovery_memory(&bound.scope)
+            .await
+            .expect("memory")
+            .decode_step_recipe
+            .is_none());
+        request.reopen_reason = Some(ReopenReason::Decode);
+        let event = uuid::Uuid::new_v4().to_string();
+        assert!(crate::http::hls::candidate_recovery::observe(
+            &state,
+            None,
+            Some(&file),
+            &request,
+            None,
+            &event
+        )
+        .await
+        .is_err());
+        if review_controls {
+            assert!(
+                crate::http::hls::candidate_recovery::observe(
+                    &state,
+                    Some(&network),
+                    Some(&file),
+                    &request,
+                    None,
+                    &event
+                )
+                .await
+                .is_err(),
+                "authenticated Decode label cannot mint evidence"
+            );
+        }
+        let mut fault = crate::http::hls::candidate_recovery::ClientRecoverySample {
+            cause: plurx_core::store::CandidateRecoveryCause::Decode,
+            event_id: uuid::Uuid::new_v4().to_string(),
+            candidate_id: incumbent.id,
+            recipe_digest: incumbent.recipe_digest,
+            age_ms: 0,
+            decoder_failed: true,
+            rendered_elapsed_ms: 0,
+            position_progress_ms: 0,
+            dropped_frames: 0,
+            runway_ms: 0,
+        };
+        if review_controls {
+            fault.decoder_failed = false;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            fault.decoder_failed = true;
+            fault.age_ms = 15_001;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            fault.age_ms = 0;
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some("foreign-session"),
+                &fault
+            )
+            .await
+            .is_none());
+            let mut foreign = network.clone();
+            foreign.user_id = Some(user.id + 1);
+            assert!(crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &foreign,
+                Some(&session),
+                &fault
+            )
+            .await
+            .is_none());
+            // The new case exercises the actual supplied progressing-pressure
+            // alternative, without inventing a fatal decoder flag.
+            fault.decoder_failed = false;
+            fault.rendered_elapsed_ms = 4_000;
+            fault.position_progress_ms = 2_000;
+            fault.dropped_frames = 6;
+            fault.runway_ms = 10_000;
+        }
+        assert_eq!(
+            crate::http::hls::candidate_recovery::accept_sample(
+                &state,
+                &network,
+                Some(&session),
+                &fault
+            )
+            .await,
+            Some(fault.event_id.clone()),
+            "only actual accepted exact decoder failure is acknowledged"
+        );
+        if review_controls {
+            assert!(
+                crate::http::hls::candidate_recovery::accept_sample(
+                    &state,
+                    &network,
+                    Some(&session),
+                    &fault
+                )
+                .await
+                .is_none(),
+                "replay cannot acknowledge or refresh its original proof"
+            );
+        }
+        assert!(crate::http::hls::candidate_recovery::observe(
+            &state,
+            Some(&network),
+            Some(&file),
+            &request,
+            None,
+            &event
+        )
+        .await
+        .is_ok());
+        assert!(
+            crate::http::hls::candidate_recovery::observe(
+                &state,
+                Some(&network),
+                Some(&file),
+                &request,
+                None,
+                &uuid::Uuid::new_v4().to_string()
+            )
+            .await
+            .is_err(),
+            "second quality response stays with compatibility owner"
+        );
+        let memory = state
+            .store
+            .candidate_recovery_memory(&bound.scope)
+            .await
+            .expect("memory");
+        assert_eq!(memory.decode_step_recipe, Some(incumbent.recipe_digest));
+        let private_auto = crate::http::hls::candidate_recovery::auto_catalog(
+            &state,
+            Some(&network),
+            &file,
+            &request.playback_id,
+            catalog.clone(),
+        )
+        .await;
+        assert!(!private_auto.iter().any(|row| row.id == incumbent.id));
+        assert!(
+            catalog.iter().any(|row| row.id == incumbent.id),
+            "manual/public catalog is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn a05_negative_ack_requires_real_fold_and_exact_nonce_without_replay_refresh() {
+        use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
+        let (state, user, file, _root) = actual_intake_state().await;
+        state
+            .store
+            .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("setting");
+        let now = crate::media_sessions::unix_ms();
+        let activation = MediaSessionActivation {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: user.id,
+            playback_id: "ack-player".into(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: state.node_id.clone(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        state
+            .store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate")
+            .expect("accepted");
+        state
+            .store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now,
+            )
+            .await
+            .expect("confirm")
+            .expect("published");
+        let network = NetworkIdentity {
+            user_id: Some(user.id),
+            credential_generation: Some(plurx_core::domain::CredentialGeneration::derive(
+                user.id,
+                user.created_at,
+                &user.password_hash,
+            )),
+            client_class: "web".into(),
+            network_fingerprint: "192.168.4.0/24".into(),
+        };
+        let source = binding(&network, &file, [4; 32], CandidateRoute::Encode)
+            .await
+            .expect("source");
+        let session = SessionBinding {
+            source,
+            session: activation.session_id.clone(),
+            incarnation: activation.incarnation_id.clone(),
+            owner_epoch: 1,
+        };
+        state.link_receipts.register(session.clone());
+        let (nonce, eof) = state
+            .link_receipts
+            .mint(
+                &session.session,
+                "seg00001.m4s",
+                "etag",
+                4096,
+                Some(4000),
+                true,
+            )
+            .expect("receipt");
+        let completed = Instant::now();
+        eof(completed, now);
+        let mut sample = ClientLinkSample {
+            receipt: nonce.clone(),
+            object_name: "seg00001.m4s".into(),
+            etag: "etag".into(),
+            body_bytes: 4096,
+            body_duration_ms: 5000,
+            age_ms: 0,
+            network_load: Some(true),
+            from_cache: Some(false),
+            producer_paced: Some(false),
+            cause: NetworkPriorCause::Link,
+            negative: false,
+            media_duration_ms: Some(4000),
+            presenting: true,
+            stalled: true,
+            runway_ms: 1000,
+        };
+        assert!(
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
+                .await
+                .is_none(),
+            "positive telemetry is never an acknowledgement"
+        );
+        assert!(
+            state
+                .link_receipts
+                .accept(&state, &network, Some(&session.session), &sample)
+                .await
+                .is_some(),
+            "real raw fold first"
+        );
+        sample.negative = true;
+        sample.receipt = "malformed".into();
+        assert!(state
+            .link_receipts
+            .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
+            .await
+            .is_none());
+        sample.receipt = nonce.clone();
+        sample.etag = "other-response".into();
+        assert!(state
+            .link_receipts
+            .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
+            .await
+            .is_none());
+        sample.etag = "etag".into();
+        assert!(state
+            .link_receipts
+            .accept_negative_for_ack(&state, &network, Some("different-incumbent"), &sample)
+            .await
+            .is_none());
+        assert_eq!(
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
+                .await,
+            Some(nonce.clone())
+        );
+        assert!(
+            state
+                .link_receipts
+                .accept_negative_for_ack(&state, &network, Some(&session.session), &sample)
+                .await
+                .is_none(),
+            "duplicate cannot acknowledge or refresh"
+        );
+        let rows = state.link_receipts.0.lock().expect("registry");
+        let row = rows.receipts.get(&nonce).expect("same immutable response");
+        assert_eq!(row.completion.expect("EOF").0, completed);
+        assert!(row.negative_claimed);
+    }
 
     async fn actual_intake_state() -> (
         AppState,
