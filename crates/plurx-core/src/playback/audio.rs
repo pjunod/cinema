@@ -97,12 +97,80 @@ pub enum AudioRoute {
     EncodedVod,
 }
 
-/// A measured matrix is not available yet. This identity records what must
-/// be measured without inventing gains or assuming channel order.
+/// How a multichannel source is folded to fewer channels.
+///
+/// The stereo rows were chosen by the real-content measurement recorded in
+/// `docs/streaming/AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md`: the
+/// incumbent `-ac 2` fold matches the ITU-R BS.775 Lo/Ro centre gain on most
+/// sources, but it is unlimited, so loud film scenes decode with samples at or
+/// above full scale after AAC, and AC-3/E-AC-3 sources silently apply their
+/// stored centre/surround levels instead. Every stereo row therefore converts
+/// to float first (TrueHD and DTS-HD MA decode to 32-bit integers, and `pan`
+/// mixes in the decoder's format), applies a named matrix where the source
+/// layout is known, and ends in one look-ahead limiter at −4 dBFS — the
+/// ceiling that kept every measured window below −2 dBFS after AAC overshoot.
+///
+/// A row is selected only from the source's own layout spelling with a
+/// matching channel count; an absent or unrecognised spelling takes the
+/// limited default fold, never a matrix guessed from the channel count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum DownmixMatrix {
+    /// The incumbent unlimited fold. Retained for durable snapshots and for
+    /// non-stereo targets (7.1 → 5.1), which this measurement did not cover.
     RequiresLayoutMeasurement { source_channels: u8 },
+    /// `5.1` (back surrounds) → Lo/Ro, limited.
+    #[serde(rename = "lo_ro_5_1_back")]
+    LoRo51Back,
+    /// `5.1(side)` → Lo/Ro, limited.
+    #[serde(rename = "lo_ro_5_1_side")]
+    LoRo51Side,
+    /// `7.1` → Lo/Ro with both surround pairs at −6 dB, limited.
+    #[serde(rename = "lo_ro_7_1")]
+    LoRo71,
+    /// Any other layout: FFmpeg's float default fold to stereo, limited.
+    LimitedDefault { source_channels: u8 },
+}
+
+/// −4 dBFS as linear amplitude: the ceiling the real-content receipt chose.
+const DOWNMIX_LIMIT: &str = "alimiter=limit=0.6309573444801932:level=0:latency=1";
+
+impl DownmixMatrix {
+    /// The stereo fold for a source with `source_channels` channels and the
+    /// probe's opaque `layout` spelling.
+    pub fn stereo_for(source_channels: u8, layout: Option<&str>) -> Self {
+        match (layout, source_channels) {
+            (Some("5.1"), 6) => Self::LoRo51Back,
+            (Some("5.1(side)"), 6) => Self::LoRo51Side,
+            (Some("7.1"), 8) => Self::LoRo71,
+            _ => Self::LimitedDefault { source_channels },
+        }
+    }
+
+    /// The filter chain this matrix contributes to the audio `-af`, or
+    /// `None` for the incumbent fold, which `-ac` alone performs.
+    pub fn filter(&self) -> Option<String> {
+        let pan = match self {
+            Self::RequiresLayoutMeasurement { .. } => return None,
+            Self::LoRo51Back => "pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR",
+            Self::LoRo51Side => "pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR",
+            Self::LoRo71 => "pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR",
+            Self::LimitedDefault { .. } => {
+                return Some(format!(
+                    "aformat=sample_fmts=fltp:channel_layouts=stereo,{DOWNMIX_LIMIT}"
+                ))
+            }
+        };
+        Some(format!("aformat=sample_fmts=fltp,{pan},{DOWNMIX_LIMIT}"))
+    }
+
+    fn valid(&self) -> bool {
+        match self {
+            Self::RequiresLayoutMeasurement { source_channels }
+            | Self::LimitedDefault { source_channels } => *source_channels > 0,
+            Self::LoRo51Back | Self::LoRo51Side | Self::LoRo71 => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -168,6 +236,12 @@ impl AudioDelivery {
         self.bitrate_kbps().unwrap_or(640)
     }
 
+    /// The measured downmix's filter chain, if this delivery folds channels
+    /// with one. Callers join it into the single audio `-af` they emit.
+    pub fn downmix_filter(&self) -> Option<String> {
+        self.downmix.as_ref().and_then(DownmixMatrix::filter)
+    }
+
     pub fn codec(&self) -> Option<&str> {
         match &self.action {
             AudioAction::None => None,
@@ -204,8 +278,14 @@ impl AudioDelivery {
         };
         valid
             && self.reason.len() <= 256
-            && self.downmix.is_none_or(|matrix| match matrix {
-                DownmixMatrix::RequiresLayoutMeasurement { source_channels } => source_channels > 0,
+            && self.downmix.is_none_or(|matrix| {
+                matrix.valid()
+                    && match matrix {
+                        // A measured matrix is a stereo fold, never a label
+                        // on some other output shape.
+                        DownmixMatrix::RequiresLayoutMeasurement { .. } => true,
+                        _ => matches!(&self.action, AudioAction::Encode { channels: 2, .. }),
+                    }
             })
     }
 }
@@ -234,9 +314,10 @@ fn encoded(
     codec: &'static str,
     channels: u8,
     bitrate_kbps: u32,
-    source_channels: u8,
+    source: &AudioStream,
     reason: &'static str,
 ) -> AudioDelivery {
+    let source_channels = self::channels(source);
     AudioDelivery {
         action: AudioAction::Encode {
             codec: codec.to_owned(),
@@ -245,8 +326,13 @@ fn encoded(
             bitrate_kbps,
             sample_rate: AUDIO_SAMPLE_RATE,
         },
-        downmix: (channels < source_channels)
-            .then_some(DownmixMatrix::RequiresLayoutMeasurement { source_channels }),
+        downmix: (channels < source_channels).then(|| {
+            if channels == 2 {
+                DownmixMatrix::stereo_for(source_channels, source.channel_layout.as_deref())
+            } else {
+                DownmixMatrix::RequiresLayoutMeasurement { source_channels }
+            }
+        }),
         reason: reason.to_owned(),
     }
 }
@@ -310,27 +396,19 @@ pub fn resolve_audio(
     // otherwise retains the source channel count at 256 kbit/s.
     if legacy_claim {
         return match route {
-            AudioRoute::Progressive if source_channels == 6 => encoded(
-                "aac",
-                6,
-                320,
-                source_channels,
-                "legacy copy-video audio conversion",
-            ),
+            AudioRoute::Progressive if source_channels == 6 => {
+                encoded("aac", 6, 320, source, "legacy copy-video audio conversion")
+            }
             AudioRoute::Progressive => encoded(
                 "aac",
                 source_channels,
                 256,
-                source_channels,
+                source,
                 "legacy copy-video audio conversion",
             ),
-            AudioRoute::RollingHls | AudioRoute::EncodedVod => encoded(
-                "aac",
-                2,
-                160,
-                source_channels,
-                "legacy transcode audio default",
-            ),
+            AudioRoute::RollingHls | AudioRoute::EncodedVod => {
+                encoded("aac", 2, 160, source, "legacy transcode audio default")
+            }
         };
     }
 
@@ -344,7 +422,7 @@ pub fn resolve_audio(
                 } else {
                     384
                 },
-                source_channels,
+                source,
                 "current sink admits E-AC-3",
             );
         }
@@ -353,7 +431,7 @@ pub fn resolve_audio(
                 "ac3",
                 source_channels.min(6),
                 640,
-                source_channels,
+                source,
                 "current sink admits AC-3",
             );
         }
@@ -374,7 +452,7 @@ pub fn resolve_audio(
         "aac",
         output_channels,
         if output_channels == 6 { 320 } else { 160 },
-        source_channels,
+        source,
         if route == AudioRoute::EncodedVod {
             "encoded VOD keeps the film-global AAC lattice"
         } else {
@@ -560,10 +638,118 @@ mod tests {
             AudioRoute::RollingHls,
             0,
         );
-        assert!(matches!(
+        // No layout spelling in the facts: the limited default fold, never a
+        // matrix guessed from the channel count.
+        assert_eq!(
             stereo.downmix,
-            Some(DownmixMatrix::RequiresLayoutMeasurement { source_channels: 6 })
-        ));
+            Some(DownmixMatrix::LimitedDefault { source_channels: 6 })
+        );
+    }
+
+    fn laid_out(codec: &str, channels: i64, layout: &str) -> AudioStream {
+        AudioStream {
+            channel_layout: Some(layout.to_owned()),
+            ..source(codec, channels)
+        }
+    }
+
+    #[test]
+    fn stereo_fold_takes_the_named_matrix_only_from_a_matching_layout() {
+        let stereo = claimed(&[("aac", 2)]);
+        let fold = |stream: AudioStream| {
+            resolve_audio(Some(&stream), &stereo, AudioRoute::RollingHls, 0).downmix
+        };
+        assert_eq!(
+            fold(laid_out("dts", 6, "5.1(side)")),
+            Some(DownmixMatrix::LoRo51Side)
+        );
+        assert_eq!(
+            fold(laid_out("aac", 6, "5.1")),
+            Some(DownmixMatrix::LoRo51Back)
+        );
+        assert_eq!(
+            fold(laid_out("truehd", 8, "7.1")),
+            Some(DownmixMatrix::LoRo71)
+        );
+        // A spelling whose channel count disagrees is not trusted.
+        assert_eq!(
+            fold(laid_out("aac", 8, "5.1")),
+            Some(DownmixMatrix::LimitedDefault { source_channels: 8 })
+        );
+        assert_eq!(
+            fold(laid_out("ac3", 5, "5.0(side)")),
+            Some(DownmixMatrix::LimitedDefault { source_channels: 5 })
+        );
+        // Stereo sources fold nothing.
+        assert_eq!(fold(laid_out("aac", 2, "stereo")), None);
+        // The legacy (absent-claim) transcode default folds the same way: it
+        // is the path every multichannel title takes today.
+        let legacy = resolve_audio(
+            Some(&laid_out("truehd", 8, "7.1")),
+            default_profile(),
+            AudioRoute::EncodedVod,
+            0,
+        );
+        assert_eq!(legacy.downmix, Some(DownmixMatrix::LoRo71));
+    }
+
+    #[test]
+    fn non_stereo_targets_keep_the_incumbent_fold() {
+        let delivery = resolve_audio(
+            Some(&laid_out("truehd", 8, "7.1")),
+            &claimed(&[("eac3", 6)]),
+            AudioRoute::RollingHls,
+            0,
+        );
+        assert_eq!(
+            delivery.downmix,
+            Some(DownmixMatrix::RequiresLayoutMeasurement { source_channels: 8 })
+        );
+        assert_eq!(delivery.downmix_filter(), None);
+    }
+
+    #[test]
+    fn downmix_filters_are_float_matrix_then_minus_four_dbfs_limiter() {
+        let limit = "alimiter=limit=0.6309573444801932:level=0:latency=1";
+        assert_eq!(
+            DownmixMatrix::LoRo51Side.filter().expect("measured fold"),
+            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR,{limit}")
+        );
+        assert_eq!(
+            DownmixMatrix::LoRo51Back.filter().expect("measured fold"),
+            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR,{limit}")
+        );
+        assert_eq!(
+            DownmixMatrix::LoRo71.filter().expect("measured fold"),
+            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR,{limit}")
+        );
+        assert_eq!(
+            DownmixMatrix::LimitedDefault { source_channels: 6 }
+                .filter()
+                .expect("measured fold"),
+            format!("aformat=sample_fmts=fltp:channel_layouts=stereo,{limit}")
+        );
+        assert_eq!(
+            DownmixMatrix::RequiresLayoutMeasurement { source_channels: 6 }.filter(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_measured_matrix_on_a_non_stereo_snapshot_is_refused() {
+        let mut delivery = resolve_audio(
+            Some(&laid_out("dts", 6, "5.1(side)")),
+            &claimed(&[("aac", 2)]),
+            AudioRoute::EncodedVod,
+            0,
+        );
+        assert!(delivery.valid_snapshot());
+        let snapshot = delivery.byte_identity();
+        assert!(snapshot.contains("lo_ro_5_1_side"), "{snapshot}");
+        if let AudioAction::Encode { channels, .. } = &mut delivery.action {
+            *channels = 6;
+        }
+        assert!(!delivery.valid_snapshot());
     }
 
     #[test]
