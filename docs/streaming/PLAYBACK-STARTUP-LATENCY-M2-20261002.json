@@ -129,7 +129,7 @@
   "physical_apple_android_status": "not qualified; absent transport metadata retains conservative policy",
   "limits": [
     "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
-    "Browser fixture exercises shipped startup/load policy and HLS engine; actor/flow/scratch are covered separately by authored regressions.",
+    "Browser fixture exercises shipped startup/load policy and HLS engine; it does not execute the daemon actor/flow/scratch. Publication regressions are authored, not run.",
     "32 seconds of media is an interim improvement, not the strict few-seconds buffer requirement.",
     "No deployment, queue reset, digest migration or live reference-film acceptance."
   ],
@@ -240,5 +240,23 @@
     },
     "sha256": "d59a1403c06190ac97fa0c9c544b22c22b5321f01c443302bd4f276d032e0387",
     "limits": "Arithmetic only; unconstrained inventory and assumed 2.5s transfer/append. Below-consumption is a negative control, not an admitted production class."
-  }
+  },
+  "physical_device_discovery_20261002": {
+    "apple_tv": "Bedroom physical AppleTV14,1 connected via CoreDevice; playback not measured for this candidate",
+    "android": "adb devices -l reports no connected device; enabled wireless-debugging address requested",
+    "discovery_is_qualification": false
+  },
+  "regression_scope_note": "The 30-minute publication fixture supplies established presentation through the existing cfg(test) actor marker after checking AwaitingPresentation, then checks ActiveLowReserve and a reachable Steady phase. It does not claim to test HTTP response commit or the actor presentation-progress proof.",
+  "compiler_evidence": [
+    {
+      "source": "e3cffab449d7db31a77b985667f1097badf1c34c",
+      "command": "cargo check --workspace --all-targets --locked",
+      "result": "passed"
+    },
+    {
+      "source": "1fac261a86e272ef41758b862d56aaa3f8db0a51",
+      "command": "cargo check -p plurxd --all-targets --locked; normal-hook workspace Clippy -D warnings",
+      "result": "passed; later phase assertions also compile"
+    }
+  ]
 }

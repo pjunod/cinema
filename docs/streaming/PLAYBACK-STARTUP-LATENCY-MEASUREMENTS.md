@@ -260,8 +260,12 @@ The fixture exposes a complete 8-second object at 2.25 seconds, bursts at
 completed endpoint on 16-second snapshot cycles. It exercises actual shipped
 web startup/loading code and the HLS engine, with generated local media; it
 does not exercise daemon actor, production flow or scratch. The authored
-server regressions cover those publication seams separately and remain
-unrun until final review, per the build contract.
+server regressions exercise publication seams separately and remain unrun
+until final review, per the build contract. The continuity fixture supplies
+the actor established-presentation fact through its existing test-only
+marker; it checks AwaitingPresentation, ActiveLowReserve and a reachable
+Steady phase, rather than claiming an HTTP response-commit or actor
+presentation-progress proof.
 
 Current main preserves PR #703's index reconciliation and the existing
 durable playback-interest/source-reader admission. The incident census is a

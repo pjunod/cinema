@@ -673,6 +673,7 @@
             .bind_startup_transport(Some("native"));
         let started = Instant::now();
         let mut previous_end = 0;
+        let mut saw_steady = false;
         for step in 0..=112_i64 {
             let position = step * 16_000;
             accept_rolling_publication_demand(
@@ -688,6 +689,12 @@
                 },
             )
             .await;
+            if step == 2 {
+                // This fixture has no HTTP response commit. Supply the
+                // actor's established-presentation fact after observing the
+                // unproved phase; actor progress proof has its own tests.
+                session.control.mark_startup_presented_for_test().await;
+            }
             // Only 5% spare capacity: reaching the former 48s reserve takes
             // 320s. Include all completed 8s segments on each legal cycle.
             let produced = 32_000 + position * 105 / 100;
@@ -707,6 +714,16 @@
                 .expect("sustainable publication");
             let clock = session.publication.lock().await;
             let served = clock.served.as_ref().expect("published media");
+            if step == 1 {
+                assert_eq!(
+                    clock.reserve_phase,
+                    RollingReservePhase::AwaitingPresentation
+                );
+            }
+            if step == 2 {
+                assert_eq!(clock.reserve_phase, RollingReservePhase::ActiveLowReserve);
+            }
+            saw_steady |= clock.reserve_phase == RollingReservePhase::Steady;
             assert!(served.end_ms > position, "no drain at step {step}");
             assert!(
                 served.end_ms >= previous_end,
@@ -729,6 +746,10 @@
             drop(clock);
             tokio::time::advance(Duration::from_millis(251)).await;
         }
+        assert!(
+            saw_steady,
+            "the trace must exercise actual steady publication"
+        );
         assert!(
             !session.failed.load(Acquire),
             "normal low reserve is not startup expiry"
