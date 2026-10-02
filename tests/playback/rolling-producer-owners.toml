@@ -486,7 +486,8 @@ also_in = ["crates/plurxd/src/transcode"]
 # stops its actual manager session. This timer adds no separate producer or
 # recovery owner, and the external acquisition supervisor bounds drain.
 # S10 new real Copy and PUT consumers: two bounded fixture polls, no production timer.
-expected_occurrences = 54
+# Review59: two NEW real-completion fixture polls, each inside a finite timeout.
+expected_occurrences = 56
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -506,14 +507,18 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 
 [[symbols]]
 id = "all-ffmpeg-process-starts"
-pattern = "\\bspawn_ffmpeg\\("
-expected_occurrences = 6
+pattern = "\\bspawn_ffmpeg(?:_at)?\\("
+# Review59: preserve the ordinary/fallback wrapper; include its exact-path
+# delegate and definition. The NEW executable fixture is outside this source
+# row's scope; its bounded child lifecycle is counted in the module sentinel.
+# The two initial launches moved to _at, not outside this ownership scan.
+expected_occurrences = 8
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
 [[symbols]]
 id = "all-piped-ffmpeg-process-starts"
-pattern = "\\bspawn_ffmpeg_pipe\\("
+pattern = "\\bspawn_ffmpeg_pipe(?:_at)?\\("
 expected_occurrences = 2
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling copy spawn"
@@ -814,7 +819,9 @@ pattern = "SegmentPublication"
 # +8 preserve typed Missing/Pending/Ready outcomes for retired rolling objects
 # and assert promised init/segment availability plus expiry. They add no worker;
 # the existing request owner still resolves one typed outcome.
-expected_occurrences = 46
+# Review59: +1 NEW integrity regression asserts the actual HTTP Failed arm,
+# not the legacy probe facade's lossy Option result; no new response owner.
+expected_occurrences = 47
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -3644,7 +3651,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one the existing inner completion deadline, one real preparation fixture.
 # No extra spawned task or producer loop; all fixture waits are awaited.
 # S10 optional link timeout + Copy/PUT fixture timeouts and polls; no additional production timer.
-expected_occurrences = 1166
+# Review59: +7 NEW fixture bounds (two completion timeout/poll pairs, one busy
+# owner publication bound, one exact executable wait, one admission bound).
+# The optional link timeout moved to completion; no production timer was added.
+expected_occurrences = 1173
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4689,7 +4699,9 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 250
+# Review59: +3 only in the NEW exact executable fixture: ordinary child.wait
+# and timeout start_kill + wait, retaining the job through exact reap.
+expected_occurrences = 253
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

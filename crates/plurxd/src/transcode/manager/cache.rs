@@ -142,6 +142,9 @@ impl TranscodeManager {
         session.fail(PlaylistError::SessionFailed(
             CACHED_MEDIA_INTEGRITY_FAILURE.to_owned(),
         ));
+        if let Some(artifact) = &session.rolling_artifact {
+            self.vod.refuse_rolling_output(artifact);
+        }
         if session
             .cache_integrity_cleanup_started
             .compare_exchange(false, true, AcqRel, Acquire)
