@@ -617,6 +617,7 @@ pub struct VodStart {
 
 /// Actual init-verified media and exact catalog provenance for one parent.
 pub(crate) struct VerifiedContinuousFamily {
+    pub controlled: bool,
     pub family: plurx_core::transcode::VodPresentationFamily,
     pub video_budgets: Vec<plurx_core::transcode::VodRenditionBandwidth>,
     pub audio_budget: Option<plurx_core::transcode::VodRenditionBandwidth>,
@@ -658,7 +659,7 @@ impl VerifiedContinuousFamily {
         });
         let bytes = serde_json::to_vec(&serde_json::json!({
             "version": 1, "family_id": self.family.id(),
-            "mode": "autonomous_reserved", "master": "master.m3u8", "video": video, "audio": audio,
+            "mode": if self.controlled { "controlled" } else { "autonomous_reserved" }, "master": "master.m3u8", "video": video, "audio": audio,
         }))
         .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
         if bytes.len() > 32 * 1024 {

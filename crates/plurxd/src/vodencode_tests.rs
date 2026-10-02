@@ -308,6 +308,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let mut parent_request = request(&parent, 0.0);
     parent_request.kind = SessionKind::Transcode { height: video.options.target_height };
     parent_request.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+            controlled: false,
             autonomous_companion: None,
             family_descriptor: None,
             companion_context: None,

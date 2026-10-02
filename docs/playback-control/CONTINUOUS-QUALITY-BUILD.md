@@ -2472,3 +2472,40 @@ existing SDR envelope, not qualification of other color layouts. The authored
 regression requires frame values and box emission together. The failed v2
 production receipt is retained as `continuous-chrome-partial-linux-color.json`.
 No unit execution or successful continuity claim follows from this experiment.
+
+
+### 10.74 Controlled families reacquire cold video work under the parent
+
+The continuous create route now distinguishes an explicitly controlled loader
+from an autonomous engine. hls.js requests the controlled mode. The durable
+family descriptor retains its exact immutable two-rung graph and init proof;
+a cold video child may release its own admission without withdrawing a URI
+or changing family identity. Autonomous masters retain all advertised credits.
+
+Parent control readers and cold child readers keep their identities but create
+neither background encode demand nor eviction windows. Accepted control still
+updates them, and another viewer's active reader continues to drive shared
+work. A selected cold target reacquires only its video and existing AAC group
+under sorted media gates, the parent lifecycle and the original preparation
+deadline. Optional cold admission is speculative. It restores the same child
+reader before actual two-segment readiness and durable reservation publication.
+
+Pending preparation keeps incumbent demand. Once the latest noncancelled
+Scheduled promise accepts future loading, old producer demand is released
+while immutable child identity, loaded media and committed Store pins remain.
+The worker independently retains its credit until confirmed reap; another
+active reader keeps shared work alive. Settlement rereads the durable ledger
+under the lifecycle so a stale response cannot retire a newer accepted intent.
+This source implementation still needs measured cleanup, pressure, cold seek
+and cancellation qualification; no physical timing result is claimed.
+
+The v3 color probe passed family verification and attached to the shipped
+continuous master, then failed before a presented frame with a JavaScript
+stack-overflow observation. Its failed receipt is retained as
+`continuous-chrome-partial-linux-colr.json`. A repeated debugger-assisted probe
+retained the same failure but captured no exception pause. The existing lab
+now retains the adapter's bounded error stack to locate the actual recursive
+call without changing scoring or publishing credentials. The controlled
+regressions cover passive-reader fairness, future-load retirement without
+disposing incumbent facts, and strict metadata in both delivery modes. Their
+source is compiled; execution remains deferred to the final fast lane.

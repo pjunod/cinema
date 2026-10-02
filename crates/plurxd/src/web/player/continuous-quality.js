@@ -62,7 +62,7 @@ function continuousQualityResponse(value,request){
     &&receipt.transaction.target_rendition_id===transition.operation.target_rendition_id);
 }
 function continuousQualityFamily(value){
-  if(!value||value.version!==1||value.mode!=='autonomous_reserved'||!continuousQualityArtifact(value.family_id)
+  if(!value||value.version!==1||!['autonomous_reserved','controlled'].includes(value.mode)||!continuousQualityArtifact(value.family_id)
     ||value.master!=='master.m3u8'||!Array.isArray(value.video)||value.video.length<2||value.video.length>8)return false;
   const rows=value.video;
   if(!rows.every(row=>row&&typeof row.candidate_id==='string'&&/^[0-9a-f]{32}$/.test(row.candidate_id)
@@ -214,7 +214,7 @@ async function openContinuousQualitySession(fileId,body,player,signal){
   }
   let response;
   try{response=await api(`/files/${fileId}/hls/continuous-sessions`,{method:'POST',signal,
-    body:{version:1,family_generation:attempts.get(attemptKey),...pair,start}});}
+    body:{version:1,controlled:true,family_generation:attempts.get(attemptKey),...pair,start}});}
   catch(error){if(error.status===404||error.status===405)return null;throw error;}
   const playback=response?.playback,bootstrap=response?.quality;
   try{
@@ -265,6 +265,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   }
   function note(error){
     player.continuousQualityObservation=String(error?.message||error).slice(0,160);
+    player.continuousQualityObservationStack=String(error?.stack||'').slice(0,2048);
   }
   function tx(id=transaction){return protocol.ledger?.transactions.find(row=>row.transaction_id===id);}
   function pins(){return (protocol.ledger?.transactions||[]).flatMap(row=>row.reserved)

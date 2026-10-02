@@ -2677,6 +2677,7 @@ scope = "test"
         assert!(legacy.get("continuous_media").is_none());
         let legacy_identity = request.intent_fingerprint("viewer");
         request.continuous_media = Some(Box::new(ContinuousMediaRequest {
+            controlled: false,
             autonomous_companion: None,
             family_descriptor: None,
             companion_context: None,

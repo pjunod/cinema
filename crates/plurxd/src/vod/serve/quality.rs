@@ -113,6 +113,235 @@ impl QualityScheduleResponse {
 }
 
 impl VodServe {
+    /// Reacquire only the selected controlled video plus its existing AAC
+    /// credit. Every await remains inside the intent's original deadline.
+    pub(super) async fn admit_controlled_video_before(
+        &self,
+        session_id: &str,
+        rendition_id: &str,
+        frontier_ms: i64,
+        deadline: Instant,
+    ) -> Result<(), String> {
+        let work = async {
+            let (lifecycle, incarnation, mut media) = {
+                let sessions = self.shared.sessions.lock().await;
+                let session = sessions
+                    .get(session_id)
+                    .ok_or("controlled parent disappeared")?;
+                if session.tombstone.is_some() {
+                    return Err("controlled parent ended".into());
+                }
+                let child = session
+                    .children
+                    .iter()
+                    .find(|child| child.rendition.key == rendition_id)
+                    .ok_or("controlled target is outside its parent")?;
+                if !child.controlled || child._reservation.is_some() {
+                    return Ok(());
+                }
+                let media = session
+                    .children
+                    .iter()
+                    .filter(|child| {
+                        child.rendition.key == rendition_id || child.candidate_id.is_none()
+                    })
+                    .map(|child| Arc::clone(&child.rendition))
+                    .collect::<Vec<_>>();
+                (
+                    Arc::clone(&session.lifecycle),
+                    Arc::clone(&session.incarnation),
+                    media,
+                )
+            };
+            media.sort_unstable_by(|left, right| left.key.cmp(&right.key));
+            let mut gates = Vec::with_capacity(media.len());
+            for rendition in &media {
+                gates.push(
+                    self.shared
+                        .rendition_build_gate(&rendition.key)
+                        .lock_owned()
+                        .await,
+                );
+            }
+            let _lifecycle = lifecycle.lock().await;
+            {
+                let sessions = self.shared.sessions.lock().await;
+                if sessions.get(session_id).is_none_or(|session| {
+                    session.tombstone.is_some()
+                        || !Arc::ptr_eq(&session.incarnation, &incarnation)
+                        || !Arc::ptr_eq(&session.lifecycle, &lifecycle)
+                }) {
+                    return Err("controlled attachment changed during admission".into());
+                }
+            }
+            if media.iter().any(|rendition| {
+                rendition.closed.load(Acquire)
+                    || rendition
+                        .source
+                        .as_ref()
+                        .is_some_and(|source| !source.unchanged())
+            }) {
+                return Err("controlled source changed during admission".into());
+            }
+            let permits =
+                Self::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
+                    .await?;
+            // Lock every participant before publishing any credit or demand.
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = sessions
+                .get_mut(session_id)
+                .ok_or("controlled parent disappeared")?;
+            if session.tombstone.is_some() || !Arc::ptr_eq(&session.incarnation, &incarnation) {
+                return Err("controlled parent changed during admission".into());
+            }
+            let child = session
+                .children
+                .iter_mut()
+                .find(|child| child.controlled && child.rendition.key == rendition_id)
+                .ok_or("controlled target disappeared")?;
+            let mut readers = child.rendition.readers.lock().await;
+            let reader = readers
+                .get_mut(&child.reader_id)
+                .ok_or("controlled reader disappeared")?;
+            let permit = media
+                .iter()
+                .zip(permits)
+                .find_map(|(rendition, permit)| (rendition.key == rendition_id).then_some(permit))
+                .ok_or("controlled credit missing")?;
+            reader.frontier = media_entry_containing_ms(&child.rendition.plan, frontier_ms);
+            reader.authority_only = false;
+            child._reservation = Some(permit);
+            child.rendition.kick();
+            Ok(())
+        };
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+            .await
+            .map_err(|_| "controlled admission exceeded its original deadline".to_owned())?
+    }
+
+    /// The latest accepted Scheduled promise changes future loading. Its
+    /// verified bytes and the old loaded buffer are retained independently
+    /// of either producer. Pending preparation keeps the incumbent working.
+    pub(super) fn controlled_video_demand(
+        ledger: &QualityLedger,
+    ) -> Option<std::collections::BTreeSet<&str>> {
+        let incumbent = ledger
+            .transactions
+            .iter()
+            .filter(|tx| tx.first_presented_tick.is_some())
+            .max_by_key(|tx| tx.intent_revision);
+        let latest = ledger.transactions.iter().find(|tx| {
+            tx.intent_revision == ledger.latest_intent_revision
+                && !tx.cancel_requested
+                && !tx.intent_superseded
+        });
+        if let Some(tx) = latest.filter(|tx| {
+            matches!(
+                tx.state,
+                QualityState::Scheduled | QualityState::Appended | QualityState::Presented
+            ) || (tx.state == QualityState::Disposed && tx.first_presented_tick.is_some())
+        }) {
+            return Some(std::collections::BTreeSet::from([tx
+                .target_rendition_id
+                .as_str()]));
+        }
+        let mut keep = std::collections::BTreeSet::new();
+        if let Some(tx) = incumbent {
+            keep.insert(tx.target_rendition_id.as_str());
+        }
+        if let Some(tx) =
+            latest.filter(|tx| matches!(tx.state, QualityState::Preparing | QualityState::Ready))
+        {
+            keep.insert(tx.target_rendition_id.as_str());
+        }
+        (!keep.is_empty()).then_some(keep)
+    }
+
+    /// Completed scheduling retires demand, never the immutable child or
+    /// its committed interval pins. Shared workers retain their physical
+    /// permit through confirmed reap and continue for any other active reader.
+    async fn settle_controlled_video(
+        &self,
+        session_id: &str,
+        owner: &ResponseOwner,
+        ledger: &QualityLedger,
+    ) -> Result<(), String> {
+        let Some(keep) = Self::controlled_video_demand(ledger) else {
+            return Ok(());
+        };
+        let _lifecycle = owner.lifecycle.lock().await;
+        {
+            let sessions = self.shared.sessions.lock().await;
+            if sessions
+                .get(session_id)
+                .is_some_and(|session| !session.children.iter().any(|child| child.controlled))
+            {
+                return Ok(());
+            }
+        }
+        // A newer accepted intent cannot be retired by an older response.
+        let current = self
+            .shared
+            .store
+            .quality_ledger(&ledger.generation)
+            .await
+            .map_err(|error| error.to_string())?;
+        if current
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.ledger != *ledger)
+        {
+            return Ok(());
+        }
+        let mut sessions = self.shared.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or("controlled parent disappeared")?;
+        if session.tombstone.is_some()
+            || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            || !session.owns_response_media(owner)
+        {
+            return Err("controlled settlement owner changed".into());
+        }
+        let mut media = session
+            .children
+            .iter()
+            .filter(|child| child.controlled && !keep.contains(child.rendition.key.as_str()))
+            .map(|child| (Arc::clone(&child.rendition), child.reader_id.clone()))
+            .collect::<Vec<_>>();
+        media.sort_unstable_by(|left, right| left.0.key.cmp(&right.0.key));
+        let mut readers = Vec::with_capacity(media.len());
+        for (rendition, _) in &media {
+            readers.push(rendition.readers.lock().await);
+        }
+        if media
+            .iter()
+            .zip(&readers)
+            .any(|((_, id), readers)| !readers.contains_key(id))
+        {
+            return Err("controlled settlement reader disappeared".into());
+        }
+        let mut released = Vec::new();
+        for ((rendition, id), readers) in media.iter().zip(readers.iter_mut()) {
+            readers
+                .get_mut(id)
+                .expect("validated controlled reader")
+                .authority_only = true;
+            let child = session
+                .children
+                .iter_mut()
+                .find(|child| child.reader_id == *id && Arc::ptr_eq(&child.rendition, rendition))
+                .expect("validated controlled child");
+            if let Some(permit) = child._reservation.take() {
+                released.push(permit);
+            }
+            rendition.kick();
+        }
+        drop(readers);
+        drop(sessions);
+        drop(released);
+        Ok(())
+    }
+
     pub(crate) async fn quality_schedule_before(
         &self,
         session_id: &str,
@@ -478,6 +707,12 @@ impl VodServe {
         {
             return Err("quality response owner changed".into());
         }
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.settle_controlled_video(session_id, &owner, &snapshot.ledger),
+        )
+        .await
+        .map_err(|_| "controlled settlement exceeded its response deadline".to_owned())??;
         Ok(QualityScheduleResponse {
             version: 1,
             generation: request.generation.clone(),

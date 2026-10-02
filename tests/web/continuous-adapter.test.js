@@ -168,3 +168,15 @@ test('reloading an actually removed artifact flushes disposal before a fresh res
  assert.equal(kinds[disposed+1],'prepare');assert.equal(kinds[disposed+2],'scheduled');
  f.hls.emit('detached',{});await pause();
 });
+
+
+test('controlled metadata keeps the same strict immutable family contract',()=>{
+ const source=fixture().adapter.family;
+ const context=vm.createContext({AbortController,TextDecoder,setTimeout,clearTimeout});
+ vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),context);
+ assert.equal(context.continuousQualityFamily({...source,mode:'controlled'}),true);
+ assert.equal(context.continuousQualityFamily({...source,mode:'autonomous_reserved'}),true);
+ assert.equal(context.continuousQualityFamily({...source,mode:'unbounded'}),false);
+ const invalid=copy(source);invalid.mode='controlled';invalid.video[1].init_id='unverified';
+ assert.equal(context.continuousQualityFamily(invalid),false);
+});

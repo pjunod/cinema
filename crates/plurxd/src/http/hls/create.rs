@@ -176,6 +176,8 @@ pub struct CreateSession {
 #[serde(deny_unknown_fields)]
 pub struct CreateContinuousFamily {
     pub version: u8,
+    #[serde(default)]
+    pub controlled: bool,
     pub family_generation: String,
     pub primary_candidate_id: plurx_core::playback::candidate::CandidateId,
     pub companion_candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -378,6 +380,7 @@ impl ContinuousQualityBootstrap {
 
 #[derive(Clone)]
 struct ContinuousFamilyStart {
+    controlled: bool,
     family_generation: String,
     primary_candidate_id: plurx_core::playback::candidate::CandidateId,
     companion_candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -1550,6 +1553,7 @@ async fn resolve_plan_with_continuous(
                 companion_context.owner_node_id = Some(companion.node_id.clone());
                 continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
                     version: 1,
+                    controlled: family.controlled,
                     family_generation: family.family_generation.clone(),
                     role: crate::transcode::ContinuousMediaRole::Video,
                     autonomous_companion: Some(family.companion_candidate_id),
@@ -1722,6 +1726,7 @@ pub async fn create_continuous(
         ));
     }
     let purpose = ContinuousFamilyStart {
+        controlled: body.controlled,
         family_generation: body.family_generation,
         primary_candidate_id: body.primary_candidate_id,
         companion_candidate_id: body.companion_candidate_id,

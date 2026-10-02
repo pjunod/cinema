@@ -2070,6 +2070,7 @@ function continuousTransportSnapshot(player, video, objects) {
         from_tick: row.from_tick, through_tick: row.through_tick, timescale: row.timescale })),
     } : null,
     observation: player.continuousQualityObservation || null,
+    observation_stack: player.continuousQualityObservationStack || null,
   };
 }
 

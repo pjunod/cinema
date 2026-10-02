@@ -954,7 +954,7 @@
         let private_id = uuid::Uuid::new_v4().to_string();
         first.attach_reader(&private_id, 0).await;
         serve.shared.sessions.lock().await.get_mut("sess-a").expect("parent").children.push(
-            ParentMediaReader { candidate_id: None,
+            ParentMediaReader { controlled: false, candidate_id: None,
                 reader_id: private_id.clone(), rendition: Arc::clone(&first), _reservation: None,
             },
         );
@@ -1019,7 +1019,7 @@
         insert_control_session(&serve, &other, Arc::clone(&root), Instant::now()).await;
         child.attach_reader(&private_id, 0).await;
         serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
-            ParentMediaReader { candidate_id: None, reader_id: private_id.clone(), rendition: Arc::clone(&child), _reservation: None },
+            ParentMediaReader { controlled: false, candidate_id: None, reader_id: private_id.clone(), rendition: Arc::clone(&child), _reservation: None },
         );
         let publication = serve.session_media_rendition(&parent, Some(&child.key)).await.expect("parent lookup");
         assert!(publication.result.expect("live lookup").is_some());
@@ -1037,7 +1037,7 @@
         let touched = {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(&parent).expect("parent");
-            session.children.push(ParentMediaReader { candidate_id: None, reader_id: next_id.clone(), rendition: Arc::clone(&child), _reservation: None });
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: next_id.clone(), rendition: Arc::clone(&child), _reservation: None });
             let touched = *session.last_touch.lock().expect("touch");
             touched
         };
@@ -1067,7 +1067,7 @@
         insert_control_session(&serve, &other, Arc::clone(&rendition), Instant::now()).await;
         rendition.attach_reader(&child_id, 0).await;
         serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
-            ParentMediaReader { candidate_id: None,
+            ParentMediaReader { controlled: false, candidate_id: None,
                 reader_id: child_id.clone(),
                 rendition: Arc::clone(&rendition),
                 _reservation: None,
@@ -1096,7 +1096,7 @@
         let next_child = uuid::Uuid::new_v4().to_string();
         rendition.attach_reader(&next_child, 0).await;
         serve.shared.sessions.lock().await.get_mut(&other).expect("other parent").children.push(
-            ParentMediaReader { candidate_id: None,
+            ParentMediaReader { controlled: false, candidate_id: None,
                 reader_id: next_child.clone(),
                 rendition: Arc::clone(&rendition),
                 _reservation: None,
@@ -1124,7 +1124,7 @@
         let lifecycle = {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(&parent).expect("parent");
-            session.children.push(ParentMediaReader { candidate_id: None,
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None,
                 reader_id: child_id.clone(), rendition: Arc::clone(&child), _reservation: None,
             });
             Arc::clone(&session.lifecycle)

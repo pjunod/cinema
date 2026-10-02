@@ -496,6 +496,10 @@ pub struct CandidateExecutionContext {
 #[serde(deny_unknown_fields)]
 pub struct ContinuousMediaRequest {
     pub version: u32,
+    /// A controlled loader prepares a cold video child before requesting it.
+    /// Autonomous engines retain all advertised capacity through detach.
+    #[serde(default, skip_serializing_if = "continuous_media_is_autonomous")]
+    pub controlled: bool,
     pub family_generation: String,
     pub role: ContinuousMediaRole,
     /// One additional catalog rung for a capacity-reserved autonomous master.
@@ -523,11 +527,21 @@ pub enum ContinuousMediaRole {
     SharedAudio,
 }
 
+fn continuous_media_is_autonomous(controlled: &bool) -> bool {
+    !*controlled
+}
+
 impl ContinuousMediaRequest {
     pub fn valid_for(&self, request: &SessionRequest) -> bool {
         self.version == 1
             && self.family_descriptor.as_ref().is_none_or(|description| {
                 description.valid()
+                    && description.mode
+                        == if self.controlled {
+                            "controlled"
+                        } else {
+                            "autonomous_reserved"
+                        }
                     && self.role == ContinuousMediaRole::Video
                     && self.autonomous_companion.is_some_and(|companion| {
                         description

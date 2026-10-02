@@ -49,7 +49,7 @@ impl ContinuousFamilyDescription {
     pub fn valid(&self) -> bool {
         if self.version != 1
             || !digest(&self.family_id)
-            || self.mode != "autonomous_reserved"
+            || !matches!(self.mode.as_str(), "autonomous_reserved" | "controlled")
             || self.master != "master.m3u8"
             || self.video.len() != 2
         {

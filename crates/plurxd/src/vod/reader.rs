@@ -22,6 +22,9 @@ pub(super) struct Recipe {
 /// One attached reader, in plan indexes.
 #[derive(Debug, Clone)]
 pub(super) struct Reader {
+    /// Parent authority or a cold controlled child retains control identity,
+    /// but creates neither background production nor an eviction window.
+    pub(super) authority_only: bool,
     /// Current playback anchor, owned by accepted control once available.
     /// Before control arrives, successful media commits are the fallback.
     pub(super) frontier: u32,
@@ -42,6 +45,7 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn new(frontier: u32) -> Self {
         Self {
+            authority_only: false,
             frontier,
             control_sequence: None,
             last_served: None,

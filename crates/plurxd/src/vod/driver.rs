@@ -446,6 +446,7 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
             let demands = playback_demands(&shared.pool, rendition, &readers, &manifest);
             let ledgers = readers
                 .values()
+                .filter(|reader| !reader.authority_only)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
                 .collect::<Vec<_>>();
             (demands, ledgers)
@@ -758,7 +759,15 @@ pub(super) fn playback_demands(
     readers: &HashMap<String, Reader>,
     manifest: &Manifest,
 ) -> Vec<Demand> {
-    let blocked = pool.demands(&rendition.key);
+    let blocked = pool
+        .demands(&rendition.key)
+        .into_iter()
+        .filter(|request| {
+            !readers
+                .get(&request.session)
+                .is_some_and(|reader| reader.authority_only)
+        })
+        .collect::<Vec<_>>();
     let mut nearest = HashMap::new();
     let mut oldest = HashMap::new();
     for request in &blocked {
@@ -801,6 +810,7 @@ pub(super) fn playback_demands(
     demands.extend(
         readers
             .values()
+            .filter(|reader| !reader.authority_only)
             .map(|reader| Demand::idle_at(reader.frontier)),
     );
     demands

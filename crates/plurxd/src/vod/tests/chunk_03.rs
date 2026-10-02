@@ -781,9 +781,9 @@
         {
             let mut sessions = serve.shared.sessions.lock().await;
             let session = sessions.get_mut(VIEWER).expect("parent");
-            session.children.push(ParentMediaReader { candidate_id: None, reader_id: "private-audio".into(),
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-audio".into(),
                 rendition: Arc::clone(&soundtrack), _reservation: None });
-            session.children.push(ParentMediaReader { candidate_id: None, reader_id: "private-root".into(),
+            session.children.push(ParentMediaReader { controlled: false, candidate_id: None, reader_id: "private-root".into(),
                 rendition: Arc::clone(&rendition), _reservation: None });
         }
         let control = |sequence, snapshot| crate::playback_control::LocalControlRequest {
@@ -1234,6 +1234,86 @@
             .expect("GET task")
             .expect("response file");
         assert_eq!(ready.len, 12);
+    }
+
+    #[test]
+    fn controlled_future_loading_retires_work_without_disposing_incumbent_bytes() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger, QualityState, QualityTransaction};
+        let identity = || uuid::Uuid::new_v4().to_string();
+        let mut ledger = QualityLedger::new(identity(),1,QualityAttachment {
+            client_instance_id: identity(), lifetime_id: "film".into(), attachment_id: identity(), family_id: "c".repeat(64),
+        }).expect("ledger");
+        let transaction = |intent_revision,target_rendition_id:String,state,first_presented_tick:Option<u64>| QualityTransaction {
+            transaction_id: identity(),intent_revision,target_rendition_id,state,
+            intent_superseded:false,cancel_requested:false,preparation:None,ready:vec![],reserved:vec![],appended:vec![],
+            ever_appended:first_presented_tick.is_some(),disposed:vec![],first_presented_tick,
+            first_presented_at_ms:first_presented_tick.map(|_| 1),
+        };
+        ledger.transactions.push(transaction(1,"a".repeat(64),QualityState::Presented,Some(0)));
+        ledger.transactions.push(transaction(2,"b".repeat(64),QualityState::Ready,None));
+        ledger.latest_intent_revision=2;
+        let active = |ledger:&QualityLedger| VodServe::controlled_video_demand(ledger).expect("active")
+            .into_iter().map(str::to_owned).collect::<Vec<_>>();
+        assert_eq!(active(&ledger),vec!["a".repeat(64),"b".repeat(64)]);
+        ledger.transactions[1].state=QualityState::Scheduled;
+        assert_eq!(active(&ledger),vec!["b".repeat(64)]);
+        assert_eq!(ledger.transactions[0].first_presented_tick,Some(0));
+        assert!(!ledger.transactions[0].cancel_requested);
+        ledger.transactions[1].cancel_requested=true;
+        assert_eq!(active(&ledger),vec!["a".repeat(64)]);
+        ledger.transactions[1].cancel_requested=false;
+        ledger.transactions[1].state=QualityState::Presented;
+        ledger.transactions[1].first_presented_tick=Some(48);
+        assert_eq!(active(&ledger),vec!["b".repeat(64)]);
+        ledger.transactions[1].state=QualityState::Disposed;
+        assert_eq!(active(&ledger),vec!["b".repeat(64)],"ordinary eviction does not retire wanted loading");
+    }
+
+    #[tokio::test]
+    async fn cold_controlled_readers_keep_authority_without_driving_shared_work() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        for (id,frontier) in [("parent",0),("cold",45),("other",3)] {
+            rendition.attach_reader(id,frontier).await;
+        }
+        {
+            let mut readers = rendition.readers.lock().await;
+            for id in ["parent","cold"] {
+                let reader = readers.get_mut(id).expect("authority");
+                reader.authority_only = true;
+                reader.accept_control(1,77);
+            }
+        }
+        let cold = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 45,
+        }, "cold").expect("bounded cold request");
+        let active = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 3,
+        }, "other").expect("other viewer");
+        let windows = rendition.reader_windows().await;
+        assert_eq!(windows.len(),1);
+        assert_eq!(windows[0].playhead,3);
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool,&rendition,&readers,&manifest);
+            assert!(!demands.iter().any(|demand| demand.blocked_on == Some(45)));
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(3) && demand.foreground));
+            assert_eq!(readers["cold"].control_sequence,Some(1));
+            assert_eq!(readers["cold"].frontier,77);
+        }
+        {
+            let mut readers = rendition.readers.lock().await;
+            readers.get_mut("cold").expect("same cold identity").authority_only = false;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool,&rendition,&readers,&manifest);
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(45)));
+            assert!(readers["parent"].authority_only);
+        }
+        assert_eq!(rendition.reader_windows().await.len(),2);
+        drop(cold);
+        drop(active);
     }
 
     #[tokio::test]

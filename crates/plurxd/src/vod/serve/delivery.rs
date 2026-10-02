@@ -539,7 +539,7 @@ impl VodServe {
                         || session
                             .children
                             .iter()
-                            .any(|child| child._reservation.is_none())
+                            .any(|child| child._reservation.is_none() && !child.controlled)
                     {
                         return Ok(None);
                     }
@@ -701,7 +701,8 @@ impl VodServe {
                     || session.children.len() != children.len()
                     || children.iter().any(|rendition| {
                         !session.children.iter().any(|child| {
-                            Arc::ptr_eq(&child.rendition, rendition) && child._reservation.is_some()
+                            Arc::ptr_eq(&child.rendition, rendition)
+                                && (child._reservation.is_some() || child.controlled)
                         })
                     })
                 {
@@ -717,6 +718,7 @@ impl VodServe {
                     })
                     .collect();
                 Ok(Some(VerifiedContinuousFamily {
+                    controlled: session.children.iter().any(|child| child.controlled),
                     family,
                     video_budgets,
                     audio_budget,
@@ -875,6 +877,10 @@ impl VodServe {
             if timescale != rung.grid().numerator {
                 return Err("append frontier clock changed".into());
             }
+            let frontier_ms = (u128::from(frontier) * 1000 / u128::from(timescale.max(1)))
+                .min(i64::MAX as u128) as i64;
+            self.admit_controlled_video_before(session_id, rendition_id, frontier_ms, deadline)
+                .await?;
             let publication = self
                 .session_media_rendition(session_id, Some(rendition_id))
                 .await

@@ -469,8 +469,9 @@ impl VodServe {
             })
     }
 
-    async fn reserve_media_group(
+    pub(super) async fn reserve_media_group(
         media: &[Arc<Rendition>],
+        priority: Option<crate::admission::Priority>,
     ) -> Result<Vec<crate::vodencode::EncodePermit>, String> {
         let refuse = || {
             crate::transcode::vod_refusal_error(
@@ -534,14 +535,16 @@ impl VodServe {
             .zip(&retained)
             .filter_map(|(estimate, permit)| permit.is_none().then_some(*estimate))
             .collect::<Vec<_>>();
-        let priority = if encodings
-            .iter()
-            .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
-        {
-            crate::admission::Priority::Speculative
-        } else {
-            crate::admission::Priority::Live
-        };
+        let priority = priority.unwrap_or_else(|| {
+            if encodings
+                .iter()
+                .any(|encoding| encoding.is_speculative() || encoding.nonpreemptive_trial)
+            {
+                crate::admission::Priority::Speculative
+            } else {
+                crate::admission::Priority::Live
+            }
+        });
         let mut admitted = if missing.is_empty() {
             Vec::new()
         } else {
@@ -762,11 +765,20 @@ impl VodServe {
             }
         }
         let mut private_media = if continuous {
-            let permits = Self::reserve_media_group(&media).await?;
+            let permits = Self::reserve_media_group(&media, None).await?;
             media
                 .into_iter()
                 .zip(permits)
                 .map(|(child, permit)| ParentMediaReader {
+                    controlled: req
+                        .continuous_media
+                        .as_ref()
+                        .is_some_and(|media| media.controlled)
+                        && child
+                            .recipe
+                            .encoding
+                            .as_ref()
+                            .is_some_and(|encoding| encoding.shared_audio.is_none()),
                     candidate_id: if Arc::ptr_eq(&child, &rendition) {
                         req.candidate_context
                             .as_ref()
@@ -981,7 +993,9 @@ impl VodServe {
             }
         }
         replacement.children = std::mem::take(&mut private_media);
-        replacement_readers.insert(session_id.clone(), Reader::new(start_entry));
+        let mut authority = Reader::new(start_entry);
+        authority.authority_only = replacement.children.iter().any(|child| child.controlled);
+        replacement_readers.insert(session_id.clone(), authority);
         *rendition.dormant_since.lock().expect("dormant lock") = None;
         // A live entry with this id is replaced rather than refused, and the
         // replacement carries a fresh `ControlState` — so a staged M6
