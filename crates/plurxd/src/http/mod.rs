@@ -47,6 +47,7 @@ pub(crate) mod publication;
 mod reading;
 mod scan;
 pub(crate) mod scan_identity;
+pub(crate) mod sharing;
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
@@ -1317,6 +1318,7 @@ pub fn router(state: AppState) -> Router {
     // before the shared serving gate so media bodies and blocked GETs remain
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
+        .merge(sharing::admin_router())
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
         .route("/settings", get(system::get_settings))
@@ -1795,6 +1797,11 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
+        .route("/sharing", axum::routing::any(sharing::local_peer_refusal))
+        .route(
+            "/sharing/{*path}",
+            axum::routing::any(sharing::local_peer_refusal),
+        )
         .fallback(web::fallback)
         .layer(axum::middleware::from_fn(json_short_deadline));
 
@@ -11959,6 +11966,302 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "token revocation must apply to the next preview request"
         );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_isolates_peer_routes_and_saves_without_readiness() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let peer = sharing::peer_router(state.clone());
+        for path in [
+            "/sharing/v1/identity",
+            "/sharing/v2/identity",
+            "/api/v1/users",
+        ] {
+            let response = peer
+                .clone()
+                .oneshot(get(path, None))
+                .await
+                .expect("private response");
+            assert_eq!(response.headers()["cache-control"], "no-store", "{path}");
+        }
+        let response = app
+            .clone()
+            .oneshot(get("/api/v1/sharing/settings", None))
+            .await
+            .expect("private admin response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(
+            call(&app, get("/sharing/v1/identity", None)).await.0,
+            StatusCode::NOT_FOUND
+        );
+        for path in ["/api/v1/settings", "/api/v1/users", "/healthz", "/"] {
+            assert_eq!(
+                call(&peer, get(path, None)).await.0,
+                StatusCode::NOT_FOUND,
+                "{path}"
+            );
+        }
+        let (status, body) = call(&peer, get("/sharing/v2/identity", None)).await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED);
+        assert_eq!(body["code"], "sharing_protocol_unsupported");
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+        assert_eq!(
+            call(
+                &app,
+                put("/api/v1/sharing/settings", None, json!({"enabled":true}))
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, saved) = call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(saved["enabled"], true);
+        assert_eq!(state.sharing.status().topology_qualification, "pending");
+        let readiness = call(&app, get("/api/v1/developer/readiness", Some(&admin)))
+            .await
+            .1;
+        let sharing = readiness["items"]
+            .as_array()
+            .expect("readiness items")
+            .iter()
+            .find(|item| item["id"] == "cinema_sharing")
+            .expect("sharing advisory card");
+        assert_eq!(sharing["setting"], "sharing_enabled");
+        assert_eq!(sharing["requirements"][2]["status"], "unknown");
+        for enabled in [false, true] {
+            let saved = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"sharing_enabled":enabled}),
+                ),
+            )
+            .await;
+            assert_eq!(saved.0, StatusCode::OK);
+            assert_eq!(saved.1["sharing_enabled"], enabled);
+            assert_eq!(
+                call(&app, get("/api/v1/sharing/settings", Some(&admin)))
+                    .await
+                    .1["enabled"],
+                enabled
+            );
+        }
+        let identity = call(&peer, get("/sharing/v1/identity", None)).await;
+        assert_eq!(identity.0, StatusCode::OK);
+        assert!(identity.1.get("libraries").is_none());
+        assert_eq!(
+            call(&peer, get("/sharing/v1/grant", Some(&admin))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/settings",
+                    Some(&admin),
+                    json!({"enabled":false})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
+            "sharing_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_rejects_secret_bearing_unknown_fields_and_oversized_claims() {
+        let (_, state) = test_app_with_state();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable sharing");
+        let peer = sharing::peer_router(state.clone());
+        let secret = plurx_core::sharing::new_secret().expect("synthetic secret");
+        let mut payload = json!({"invitation_id":uuid::Uuid::new_v4(),"invitation_secret":secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Fixture","grant_credential":secret.expose()});
+        payload[secret.expose()] = json!("unknown secret authorization field");
+        let response = call_text(&peer, post("/sharing/v1/claims", None, payload)).await;
+        assert_eq!(response.0, StatusCode::BAD_REQUEST);
+        assert!(!response.1.contains(secret.expose()));
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/claims")
+            .body(Body::from("x".repeat(16 * 1024 + 1)))
+            .expect("bounded request");
+        assert_eq!(call(&peer, request).await.0, StatusCode::BAD_REQUEST);
+        assert!(state
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("no claims created")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn sharing_http_claim_approval_rotation_and_pending_catalogue_denial() {
+        use plurx_core::{secrets::Secret, sharing::Invitation};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let endpoints = json!([{"ipv4":"100.101.102.103","ipv6":null,"ts_fqdn":"source.fixture.ts.net","port":32443,"spki_sha256":"a".repeat(64)}]);
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        for libraries in [
+            json!([]),
+            json!(["-1"]),
+            json!([seeded.lib.to_string(), seeded.lib.to_string()]),
+            json!(["9223372036854775807"]),
+        ] {
+            let response = call(
+                &app,
+                post(
+                    "/api/v1/sharing/invitations",
+                    Some(&admin),
+                    json!({"library_ids":libraries}),
+                ),
+            )
+            .await;
+            assert_eq!(response.0, StatusCode::BAD_REQUEST);
+            assert_eq!(response.1["code"], "sharing_invalid_request");
+        }
+        let (status, created) = call(
+            &app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let invitation = Invitation::parse(&Secret::from_cleartext(
+            created["invitation"]
+                .as_str()
+                .expect("once-only invitation"),
+        ))
+        .expect("bounded invitation");
+        call(
+            &app,
+            put(
+                "/api/v1/sharing/settings",
+                Some(&admin),
+                json!({"enabled":true}),
+            ),
+        )
+        .await;
+        let peer = sharing::peer_router(state.clone());
+        let credential = plurx_core::sharing::new_secret().expect("fixture grant");
+        let request = json!({"invitation_id":invitation.id,"invitation_secret":invitation.secret.expose(),"claim_id":uuid::Uuid::new_v4(),"recipient_server_id":uuid::Uuid::new_v4(),"recipient_name":"Unverified fixture","grant_credential":credential.expose()});
+        let first = call(&peer, post("/sharing/v1/claims", None, request.clone())).await;
+        assert_eq!(first.0, StatusCode::OK);
+        let replay = call(&peer, post("/sharing/v1/claims", None, request)).await;
+        assert_eq!(first.1, replay.1);
+        let grant_id = first.1["grant_id"].as_str().expect("grant ID");
+        let peer_get = |path: &str, credential: &Secret| {
+            Request::builder()
+                .uri(path)
+                .header(
+                    "authorization",
+                    format!("CinemaShare {}", credential.expose()),
+                )
+                .body(Body::empty())
+                .expect("fixture peer request")
+        };
+        let pending = call(&peer, peer_get("/sharing/v1/grant", &credential)).await;
+        assert_eq!(pending.1["state"], "pending");
+        assert!(pending.1.get("library_ids").is_none());
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let approval_path = format!("/api/v1/sharing/exports/{grant_id}/approve");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    &approval_path,
+                    Some(&admin),
+                    json!({"expected_mutation_generation":1,"pairing_code":"0".repeat(16)})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(call(&app,post(&approval_path,Some(&admin),json!({"expected_mutation_generation":1,"pairing_code":pending.1["pairing_code"]}))).await.0,StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/endpoints", &credential))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let replacement = plurx_core::sharing::new_secret().expect("replacement credential");
+        let rotation = uuid::Uuid::new_v4();
+        let request = Request::builder()
+            .method("POST")
+            .uri("/sharing/v1/grant/rotation")
+            .header(
+                "authorization",
+                format!("CinemaShare {}", credential.expose()),
+            )
+            .body(Body::from(
+                serde_json::to_vec(
+                    &json!({"request_id":rotation,"grant_credential":replacement.expose()}),
+                )
+                .expect("synthetic body"),
+            ))
+            .expect("rotation");
+        assert_eq!(call(&peer, request).await.0, StatusCode::OK);
+        assert_eq!(
+            call(&peer, peer_get("/sharing/v1/grant", &credential))
+                .await
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let status_path = format!("/sharing/v1/grant/rotation/{rotation}?grant_id={grant_id}");
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &credential)).await.1["confirmed"],
+            true
+        );
+        assert_eq!(
+            call(&peer, peer_get(&status_path, &replacement)).await.1["confirmed"],
+            true
+        );
+        let active = call(&peer, peer_get("/sharing/v1/grant", &replacement)).await;
+        assert_eq!(active.1["state"], "active");
+        assert_eq!(active.1["credential_generation"], 2);
+        assert_eq!(active.1["scope_generation"], 1);
     }
 
     // ---- seeded integration surface -----------------------------------------

@@ -497,7 +497,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // portable backup and fenced restore and reached `developerPanel`
       // without being composed here, so this whole gate died on its name.
       shippedSource("clusterBackupCard"),
-      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"),
+      shippedSource("clusterPlacementCard"), shippedSource("boundedCatalogueCard"), shippedSource("cinemaSharingCard"),
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
@@ -1402,6 +1402,28 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     assert.equal(card.outerHTML, `saved:${enabled}`);
     assert.equal(err.textContent, "");
   }
+});
+
+test("Cinema sharing saves both choices with unknown network qualification", async () => {
+  const readiness={items:[{id:"cinema_sharing",requirements:[{id:"network",status:"unknown",evidence:"No qualified network receipt."}]}]};
+  const writes=[];
+  const nodes={"cinema-sharing-enabled":{checked:false},"cinema-sharing-error":{textContent:""},"cinema-sharing-settings":{outerHTML:""}};
+  let reject=false;
+  const save=new Function("document","api","cacheSettings","cinemaSharingCard","DEVELOPER_READINESS",
+    `${shippedSource("saveCinemaSharing")} return saveCinemaSharing;`)(
+      {getElementById:id=>{assert.ok(id in nodes);return nodes[id];}},
+      async(path,request)=>{writes.push([path,request.body]);if(reject)throw new Error("Write unavailable");return request.body;},
+      value=>value,(settings,evidence)=>{assert.equal(evidence,readiness);return `saved:${settings.sharing_enabled}`;},readiness);
+  for(const enabled of [true,false]){
+    nodes["cinema-sharing-enabled"].checked=enabled;
+    const button={disabled:false};await save(button);
+    assert.deepEqual(writes.at(-1),["/settings",{sharing_enabled:enabled}]);
+    assert.equal(nodes["cinema-sharing-settings"].outerHTML,`saved:${enabled}`);
+    assert.equal(button.disabled,false);
+  }
+  reject=true;await save({disabled:false});
+  assert.equal(nodes["cinema-sharing-error"].textContent,"Write unavailable");
+  assert.equal(nodes["cinema-sharing-settings"].outerHTML,"saved:false");
 });
 
 main().then(() => {

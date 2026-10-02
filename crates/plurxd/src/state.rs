@@ -698,6 +698,7 @@ impl StoreMetricsCache {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<dyn Store>,
+    pub(crate) sharing: Arc<crate::sharing::SharingManager>,
     /// Fixed-lifetime, digest-only admin proofs for cluster recovery reads.
     /// Ordinary authentication populates it; cache-only routes never reach
     /// Store on a miss.
@@ -967,6 +968,7 @@ impl AppState {
         let catalogue = CatalogueReader::authority(Arc::clone(&store));
         Self::new_configured(
             AppConfig {
+                sharing_network: Default::default(),
                 server_name,
                 node_id,
                 cluster_advertisement: false,
@@ -1008,6 +1010,7 @@ impl AppState {
         logs: LogBuffers,
     ) -> Self {
         let AppConfig {
+            sharing_network,
             server_name,
             node_id,
             cluster_advertisement,
@@ -1049,6 +1052,11 @@ impl AppState {
             .with_dv_disk_capabilities(system.dv_disk.clone())
             .with_membership(membership.clone()),
         );
+        let sharing = Arc::new(crate::sharing::SharingManager::new(
+            Arc::clone(&credential_key),
+            data_dir.join("sharing-tls"),
+            sharing_network,
+        ));
         let backup = crate::backup::BackupManager::new(
             Arc::clone(&store),
             Arc::clone(&jobs),
@@ -1143,6 +1151,7 @@ impl AppState {
         );
         AppState {
             store,
+            sharing,
             cache_only_admin_proofs,
             login_throttle: Default::default(),
             password_capacity: Default::default(),
@@ -1312,6 +1321,7 @@ pub struct SnapshotRecoveryBudgets {
 }
 
 pub struct AppConfig {
+    pub sharing_network: plurx_core::config::SharingNetworkConfig,
     pub server_name: String,
     pub node_id: String,
     pub cluster_advertisement: bool,

@@ -1150,6 +1150,11 @@ title = "Cinema sharing authority and sealed peer credentials"
 contract = "Invitation consumption, export scope, credential rotation, receiver assignment and restore fences commit atomically on SQLite and replicated storage. Peer credentials remain sealed at rest; unreadable credentials refuse startup."
 paths = [
   "crates/plurx-core/src/sharing.rs",
+  "crates/plurx-core/src/sharing_tls.rs",
+  "crates/plurx-core/src/sharing_dns.rs",
+  "crates/plurxd/src/sharing.rs",
+  "crates/plurxd/src/sharing_client.rs",
+  "crates/plurxd/src/http/sharing.rs",
   "crates/plurx-core/src/store/sharing.rs",
   "crates/plurx-core/src/store/sharing_schema.sql",
   "crates/plurx-core/src/store/hiqlite_sharing.rs",
@@ -1158,5 +1163,5 @@ paths = [
   "tests/sharing/**",
   "docs/features/SHARED-LIBRARIES-*.md",
 ]
-checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption", "web-static"]
 depends_on = ["identity.access", "cluster.auth", "persistence.upgrades"]

@@ -58,6 +58,8 @@ mod scratch_put;
 mod seam_hooks;
 mod serving_fence;
 mod shared_cache;
+mod sharing;
+mod sharing_client;
 mod source_probe;
 mod state;
 mod store_result;
@@ -296,6 +298,11 @@ struct Cli {
 enum Command {
     /// Run the server (the default when no subcommand is given).
     Run,
+    /// Provision the node-local TLS identity used by the private sharing listener.
+    Sharing {
+        #[command(subcommand)]
+        command: SharingCommand,
+    },
     /// Install, remove, or enter the native Windows service.
     #[cfg(windows)]
     Service {
@@ -379,6 +386,15 @@ enum Command {
     /// diagnostic-panic`. It touches no storage and no network.
     #[command(hide = true)]
     DiagnosticPanic,
+}
+
+#[derive(Subcommand)]
+enum SharingCommand {
+    /// Create an owner-only node key and certificate; refuse existing identity files.
+    InitTls {
+        #[arg(long)]
+        key_directory: PathBuf,
+    },
 }
 
 #[cfg(windows)]
@@ -526,10 +542,23 @@ async fn dispatch(
         | Command::Cluster { .. }
         | Command::Restore { .. }
         | Command::Wal { .. }
+        | Command::Sharing { .. }
         | Command::DiagnosticPanic => {}
     }
     match command {
         Command::Run => run(config).await,
+        Command::Sharing {
+            command: SharingCommand::InitTls { key_directory },
+        } => {
+            let now = crate::state::clock_ms() / 1000;
+            let node = plurx_core::sharing_tls::NodeTls::initialize(&key_directory, now)?;
+            println!("SPKI SHA-256: {}", node.spki_sha256);
+            println!(
+                "Certificate expires at Unix second {}",
+                node.expires_at_seconds
+            );
+            Ok(())
+        }
         #[cfg(windows)]
         Command::Service { command } => match command {
             WindowsServiceCommand::Install => {
@@ -2657,6 +2686,7 @@ fn build_state(
 ) -> AppState {
     AppState::new_configured(
         crate::state::AppConfig {
+            sharing_network: config.sharing.clone(),
             server_name: config.server.name.clone(),
             node_id,
             cluster_advertisement: !config.cluster.advertise_host.trim().is_empty(),
@@ -2750,6 +2780,8 @@ fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
+    tokio::spawn(Arc::clone(&state.sharing).run(state.clone(), background_shutdown.clone()));
+    tokio::spawn(Arc::clone(&state.sharing).claim_loop(state.clone(), background_shutdown.clone()));
     tokio::spawn(http::file_grants::prune_loop(
         state.clone(),
         background_shutdown.clone(),
@@ -3039,6 +3071,12 @@ impl HttpAcceptor for tokio::net::TcpListener {
         let (stream, remote) = tokio::net::TcpListener::accept(self).await?;
         disable_nagle(&stream, remote);
         Ok((stream, remote))
+    }
+}
+impl HttpAcceptor for plurx_core::sharing_tls::SharingTlsListener {
+    type Stream = plurx_core::sharing_tls::SharingTlsStream;
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+        plurx_core::sharing_tls::SharingTlsListener::accept(self).await
     }
 }
 
@@ -7534,6 +7572,43 @@ mod startup_tests {
             cli.command,
             Some(Command::RefreshMetadata { library: Some(7) })
         ));
+    }
+
+    #[tokio::test]
+    async fn sharing_tls_command_refuses_to_replace_an_existing_node_key() {
+        let dir = tempfile::tempdir().expect("synthetic node key directory");
+        let command = || SharingCommand::InitTls {
+            key_directory: dir.path().to_path_buf(),
+        };
+        let cli = Cli::try_parse_from([
+            "plurxd",
+            "sharing",
+            "init-tls",
+            "--key-directory",
+            dir.path().to_str().expect("synthetic UTF-8 path"),
+        ])
+        .expect("sharing provisioning command");
+        assert!(matches!(cli.command, Some(Command::Sharing { .. })));
+        dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None,
+        )
+        .await
+        .expect("provision synthetic TLS identity");
+        let original =
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("synthetic certificate");
+        assert!(dispatch(
+            Command::Sharing { command: command() },
+            Config::default(),
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("sharing-tls.der")).expect("retained certificate"),
+            original
+        );
     }
 
     #[test]

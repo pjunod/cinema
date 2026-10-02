@@ -1997,6 +1997,7 @@ pub mod keys {
     /// seed it, so a deployment that had turned it on keeps it on and can
     /// then find it in Settings.
     pub const PGS_OVERLAY: &str = "subtitles.pgs_overlay";
+    pub const SHARING_ENABLED: &str = "sharing_enabled";
     /// Convert a Dolby Vision Profile 7 title to Profile 8.1 so a Dolby Vision
     /// client sees Dolby Vision rather than HDR10.
     ///

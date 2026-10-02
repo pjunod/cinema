@@ -1462,7 +1462,7 @@ implied by the build handoff.
 |---|---|---|---|
 | S0 | contract ready to build | Original `4e81bc38c`, revision `eb9038755`, PR #740 | Opus re-review corrections incorporated in §16; S2/runtime experiments not yet executed |
 | S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
-| S2 | not started | — | — |
+| S2 | implementation in progress; topology qualification open | `codex/sharing-s2-network` (unpublished) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | not started | — | — |
 | S4 | not started | — | — |
 | S5 | not started | — | — |
@@ -1569,8 +1569,75 @@ mapping: the two new store adapters must also select `cluster.auth` in the
 CI scope resolver. That mapping was corrected, and all 253 validation tests
 passed locally (one platform-specific skip). The runtime source is unchanged.
 
+Run 3887 passed policy, web, Apple and Android checks, but its Rust job
+rejected the isolated Hiqlite spike lockfile before compilation. Commit
+`aaafc1a0f5af031c3adbfe6760ad4edcff7cb082` synchronizes that lockfile;
+`make spike-lock-check` and the normal hook passed locally. Exact-candidate
+[run 3890](http://192.168.4.7:3000/noirr/plurx/actions/runs/3890) has passed
+scope, policy, Rust, web, Apple and Android. Windows compilation reached
+its 30-minute runner deadline without a compiler error. Only that job was
+rerun as attempt 2 on the same commit; the effort gate remains blocking
+until it passes.
+
 **Still owed:** the gate on the corrected S1 candidate. S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
 the S1 task is integrated; no deployment is authorized.
+
+
+### 16.3 Implementation progress — S2, 2026-10-02
+
+The unpublished S2 worktree preserves the primary checkout and builds on the
+prospective S1 tree. It must be ported to the gated effort and verified again
+against that exact base before its task PR is published.
+
+**Implemented:** node-local TLS key provisioning and same-key renewal;
+strict SPKI, validity, server-auth and signature checks before capabilities;
+a bounded loopback listener isolated from ordinary Cinema routes; fixed
+Tailscale DNS with bounded binary parsing and same-resolver TCP fallback;
+validated numeric fallback and qualified egress binding; closed HTTP requests
+that never follow redirects or consult proxy environment variables. The
+admin endpoint manifest is read and updated through
+`GET` / `PUT /api/v1/sharing/endpoints`; updates require `expected_revision`.
+A source manifest is accepted only through an authenticated active peer and
+uses both the source revision and the local endpoint generation.
+
+Recipient claim metadata persists the original recipient name and confirmed
+pending expiry inside the purpose-bound credential envelope. Repeated claims
+retain the same digest, restart recovery retains expiry, and delayed replies
+cannot replace a newer lifecycle's credential or downgrade active authority.
+Rotation persists the replacement before the upstream swap and recovers
+through the old credential's status-only route. Private HTTP responses carry
+`Cache-Control: no-store`, including errors and unsupported protocol majors.
+The Developer switch saves either choice while readiness remains advisory.
+
+**Observed so far:** the core sharing filter passed 20 tests, including seven
+TLS cases and two DNS cases. The updated endpoint/re-pair/receipt contract passed
+against both SQLite modes and three real Hiqlite voters (one named scenario,
+9.76 seconds). The focused daemon filter passed eight tests (seven sharing
+cases and one pre-existing playback case), including secret-safe errors,
+private-route isolation, cache headers, invalid library selections, approval,
+rotation and sealed restart metadata. Developer section tests passed 36/36;
+`web-types` preserves the existing baseline. Workspace Clippy with denied
+warnings passed. The native test linker warns about its large unwind table;
+the tests completed successfully. Final exact-tree commands and nonzero
+counts will be recorded again after porting to the gated effort. These
+component tests do not constitute a topology or physical-device receipt.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity -- --nocapture
+cargo test --locked -p plurxd --bin plurxd sharing_ -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_ -- --nocapture
+cargo clippy --locked --workspace --all-targets -- -D warnings
+scripts/web-types
+node --test tests/web/settings-sections.test.js
+make spike-lock-check
+python3 -m unittest discover -s tests/operations -p test_docs_index.py
+```
+
+**Still owed:** a restart and lost-response pairing exercise with the real
+pinned transport; complete per-node availability and deployment diagnostics;
+shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
+startup ordering; the final task gate. The current listener refuses unqualified
+non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
