@@ -572,6 +572,17 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     return;
                 }
                 let was_waiting = encoding.has_live_wait();
+                if let Some(preparation) = rendition.preparation() {
+                    if !preparation.live(rendition).await {
+                        rendition.revoke_preparation();
+                        return;
+                    }
+                    prepared_permit = encoding.try_background_permit().await;
+                    if prepared_permit.is_none() {
+                        return;
+                    }
+                    continue;
+                }
                 prepared_permit = encoding.try_permit().await;
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {

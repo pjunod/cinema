@@ -9896,6 +9896,77 @@ impl JobManager {
                 }
             };
             let (job, active, fence) = match claim {
+                crate::background_jobs::PreparationClaim::Encoded(job, active, _admission) => {
+                    let fence = active.fence();
+                    let observation = transcode.copy_preparation_attachment_observation();
+                    let result = {
+                        let operation = async {
+                            let plurx_core::store::background_jobs::JobPayload::EncodedOutputPrepare {
+                                file_id, source_size, source_mtime, ..
+                            } = job.supported_payload().map_err(|error| error.to_string())?
+                            else { return Err("encoded payload unsupported".to_owned()); };
+                            let file = self
+                                .store
+                                .get_file(file_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .filter(|file| {
+                                    file.size == source_size && file.mtime == source_mtime
+                                })
+                                .ok_or("encoded source row changed")?;
+                            let roots = match self
+                                .store
+                                .get_item(file.item_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                            {
+                                Some(item) => self
+                                    .store
+                                    .get_library(item.library_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .map(|library| library.paths)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                .await
+                                .ok_or("encoded source unavailable on owner")?;
+                            transcode
+                                .produce_encoded_output_job(
+                                    &file,
+                                    &job,
+                                    fence.clone(),
+                                    deadline,
+                                    observation,
+                                )
+                                .await
+                        };
+                        crate::background_jobs::watch_copy_preparation(
+                            &fence,
+                            deadline.into(),
+                            || transcode.encoded_preparation_still_idle(observation),
+                            operation,
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok(true) => produced += 1,
+                        Ok(false) | Err(_) => {
+                            let _ = fence
+                                .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                                    error_code: Some("encoded_output_unavailable".to_owned()),
+                                    checkpoint: None,
+                                    not_before_ms: clock_ms().saturating_add(5_000),
+                                })
+                                .await;
+                            skipped += 1;
+                            *reasons.entry("encoded_output_unavailable").or_default() += 1;
+                        }
+                    }
+                    active.finish().await;
+                    continue;
+                }
                 crate::background_jobs::PreparationClaim::Transcode(job, active, fence) => {
                     (job, active, fence)
                 }
