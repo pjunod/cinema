@@ -9248,7 +9248,7 @@ final class PlayerController: ObservableObject {
         guard let item, started, player.currentItem === item,
               expectedActionEpoch == viewerActionEpoch else { return false }
         let selection = await mediaSelectionPreparation.native(index, subtitles, item)
-        guard started,
+        guard !Task.isCancelled, started,
               player.currentItem === item,
               Self.subtitleMutationIsCurrent(
                 expectedActionEpoch: expectedActionEpoch,
@@ -9347,7 +9347,7 @@ final class PlayerController: ObservableObject {
               started, player.currentItem === item,
               expectedActionEpoch == viewerActionEpoch else { return }
         let apply = await mediaSelectionPreparation.audio(audioLanguage, item)
-        guard started, player.currentItem === item, audioOverride == nil,
+        guard !Task.isCancelled, started, player.currentItem === item, audioOverride == nil,
               prePlaySelection.audioIndex == nil,
               expectedActionEpoch == viewerActionEpoch else { return }
         apply?()
@@ -9358,17 +9358,17 @@ final class PlayerController: ObservableObject {
     /// epoch. An intervening command requires a fresh preparation; item
     /// identity alone cannot fence two operations against the same item.
     func reconcileNativeMediaSelections(to item: AVPlayerItem) async {
-        while started, player.currentItem === item {
+        while !Task.isCancelled, started, player.currentItem === item {
             let actionEpoch = viewerActionEpoch
             let fields = Self.sessionSubtitleFields(
                 selected: selectedSubtitle, tracks: subtitles
             )
             let nativeSubtitle = pgsOverlayIsActive || activeBurnedSubtitle != nil ? nil : fields.native
             await applyPreferredAudioSelection(to: item, expectedActionEpoch: actionEpoch)
-            guard started, player.currentItem === item else { return }
+            guard !Task.isCancelled, started, player.currentItem === item else { return }
             if actionEpoch != viewerActionEpoch { continue }
             await applyNativeSubtitleSelection(nativeSubtitle, to: item, expectedActionEpoch: actionEpoch)
-            guard started, player.currentItem === item else { return }
+            guard !Task.isCancelled, started, player.currentItem === item else { return }
             if actionEpoch == viewerActionEpoch { return }
         }
     }
@@ -10867,8 +10867,9 @@ extension PlayerController: PreparedSuccessorHost {
         // landed during the commit owns the selection, and this must not put
         // the pre-commit choice back on top of it.
         let reconcileGeneration = lifecycleGeneration
+        var selectionsReady = false
         if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
-            await reconcileNativeMediaSelections(to: item)
+            selectionsReady = await reconcilePreparedMediaSelections(to: item, overlapStartedAtMs: overlapStartedAtMs)
         }
         applyDisplayCriteria(for: item, generation: openGeneration)
         startRecoveryEvidencePoll()
@@ -10877,7 +10878,9 @@ extension PlayerController: PreparedSuccessorHost {
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
-        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs)
+        let firstFrameUnixMs = selectionsReady
+            ? await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs)
+            : nil
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
         // starts the predecessor's bounded drain. Ending it first removes the
@@ -10950,6 +10953,29 @@ extension PlayerController: PreparedSuccessorHost {
             recipeRevision.didAttach(recipeRevision.desired)
         }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Asset track loading may ignore task cancellation. Return at the original
+    /// overlap deadline and fence any eventual selection from the cancelled task.
+    private func reconcilePreparedMediaSelections(to item: AVPlayerItem, overlapStartedAtMs: Int) async -> Bool {
+        let now = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        let remaining = max(0, PreparedReplacementBounds.overlapMs - max(0, now - overlapStartedAtMs))
+        guard remaining > 0 else { return false }
+        var completed: Bool?
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.reconcileNativeMediaSelections(to: item)
+            if !Task.isCancelled { completed = true }
+        }
+        let ready = await awaitBoundedValue(
+            boundMs: remaining,
+            pollMs: PreparedReplacementBounds.pollMs,
+            now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { completed }
+        )
+        task.cancel()
+        return ready == true
     }
 
     /// Put the successor's playhead on the rendezvous, and give up on the seek

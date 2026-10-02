@@ -3813,6 +3813,7 @@ class Controller internal constructor(
     private var preparedOrigin: ProgressiveMediaOrigin? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
+    private var preparedReadinessDeadlineJob: Job? = null
 
     /**
      * When the switch happened, while the commit still waits for the frame that
@@ -3954,6 +3955,18 @@ class Controller internal constructor(
             return
         }
         preparedPlayer = built.player
+        if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
+            abandonPreparedReplacement(failed = true)
+            return
+        }
+        val openedAtMs = preparedStartedAtMs
+        preparedReadinessDeadlineJob?.cancel()
+        preparedReadinessDeadlineJob = scope.launch {
+            delay((PREPARED_OVERLAP_BOUND_MS - (monotonicNowMs() - openedAtMs)).coerceAtLeast(1))
+            if (preparedPlayer === built.player && preparedStartedAtMs == openedAtMs) {
+                abandonPreparedReplacement(failed = true)
+            }
+        }
         try {
             preparedVideoSurfaces?.stage(built.player)
         } catch (_: Exception) {
@@ -4046,7 +4059,8 @@ class Controller internal constructor(
         }
         val successor = preparedPlayer ?: return
         if (!preparedLedger.isLive) return
-        if (monotonicNowMs() - preparedStartedAtMs > PREPARED_READINESS_BOUND_MS) {
+        if (monotonicNowMs() - preparedStartedAtMs >=
+            minOf(PREPARED_READINESS_BOUND_MS, PREPARED_OVERLAP_BOUND_MS)) {
             abandonPreparedReplacement(failed = true)
             return
         }
@@ -4218,6 +4232,8 @@ class Controller internal constructor(
         // gated on this clock — so any window where one is set and the other is
         // not is a window where a preparation can be left permanently
         // unsettleable.
+        preparedReadinessDeadlineJob?.cancel()
+        preparedReadinessDeadlineJob = null
         awaitingCommitFrameSinceMs = monotonicNowMs()
         preparedCommitFrameBudget = PreparedActiveWallBudget(
             PREPARED_COMMIT_FRAME_BOUND_MS,
@@ -4508,6 +4524,8 @@ class Controller internal constructor(
      * is a second decoder the viewer is paying for and cannot see.
      */
     private fun releaseSuccessor() {
+        preparedReadinessDeadlineJob?.cancel()
+        preparedReadinessDeadlineJob = null
         autoStagedStatus = null
         autoStagedStatusObservedMs = null
         val successor = preparedPlayer ?: return

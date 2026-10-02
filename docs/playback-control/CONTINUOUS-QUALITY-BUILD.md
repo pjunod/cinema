@@ -863,10 +863,10 @@ historical measured outcomes as current evidence.
 | CQ0 | `codex/continuous-quality-cq0`, planning base `ea5f76d34`; source hashes retained per run | New isolated lab; commands and limitations below | Runnable Chrome mechanics probe; native Safari and output captures incomplete |
 | CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; web caller and durable cleanup receipts implemented; client replay/retention settlement remains |
 | CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap closed; manual retention and explicit Retry/restart implemented, qualification pending |
-| CQ2 | Strict transaction ledger and owner-fenced storage implemented; serving integration underway | Pinned workspace/all-target compile; lost append, replay, takeover, pin-pressure and cross-language fixture regressions authored, unrun | Dependency reservations persist; producer/cache-pin and client adapters still need integration |
+| CQ2 | Strict transaction ledger, owner-fenced storage and serving integration implemented | Pinned workspace/all-target compile; lost append, replay, takeover, pin-pressure and cross-language fixture regressions authored, unrun | Dependency reservations, physical pins and web adapter implemented; pressure/takeover qualification remains |
 | CQ3 | Verified two-rung AVC/shared-AAC family implemented | Actual isolated Linux init verification and production probes | BT.709 proof passes; continuity qualification remains |
 | CQ4 | Controlled cold admission and demand retirement implemented | Pinned all-target compilation; regressions authored | Measured cleanup and pressure qualification remain |
-| CQ5 | Shipped hls.js enrollment, reserved loader and observers implemented | Exact-source Chrome probes; first frame and first rung observed | Second-switch AAC pin failure corrected; full Chrome/Firefox series remain |
+| CQ5 | Production hls.js enrollment, reserved loader and observers implemented | Exact-source Chrome probes; first frame and first rung observed | AAC pin and logical abort fixes implemented; rate-budget fix awaits replay; full Chrome/Firefox series remain |
 | CQ6 | Warm prepared surfaces and original overlap clocks implemented | iOS/tvOS and Android source compilation | Unit execution deferred; physical qualification remains |
 | CQ7 | Public API and SDK constraints audited; prepared path retained | Official variant/track API documentation; device inventory | Continuous native adapters and device evidence remain unfinished |
 | CQ8 | — | — | Not run |
@@ -2658,3 +2658,24 @@ before its one identical retry, preserving sequence and pending ownership.
 Authored regressions cover isolated budgets, global spray refusal and the
 ordered delayed retry. They await the final fast lane; no unit execution is
 claimed. Browser replay remains required on the committed candidate.
+
+
+### 10.83 Native readiness and track loading cannot extend physical overlap
+
+Android's pre-metadata poll still allowed the old 20-second readiness limit.
+It now uses the earlier physical limit and arms an item-bound deadline job
+at construction, independently of metadata callbacks or the one-second poll.
+Release and promotion cancel that job; exposure inherits the original clock.
+
+Apple's post-promotion audio/subtitle asset loading could suspend before the
+first-frame budget check. Reconciliation now waits only for the original
+remaining overlap, cancels its task and routes timeout through existing warm
+rollback. Late cancellation-ignoring asset results cannot apply tracks or
+start the next reconciliation stage. The authored ownership regression
+suspends audio preparation, cancels it, then releases its late result and
+requires zero audio commits or subtitle preparations. iOS production and test
+sources and Android production and test sources compile; unit execution and
+physical qualification remain deferred.
+
+The status page was condensed to current milestone rows. Historical CQ0
+mechanics remain explicitly separate from failed production replay receipts.
