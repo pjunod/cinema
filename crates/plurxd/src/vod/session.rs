@@ -35,6 +35,9 @@ pub(super) struct Rendition {
     pub(super) manifest: Mutex<Manifest>,
     pub(super) identity: Mutex<IdentityState>,
     pub(super) slot: ProducerSlot,
+    /// Capacity can be shared by parents of this exact immutable rendition,
+    /// without keeping a cache-only rendition admitted after the final reap.
+    pub(super) retained_admission: crate::vodencode::RetainedEncodeAdmission,
     pub(super) readers: Mutex<HashMap<String, Reader>>,
     /// Monotonic identity of each successful segment publication. The ledger
     /// stores this beside an entry index so eviction followed by ordinary

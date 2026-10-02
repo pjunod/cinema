@@ -157,6 +157,7 @@ impl VodServe {
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
+            retained_admission: crate::vodencode::RetainedEncodeAdmission::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),

@@ -1697,3 +1697,17 @@ replacement and cancelled idle reap with a concurrent resurrection. Pinned
 Rust compilation applies; unit execution remains deferred to final review.
 Family construction, admission attachment and child HTTP/peer serving are
 still needed before this graph carries production continuous media.
+
+### 10.37 Retained capacity reaches real producer starts
+
+Each immutable rendition now weakly records the exact capacity held by its
+worker. A parent can adopt that credit without counting the same physical
+producer twice. Real VOD starts bind admission to the rendition and take its
+exclusive worker claim; restarts borrow a still-retained parent entitlement
+after reaping the predecessor. A racing duplicate admission is released.
+The cache keeps only a weak link, so the final parent/worker release returns
+CPU/GPU capacity rather than leaving a warm rendition permanently admitted.
+The authored regression covers duplicate admission, shared parent ownership,
+a cold restart, adoption during reap and expiry. This connects capacity to
+the real driver; family group allocation and parent attachment still need
+their caller. Pinned compiler and normal hooks apply; no unit execution.

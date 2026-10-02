@@ -269,6 +269,43 @@ struct EncodeReservation {
     worker_claimed: std::sync::atomic::AtomicBool,
 }
 
+/// Weak link from one immutable rendition to its exact retained capacity.
+/// A cached rendition owns no admission by itself. Parents may adopt the
+/// running worker's credit, and later workers borrow that same entitlement.
+#[derive(Debug, Default)]
+pub(crate) struct RetainedEncodeAdmission {
+    reservation: Mutex<std::sync::Weak<EncodeReservation>>,
+}
+impl RetainedEncodeAdmission {
+    pub(crate) fn current(&self) -> Option<EncodePermit> {
+        self.reservation
+            .lock()
+            .expect("retained rendition admission")
+            .upgrade()
+            .map(|reservation| EncodePermit {
+                _reservation: reservation,
+            })
+    }
+
+    pub(crate) fn bind(&self, admitted: EncodePermit) -> EncodePermit {
+        let mut binding = self
+            .reservation
+            .lock()
+            .expect("retained rendition admission");
+        if let Some(existing) = binding.upgrade() {
+            // An attachment arriving while ordinary admission was in flight
+            // already owns this rendition's exact credit. Release the newly
+            // admitted duplicate and preserve the existing worker claim.
+            EncodePermit {
+                _reservation: existing,
+            }
+        } else {
+            *binding = Arc::downgrade(&admitted._reservation);
+            admitted
+        }
+    }
+}
+
 /// Exclusive process ownership, retained by the producer slot until reap.
 /// Retaining a family reservation never grants concurrent use of its capacity.
 #[derive(Debug)]

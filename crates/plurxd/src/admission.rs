@@ -1277,6 +1277,64 @@ mod tests {
     }
 
     #[test]
+    fn retained_admission_reuses_worker_capacity_and_expires_after_reap() {
+        let admissions = Admissions::new();
+        let before = admissions.snapshot();
+        let binding = crate::vodencode::RetainedEncodeAdmission::default();
+        let first = crate::vodencode::EncodePermit::from(
+            admissions
+                .try_admit_bundle(2, 4, &mixed(2), Priority::Live)
+                .expect("first worker"),
+        );
+        let parent = binding.bind(first);
+        let worker = parent.clone().try_claim_worker().expect("exclusive worker");
+        let duplicate = crate::vodencode::EncodePermit::from(
+            admissions
+                .try_admit_bundle(2, 4, &mixed(2), Priority::Live)
+                .expect("racing admission"),
+        );
+        assert_eq!(admissions.snapshot().hardware_used, 2);
+        let second_parent = binding.bind(duplicate);
+        assert_eq!(admissions.snapshot().hardware_used, 1);
+        assert_eq!(admissions.software_in_use(), 2);
+        assert!(second_parent.clone().try_claim_worker().is_none());
+        drop(worker);
+        let next_worker = binding
+            .current()
+            .expect("parents retain delivery entitlement")
+            .try_claim_worker()
+            .expect("cold restart uses the same credit");
+        drop(parent);
+        drop(second_parent);
+        assert_eq!(
+            admissions.snapshot().hardware_used,
+            1,
+            "unreaped worker owns capacity"
+        );
+        assert!(binding
+            .current()
+            .expect("worker credit is adoptable")
+            .try_claim_worker()
+            .is_none());
+        drop(next_worker);
+        assert!(
+            binding.current().is_none(),
+            "a warm cache owns no permanent capacity"
+        );
+        assert_eq!(admissions.snapshot(), before);
+        let replacement = crate::vodencode::EncodePermit::from(
+            admissions
+                .try_admit_bundle(2, 4, &mixed(2), Priority::Live)
+                .expect("later attachment"),
+        );
+        let replacement = binding.bind(replacement);
+        assert!(binding.current().is_some());
+        drop(replacement);
+        assert!(binding.current().is_none());
+        assert_eq!(admissions.snapshot(), before);
+    }
+
+    #[test]
     fn bounded_producer_groups_reserve_all_roles_or_nothing() {
         let admissions = Admissions::new();
         let audio = TranscodeResourceEstimate {

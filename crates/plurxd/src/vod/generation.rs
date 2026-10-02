@@ -36,7 +36,11 @@ pub(super) async fn spawn_generation(
     // only the exact unreaped process may use it. Refuse a duplicate launch
     // before opening inputs or spawning a second producer under one credit.
     let permit = match permit {
-        Some(reservation) => match reservation.try_claim_worker() {
+        Some(reservation) => match rendition
+            .retained_admission
+            .bind(reservation)
+            .try_claim_worker()
+        {
             Some(worker) => Some(worker),
             None => {
                 record_failure(

@@ -540,7 +540,16 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                     return;
                 }
                 let was_waiting = encoding.has_live_wait();
-                prepared_permit = encoding.try_permit().await;
+                prepared_permit = match rendition.retained_admission.current() {
+                    Some(reservation) => {
+                        // A parent's admitted delivery obligation survives an
+                        // idle worker or a later cold seek. Borrow its exact
+                        // credit instead of competing for a second allocation.
+                        encoding.cancel_wait();
+                        Some(reservation)
+                    }
+                    None => encoding.try_permit().await,
+                };
                 notify_new_vod_live_wait(shared, encoding, was_waiting, prepared_permit.is_some());
                 if prepared_permit.is_none() {
                     report_permit_wait(shared, rendition, encoding).await;
