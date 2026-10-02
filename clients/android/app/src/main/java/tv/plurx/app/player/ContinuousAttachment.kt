@@ -27,6 +27,7 @@ internal class ContinuousAttachment(
     private val transfers: AutoTransferEvidence,
     private val presented: (JsonObject, Long) -> Unit,
     private val observationUnknown: (JsonObject) -> Unit,
+    private val retained: (JsonObject, Long) -> Unit,
     private val failed: (Exception) -> Unit,
 ) {
     private val owner = Any()
@@ -40,7 +41,14 @@ internal class ContinuousAttachment(
         })
     }, exchange::exchange)
     private val selection = ContinuousVideoSelection(start.family, protocol)
-    private val reservations = ContinuousReservations(start.family, protocol, selection, start.primaryRendition)
+    private val exposure = ContinuousExposure()
+    private val reservations = ContinuousReservations(start.family, protocol, selection, start.primaryRendition) { id, tx ->
+        exposure.cancelUnexposed(id) {
+            queues.queuedArtifacts().none { load ->
+                load.resource.role == "video" && tx.getValue("reserved").jsonArray.any { it.jsonObject == load.authorized.interval }
+            }
+        }
+    }
     private val media = ContinuousQualityMedia(profile.origin, start.schedulePath, start.family, protocol)
     private val videoReleaseEpoch = AtomicLong()
     private val audioDecoderReleaseEpoch = AtomicLong()
@@ -86,7 +94,16 @@ internal class ContinuousAttachment(
         val sources = DataSource.Factory {
             ContinuousReservedDataSource(owner, upstream, profile.origin, start.schedulePath, start.family,
                 media, reservations::reserve, loads, mediaCalls::cancel,
-                { resource -> disposalBarriers.await(resourceKey(resource)) })
+                { resource -> disposalBarriers.await(resourceKey(resource)) },
+                { authorization ->
+                    val live = transactions().mapNotNull { it.text("transaction_id") }.toSet()
+                    if (!live.containsAll(authorization.transactionIds)) throw ContinuousStaleVideoLoad()
+                    exposure.publish(authorization.transactionIds)
+                }, { resource ->
+                    val result = reservations.retainUnexposed(resource)
+                    if (result != null) retained(result.failedRow, result.request)
+                    result != null
+                })
         }
         val extractor = ContinuousHlsExtractorFactory(owner, queues::accepted, { verified ->
             queues.completed(verified)?.let { append ->
@@ -109,10 +126,10 @@ internal class ContinuousAttachment(
     }
 
     /** Call with the current buffered frontier, never the old tap position. */
-    suspend fun change(row: JsonObject, positionMs: Long, automatic: Boolean): Boolean {
+    suspend fun change(row: JsonObject, positionMs: Long, automatic: Boolean, request: Long = 0): Boolean {
         if (closed.get() || row !in rows) return false
         val changed = reservations.change(requireNotNull(row.text("rendition_id")), frontier(row, positionMs),
-            automatic, selection.supportedRenditions())
+            automatic, selection.supportedRenditions(), request)
         wake.trySend(Unit)
         return changed
     }
@@ -143,6 +160,7 @@ internal class ContinuousAttachment(
 
     private suspend fun flushFacts() {
         protocol.settlePending()
+        loads.whenQuiescent { exposure.retain(transactions().mapNotNull { it.text("transaction_id") }.toSet()) }
         finishDisposals()
         queues.observeResets()
         output.audioOutputs.collectReleased()
@@ -203,6 +221,7 @@ internal class ContinuousAttachment(
             }
         }
         retirePassedMedia()
+        retireUnexposedTargets()
         checkObservation()
     }
 
@@ -249,6 +268,27 @@ internal class ContinuousAttachment(
                 // Recheck while new loader admission is excluded.
                 if (queues.queueRetired(load.resource.rendition, artifact) && disposalBarriers.begin(resourceKey))
                     disposing[resourceKey] = Disposal(load, ids)
+            }
+        }
+        finishDisposals()
+    }
+
+    private suspend fun retireUnexposedTargets() {
+        loads.whenQuiescent {
+            for (tx in transactions()) {
+                val id = requireNotNull(tx.text("transaction_id"))
+                if (!exposure.isCancelled(id)) continue
+                for (item in tx.getValue("reserved").jsonArray) {
+                    val pin = item.jsonObject
+                    if (pin.getValue("artifact_id") in tx.getValue("disposed").jsonArray ||
+                        queues.queuedArtifacts().any { it.authorized.interval == pin }) continue
+                    val row = rows.singleOrNull { it.text("rendition_id") == pin.text("rendition_id") } ?: continue
+                    val entry = requireNotNull(pin.number("from_tick")) / requireNotNull(row.number("segment_ticks"))
+                    val resource = ContinuousQualityMedia.Resource("video", row, false, entry)
+                    val resourceKey = resourceKey(resource)
+                    if (disposalBarriers.begin(resourceKey)) disposing[resourceKey] = Disposal(
+                        ContinuousLoadContext.Verified(owner, resource, ContinuousQualityMedia.Authorized(pin, setOf(id))), setOf(id))
+                }
             }
         }
         finishDisposals()

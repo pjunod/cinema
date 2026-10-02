@@ -348,6 +348,25 @@ class Controller internal constructor(
                     continuousQualityPresented(row)
                 }
             } },
+            retained = { row, request -> scope.launch {
+                if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive()) {
+                    if (request < 0 && request == continuousAutoRequest && autoDesiredCandidate?.id == row.text("candidate_id")) {
+                        failAutoPreparation()
+                    } else directedChange?.takeIf { it.pending?.sequence == request }?.let { change ->
+                        val pending = change.pending
+                        if (pending != null && change.incumbentSelection != null && playbackIntent.retainQualityChange(pending, null)) {
+                            change.settleFailureOnce(mediaMutationEpoch, true, retain = {
+                                if (playbackIntent.retainFailedQuality(pending, change.incumbentSelection)) {
+                                    retainedQualityRequest = change.quality
+                                    raiseDegradedNotice("Quality change did not complete. Playback continues. Retry or apply with restart in Playback settings.")
+                                    logQualitySwitch("retained_current", change.quality)
+                                    playbackControl.reportEvidence()
+                                }
+                            }, reopen = {})
+                        }
+                    }
+                }
+            } },
             observationUnknown = { row -> scope.launch {
                 if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive() &&
                     (playbackIntent.desiredQuality == PlaybackQuality.Auto || playbackIntent.desiredQuality.rungHeight?.toLong() == row.number("height"))) {
@@ -795,6 +814,7 @@ class Controller internal constructor(
      * wasteful.
      */
     private var autoCatalog = plan.qualityCandidates
+    private var continuousAutoRequest = 0L
     private var autoDesiredCandidate: tv.plurx.app.data.QualityCandidate? = null
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
@@ -1674,7 +1694,7 @@ class Controller internal constructor(
             if (continuous != null && row != null) {
                 try {
                     val applied = withTimeout(12_000) {
-                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), quality == PlaybackQuality.Auto)
+                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), quality == PlaybackQuality.Auto, pending.sequence)
                     }
                     if (!applied) fallBackDirectedChange(change, "unsupported")
                 } catch (_: TimeoutCancellationException) { fallBackDirectedChange(change, "timed_out") }
@@ -3330,6 +3350,7 @@ class Controller internal constructor(
         autoPreparedMutationEpoch = mediaMutationEpoch
         val epoch = mediaMutationEpoch
         val incumbent = player
+        val continuousRequest = --continuousAutoRequest
         scope.launch {
             playbackControl.reportIntent()
             val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
@@ -3338,7 +3359,7 @@ class Controller internal constructor(
                 if (mediaMutationEpoch != epoch || player !== incumbent || playbackIntent.desiredQuality != PlaybackQuality.Auto || autoDesiredCandidate?.id != chosen.id) return@launch
                 try {
                     if (!withTimeout(12_000) {
-                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true)
+                        continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true, continuousRequest)
                     }) failAutoPreparation()
                 } catch (_: TimeoutCancellationException) { failAutoPreparation() }
                 catch (error: CancellationException) { throw error }

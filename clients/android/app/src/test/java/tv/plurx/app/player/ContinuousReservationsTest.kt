@@ -48,6 +48,8 @@ class ContinuousReservationsTest {
                     put("appended", JsonArray(emptyList())); put("disposed", JsonArray(emptyList()))
                 }
             }
+            if (operation?.text("kind") == "cancel_unappended") tx = JsonObject(requireNotNull(tx) + mapOf(
+                "cancel_requested" to JsonPrimitive(true), "state" to JsonPrimitive("cancelling")))
             if (operation?.text("kind") == "scheduled") tx = JsonObject(requireNotNull(tx) + mapOf(
                 "state" to JsonPrimitive("scheduled"), "reserved" to operation.getValue("intervals")))
             if (transition != null) sequence = requireNotNull(transition.number("sequence"))
@@ -60,7 +62,7 @@ class ContinuousReservationsTest {
             }
         })
         val selection = ContinuousVideoSelection(family, protocol)
-        val reservations = ContinuousReservations(family, protocol, selection, "b".repeat(64))
+        val reservations = ContinuousReservations(family, protocol, selection, "b".repeat(64)) { _, _ -> true }
         assertFalse(reservations.change("c".repeat(64), 0, false, setOf("b".repeat(64))))
         assertTrue(requests.isEmpty())
         reservations.initial(0, false)
@@ -68,14 +70,26 @@ class ContinuousReservationsTest {
         val before = requests.size
         reservations.reserve(ContinuousQualityMedia.Resource("video", low, false, 0), null)
         assertEquals(before, requests.size)
+        // Only an actually presented incumbent can be restored on a cold
+        // optional load failure. Refresh its durable presentation receipt.
+        tx = JsonObject(requireNotNull(tx) + mapOf("first_presented_tick" to JsonPrimitive(0)))
+        protocol.snapshot()
         assertTrue(reservations.change("c".repeat(64), 48, true, setOf("b".repeat(64), "c".repeat(64))))
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
         assertEquals(2L, protocol.ledger?.number("latest_intent_revision"))
+        val retentionStart = requests.size
+        val retained = reservations.retainUnexposed(ContinuousQualityMedia.Resource("video", high, false, 1))
+        assertEquals(high, retained?.failedRow)
+        assertEquals("b".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
+        assertEquals(listOf("cancel_unappended", "prepare", "scheduled"), requests.drop(retentionStart).mapNotNull {
+            it.obj("transition")?.obj("operation")?.text("kind")
+        })
+        assertTrue(reservations.change("c".repeat(64), 48, true, setOf("b".repeat(64), "c".repeat(64))))
         failedTargetCalls = 2
         assertTrue(runCatching { reservations.change("b".repeat(64), 96, false, setOf("b".repeat(64), "c".repeat(64))) }.isFailure)
         // Replay the uncertain low target first, then restore high using a
         // newer intent; its actual scheduled choice remains usable.
-        assertEquals(4L, protocol.ledger?.number("latest_intent_revision"))
+        assertEquals(6L, protocol.ledger?.number("latest_intent_revision"))
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
         assertTrue(selection.publishReserved(96, true))
         assertTrue(runCatching { reservations.reserve(ContinuousQualityMedia.Resource("video", low, false, 2), null) }.isFailure)

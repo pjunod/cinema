@@ -3221,3 +3221,33 @@ Production and test sources compile in eleven seconds. A regression exercises
 blocked reentry, cancellation, independent resources and barrier reuse; unit
 execution remains deferred to the final main-ready fast lane. Optional target
 load failure before exposure and native runtime qualification remain open.
+
+
+### 10.103 Android retains a failed optional target only before exposure
+
+Video byte publication and unexposed cancellation share one ownership monitor.
+A target is eligible for restoration only when the previous rendition has a
+durable hardware presentation receipt, the target has never exposed bytes,
+and no accepted physical queue span aliases its reservation. Appended or
+partially extracted media stays on the committed observation path.
+
+A failed cold target load cancels its unappended transaction, restores the
+previous rendition with a higher intent and accepted reservation, then yields
+the zero-byte failed chunk through the existing retained selection. Manual
+failures retain the viewer request for retry or explicit restart. Auto failures
+settle only their matching private request token. A late failure cannot settle
+a newer manual request or Auto candidate. Canceled reservation cleanup waits
+for actual loader closure and uses the same disposal/read barrier. Exposure
+fences are pruned only while loaders are quiescent.
+
+Authored regressions cover exposure before cancellation, cancellation before
+publication, physical alias refusal, mixed-owner publication refusal and
+restorative control ordering. Production and test sources compile; unit
+execution remains deferred to the final main-ready fast lane.
+
+The native UI returned Safari's accessible page once on October 2, proving
+the Mac had become unlocked at that moment. A renewed WebDriver probe still
+timed out creating a session. The next native action reported a locked Mac
+again. No media evidence was obtained; the isolated fixture server was closed.
+Production replay, physical native qualification and source-transfer approval
+remain outstanding.

@@ -41,6 +41,8 @@ internal class ContinuousReservedDataSource(
     private val loads: ContinuousLoads = ContinuousLoads(),
     private val cancelNetwork: (() -> Unit)? = null,
     private val beforeReserve: suspend (ContinuousQualityMedia.Resource) -> Unit = {},
+    private val publish: (ContinuousQualityMedia.Authorized) -> Unit = {},
+    private val retainFailure: suspend (ContinuousQualityMedia.Resource) -> Boolean = { false },
 ) : BaseDataSource(false) {
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
@@ -108,6 +110,7 @@ internal class ContinuousReservedDataSource(
             val slice = ContinuousVerifiedRange.resolve(retained.size, dataSpec.position, dataSpec.length)
             synchronized(lifetime) {
                 if (!job.isActive || !loads.isAlive() || opening.get() !== job) throw IOException("Continuous media request cancelled")
+                if (authorization != null) publish(authorization)
                 payload = retained
                 position = slice.first
                 end = slice.second
@@ -118,7 +121,12 @@ internal class ContinuousReservedDataSource(
             }
             return (slice.second - slice.first).toLong()
         } catch (error: Exception) {
+            val retained = if (error !is ContinuousStaleVideoLoad && resource?.role == "video" && !resource.initialization &&
+                !started && job.isActive && loads.isAlive()) {
+                try { blocking(job) { retainFailure(resource) } } catch (_: Exception) { false }
+            } else false
             close()
+            if (retained) throw ContinuousStaleVideoLoad()
             throw if (error is IOException) error else IOException("Continuous media load refused", error)
         } finally {
             job.complete()

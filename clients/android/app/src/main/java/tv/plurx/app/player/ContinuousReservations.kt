@@ -14,6 +14,7 @@ internal class ContinuousReservations(
     private val protocol: ContinuousQualityProtocol,
     private val selection: ContinuousVideoSelection,
     initialRendition: String,
+    private val cancelUnexposed: (String, JsonObject) -> Boolean = { _, _ -> false },
 ) {
     private val family = Json.parseToJsonElement(family.toString()).jsonObject.also { require(ContinuousQualityWire.family(it)) }
     private val video = this.family.getValue("video").jsonArray.map { it.jsonObject }
@@ -21,6 +22,9 @@ internal class ContinuousReservations(
     private var wanted = video.single { it.text("rendition_id") == initialRendition }
     private var transaction: String? = null
     private var automatic = false
+    data class Retained(val failedRow: JsonObject, val request: Long)
+    private data class Previous(val row: JsonObject, val automatic: Boolean, val request: Long)
+    private var optionalPrevious: Previous? = null
 
     suspend fun initial(through: Long, automatic: Boolean) = lock.withLock {
         this.automatic = automatic
@@ -29,16 +33,22 @@ internal class ContinuousReservations(
 
     /** The caller must establish actual supported formats before a new target
      * is prepared. This retains the previous choice when that proof is absent. */
-    suspend fun change(rendition: String, through: Long, automatic: Boolean, supported: Set<String>): Boolean = lock.withLock {
+    suspend fun change(rendition: String, through: Long, automatic: Boolean, supported: Set<String>, request: Long = 0): Boolean = lock.withLock {
         val next = video.singleOrNull { it.text("rendition_id") == rendition } ?: return@withLock false
         if (rendition !in supported) return@withLock false
         val previous = wanted
         val previousAutomatic = this.automatic
+        val wasPresented = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().any {
+            it.jsonObject.text("target_rendition_id") == previous.text("rendition_id") &&
+                it.jsonObject.number("first_presented_tick") != null
+        }
+        optionalPrevious = null
         try {
             prepare(next, through)
             wanted = next
             this.automatic = automatic
             reserveWindow(through)
+            if (next != previous && wasPresented) optionalPrevious = Previous(previous, previousAutomatic, request)
             true
         } catch (error: Exception) {
             wanted = previous
@@ -78,6 +88,29 @@ internal class ContinuousReservations(
             protocol.window(requireNotNull(transaction), frontier(wanted, entry))
             reserveWindow(entry)
         }
+    }
+
+    /** Restores only a previously presented choice with zero target exposure.
+     * A partial extraction or uncertain committed append cannot use this path. */
+    suspend fun retainUnexposed(resource: ContinuousQualityMedia.Resource): Retained? = lock.withLock {
+        val previous = optionalPrevious ?: return@withLock null
+        if (resource.initialization || resource.role != "video" || resource.rendition != wanted.text("rendition_id")) return@withLock null
+        protocol.settlePending()
+        val tx = current()
+        if (tx["ever_appended"]?.wireBoolean() != false || tx.getValue("appended").jsonArray.isNotEmpty()) return@withLock null
+        val id = requireNotNull(transaction)
+        if (!cancelUnexposed(id, tx)) return@withLock null
+        val failedRow = wanted
+        protocol.transition(id, buildJsonObject { put("kind", "cancel_unappended"); put("completed", JsonArray(emptyList())) })
+        // Once cancelled, future loads must never republish that target, even
+        // if the restorative control request loses its acknowledgment.
+        optionalPrevious = null
+        wanted = previous.row
+        automatic = previous.automatic
+        transaction = null
+        prepare(wanted, resource.videoFrontier())
+        reserveWindow(resource.videoFrontier())
+        Retained(failedRow, previous.request)
     }
 
     private suspend fun prepare(row: JsonObject, through: Long): JsonObject {
