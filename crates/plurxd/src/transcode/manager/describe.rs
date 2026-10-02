@@ -136,6 +136,12 @@ impl TranscodeManager {
             .await
     }
 
+    /// The encoder this node's capabilities resolve `prefer` (the stored
+    /// [`keys::HWACCEL`] value; empty = auto) to, without a store read.
+    pub fn encoder_for_preference(&self, prefer: &str) -> Encoder {
+        self.caps.choose(prefer)
+    }
+
     /// Choose the encoder given the admin preference setting (empty = auto).
     pub(super) async fn encoder(&self) -> Encoder {
         let prefer = self
@@ -708,15 +714,19 @@ impl TranscodeManager {
     /// Validate and durably apply one complete requested setting pair.
     /// Sessions keep the old effective snapshot until every probe and both
     /// writes succeed, then all new sessions see the new one at once.
+    ///
+    /// `mode: None` clears the request: the stored mode becomes empty, which
+    /// [`normalize_rate_control_request`] reads back as "use each encoder
+    /// family's code default", distinct from an explicit `bitrate`.
     pub async fn apply_rate_control_settings(
         &self,
-        mode: RateMode,
+        mode: Option<RateMode>,
         quality: Option<u8>,
     ) -> Result<(), ApplyRateControlError> {
         let _serial = self.rate_control_update.lock().await;
         let snapshot = match self
             .validate_rate_control_snapshot(
-                Some(mode),
+                mode,
                 quality,
                 RateControlProbePolicy::YieldingBackground,
             )
@@ -726,13 +736,14 @@ impl TranscodeManager {
             RateControlValidation::Deferred => return Err(ApplyRateControlError::Busy),
         };
         let stored_quality = quality.map(|value| value.to_string()).unwrap_or_default();
+        let stored_mode = mode.map_or("", RateMode::as_str);
         self.store
             .put_settings(&[
                 (keys::TRANSCODE_QUALITY, stored_quality.as_str()),
-                (keys::TRANSCODE_RATE_MODE, mode.as_str()),
+                (keys::TRANSCODE_RATE_MODE, stored_mode),
             ])
             .await?;
-        if self.requested_rate_control().await? == (Some(mode), quality) {
+        if self.requested_rate_control().await? == (mode, quality) {
             let selected = self.encoder().await;
             self.publish_rate_control(snapshot, selected);
         } else {
