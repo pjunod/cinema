@@ -1,6 +1,6 @@
 # Interlace in the media contract — field order as a fact, deinterlace as a decision
 
-**Status:** implementation in draft #417; M5 blocked on media1 qualification · **Executes:** Q4 / §3.1.1 / F-stream-4 and
+**Status:** open — M1–M4 merged (#417); M5 measured 2026-10-02 (§9): hardware deinterlace **not adopted**, CPU bwdif stays; routing by the M4 verdict still open (§8) · **Executes:** Q4 / §3.1.1 / F-stream-4 and
 the field-rate bitrate half of Q9 / F-ltv-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -356,10 +356,13 @@ plurx_interlace_verdicts_total` shows both labels after playing both.
 ### 5.5 M5 — hardware deinterlace after qualification (media1)
 
 `vpp_qsv=…:deinterlace=2` and `deinterlace_vaapi` variants, each behind the
-boot probe's verdict (a fixture run through the graph must produce
-progressive ≥ 95 % by `idet` and match the CPU bwdif output within
-`MAX_CHANNEL_DELTA`), each its own PR. Until a graph passes, the M2 decline
+boot probe's verdict, each its own PR. Until a graph passes, the M2 decline
 arm stands.
+
+> **Superseded 2026-10-02 (§9).** The bars originally written here — `idet`
+> ≥ 95 % progressive and mean Y/U/V within `MAX_CHANNEL_DELTA` of CPU bwdif —
+> cannot judge a deinterlacer and are replaced by §9.3. Measured against
+> them, neither hardware graph is adopted (§9.4).
 
 GPT prompt: "On media1 run the 1080i fixture through
 `-hwaccel qsv -hwaccel_output_format qsv -vf
@@ -369,7 +372,8 @@ through the CPU `bwdif=send_frame,scale` chain; report `idet` summaries,
 each."
 
 Acceptance: the QSV graph's numbers in the PR; `Pipeline::declined` no
-longer names interlace for QSV once it passes.
+longer names interlace for QSV once it passes. Judged by §9.3, not by the
+two bars above.
 
 ## 6. Verification and rollout
 
@@ -403,10 +407,13 @@ longer names interlace for QSV once it passes.
    recording so a saved programme and its live session take the same path
    (§3.1.1 notes they diverge today). The column from M1 covers it once the
    recording is scanned; a DVR-side hint is optional.
-4. Whether `unknown` on MPEG-2 sources should trigger M4's `idet` (MPEG-2
-   broadcast often reports `unknown` at container level). Proposed: yes for
-   `mpeg2video` only, decided after M1's backfill shows how many rows read
-   `unknown`.
+4. ~~Whether `unknown` on MPEG-2 sources should trigger M4's `idet`.~~
+   **Closed 2026-10-02: no.** A read-only audit of media1's catalogue after
+   the M1 backfill found no `mpeg2video` row reading `unknown`; FFprobe
+   reports a field order for every MPEG-2 file there, so the extra pass would
+   cost a probe for no row. The rows that do read `unknown` are the
+   key-omitting codecs (HEVC above all) and audio-only files. Reopen only if
+   a catalogue shows MPEG-2 `unknown` rows.
 
 ## 8. Execution decisions
 
@@ -433,6 +440,131 @@ longer names interlace for QSV once it passes.
   until its held-handle execution path can provide the same invariant.
 - M5 has no safe implementation without the plan's media1 QSV/VAAPI fixture
   measurements. No hardware filter string or hidden enable gate was added.
+- **2026-10-02 — the M1 `NULL` defect, fixed.** The scanner wrote `NULL`
+  when FFprobe omitted `field_order` (typical for HEVC) while the backfill
+  wrote `unknown` for the same document, so 81 rows scanned on media1 after
+  `jobs.field_order_backfilled` was stamped stayed `NULL` forever and
+  identical media stored a different token depending on which path wrote it.
+  `parse_probe_json` is now the single owner of "probed, no field order": it
+  reports `unknown` whenever the selected playable video has no token,
+  including audio-only and cover-art-only files (the token the backfill
+  already wrote for those rows), so the SQLite and Hiqlite upserts and the
+  background probe job's facts document all store the same value; `NULL`
+  now means only "never probed". The backfill was re-armed under new keys
+  (`jobs.field_order_backfilled_v2`, `jobs.field_order_backfill_v2_cursor`)
+  and, in the transaction that stamps it done, deletes the first pass's
+  stamp and both passes' node-local cursors (`SettingsStore::put_setting_retiring`).
+  **Identity:** no artifact key moves. The catalogue column feeds only
+  `ScanType::from_field_order`, which reads `NULL` and `unknown` alike, so
+  the deinterlace decision and `plan_digest` are unchanged; `FactsDigest`
+  hashes the held-descriptor or retained FFprobe document's own
+  `field_order` (absent in both routes for these sources), not the column;
+  `DecodeCacheIdentity` is id/size/mtime. The only digest that sees the
+  column is the per-session rolling-provenance binding, which serialises the
+  whole row (`scanned_at` included) and so moves once for each backfilled
+  row, as it does on any rescan.
+- **2026-10-02 — routing by the M4 verdict: not done; the gap, precisely.**
+  The hardware graph is declined twice. First at request time, in
+  `options_for_tone_map` (`manager/plan.rs`, `Pipeline::for_session_with_scan`
+  → `declined_with_scan`, `pipeline.rs`), from the catalogue's
+  `file.field_order` — before any decode facts exist, so no `idet` verdict
+  can be there. Second in `resolve_transcode` (`decode.rs`, the
+  `Deinterlace::BwdifSendFrame` guard), from `facts.scan_type()`, which *is*
+  verdict-aware — but that guard can only downgrade a GPU request to the
+  software renderer, never restore one the first guard already removed. So
+  a mis-flagged *heavy* source (HEVC 4K/HDR flagged `tt`, which M4
+  overrules) still loses its GPU graph: correct picture, CPU renderer,
+  slower. Dropping the request-time guard is not enough on its own, because
+  the request options outlive the resolve: the colour-safe retry is prepared
+  from the request's `opts.pipeline` (`PrepublicationTranscodeRetry::prepare`
+  in `manager/start.rs`; a GPU request would "retry" onto the exact plan it
+  already got), and the start log and session descriptor print
+  `opts.pipeline` (`start.rs`, `construct.rs`). The fix is to make every
+  post-resolve reader take `plan.options().pipeline` (retry preparation, log,
+  descriptor, and the other `live_lookup_options` call sites in
+  `create.rs`, `candidates.rs`, `produce.rs`) and then drop the scan argument
+  from the request-time guard, leaving `resolve_transcode` the sole,
+  verdict-aware authority. That is a restructuring of the request/plan
+  boundary, not a routing tweak, so it is recorded here instead of forced.
+  Practical reach today: interlaced sources are MPEG-2/H.264 8-bit, which
+  `heavy_source` keeps on the CPU chain anyway; only a mis-flagged heavy
+  HEVC file pays.
+
+## 9. M5 evidence and decision (2026-10-02)
+
+Measured on lab3 (Alder Lake-P iGPU, iHD VA-API driver with libva 1.24,
+oneVPL 2.17) with the shipped image's FFmpeg 8.1.3, production thread caps
+(`-threads 6 -filter_threads 6`), timing including decode and
+`hwdownload`, no encoder. The private receipt with source paths is kept off
+the repository; the numbers below are its.
+
+### 9.1 Inputs
+
+| Label | Source | Source `idet` (multi-frame) |
+|---|---|---|
+| broadcast-1080i | H.264 High 1920×1080 30000/1001 broadcast recording, `tt` | 100 % TFF at two offsets |
+| dvr-480i | MPEG-2 704×480 30000/1001 DVR recording, `tt` | 99.4–100 % TFF |
+| fixture-1080i | generated `testsrc2` → `tinterlace=interleave_top,setfield=tff` → MPEG-2 | 100 % TFF |
+| misflagged-1080 | H.264 1080 30000/1001, every frame `interlaced_frame=1` | 97–100 % progressive |
+
+### 9.2 Results (60 s windows; fixture whole file)
+
+| Graph | `idet` % progressive on output (1080i / 480i / fixture) | Mean Y/U/V Δ vs CPU | Picture vs CPU bwdif, SSIM / PSNR | Wall vs CPU (1080i) | CPU-seconds per minute of 1080i |
+|---|---|---|---|---|---|
+| CPU `bwdif=send_frame` (reference) | 78.8 / 83.2 / 100 | — | — | 1.00 (4.9 s) | 27.5 |
+| No deinterlace at all (weave) | 0 / 0.3 / 0 | 0.23 / 0.09 / 0.07 | 0.974 / 34.8 dB | — | — |
+| QSV `vpp_qsv deinterlace=2` | 35.7 / 64.1 / 98.7 | 0.08 / 0.02 / 0.04 | 0.9971 / 51.5 dB (1080i); **one field ahead** on dvr-480i (26.1 dB as-is, 43.9 dB re-aligned) | 0.89× (5.45 s) | 4.4 |
+| VA-API `deinterlace_vaapi motion_adaptive` | 37.1 / 65.4 / 98.7 | 0.29 / 0.05 / 0.02 | **one field late** on all three (30.6 dB as-is); 0.9972 / 52.2 dB re-aligned | 0.58× (8.4 s) | 5.0 |
+
+Also measured: `motion_compensated` and `default` are byte-identical to
+`motion_adaptive` on this driver; `deinterlace_qsv=mode=advanced` defaults to
+field rate (59.94), unlike `vpp_qsv=…:deinterlace=2` (frame rate, as the plan
+intends); hardware outputs drop one edge frame. The misflagged source through
+bwdif without M4's overrule measures PSNR-Y 52.5 dB / SSIM 0.9966 against
+untouched — mild softening, which M4 removes.
+
+### 9.3 Bars that can judge a deinterlacer (replace §5.5's)
+
+What failed as written: `idet` ≥ 95 % progressive fails real content *for
+the CPU reference itself* (78.8 %, 83.2 %) while every graph passes the
+generated fixture, because `idet` on deinterlaced real video reacts to
+residual line structure; and "mean Y/U/V within `MAX_CHANNEL_DELTA` (24)"
+passes the un-deinterlaced weave at 0.23, so it cannot tell a deinterlacer
+from none. A 1.2× wall-time rule (the boot probe's `MIN_SPEEDUP`) applied to
+deinterlace alone rejects both GPU paths at these resolutions, though they
+use 5–6× less CPU. A future hardware candidate is judged, per source in
+§9.1 (the real recordings, not only the fixture), by:
+
+1. **Field timing first.** PSNR against CPU `bwdif=send_field` with the
+   reference shifted by −1, 0 and +1 field (`setpts=PTS±1/(2·rate)/TB`): the
+   0 shift must be the best of the three on every source. A constant offset
+   is a timing defect even when the picture is good, and it is
+   source-dependent (QSV was aligned on 1080i and ahead on 480i).
+2. **Picture, time-aligned.** SSIM ≥ 0.995 and mean PSNR ≥ 45 dB against
+   CPU `bwdif=send_frame` on pts-synchronised frames, with fewer than 1 % of
+   frames below 30 dB.
+3. **`idet` relative to the reference, not absolute.** Output progressive
+   share no more than 10 points below the CPU reference's on the same
+   window; the generated fixture keeps the absolute ≥ 95 % as a boot-probe
+   sanity check only.
+4. **Cost reported, not gated.** Wall time and CPU-seconds beside the CPU
+   chain, measured feeding the hardware encoder directly (not via
+   `hwdownload`); the operator decides what CPU saved is worth.
+5. Cadence: output `avg_frame_rate` equals the source (frame mode), and the
+   frame count is within one of the reference.
+
+### 9.4 Decision
+
+**Hardware deinterlace is not adopted; the CPU `bwdif=send_frame` chain
+stays the only file-path deinterlacer**, and the decline arm stands for all
+four GPU graphs. VA-API fails bar 1 on every source (constant one-field,
+16.7 ms, video lag). QSV fails bar 1 on the DVR recording (one field ahead)
+and bar 2 there as a consequence, while passing on the broadcast 1080i — a
+source-dependent timing, which a boot probe on one fixture cannot certify.
+Neither is faster in wall time here, so nothing is lost by declining: an
+interlaced source is still encoded by the hardware *encoder*, fed after the
+CPU chain (`hwupload` suffix). A QSV adoption would need bar 1 met on a
+wider DVR corpus or a per-source phase check; neither is planned.
 
 ---
 
@@ -452,3 +584,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`a55bad845`) | Ten-second-media `idet` pass uses the snapshotted FFprobe and held descriptor under the existing overall deadline, output caps, cancellation/reap and offset ownership. Verdict is cached/digested, strict >90% progressive overrides bwdif, and three fixed metric labels are exported. Real FFmpeg/FFprobe descriptor acceptance confirms both overrule and confirmation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) | **needs:** run the §5.5 media1 QSV/VAAPI prompt and record idet, cadence, signalstats and wall-time comparisons. Hardware graphs remain conservatively declined; no unqualified filter was added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Review disposition | [#417 comment 3298](http://192.168.4.7:3000/noirr/plurx/pulls/417#issuecomment-3298) (`9789ca4ed`, merged with `6063b37c0` in `3fd0d8ac1`) | Both P1 findings resolved: the three special Dolby Vision/HDR10 graphs apply the recorded bwdif decision before scale without moving Dolby Vision reshape, and Live TV selects one complete final H.264 limit only after output cadence is known. Focused argv, 30/60 fps capability, rational bitrate, affected compile and all-target Clippy evidence is green. M5 remains honestly blocked on media1 qualification. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M1 defect + M5 | branch `opus/s08-interlace-continuation` (unpushed) | `parse_probe_json` owns `unknown`; backfill re-armed under v2 keys and retires the first pass's stamp and cursors in its completing write; store contract on both backends. M5 measured on lab3 (§9): hardware deinterlace not adopted, CPU bwdif stays; §5.5 bars replaced by §9.3. Open question 4 closed. Routing by the M4 verdict recorded as a gap (§8), not forced. |
