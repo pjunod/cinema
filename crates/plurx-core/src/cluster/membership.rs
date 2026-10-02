@@ -2025,6 +2025,8 @@ pub struct StartupMembershipAdmission {
     removal_owner: OnceLock<Weak<ReplicatedMembership>>,
     #[cfg(test)]
     activation_capture_pause: StartupSettlementPause,
+    #[cfg(test)]
+    activation_metadata_submissions: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Default)]
@@ -2048,6 +2050,8 @@ impl Default for StartupMembershipAdmission {
             activation_capture_pause: StartupSettlementPause {
                 once: std::sync::Mutex::new(None),
             },
+            #[cfg(test)]
+            activation_metadata_submissions: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
@@ -4251,6 +4255,18 @@ impl MembershipManager {
         }
         if let Some(original) = original {
             original.revalidate()?;
+        }
+        #[cfg(test)]
+        if original.is_some() {
+            let installed = inner.client.local_membership_admission()?;
+            if let Some(policy) = installed
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+            {
+                policy
+                    .activation_metadata_submissions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
         }
         let current = inner
             .client
@@ -13215,6 +13231,297 @@ mod tests {
             .shutdown()
             .await
             .expect("actual Client and directory owner drain");
+    }
+
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[test]
+    fn k06_actual_activation_transaction_commits_after_phase_expiry_without_next_submission() {
+        let hold = Arc::new(std::sync::Mutex::new(None));
+        let worker_hold = Arc::clone(&hold);
+        let (completed, completion) = std::sync::mpsc::channel();
+        let worker = std::thread::Builder::new()
+            .name("k06-precommit-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let root = tempfile::tempdir().expect("actual precommit fixture");
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("actual precommit fixture");
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    runtime.block_on(Box::pin(actual_precommit_activation_fixture(
+                        Arc::clone(&worker_hold),
+                        root.path(),
+                    )));
+                }));
+                if result.is_err() {
+                    // Failure is not terminal-drain evidence. Release the injection,
+                    // but retain the runtime owning accepted tasks/Client/lock.
+                    drop(worker_hold.lock().expect("owned writer hold").take());
+                    std::mem::forget(root);
+                    std::mem::forget(runtime);
+                } else {
+                    drop(runtime);
+                    drop(root);
+                }
+                let _ = completed.send(result);
+            })
+            .expect("actual precommit fixture");
+        let result = completion.recv_timeout(Duration::from_secs(110));
+        drop(hold.lock().expect("owned writer hold").take());
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(panic)) => std::panic::resume_unwind(panic),
+            Err(error) => panic!("precommit worker did not complete; ownership retained: {error}"),
+        }
+        let finished_by = std::time::Instant::now() + Duration::from_secs(1);
+        while !worker.is_finished() && std::time::Instant::now() < finished_by {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            worker.is_finished(),
+            "precommit worker terminal return missing"
+        );
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[cfg(feature = "cluster-read-cost-validation")]
+    async fn actual_precommit_activation_fixture(
+        hold: Arc<std::sync::Mutex<Option<std::sync::mpsc::Sender<()>>>>,
+        root: &std::path::Path,
+    ) {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::error::StoreError;
+        struct CapturedWriter {
+            entered: tokio::sync::oneshot::Receiver<()>,
+            release: std::sync::mpsc::Sender<()>,
+            deadline: tokio::time::Instant,
+            manager: MembershipManager,
+            baseline_submissions: usize,
+        }
+        struct Observer(std::sync::Mutex<Option<tokio::sync::oneshot::Sender<CapturedWriter>>>);
+        impl StartupClockObserver for Observer {
+            fn start<'a>(
+                &'a self,
+                manager: MembershipManager,
+                node: String,
+            ) -> std::pin::Pin<
+                Box<dyn std::future::Future<Output = Result<(), StoreError>> + Send + 'a>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual applied roster");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert_eq!(applied.members, applied.voters);
+                    assert!(roster.peers.is_empty());
+                    let nonce = uuid::Uuid::now_v7().to_string();
+                    let body = b"actual singleton ownership, not a learner HTTP exchange";
+                    let signature = manager
+                        .sign_internal_peer_response(&node, &nonce, "/_internal/v1/clock", body)
+                        .expect("actual precommit fixture");
+                    let message = internal_peer_response_message(
+                        &node,
+                        &node,
+                        &nonce,
+                        "/_internal/v1/clock",
+                        body,
+                    )
+                    .expect("actual precommit fixture");
+                    assert!(manager
+                        .activity_signature_is_valid(
+                            &node,
+                            &message,
+                            &hex::decode(signature).expect("actual precommit fixture")
+                        )
+                        .await
+                        .expect("actual precommit fixture"));
+                    let guard = manager.clock_guard();
+                    assert!(guard.publish(
+                        guard
+                            .roster_for_peer_directory(&roster)
+                            .expect("actual precommit fixture"),
+                        BTreeMap::new()
+                    ));
+                    let inner = manager
+                        .replicated_inner()
+                        .expect("actual precommit fixture");
+                    let installed = inner
+                        .client
+                        .local_membership_admission()
+                        .expect("actual precommit fixture");
+                    let policy = installed
+                        .as_any()
+                        .downcast_ref::<StartupMembershipAdmission>()
+                        .expect("actual precommit fixture");
+                    let deadline = policy.startup_deadline().expect("actual precommit fixture");
+                    inner
+                        .client
+                        .execute(
+                            "DROP TRIGGER IF EXISTS cluster_node_removal_insert_guard",
+                            params!(),
+                        )
+                        .await
+                        .expect("actual precommit fixture");
+                    let (entered, release) = inner
+                        .client
+                        .validation_hold_transaction_before_commit(
+                            REQUIRE_REMOVAL_INTENT_SQL.to_owned(),
+                            deadline.into_std() + Duration::from_secs(5),
+                        )
+                        .await
+                        .expect("actual precommit fixture");
+                    let baseline_submissions = policy
+                        .activation_metadata_submissions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    self.0
+                        .lock()
+                        .expect("actual precommit fixture")
+                        .take()
+                        .expect("actual precommit fixture")
+                        .send(CapturedWriter {
+                            entered,
+                            release,
+                            deadline,
+                            manager,
+                            baseline_submissions,
+                        })
+                        .map_err(|_| StoreError::Database("fixture observer disappeared".into()))?;
+                    Ok(())
+                })
+            }
+        }
+        fn trigger_count(path: &std::path::Path) -> i64 {
+            let connection = rusqlite::Connection::open_with_flags(
+                path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .expect("actual precommit fixture");
+            connection.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='cluster_node_removal_insert_guard'", [], |row| row.get(0)).expect("actual precommit fixture")
+        }
+        let held: Vec<_> = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("actual precommit fixture"))
+            .collect();
+        let addresses: Vec<_> = held
+            .iter()
+            .map(|listener| listener.local_addr().expect("actual precommit fixture"))
+            .collect();
+        let mut config = crate::config::Config::default();
+        config.storage.data_dir = root.into();
+        config.server.bind = addresses[0];
+        config.cluster.raft_bind = addresses[1];
+        config.cluster.api_bind = addresses[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", addresses[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(held);
+        drop(
+            crate::store::SqliteStore::open(&root.join("plurx.db"))
+                .expect("actual precommit fixture"),
+        );
+        let (capture, captured) = tokio::sync::oneshot::channel();
+        let mut pending = tokio::spawn(async move {
+            let observer = Observer(std::sync::Mutex::new(Some(capture)));
+            Box::pin(select_daemon_store_observing(&config, Some(&observer))).await
+        });
+        let CapturedWriter {
+            entered,
+            release,
+            deadline,
+            manager,
+            baseline_submissions,
+        } = tokio::time::timeout(Duration::from_secs(15), captured)
+            .await
+            .expect("bounded actual observer capture")
+            .expect("actual precommit fixture");
+        *hold.lock().expect("owned writer hold") = Some(release);
+        tokio::time::timeout(Duration::from_secs(10), entered)
+            .await
+            .expect("bounded actual precommit entry")
+            .expect("actual transaction statements completed before commit");
+        let database = root.join("hiqlite/state_machine/db/plurx.db");
+        assert_eq!(
+            trigger_count(&database),
+            0,
+            "independent reader cannot see uncommitted trigger"
+        );
+        assert!(!pending.is_finished());
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".plurxd.lock"))
+            .expect("actual precommit fixture");
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        tokio::time::sleep_until(deadline).await;
+        assert!(
+            !pending.is_finished(),
+            "accepted SQL not cancelled at phase expiry"
+        );
+        assert!(matches!(
+            lock.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        let release = hold.lock().expect("owned writer hold").take();
+        release
+            .expect("actual writer release owner")
+            .send(())
+            .expect("release actual uncommitted writer");
+        let error = match tokio::time::timeout(Duration::from_secs(15), &mut pending)
+            .await
+            .expect("bounded post-release activation completion; no cancellation proof")
+            .expect("actual precommit fixture")
+        {
+            Ok(_) => panic!("expired activation succeeded"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("original deadline"), "{error}");
+        let installed = manager
+            .replicated_inner()
+            .expect("actual precommit fixture")
+            .client
+            .local_membership_admission()
+            .expect("actual precommit fixture");
+        let policy = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .expect("actual precommit fixture");
+        assert_eq!(policy.startup_deadline(), Some(deadline));
+        assert_eq!(
+            policy
+                .activation_metadata_submissions
+                .load(std::sync::atomic::Ordering::Relaxed),
+            baseline_submissions,
+            "no next metadata submission after expired transaction"
+        );
+        assert_eq!(
+            trigger_count(&database),
+            1,
+            "actual transaction committed after expiry"
+        );
+        let cleanup_limit = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock)
+                    if tokio::time::Instant::now() < cleanup_limit =>
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => panic!("actual terminal cleanup did not release lock: {other:?}"),
+            }
+        }
+        lock.unlock().expect("actual precommit fixture");
+        assert!(std::net::TcpListener::bind(addresses[1]).is_ok());
+        assert!(std::net::TcpListener::bind(addresses[2]).is_ok());
     }
 
     #[test]

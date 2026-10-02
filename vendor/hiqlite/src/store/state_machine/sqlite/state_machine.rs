@@ -103,7 +103,6 @@ pub fn validation_register_applied_sql_classes(classes: &[&str]) -> bool {
             .collect();
         VALIDATION_SQL_CLASS_COUNTS
             .set(counters)
-            .ok()
             .expect("sql class counters follow their classes");
     }
     registered
