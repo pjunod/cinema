@@ -1224,7 +1224,8 @@ within its existing bounded wait. Proof-enabled initial launches use the exact
 captured executable path, not a second resolution of its configured symlink.
 An actual verified-GET integrity failure permanently refuses that exact
 artifact's acquisition entry while preserving issued body owners and charged
-collector cleanup. Exact retained lookup precedes encoder and scratch
+collector cleanup. Attachment samples irreversible refusal after source
+verification yields, both before and after registration. Exact retained lookup precedes encoder and scratch
 admission; its preferred graph uses the existing read-only workload/bundle
 thread policy, and a later hardware demotion never broadens compatibility.
 
@@ -1254,7 +1255,7 @@ compatibility and fleet qualification remain open.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | pending draft | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five new focused IDs passed once, including real Copy and TS PUT body consumers and refusal controls. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
+| 2026-10-02 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M5 rolling/PUT retained consumers | [#706](http://192.168.4.7:3000/noirr/plurx/pulls/706) | Optional successful commit hardlinks share existing namespace/count/allowance/cleanup; original verified completion and exact process-private source/recipe/engine binding precede a compatible NEW attachment. Five original focused successes retain historical source attribution; five new review59 controls passed once, including real integrity/producer-admission and post-await refusal controls. Same sole review59 disposition remains required. No restart/telemetry authority, old-owner rebinding, unseen-tail or physical qualification claim. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/p02_663_resume_sol61 | M3 claim | pending draft | Own clone `plurx-s10-m3-sol61`, branch `codex/s10-m3-encoder-qualification`, original actual effort `903201a24`; pinned Rust 1.97.1 baseline passed before Rust edits. M1/M2, output-codec and audio contracts retained; no M4/M5 or fleet/device acceptance claim. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |

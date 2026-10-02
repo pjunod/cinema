@@ -272,6 +272,12 @@ impl RollingArtifact {
     pub(crate) fn acquirable(&self) -> bool {
         !self.refused.load(Acquire)
     }
+    pub(crate) async fn current_for_attachment(
+        &self,
+        production: &crate::rolling_provenance::RollingProduction,
+    ) -> bool {
+        attachment_facts_current(&self.refused, production.input_current()).await
+    }
     pub(crate) fn object_etag(&self, name: &str) -> Option<String> {
         let object = self
             .complete
@@ -506,8 +512,37 @@ fn retained_member(name: &str, bytes: u64) -> bool {
         && bytes <= plurx_core::transcode::manifest::MAX_OBJECT_BYTES
 }
 
+async fn attachment_facts_current(
+    refused: &AtomicBool,
+    input_current: impl std::future::Future<Output = bool>,
+) -> bool {
+    // Source verification can yield. Sample irreversible refusal afterwards,
+    // so a concurrent integrity transfer cannot be hidden by that await.
+    input_current.await && !refused.load(Acquire)
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn rolling_attachment_refusal_is_observed_after_source_await() {
+        use super::*;
+        let refused = AtomicBool::new(false);
+        assert!(attachment_facts_current(&refused, async { true }).await);
+        assert!(!attachment_facts_current(&refused, async { false }).await);
+        assert!(
+            !attachment_facts_current(&refused, async {
+                refused.store(true, Release);
+                true
+            })
+            .await,
+            "integrity refusal during source await remains visible"
+        );
+        assert!(
+            !attachment_facts_current(&refused, async { true }).await,
+            "refusal is one-way"
+        );
+    }
+
     #[test]
     fn rolling_member_bounds_refuse_unservable_and_foreign_proof_objects() {
         use super::retained_member;
