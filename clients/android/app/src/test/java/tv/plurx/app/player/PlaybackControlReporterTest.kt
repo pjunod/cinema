@@ -1728,6 +1728,98 @@ class PlaybackControlSettleTest {
 }
 
 class DisplayAwareAutoEvidenceTest {
+    @Test fun a05ViewerTransportRefusesStaleWrappersAndKeepsOriginalDeadline() {
+        val forwarded = mutableListOf<String>()
+        val delegate = java.lang.reflect.Proxy.newProxyInstance(
+            androidx.media3.common.Player::class.java.classLoader,
+            arrayOf(androidx.media3.common.Player::class.java),
+        ) { _, method, _ ->
+            forwarded.add(method.name)
+            when (method.returnType) {
+                java.lang.Boolean.TYPE -> false
+                java.lang.Integer.TYPE -> 0
+                java.lang.Long.TYPE -> 0L
+                java.lang.Float.TYPE -> 0f
+                else -> null
+            }
+        } as androidx.media3.common.Player
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        var current = true
+        var optionalOwner: Any? = null
+        val commands = mutableListOf<Boolean>()
+        val wrapper = autoViewerTransport(delegate, { current }) { requested ->
+            commands.add(requested)
+            intent.setPlaybackRequested(requested)
+            optionalOwner = if (requested) Any() else null
+            // A prepared resume holds the delegate paused; a second explicit
+            // Pause must still reach this writer without an SDK edge.
+        }
+        wrapper.play()
+        assertTrue(intent.playbackRequested)
+        assertNotNull(optionalOwner)
+        wrapper.pause()
+        wrapper.pause()
+        assertFalse(intent.playbackRequested)
+        assertNull(optionalOwner)
+        assertEquals(listOf(true, false, false), commands)
+        wrapper.setPlayWhenReady(true)
+        assertTrue(intent.playbackRequested)
+        wrapper.seekTo(123L)
+        assertEquals(listOf("seekTo"), forwarded, "non-transport SDK forwarding is unchanged")
+        current = false
+        wrapper.play()
+        wrapper.pause()
+        wrapper.setPlayWhenReady(false)
+        assertEquals(listOf(true, false, false, true), commands)
+        assertTrue(intent.playbackRequested, "stale wrapper cannot pause the successor")
+
+        val deadline = PlaybackTargetDeadline()
+        val owner = deadline.claimOwner(1_000L)
+        val pending = intent.beginSeek(500L, 5_000L)
+        deadline.sample(pending, true, true, 1_000L, owner)
+        assertEquals(6_500L, deadline.remainingActiveMs(2_500L, pending.sequence, owner))
+        assertEquals(6_500L, deadline.remainingActiveMs(2_500L, pending.sequence, owner), "read does not renew")
+        assertNull(deadline.remainingActiveMs(999L, pending.sequence, owner))
+        assertNull(deadline.remainingActiveMs(2_500L, pending.sequence + 1L, owner))
+        deadline.suspendOwner(owner, 3_000L)
+        assertEquals(6_000L, deadline.remainingActiveMs(70_000L, pending.sequence, owner), "inactive time is not charged")
+        val nextOwner = deadline.claimOwner(70_000L)
+        assertNull(deadline.remainingActiveMs(70_000L, pending.sequence, owner))
+        deadline.sample(pending, true, true, 70_000L, nextOwner)
+        assertNotNull(deadline.sample(pending, true, true, 76_000L, nextOwner))
+        assertNull(deadline.remainingActiveMs(76_000L, pending.sequence, nextOwner))
+
+        val manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
+        assertTrue(autoImmutableVodPlaylist(manifest.toByteArray()))
+        assertFalse(autoImmutableVodPlaylist(manifest.replace("seg00001", "seg00000").toByteArray()))
+        assertFalse(autoImmutableVodPlaylist(manifest.replace("#EXT-X-ENDLIST", "#EXT-X-DISCONTINUITY").toByteArray()))
+    }
+
+    @Test fun a05StagedMediaIntervalsRequireCapturedPipelineAndOriginalDeadline() {
+        val pipeline = Any()
+        fun sample(index: Int) = AutoCompletedTransfer(100_000, 100, 1_000,
+            "https://node", true, false, false, "https://node/hls/staged/seg0000$index.m4s",
+            receipt = "00000000-0000-0000-0000-00000000000$index", etag = "object$index", statusCode = 200,
+            pipelineIdentity = pipeline, observedMediaDurationMs = 1_000,
+            mediaStartTimeMs = index * 1_000L, mediaEndTimeMs = (index + 1) * 1_000L, fullObject = true)
+        val first = sample(0)
+        val second = sample(1)
+        fun margin(samples: List<AutoCompletedTransfer>, now: Long = 2_000, owner: Any = pipeline) =
+            autoStagedEmpiricalMargin(samples, owner, "staged", now, 15_000)
+        assertTrue(margin(listOf(first, second)))
+        assertFalse(margin(listOf(first, first)))
+        assertFalse(margin(listOf(first, second), owner = Any()))
+        assertFalse(margin(listOf(first, second), now = 15_000))
+        assertFalse(margin(listOf(first, second), now = 999))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = 500, mediaEndTimeMs = 1_500))))
+        assertFalse(margin(listOf(first, second.copy(mediaStartTimeMs = null))))
+        assertFalse(margin(listOf(first, second.copy(observedMediaDurationMs = 1_003))))
+        assertFalse(margin(listOf(first, second.copy(fullObject = false))))
+        assertFalse(margin(listOf(first, second.copy(segmentId = "https://node/hls/staged/seg1.m4s"))))
+        assertFalse(margin(listOf(first, second.copy(receipt = first.receipt))))
+        assertFalse(margin(listOf(first, second.copy(etag = first.etag))))
+    }
+
     private fun candidate(height: Int, route: String = "encode", peak: Long? = 3_000_000L) =
         tv.plurx.app.data.QualityCandidate("0a7ba9bab6fbdd31bab5e5e362a3fac7", List(32) { 0 },
             route, height * 16 / 9, height, height, average_bps = 8_000_000L, peak_bps = peak,
