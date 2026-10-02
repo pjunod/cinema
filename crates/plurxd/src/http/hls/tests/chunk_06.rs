@@ -1397,6 +1397,36 @@
     }
 
     #[test]
+    fn continuous_master_keeps_verified_variants_and_one_common_subtitle_group() {
+        let file = hls_file(vec![sub("subrip", "eng", "Regular", false, false),
+            sub("webvtt", "eng", "SDH", false, false), sub("hdmv_pgs_subtitle", "eng", "Bitmap", false, false)]);
+        let original = "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",URI=\"audio/exact/index.m3u8\"\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/low/index.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"audio\"\nvideo/high/index.m3u8\n";
+        let master = String::from_utf8(continuous_master_with_subtitles(original.as_bytes().to_vec(), &file, Some(1)).expect("caption family")).expect("UTF-8");
+        assert_eq!(master.matches("TYPE=AUDIO").count(), 1);
+        assert_eq!(master.matches("TYPE=SUBTITLES").count(), 2);
+        assert_eq!(master.matches(",SUBTITLES=\"subs\"").count(), 2);
+        assert!(master.contains("DEFAULT=YES"));
+        assert!(!master.contains("subs/2/"));
+        assert!(!master.contains("40000000") && !master.contains("3840x2160"));
+        for line in original.lines().filter(|line| !line.starts_with("#EXT-X-STREAM-INF:")) { assert!(master.lines().any(|candidate| candidate == line)); }
+        let none = hls_file(vec![]);
+        assert_eq!(continuous_master_with_subtitles(original.as_bytes().to_vec(), &none, None).expect("no native captions"), original.as_bytes());
+    }
+
+    #[test]
+    fn continuous_create_is_a_strict_separate_two_role_envelope() {
+        let wire = serde_json::json!({"version":1,"family_generation":uuid::Uuid::new_v4().to_string(),
+            "primary_candidate_id":"a".repeat(32),"companion_candidate_id":"b".repeat(32),
+            "start":{"playback_id":"family","caps":{"v":2}}});
+        let request: CreateContinuousFamily = serde_json::from_value(wire.clone()).expect("family envelope");
+        assert!(request.valid());
+        let mut duplicate = wire.clone(); duplicate["companion_candidate_id"] = duplicate["primary_candidate_id"].clone();
+        assert!(!serde_json::from_value::<CreateContinuousFamily>(duplicate).expect("shape").valid());
+        let mut extra = wire; extra["unknown"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<CreateContinuousFamily>(extra).is_err());
+    }
+
+    #[test]
     fn hdr_master_declares_the_range_and_exact_session_codecs() {
         let file = hls_file(vec![]);
         let stripped = hls_context("hvc1.2.4.L150.B0,mp4a.40.2", None);

@@ -1688,6 +1688,10 @@ pub fn router(state: AppState) -> Router {
                 // browser holding the full 256 learned limits is about 40 KiB.
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
+        .route(
+            "/files/{id}/hls/continuous-sessions",
+            post(hls::create_continuous).layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/hls/start", get(hls::start))
         .route(
             "/hls/{session}/master.m3u8",

@@ -183,6 +183,12 @@ pub(super) async fn master_playlist_response_local_before(
             .await?;
             return Err(vod_resurrection_unavailable());
         };
+        let file = state
+            .transcode
+            .vod_file_for_owner(&owner)
+            .ok_or_else(vod_resurrection_unavailable)?;
+        let bytes = continuous_master_with_subtitles(bytes, &file, query.subtitle)
+            .map_err(ApiError::Internal)?;
         return complete_buffered_response_before(
             state,
             session,

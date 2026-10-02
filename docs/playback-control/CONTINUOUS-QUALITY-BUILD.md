@@ -2030,3 +2030,26 @@ Pinned all-target compilation and normal hooks apply without unit execution.
 This delivers the autonomous-family writer, not controlled cold-rung admission
 or production client switching. Durable family reconstruction, shared-consumer
 accounting and native qualification remain unfinished.
+
+
+### 10.54 Independent family creation and common text renditions
+
+Authenticated clients can now request a family through the separate versioned
+`/files/{id}/hls/continuous-sessions` route. Its nested ordinary start uses the
+existing recipe planner, source/capability validation, durable activation,
+placement and atomic three-role admission. Both exact normalized SDR encode
+candidates must belong to the same current worker catalog; Original, copy,
+HDR and burned-subtitle recipes refuse this incompatible media contract.
+Explicit family creation does not depend on a readiness setting or enable a
+second Auto policy. Ordinary and Library-channel start JSON remain unchanged;
+a missing route on an older server cannot silently discard the family ask.
+
+The response points to the actual multivariant master rather than the silent
+video-only root playlist. That master now reuses the existing native text
+rendition rules, with one common subtitle group on every verified video rung.
+The transform retains exact video/audio identities, budgets, codecs and
+rasters; source metadata never substitutes for those facts. Initial native
+selection remains in the master query. Caption and strict-envelope regressions
+are authored. Pinned compilation and normal hooks apply without unit execution.
+Production client adoption, controlled cold-rung behavior, durable family
+reconstruction and native qualification remain unfinished.

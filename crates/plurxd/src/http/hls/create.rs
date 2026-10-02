@@ -143,6 +143,42 @@ pub struct CreateSession {
     pub transport: Option<String>,
 }
 
+/// A separate route prevents older parsers from silently accepting the
+/// nested ordinary start while discarding its required family semantics.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreateContinuousFamily {
+    pub version: u8,
+    pub family_generation: String,
+    pub primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub start: CreateSession,
+}
+
+impl CreateContinuousFamily {
+    pub(super) fn valid(&self) -> bool {
+        self.version == 1
+            && uuid::Uuid::parse_str(&self.family_generation).is_ok()
+            && self.primary_candidate_id != self.companion_candidate_id
+            && self.start.caps.is_some()
+            && self.start.copy != Some(true)
+            && self.start.hdr10 != Some(true)
+            && self.start.subtitle_burn.is_none()
+    }
+}
+
+#[derive(Clone)]
+struct ContinuousFamilyStart {
+    family_generation: String,
+    primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+}
+
+enum CreatePurpose {
+    LibraryChannel(crate::http::library_channels::LibraryChannelPlaybackPurpose),
+    Continuous(ContinuousFamilyStart),
+}
+
 impl CreateSession {
     /// `height` is initially resolved by the caller — Auto answered, explicit
     /// rungs snapped, the source-height promise honored. A bound stall reopen
@@ -1076,7 +1112,16 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) async fn resolve_plan(
     inputs: PlanInputs<'_>,
     review: Option<PlanReview>,
+    body: CreateSession,
+) -> Result<ResolvedPlan, ApiError> {
+    resolve_plan_with_continuous(inputs, review, body, None).await
+}
+
+async fn resolve_plan_with_continuous(
+    inputs: PlanInputs<'_>,
+    review: Option<PlanReview>,
     mut body: CreateSession,
+    continuous: Option<&ContinuousFamilyStart>,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
         state,
@@ -1092,6 +1137,7 @@ pub(crate) async fn resolve_plan(
     let mut height =
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
+    let mut continuous_media = None;
     let mut candidate_copy = false;
     if body.copy == Some(true) {
         if let (Some(source), Some(caps)) = (
@@ -1131,18 +1177,29 @@ pub(crate) async fn resolve_plan(
     }
 
     if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
-        let enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-            .await?
-            .is_some_and(|value| value.trim() == "1");
-        let requested = body
-            .intent
-            .as_ref()
-            .and_then(|intent| match intent.selection.quality {
-                plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
-                _ => None,
-            });
+        let enabled = continuous.is_some()
+            || state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                .await?
+                .is_some_and(|value| value.trim() == "1");
+        let intent_candidate =
+            body.intent
+                .as_ref()
+                .and_then(|intent| match intent.selection.quality {
+                    plurx_core::playback::DesiredQuality::Auto { candidate_id, .. } => candidate_id,
+                    _ => None,
+                });
+        if continuous.is_some_and(|family| {
+            intent_candidate.is_some_and(|id| id != family.primary_candidate_id)
+        }) {
+            return Err(ApiError::Conflict(
+                "continuous_primary_differs_from_viewer_intent".into(),
+            ));
+        }
+        let requested = continuous
+            .map(|family| family.primary_candidate_id)
+            .or(intent_candidate);
         if requested.is_some() && !enabled {
             return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
         }
@@ -1216,6 +1273,62 @@ pub(crate) async fn resolve_plan(
                 .iter()
                 .find(|entry| entry.candidate.id == candidate.id)
                 .map(|entry| entry.node_id.clone());
+            if let Some(family) = continuous {
+                use plurx_core::playback::candidate::CandidateRoute;
+                let primary_owner = context
+                    .owner_node_id
+                    .as_deref()
+                    .ok_or_else(|| ApiError::Conflict("continuous_primary_owner_unknown".into()))?;
+                let companion = worker_catalog
+                    .iter()
+                    .find(|entry| {
+                        entry.node_id == primary_owner
+                            && entry.candidate.id == family.companion_candidate_id
+                            && entry.candidate.route == CandidateRoute::Encode
+                            && entry.candidate.decoder_compatible
+                            && entry.candidate.normalized_geometry
+                            && entry.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+                            && entry.candidate.target_height != candidate.target_height
+                    })
+                    .ok_or_else(|| {
+                        ApiError::Conflict(
+                            "continuous_companion_recipe_changed_or_decoder_unavailable".into(),
+                        )
+                    })?;
+                if candidate.route != CandidateRoute::Encode
+                    || !candidate.normalized_geometry
+                    || candidate.grade != plurx_core::transcode::OutputGrade::Sdr
+                    || body
+                        .intent
+                        .as_ref()
+                        .is_some_and(|intent| match intent.selection.quality {
+                            plurx_core::playback::DesiredQuality::Original => true,
+                            plurx_core::playback::DesiredQuality::Manual { height } => {
+                                height != i64::from(candidate.target_height)
+                            }
+                            _ => false,
+                        })
+                {
+                    return Err(ApiError::Conflict(
+                        "continuous_primary_recipe_incompatible".into(),
+                    ));
+                }
+                let mut companion_context =
+                    crate::transcode::TranscodeManager::candidate_context(&companion.candidate);
+                companion_context.owner_node_id = Some(companion.node_id.clone());
+                continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+                    version: 1,
+                    family_generation: family.family_generation.clone(),
+                    role: crate::transcode::ContinuousMediaRole::Video,
+                    autonomous_companion: Some(family.companion_candidate_id),
+                    companion_context: Some(Box::new(
+                        crate::transcode::ContinuousCompanionContext {
+                            height: i64::from(companion.candidate.target_height),
+                            candidate: companion_context,
+                        },
+                    )),
+                }));
+            }
             candidate_context = Some(context);
         }
     } else if body.intent.as_ref().is_some_and(|intent| {
@@ -1247,6 +1360,12 @@ pub(crate) async fn resolve_plan(
     }
     let mut request = body.into_request(file_id, height);
     request.candidate_context = candidate_context;
+    request.continuous_media = continuous_media;
+    if continuous.is_some() && request.continuous_media.is_none() {
+        return Err(ApiError::BadRequest(
+            "continuous_requires_current_source_and_capabilities".into(),
+        ));
+    }
     if request
         .request_id
         .as_ref()
@@ -1356,6 +1475,41 @@ pub async fn create(
     created
 }
 
+pub async fn create_continuous(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    headers: HeaderMap,
+    super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
+    Json(body): Json<CreateContinuousFamily>,
+) -> Result<Json<StartResponse>, ApiError> {
+    if !body.valid() {
+        return Err(ApiError::BadRequest(
+            "continuous_family_start_incompatible".into(),
+        ));
+    }
+    let purpose = ContinuousFamilyStart {
+        family_generation: body.family_generation,
+        primary_candidate_id: body.primary_candidate_id,
+        companion_candidate_id: body.companion_candidate_id,
+    };
+    let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
+    let created = create_with_purpose(
+        user,
+        state,
+        id,
+        headers,
+        remote,
+        body.start,
+        Some(CreatePurpose::Continuous(purpose)),
+    )
+    .await;
+    if let Err(error) = &created {
+        start_attempts.refused(user_id, id, None, error.code(), Instant::now());
+    }
+    created
+}
+
 /// The finite-session application service used by Library channels after it
 /// has authoritatively resolved an occurrence. The purpose is not a public
 /// field on ordinary VOD creation: old servers must reject the dedicated
@@ -1369,9 +1523,17 @@ pub(crate) async fn create_for_library_channel(
     req: CreateSession,
     purpose: crate::http::library_channels::LibraryChannelPlaybackPurpose,
 ) -> Result<StartResponse, ApiError> {
-    create_with_purpose(user, state, file_id, headers, remote, req, Some(purpose))
-        .await
-        .map(|Json(response)| response)
+    create_with_purpose(
+        user,
+        state,
+        file_id,
+        headers,
+        remote,
+        req,
+        Some(CreatePurpose::LibraryChannel(purpose)),
+    )
+    .await
+    .map(|Json(response)| response)
 }
 
 async fn create_with_purpose(
@@ -1381,8 +1543,13 @@ async fn create_with_purpose(
     headers: HeaderMap,
     remote: Option<std::net::SocketAddr>,
     req: CreateSession,
-    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+    purpose: Option<CreatePurpose>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let (library_channel, continuous) = match purpose {
+        Some(CreatePurpose::LibraryChannel(purpose)) => (Some(purpose), None),
+        Some(CreatePurpose::Continuous(family)) => (None, Some(family)),
+        None => (None, None),
+    };
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -1573,7 +1740,7 @@ async fn create_with_purpose(
             .map_err(|error| {
                 ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
             })?;
-    let resolved = resolve_plan(
+    let resolved = resolve_plan_with_continuous(
         PlanInputs {
             state: &state,
             user_id: user.id,
@@ -1583,6 +1750,7 @@ async fn create_with_purpose(
         },
         review,
         req,
+        continuous.as_ref(),
     )
     .await?;
     let request = resolved.request;
@@ -1806,11 +1974,12 @@ async fn create_with_purpose(
         true,
     );
 
-    let quality_enabled = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
+    let quality_enabled = continuous.is_some()
+        || state
+            .store
+            .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+            .await?
+            .is_some_and(|value| value.trim() == "1");
     let mut quality_owners = std::collections::HashSet::new();
     if quality_enabled && candidate_decoder_caps.is_some() {
         quality_owners.insert(state.node_id.clone());
@@ -2323,7 +2492,7 @@ async fn create_with_purpose(
         crate::transcode::SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
         crate::transcode::SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
     };
-    let playlist_url = if native_subtitles {
+    let playlist_url = if request.continuous_media.is_some() || native_subtitles {
         // Give the multivariant playlist its own path. AVPlayer caches HLS
         // resources by URL and can otherwise conflate `index.m3u8?native=1`
         // with the child `index.m3u8` media playlist referenced by that
