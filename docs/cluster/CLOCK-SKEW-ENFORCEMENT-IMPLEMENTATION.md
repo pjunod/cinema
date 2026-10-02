@@ -169,6 +169,28 @@ No private enforcing source enters the effort before the unchanged identified
 measurement receipt; the original removal, replay and qualification scope
 remains open.
 
+**2026-10-02 private causal observation repair:** the real two-node startup
+control reaches promotion but correctly refuses incomplete leader coverage.
+Learner readiness cannot stand in for leader readiness. The coordinator's
+Astra consultation selected one bounded, coalescing whole-roster observer
+shared by periodic and actual-leader/committed-learner demand, retaining
+existing filters, generation/identity fences and the original two-second
+exchange and 45-second startup budgets. That owner and its actual controls
+are still owed; no partial roster, blind sleep or renewed promotion ticket
+is accepted.
+
+The first private source slice makes signed responses on the exact clock
+route use the same consistent applied-member/removal proof as incoming
+clock requests. A pending learner is not required to invent an ordinary
+heartbeat before observation can finish. Both response identities, signature,
+nonce, path and body binding remain checked; unrelated routes and voter
+proofs keep their live-peer predicate. Response verification does not count
+as an inbound authority read. Pinned all-targets daemon check on this source
+passed26.43s, zero unit methods. Real aged-learner/forged/removed/wrong-target
+controls and the failed-only two-node retry remain unexecuted for this slice;
+compiler success is not runtime acceptance. No enforcing source is promoted
+or deployed by this private preparation.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

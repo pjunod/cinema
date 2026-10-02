@@ -7303,8 +7303,17 @@ impl MembershipManager {
         {
             return Ok(false);
         }
-        self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
-            .await
+        if role == PeerAuthorityRole::CommittedMember && path == "/_internal/v1/clock" {
+            // Pending learners cannot publish ordinary heartbeats yet. Their
+            // signed clock replies use the same exact applied-member proof
+            // as incoming clock requests, without inventing liveness or
+            // counting this response as an inbound authority read.
+            self.verify_committed_clock_peer_authority(source_node_id, false)
+                .await
+        } else {
+            self.verify_live_peer_authority(source_node_id, unix_ms()?, role)
+                .await
+        }
     }
 
     /// Authenticate an idempotent read-only relay. Signature verification is
@@ -7638,7 +7647,6 @@ impl MembershipManager {
         role: PeerAuthorityRole,
         clock_request: bool,
     ) -> Result<bool, MembershipError> {
-        let inner = self.replicated_inner()?;
         if clock_request {
             // Clock observation is not serving authority. An admitted peer
             // may have no fresh normal heartbeat until its promotion finishes;
@@ -7646,27 +7654,11 @@ impl MembershipManager {
             // Keep the existing signature/nonce/rate checks above, and bind
             // this exact UUID to the same authoritative applied roster across
             // the consistent read. Never refresh liveness or expire leases.
-            let Some(applied) = inner.local_metrics.current() else {
-                return Ok(false);
-            };
-            if applied.local_node != inner.identity.raft_id {
-                return Ok(false);
-            }
-            self.clock.record_authority_read();
-            let rows = inner
-                .client
-                .query_consistent_map::<ActivityAuthNodeRow, _>(
-                    "SELECT node.raft_id, node.last_seen_at FROM cluster_nodes node \
-                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
-                     WHERE removal.node_id = node.node_id)",
-                    params!(node_id),
-                )
-                .await?;
-            return Ok(rows.len() == 1
-                && applied.members.contains(&rows[0].raft_id)
-                && inner.local_metrics.current().as_ref() == Some(&applied));
+            return self
+                .verify_committed_clock_peer_authority(node_id, true)
+                .await;
         }
+        let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
         let admits = |raft_id| {
             peer_authority_admits(
@@ -7696,6 +7688,40 @@ impl MembershipManager {
         Ok(rows.len() == 1
             && rows[0].last_seen_at >= verified_reachable_after
             && admits(rows[0].raft_id))
+    }
+
+    /// Clock exchanges prove applied membership, not normal serving liveness.
+    /// Only the exact clock route uses this proof; every other response keeps
+    /// the role-specific live-peer proof above. The consistent read preserves
+    /// removal fences and is bracketed by the same local applied membership.
+    async fn verify_committed_clock_peer_authority(
+        &self,
+        node_id: &str,
+        inbound_request: bool,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let Some(applied) = inner.local_metrics.current() else {
+            return Ok(false);
+        };
+        if applied.local_node != inner.identity.raft_id {
+            return Ok(false);
+        }
+        if inbound_request {
+            self.clock.record_authority_read();
+        }
+        let rows = inner
+            .client
+            .query_consistent_map::<ActivityAuthNodeRow, _>(
+                "SELECT node.raft_id, node.last_seen_at FROM cluster_nodes node \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                params!(node_id),
+            )
+            .await?;
+        Ok(rows.len() == 1
+            && applied.members.contains(&rows[0].raft_id)
+            && inner.local_metrics.current().as_ref() == Some(&applied))
     }
 
     async fn refresh_membership_metrics(&self) -> Result<(), MembershipError> {
@@ -8774,6 +8800,18 @@ impl MembershipManager {
                 "stale or foreign reduction reference".into(),
             ));
         }
+        // Re-read the complete actual directory after the durable await. The
+        // receiver's original capture, not this lookup, supplies clock time.
+        let roster = self.clock_peers().await?;
+        self.clock
+            .revalidate_removal_directory(
+                captured,
+                &roster,
+                &reference.target_node_id,
+                reference.target_raft_id,
+                &inner.identity.node_id,
+            )
+            .map_err(MembershipError::ClockUnbounded)?;
         let evidence = if row
             .last_applied_index
             .and_then(|index| u64::try_from(index).ok())
