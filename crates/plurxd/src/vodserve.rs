@@ -620,6 +620,9 @@ pub struct VodStart {
 pub(crate) struct VodRecipeRequest<'a> {
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
+    /// Resolved shared AAC for a continuous video attachment, never a second
+    /// public session. Creation commits both private readers together.
+    pub soundtrack: Option<Arc<crate::vodencode::Encoding>>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
@@ -627,6 +630,7 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
         Self {
             request,
             encoding: None,
+            soundtrack: None,
         }
     }
 }

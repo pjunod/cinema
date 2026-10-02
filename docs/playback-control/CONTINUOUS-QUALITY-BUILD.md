@@ -1792,3 +1792,30 @@ for the ordinary muxed catalog recipe. The existing strict-wire regression
 covers these combinations. Compiler checks and normal hooks apply; unit
 execution remains deferred to final qualification. Family attachment and
 client switching remain unfinished.
+
+### 10.44 Atomic continuous video and soundtrack attachment
+
+The normal manager now resolves shared AAC for a continuous video request
+and reconstructs it during same-node durable restoration. It borrows the
+selected video's end grid, independent of its CPU-only encoder recipe.
+Catalog identity is checked against the original muxed plan before deriving
+role-specific recipes; their work remains excluded from muxed speed proofs.
+
+Creation prepares media independently, reacquires build gates in sorted key
+order, and rechecks the exact cache objects and source fences. It reserves
+video and AAC together before registering either private reader. Existing
+workers contribute their exact retained credits; only missing roles consume
+new capacity. The whole logical group must fit current CPU/GPU policy even
+when just one missing permit is requested. Refusal or cancellation before
+registration leaves no partial reader graph. Parent End, replacement and
+idle cleanup retain their existing cancellation-independent retirement.
+Prepared promotion now includes all owned media.
+
+The existing AAC campaign now authors a one-credit-short refusal, successful
+paired attachment with retained credits, private playlist/init delivery, and
+whole-group release after End and confirmed reap. The manager planning
+regression consumes an actual normalized SDR catalog candidate. Pinned
+all-target compilation and normal hooks apply; unit execution is deferred.
+This connects one video and one soundtrack in production; additional video
+rungs, immutable master exposure, schedule transport, durable family
+descriptors and client switching remain unfinished.

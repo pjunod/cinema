@@ -551,6 +551,10 @@ impl Default for Admissions {
 }
 
 impl Admissions {
+    pub(crate) fn shares_pool(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.permits, &other.permits)
+    }
+
     pub fn new() -> Admissions {
         let permits = Arc::new(Mutex::new(PermitState::default()));
         Admissions {

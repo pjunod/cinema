@@ -25,18 +25,31 @@ impl VodServe {
     /// admission after its durable pointer commit. A copy rendition has no
     /// encoder and therefore needs no transition.
     pub(crate) async fn promote_prepared_session(&self, session_id: &str) -> bool {
-        let rendition = self
-            .shared
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|session| session.rendition.clone());
-        let Some(rendition) = rendition else {
-            return false;
+        let renditions = {
+            let sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions
+                .get(session_id)
+                .filter(|session| session.tombstone.is_none())
+            else {
+                return false;
+            };
+            let Some(root) = session.rendition.as_ref() else {
+                return false;
+            };
+            std::iter::once(Arc::clone(root))
+                .chain(
+                    session
+                        .children
+                        .iter()
+                        .map(|child| Arc::clone(&child.rendition)),
+                )
+                .collect::<Vec<_>>()
         };
-        if let Some(encoding) = rendition.recipe.encoding.as_ref() {
-            encoding.promote();
+        for rendition in renditions {
+            if let Some(encoding) = rendition.recipe.encoding.as_ref() {
+                encoding.promote();
+            }
+            rendition.kick();
         }
         true
     }

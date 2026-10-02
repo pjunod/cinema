@@ -934,6 +934,55 @@ impl TranscodeManager {
                 options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             }
         }
+        // Catalog identity describes the muxed candidate. Verify that exact
+        // plan before deriving the video-only or shared-AAC execution recipe.
+        let catalog_plan = if let Some(context) = req
+            .candidate_context
+            .as_ref()
+            .filter(|_| req.continuous_media.is_some())
+        {
+            let catalog_encoder = if shared_audio_role {
+                self.encoder_and_grade_for(file, false, target_height, false)
+                    .await?
+                    .0
+            } else {
+                encoder
+            };
+            let mut catalog_options = self.live_lookup_options(
+                self.rate_control_snapshot(),
+                catalog_encoder,
+                file,
+                target_height,
+                0.0,
+                req.audio_index,
+                None,
+                Some(software_threads),
+                OutputGrade::Sdr,
+            );
+            catalog_options.normalized_geometry = context.normalized_geometry;
+            if let Some(profile) = context.profile {
+                catalog_options.auto_quality_rate_profile = Some(profile);
+                catalog_options.video_bitrate_kbps = profile.video_bitrate_kbps();
+                catalog_options.effective_rate_control =
+                    plurx_core::transcode::EffectiveRateControl::Vbr;
+            }
+            Some(
+                self.resolve_vod_movie_plan(
+                    file,
+                    &catalog_options,
+                    catalog_encoder,
+                    Arc::new(
+                        source
+                            .handle
+                            .try_clone()
+                            .map_err(|error| start_infrastructure_error(error.to_string()))?,
+                    ),
+                )
+                .await?,
+            )
+        } else {
+            None
+        };
         if let Some(media) = req.continuous_media.as_ref() {
             options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             if media.role == ContinuousMediaRole::SharedAudio {
@@ -993,7 +1042,7 @@ impl TranscodeManager {
         }
         if let Some(context) = req.candidate_context.as_ref() {
             let actual = self
-                .candidate_recipe_digest(&plan, req.presentation)
+                .candidate_recipe_digest(catalog_plan.as_ref().unwrap_or(&plan), req.presentation)
                 .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
             if actual != context.recipe_digest
                 || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
@@ -1090,6 +1139,38 @@ impl TranscodeManager {
         })))
     }
 
+    async fn prepare_vod_soundtrack(
+        &self,
+        request: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+        video: Option<&Arc<crate::vodencode::Encoding>>,
+    ) -> Result<Option<Arc<crate::vodencode::Encoding>>, String> {
+        if file.audio_streams.is_empty()
+            || !request
+                .continuous_media
+                .as_ref()
+                .is_some_and(|media| media.role == ContinuousMediaRole::Video)
+        {
+            return Ok(None);
+        }
+        let mut audio = request.clone();
+        audio
+            .continuous_media
+            .as_mut()
+            .expect("continuous video")
+            .role = ContinuousMediaRole::SharedAudio;
+        // Video has already validated its catalog context. AAC uses its own
+        // CPU-only recipe and borrows only the selected video's end grid.
+        audio.candidate_context = None;
+        let mut soundtrack = self.prepare_vod_encoding(&audio, file).await?;
+        if let (Some(soundtrack), Some(video)) = (soundtrack.as_mut(), video) {
+            Arc::get_mut(soundtrack)
+                .expect("new soundtrack recipe")
+                .grid = video.grid;
+        }
+        Ok(soundtrack)
+    }
+
     /// The only public HLS presentation. A request either receives immutable
     /// VOD or fails with a stable refusal; it never enters the live arms.
     #[allow(clippy::too_many_arguments)]
@@ -1161,9 +1242,13 @@ impl TranscodeManager {
                 encoding.options.pipeline,
             )
         });
+        let soundtrack = self
+            .prepare_vod_soundtrack(req, &file, encoding.as_ref())
+            .await?;
         let prepared = crate::vodserve::VodRecipeRequest {
             request: req,
             encoding,
+            soundtrack,
         };
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
@@ -1540,7 +1625,16 @@ impl TranscodeManager {
             let Ok(encoding) = self.prepare_vod_encoding(&req, &file).await else {
                 return false;
             };
+            let Ok(soundtrack) = self
+                .prepare_vod_soundtrack(&req, &file, encoding.as_ref())
+                .await
+            else {
+                return false;
+            };
             if speculative {
+                if let Some(soundtrack) = soundtrack.as_ref() {
+                    soundtrack.mark_speculative();
+                }
                 if let Some(encoding) = encoding.as_ref() {
                     encoding.mark_speculative();
                 }
@@ -1568,6 +1662,7 @@ impl TranscodeManager {
                     crate::vodserve::VodRecipeRequest {
                         request: &req,
                         encoding,
+                        soundtrack,
                     },
                     &file,
                     &settings,

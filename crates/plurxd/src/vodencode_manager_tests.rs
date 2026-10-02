@@ -866,7 +866,16 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         kind: SessionKind::Transcode { height: 240 },
         ..reopen_request(file_id, "continuous-worker", "unused", "unused")
     };
-    let video = manager.prepare_vod_encoding(&request, &file).await.expect("video planning").expect("video recipe");
+    let catalog = manager.quality_candidates_with_copy_contract(&file,
+        &plurx_core::playback::DeviceCaps { v: 2, ..Default::default() },
+        None, 0, None, Presentation::Vod, None).await;
+    let candidate = catalog.iter().find(|candidate| candidate.normalized_geometry
+        && candidate.grade == OutputGrade::Sdr
+        && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode).expect("normalized SDR catalog candidate");
+    request.kind = SessionKind::Transcode { height: i64::from(candidate.target_height) };
+    request.candidate_context = Some(TranscodeManager::candidate_context(candidate));
+    let video = manager.prepare_vod_encoding(&request, &file).await.expect("video planning from catalog").expect("video recipe");
+    assert!(video.candidate_recipe.is_none(), "video-only work is not a muxed candidate speed proof");
     assert!(!video.plan.options().input_has_audio);
     assert!(video.shared_audio.is_none());
     assert_eq!(video.plan.options().video_sample_envelope, plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50);
@@ -876,6 +885,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
     request.continuous_media.as_mut().expect("continuous role").role = ContinuousMediaRole::SharedAudio;
     let audio = manager.prepare_vod_encoding(&request, &file).await.expect("audio planning").expect("audio recipe");
     assert!(audio.shared_audio.is_some());
+    assert!(audio.candidate_recipe.is_none(), "shared AAC is not a muxed candidate speed proof");
     assert!(!audio.resources().hardware_slot);
     assert_eq!(audio.resources().cpu_threads, 3);
     assert_eq!(audio.media_plan(file.duration_ms.expect("fixture duration")).timescale, 48_000);

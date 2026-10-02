@@ -294,12 +294,39 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .cloned().expect("cached real soundtrack");
     let parent = uuid::Uuid::new_v4().to_string();
     let other = uuid::Uuid::new_v4().to_string();
-    insert_control_session(&serve, &parent, Arc::clone(&soundtrack), Instant::now()).await;
+    let mut video = encoding.clone_with_admissions_for_test(encoding.admissions.clone()).await;
+    let mutable = Arc::get_mut(&mut video).expect("new video recipe");
+    mutable.shared_audio = None;
+    mutable.options.normalized_geometry = true;
+    mutable.options.video_sample_envelope = plurx_core::transcode::VideoSampleEnvelope::ContinuousAvcHigh50;
+    mutable.options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
+    refresh_encoded_plan(&file, mutable);
+    let budget = video.resources().cpu_threads + encoding.resources().cpu_threads;
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &(budget - 1).to_string()).await.expect("one missing CPU credit");
+    let mut parent_request = request(&parent, 0.0);
+    parent_request.kind = SessionKind::Transcode { height: video.options.target_height };
+    parent_request.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
+        version: 1, family_generation: uuid::Uuid::new_v4().to_string(), role: crate::transcode::ContinuousMediaRole::Video,
+    }));
+    let attach = || VodRecipeRequest { request: &parent_request, encoding: Some(Arc::clone(&video)), soundtrack: Some(Arc::clone(&encoding)) };
+    let attribution = VodAttribution { user_name: "test", item_title: "paired continuous attachment", supersession_user: "test" };
+    assert!(serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.is_err());
+    assert!(!serve.shared.sessions.lock().await.contains_key(&parent));
+    assert!(soundtrack.readers.lock().await.is_empty());
+    assert_eq!(encoding.admissions.software_in_use(), 0, "refused group leaves no partial capacity");
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, &budget.to_string()).await.expect("exact group budget");
+    serve.try_create(attach(), &file, &settings(), attribution, parent.clone()).await.expect("atomic paired parent attachment");
+    let video_rendition = rendition_of(&serve, &parent).await;
+    {
+        let sessions = serve.shared.sessions.lock().await;
+        let children = &sessions[&parent].children;
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|child| child._reservation.is_some()));
+        assert!(children.iter().any(|child| Arc::ptr_eq(&child.rendition, &soundtrack)));
+        assert!(children.iter().any(|child| Arc::ptr_eq(&child.rendition, &video_rendition)));
+    }
+    assert_eq!(encoding.admissions.software_in_use(), budget);
     insert_control_session(&serve, &other, Arc::clone(&soundtrack), Instant::now()).await;
-    let private_id = uuid::Uuid::new_v4().to_string();
-    soundtrack.attach_reader(&private_id, 0).await;
-    serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
-        ParentMediaReader { reader_id: private_id, rendition: Arc::clone(&soundtrack), _reservation: None });
     let deadline = || Instant::now() + Duration::from_secs(5);
     let playlist = serve.child_playlist_before(&parent, "audio", &soundtrack.key, deadline()).await
         .expect("parent").result.expect("actual AAC playlist").expect("owned audio");
@@ -326,8 +353,12 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         .expect("parent").result.expect("wrong init identity").is_none());
     assert!(serve.end(&parent, Terminal::Deleted).await);
     assert!(serve.end(&other, Terminal::Deleted).await);
-    soundtrack.gen_epoch.fetch_add(1, Relaxed);
-    let _ = soundtrack.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+    for rendition in [&soundtrack, &video_rendition] {
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
+        assert!(rendition.readers.lock().await.is_empty());
+    }
+    assert_eq!(encoding.admissions.software_in_use(), 0, "End and confirmed reap release the whole group");
     let mut cached_reader = FragmentReader::new();
     cached_reader.push(&cached_init);
     let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else { panic!("init first"); };
@@ -608,6 +639,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     req.kind = SessionKind::Transcode { height: 64 };
     old.try_create(
         VodRecipeRequest {
+                soundtrack: None,
             request: &req,
             encoding: Some(Arc::clone(&encoding)),
         },
@@ -655,6 +687,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     let refused = new
         .try_create(
             VodRecipeRequest {
+                soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(&encoding)),
             },
@@ -705,6 +738,7 @@ async fn encoded_vod_resurrection_cannot_adopt_same_size_mtime_replacement() {
     });
     new.try_create(
         VodRecipeRequest {
+                soundtrack: None,
             request: &req,
             encoding: Some(fresh),
         },
@@ -1253,6 +1287,7 @@ async fn encoded_pair(
     serve
         .try_create(
             VodRecipeRequest {
+                soundtrack: None,
                 request: &req,
                 encoding: Some(Arc::clone(encoding)),
             },
@@ -1588,6 +1623,7 @@ async fn assert_encoded_restarts(
         let started = serve
             .try_create(
                 VodRecipeRequest {
+                soundtrack: None,
                     request: &req,
                     encoding: Some(Arc::clone(&encoding)),
                 },
