@@ -2956,3 +2956,20 @@ fragment byte changes, missing and disposed pins, foreign identities, segment
 interval mismatch, payload bounds and overflowing frontiers. Production and
 test sources compile; unit execution remains deferred. Native enrollment is
 still not connected.
+
+
+### 10.95 Android reads the actual AAC decode clock before reservation
+
+A bounded structural reader extracts the first single-track fragment decode
+clock, refusing duplicate, truncated, malformed and unsafe clock boxes. Exact
+integer scaling maps that AAC clock to its containing video entry without
+intermediate overflow. This chooses the reservation window; it does not
+establish sample acceptance or presentation. Production and regression
+sources compile. Authored clock and malformed-input regressions await the
+final fast lane. Native loader and ownership integration remain unfinished.
+
+The native UI tool confirmed on October 2 that the Mac is locked and could
+not unlock it automatically. Safari qualification is pending a manual unlock.
+The isolated nuc3 source transfer remains pending explicit destination
+authorization following automatic approval rejection. Independent native
+source work continues while those qualification paths are unavailable.
