@@ -629,14 +629,127 @@ impl Client {
         }
     }
 
-    /// Perform a graceful shutdown for a local Raft node, or close the owned
-    /// streams and rate ticker for a remote client without stopping servers.
-    ///
-    /// The shutdown adds a 10 delay on purpose for smoothing out Kubernetes rolling releases and
-    /// make the whole process more graceful, because a whole new leader election might be necessary.
-    ///
-    /// In future versions, there will be the possibility to trigger a graceful leader election
-    /// upfront, but this has not been stabilized in this version.
+    /// Whether the staged factory transferred actual listener ownership.
+    pub fn has_retained_startup_resources(&self) -> bool {
+        self.inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+    }
+
+    /// Drain a handed-off staged node without leave/remove proposals or an
+    /// outer cancellation deadline. The caller must retain this future and
+    /// its directory lease through terminal completion.
+    pub async fn shutdown_retained_startup(&self) -> Result<(), Error> {
+        let _drain = self.inner.startup_drain.lock().await;
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Error("retained startup cleanup requires a local client".into())
+        })?;
+        state.is_shutting_down.store(true, Ordering::Relaxed);
+        if let Some(listeners) = self
+            .inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            listeners.stop_admitting();
+        }
+        // Shut admission for both groups before awaiting either group's work.
+        #[cfg(feature = "cache")]
+        {
+            state
+                .raft_cache
+                .is_raft_stopped
+                .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
+        }
+        #[cfg(feature = "sqlite")]
+        {
+            state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
+            state.raft_db.snapshot_executor.request_shutdown();
+        }
+        #[cfg(feature = "cache")]
+        {
+            state
+                .raft_cache
+                .is_raft_stopped
+                .store(true, Ordering::Relaxed);
+            state.raft_cache.snapshot_executor.request_shutdown();
+            while !state
+                .raft_cache
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                tracing::warn!("retained startup cleanup still owns accepted cache snapshot work");
+            }
+            state.raft_cache.raft.shutdown().await?;
+            if let Some(wal) = &state.raft_cache.shutdown_handle {
+                wal.shutdown().await?;
+            }
+            let _ = self
+                .inner
+                .tx_client_cache
+                .send_async(ClientStreamReq::Shutdown)
+                .await;
+        }
+        #[cfg(feature = "sqlite")]
+        {
+            state.raft_db.is_raft_stopped.store(true, Ordering::Relaxed);
+            state.raft_db.snapshot_executor.request_shutdown();
+            while !state
+                .raft_db
+                .snapshot_executor
+                .wait_for_shutdown(Duration::from_secs(5))
+                .await
+            {
+                tracing::warn!("retained startup cleanup still owns accepted SQLite snapshot work");
+            }
+            state.raft_db.raft.shutdown().await?;
+            state.raft_db.shutdown_handle.shutdown().await?;
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            state
+                .raft_db
+                .sql_writer
+                .send_async(WriterRequest::Shutdown(tx))
+                .await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+            rx.await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+            let _ = self
+                .inner
+                .tx_client_db
+                .send_async(ClientStreamReq::Shutdown)
+                .await;
+        }
+        self.inner.stream_shutdown.send_replace(true);
+        let handles = self
+            .inner
+            .background_handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle
+                .await
+                .map_err(|error| Error::Error(error.to_string().into()))?;
+        }
+        let listeners = self
+            .inner
+            .startup_listeners
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        if let Some(mut listeners) = listeners {
+            listeners.finish().await?;
+        }
+        Ok(())
+    }
+
+    /// Ordinary client shutdown retains its existing rolling-release policy.
     pub async fn shutdown(&self) -> Result<(), Error> {
         let primary = if let Some(state) = &self.inner.state {
             match tokio::time::timeout(
