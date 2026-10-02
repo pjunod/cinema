@@ -32,7 +32,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use plurx_core::transcode::{Encoder, Pipeline, PIPELINE_CANDIDATES};
+use plurx_core::transcode::{zscale_tone_map_filter, Encoder, Pipeline, PIPELINE_CANDIDATES};
 
 use crate::ffmpeg::{ffmpeg_bin, ffprobe_bin};
 
@@ -587,14 +587,13 @@ fn probe_args(fixture: &Path, out: &Path, candidate: Pipeline, encoder: Encoder)
 
     let mut vf = match candidate.filters(None, PROBE_HEIGHT, Some("hdr10")) {
         Some(g) => g,
-        // The CPU reference: the exact chain `video_filters` builds for an
-        // HDR10 source, spelled here because a probe that measured a
+        // The CPU reference: the tone map `video_filters` builds for an
+        // HDR10 source at the 1,000-nit policy peak, taken from the one
+        // function that spells it, because a probe that measured a
         // *different* CPU chain would be comparing against a fiction.
         None => format!(
-            "zscale=tin=smpte2084:min=bt2020nc:pin=bt2020:t=linear:npl=100,format=gbrpf32le,\
-             zscale=p=bt709,tonemap=tonemap=hable:desat=0:peak=10,\
-             zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p,\
-             scale=-2:'min({PROBE_HEIGHT},ih)'"
+            "{},scale=-2:'min({PROBE_HEIGHT},ih)'",
+            zscale_tone_map_filter("smpte2084", 1_000)
         ),
     };
     // The CPU path uploads for a hardware encoder; the vendor graphs already
@@ -1041,6 +1040,58 @@ mod tests {
         // picture at the same speed, so it fails on speed alone.
         let why = decide(&sample, &sample).expect_err("nothing beats itself");
         assert!(why.contains("the CPU chain"), "wrong rejection: {why}");
+    }
+
+    /// A decoded PQ frame that carries no primaries tag still tone-maps. With
+    /// `pin=` but no output `p=` on the linearising zscale, zimg took the
+    /// output primaries from the frame and refused the graph ("no path between
+    /// colorspaces"), producing no frames at all; the chain names `p=bt709`
+    /// there now. `testsrc2` frames carry no primaries, and `setparams` tags
+    /// everything else a PQ decode would.
+    #[tokio::test]
+    async fn the_cpu_tone_map_survives_a_frame_without_primaries() {
+        crate::transcode::require_ffmpeg();
+        if !has_filters(&["zscale", "tonemap", "setparams"]).await {
+            eprintln!(
+                "skipping the_cpu_tone_map_survives_a_frame_without_primaries: `{}` has \
+                 no zscale/tonemap/setparams",
+                ffmpeg_bin()
+            );
+            return;
+        }
+        let graph = format!(
+            "setparams=range=tv:color_trc=smpte2084:colorspace=bt2020nc,{}",
+            zscale_tone_map_filter("smpte2084", 1_000)
+        );
+        let output = tokio::process::Command::new(ffmpeg_bin())
+            .args([
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=320x180:rate=24:duration=0.25,format=yuv420p10le",
+                "-vf",
+                &graph,
+                "-f",
+                "framemd5",
+                "-",
+            ])
+            .output()
+            .await
+            .expect("ffmpeg runs");
+        assert!(
+            output.status.success(),
+            "the chain refused an untagged-primaries frame: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let frames = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .count();
+        assert!(frames > 0, "no frames came out of the chain");
     }
 
     fn exit_status(code: u32) -> std::process::ExitStatus {
@@ -1706,7 +1757,10 @@ mod tests {
             .map(|i| args[i + 1].clone())
             .expect("a filter graph");
         assert!(vf.contains("tonemap=tonemap=hable"), "{vf}");
-        assert!(vf.contains("zscale=p=bt709,tonemap="), "{vf}");
+        assert!(
+            vf.contains(":t=linear:p=bt709:npl=100,format=gbrpf32le,tonemap="),
+            "gamut conversion on the linearising zscale, ahead of the curve: {vf}"
+        );
         assert!(vf.contains("peak=10"), "{vf}");
         assert!(vf.contains("dither=error_diffusion"), "{vf}");
         assert!(vf.contains("tin=smpte2084"), "{vf}");

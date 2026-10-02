@@ -424,6 +424,8 @@ const MEDIA_METHODS: &[&str] = &[
     "set_file_field_order",
     "files_missing_luminance",
     "set_file_luminance",
+    "files_without_luminance_facts",
+    "set_file_frame_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -18460,7 +18462,14 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
-    assert_eq!(declared.len(), 450, "review the Store method count");
+    // 450 -> 452 for S-07's first-frame luminance backfill on `MediaStore`:
+    // `files_without_luminance_facts` lists HDR rows the stored-document walk
+    // classified `none`, and `set_file_frame_luminance` records what the first
+    // frame carried, fenced to that snapshot and to the row still being
+    // `none`. Both are named in `MEDIA_METHODS` above and covered on both
+    // backends by `frame_luminance_candidates_and_writes_are_exactly_fenced`.
+    // No new trait or supertrait of `Store`.
+    assert_eq!(declared.len(), 452, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -19299,6 +19308,153 @@ async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
             "{backend}: a classified row refuses a repeated stale update"
+        );
+    })
+    .await;
+}
+
+/// The first-frame backfill sees only HDR rows the stored-document walk left
+/// `none`, walks them by id, and its write lands only on the exact snapshot it
+/// listed while that row is still `none`.
+#[tokio::test]
+async fn frame_luminance_candidates_and_writes_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR frame luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr-frame".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR frame fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let seed = |path: &'static str, hdr: Option<&'static str>, source: Option<&'static str>| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .upsert_file(
+                        item,
+                        path,
+                        10,
+                        20,
+                        &ProbeResult {
+                            hdr: hdr.map(str::to_owned),
+                            luminance_source: source.map(str::to_owned),
+                            raw_json: Some(format!(r#"{{"streams":[],"p":"{path}"}}"#)),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: file {path}: {error}"))
+            }
+        };
+        let first = seed("/hdr-frame/a.mkv", Some("hdr10"), Some("none")).await;
+        seed("/hdr-frame/b.mkv", Some("hdr10"), Some("stream")).await;
+        seed("/hdr-frame/c.mkv", Some("hdr10"), None).await;
+        seed("/hdr-frame/d.mkv", None, Some("none")).await;
+        let second = seed("/hdr-frame/e.mkv", Some("hlg"), Some("none")).await;
+
+        let page = store
+            .files_without_luminance_facts(0, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert_eq!(
+            page.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![first],
+            "{backend}: bounded, ascending"
+        );
+        let after = store
+            .files_without_luminance_facts(first, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: next page: {error}"));
+        assert_eq!(
+            after.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: only HDR rows classified none, strictly after the cursor"
+        );
+
+        let candidate = page.into_iter().next().expect("candidate");
+        // Each identity field fences the write on its own.
+        let mut stale_mtime = candidate.clone();
+        stale_mtime.mtime += 1;
+        let mut stale_size = candidate.clone();
+        stale_size.size += 1;
+        let mut stale_path = candidate.clone();
+        stale_path.path = "/hdr-frame/elsewhere.mkv".into();
+        let mut stale_probe = candidate.clone();
+        stale_probe.probe_json = r#"{"streams":[],"p":"rescanned"}"#.into();
+        for (field, stale) in [
+            ("mtime", stale_mtime),
+            ("size", stale_size),
+            ("path", stale_path),
+            ("probe_json", stale_probe),
+        ] {
+            assert!(
+                !store
+                    .set_file_frame_luminance(&stale, Some(1), None, None)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: stale {field}: {error}")),
+                "{backend}: a snapshot differing only in {field} is refused"
+            );
+            assert_eq!(
+                store
+                    .get_file(first)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+                    .expect("stored file")
+                    .luminance_source
+                    .as_deref(),
+                Some("none"),
+                "{backend}: a refused {field} write left the row alone"
+            );
+        }
+        assert!(store
+            .set_file_frame_luminance(&candidate, Some(2008), Some(612), Some(4000))
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(first)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance,
+                stored.luminance_source.as_deref()
+            ),
+            (Some(2008), Some(612), Some(4000), Some("frame"))
+        );
+        assert!(
+            !store
+                .set_file_frame_luminance(&candidate, None, None, None)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: repeated write: {error}")),
+            "{backend}: a row no longer none refuses a repeated write"
+        );
+        assert_eq!(
+            store
+                .files_without_luminance_facts(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: final page: {error}"))
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            vec![second],
+            "{backend}: an observed row leaves the candidate set"
         );
     })
     .await;
