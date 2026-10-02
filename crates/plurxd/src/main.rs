@@ -1809,7 +1809,7 @@ struct StartupObservationHttp {
 }
 
 struct StartupObservationTasks {
-    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    server: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     observer: crate::clock_offset::ClockObserver,
     probe: Option<tokio::task::JoinHandle<()>>,
     probe_stop: tokio_util::sync::CancellationToken,
@@ -1870,7 +1870,7 @@ impl StartupObservationHttp {
         &self,
         app: axum::Router,
         shutdown: impl std::future::Future<Output = ()> + Send,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<HttpDrain> {
         *self
             .router
             .write()
@@ -2085,6 +2085,18 @@ async fn boot_observing(
     crate::telemetry::initialize(Arc::clone(&state.store))
         .await
         .context("seed playback telemetry settings")?;
+    // The Plex façade census continues across restarts (C-07 §8.5). Restored
+    // before the listener accepts; an unusable file is a new census, never a
+    // refusal to start.
+    state
+        .plex_census
+        .restore_durable(
+            &config.storage.data_dir,
+            http::plex_census::unix_now_s(),
+            http::plex_census::build_source_floor().unwrap_or(0),
+        )
+        .await;
+    let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 
@@ -2131,9 +2143,11 @@ async fn boot_observing(
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
     };
-    if let Some(owner) = observation {
-        owner.serve_normal(app, shutdown).await?;
-        drain_serving_state(progress, mdns).await
+    let served = if let Some(owner) = observation {
+        match owner.serve_normal(app, shutdown).await {
+            Ok(drain) => drain_serving_state(progress, mdns).await.map(|()| drain),
+            Err(error) => Err(error),
+        }
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
@@ -2143,7 +2157,22 @@ async fn boot_observing(
             shutdown,
         )
         .await
+    };
+    // The last census write. It is marked clean only when the HTTP server
+    // stopped with every connection drained: then no façade request can still
+    // be counted, and the clean mark tells the next start that nothing was
+    // lost. A drain that timed out leaves connections that may still finish
+    // and be counted after this write, and a serving error says nothing about
+    // them, so both write an unclean final record and the next start counts an
+    // unclean stop. A failed write is read the same way, which is honest too.
+    let clean = matches!(served, Ok(HttpDrain::Complete));
+    if let Err(error) = plex_census
+        .flush_durable(http::plex_census::unix_now_s(), clean)
+        .await
+    {
+        tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
+    served.map(|_| ())
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -3001,6 +3030,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(http::plex_census::flush_loop(
+        Arc::clone(&state.plex_census),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
         crate::http::cluster_operations::membership_status_cache_loop(
@@ -3223,9 +3256,21 @@ async fn serve(
     progress: Arc<crate::progress::ProgressCoalescer>,
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
-) -> anyhow::Result<()> {
-    serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
-    drain_serving_state(progress, mdns).await
+) -> anyhow::Result<HttpDrain> {
+    let drain = serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
+    drain_serving_state(progress, mdns).await?;
+    Ok(drain)
+}
+
+/// How `serve_http`'s shutdown drain ended. Only `Complete` proves that no
+/// request can still be running in this process; the Plex census marks its
+/// last write clean on exactly that.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpDrain {
+    /// Every open connection finished inside the drain window.
+    Complete,
+    /// The window passed with connections still open; they were abandoned.
+    TimedOut,
 }
 
 async fn drain_serving_state(
@@ -3329,7 +3374,7 @@ async fn serve_http<A: HttpAcceptor>(
     app: axum::Router,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     timeouts: HttpTimeouts,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<HttpDrain> {
     let (drain_started, drain_signal) = tokio::sync::oneshot::channel();
     let mut builder = ConnectionBuilder::new(TokioExecutor::new());
     builder
@@ -3392,9 +3437,10 @@ async fn serve_http<A: HttpAcceptor>(
     let _ = drain_started.send(());
     let connections_drained = graceful.shutdown();
     tokio::pin!(connections_drained);
-    tokio::select! {
+    let drain = tokio::select! {
         () = &mut connections_drained => {
             tracing::info!("shutdown complete");
+            HttpDrain::Complete
         }
         // Only starts counting once the signal has actually arrived: if the
         // channel never fires, this branch stays pending and the server runs.
@@ -3406,9 +3452,10 @@ async fn serve_http<A: HttpAcceptor>(
                 after = ?timeouts.shutdown_drain,
                 "drain timed out with connections still open; exiting anyway"
             );
+            HttpDrain::TimedOut
         }
-    }
-    Ok(())
+    };
+    Ok(drain)
 }
 
 /// How long to wait for open connections to finish after a shutdown signal.
@@ -4253,7 +4300,7 @@ mod startup_tests {
     ) -> (
         SocketAddr,
         tokio::sync::oneshot::Sender<()>,
-        tokio::task::JoinHandle<anyhow::Result<()>>,
+        tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -4713,7 +4760,7 @@ mod startup_tests {
 
     async fn stop_timeout_test_server(
         stop: tokio::sync::oneshot::Sender<()>,
-        served: tokio::task::JoinHandle<anyhow::Result<()>>,
+        served: tokio::task::JoinHandle<anyhow::Result<HttpDrain>>,
     ) {
         stop.send(()).expect("stop server");
         tokio::time::timeout(Duration::from_secs(1), served)
@@ -6500,7 +6547,11 @@ mod startup_tests {
             .await
             .expect("serve must finish inside the drain window")
             .expect("join");
-        outcome.expect("an orderly shutdown is exit 0, not an error");
+        assert_eq!(
+            outcome.expect("an orderly shutdown is exit 0, not an error"),
+            HttpDrain::Complete,
+            "every connection finished, so the drain says so"
+        );
 
         // And the listener really is gone: an orchestrator that restarts the
         // container must not race a socket that is still bound.
@@ -6912,6 +6963,47 @@ mod startup_tests {
                 .as_deref(),
             Some("1000"),
             "a second boot keeps the first start of the clock"
+        );
+    }
+
+    /// The Plex façade census (C-07 §8.7) is wired into the daemon, not only
+    /// into its own module: boot restores it from the data directory before
+    /// serving, and the drained shutdown writes it once more, marked clean. A
+    /// boot that dropped the restore leaves no file; one that dropped the
+    /// final write leaves the startup write's `stopped_cleanly: false`, and the
+    /// second boot then counts an unclean stop.
+    #[tokio::test]
+    async fn a_drained_boot_records_a_clean_plex_census_stop() {
+        let tmp = crate::test_tempdir().expect("tempdir");
+        let config = config_in(tmp.path());
+        let census_path = tmp.path().join(http::plex_census::CENSUS_FILE);
+        let read_census = || -> serde_json::Value {
+            serde_json::from_slice(&std::fs::read(&census_path).expect("the census file"))
+                .expect("census json")
+        };
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let first = read_census();
+        assert_eq!(
+            first["stopped_cleanly"],
+            serde_json::Value::Bool(true),
+            "a drained shutdown marks the census stop clean: {first}"
+        );
+        assert_eq!(first["unclean_stops"], 0);
+        let started = first["started_unix_s"].as_u64().expect("a start time");
+        assert!(started > 0);
+
+        drop(boot_serve_and_drain(&config, tmp.path()).await);
+        let second = read_census();
+        assert_eq!(
+            second["unclean_stops"], 0,
+            "the second boot continued a cleanly stopped census: {second}"
+        );
+        assert_eq!(second["stopped_cleanly"], serde_json::Value::Bool(true));
+        assert_eq!(
+            second["started_unix_s"].as_u64(),
+            Some(started),
+            "one census across both boots"
         );
     }
 
@@ -7972,7 +8064,12 @@ mod startup_tests {
         .await
         .expect("the drain must be bounded, not indefinite")
         .expect("join");
-        outcome.expect("a timed-out drain is still an orderly exit 0");
+        // Still exit 0, but reported as timed out: the Plex census must not
+        // mark a stop clean while this connection could still be counted.
+        assert_eq!(
+            outcome.expect("a timed-out drain is still an orderly exit 0"),
+            HttpDrain::TimedOut
+        );
         hanging.abort();
     }
 
