@@ -371,7 +371,7 @@ summary reports `loaded/total`.
 library** (Charles/`journalctl` request count on `media1`: one
 `/items?offset=0` per library, no `offset=200` until scrolling).
 
-**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** The
+**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** *Coordinator decision, awaiting Paul's review.* The
 request-count halves of 5.2 and 5.4 cannot be measured as written: plurxd runs
 in Docker with no access log, so `journalctl -u plurxd | grep -c '/items?'`
 never returns a count, and "media1" is not necessarily where clients connect.
@@ -399,7 +399,7 @@ mirror 5.2 against the same fixture.
 **Acceptance:** `make android-test` green; on the Lenovo, the same
 one-request-per-library first paint as 5.2, observed on `media1`.
 
-**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** The
+**Acceptance amendment, 2026-10-02 — measure by route-metric delta.** *Coordinator decision, awaiting Paul's review.* The
 request-count halves of 5.2 and 5.4 cannot be measured as written: plurxd runs
 in Docker with no access log, so `journalctl -u plurxd | grep -c '/items?'`
 never returns a count, and "media1" is not necessarily where clients connect.
@@ -455,17 +455,51 @@ has no access log) and report every reading with its time.
 
 ### 6.1 Route-metric acceptance (2026-10-02)
 
-Every node exports `plurx_http_route_seconds_count{route_group="library",role=…}`
-on its unauthenticated `/metrics`. The `library` group counts every matched
-`/api/v1/libraries…` and `/api/v1/library-channels…` route (and the Plex
-`/library/…` routes), so `/api/v1/libraries/{id}/items` is in it but is not
-alone. The reading is therefore a calibrated delta, summed over all nodes and
-all roles, because a cluster client may be served by any node:
+*Coordinator decision, awaiting Paul's review.* This section replaces the request-count method of
+§5.2, §5.4 and §6.
 
-```sh
-lib() { for n in $NODES; do curl -s "http://$n:8080/metrics"; done |
-  awk -F' ' '/^plurx_http_route_seconds_count\{route_group="library"/ {s+=$2} END {print s}'; }
+Every node exports `plurx_http_route_seconds_count{route_group="library",role=…}`
+on its unauthenticated `/metrics` (plurxd's port, 32400). The `library` group
+counts the matched `/api/v1/libraries…` and `/api/v1/library-channels…` routes
+and, of the Plex routes, only `/library`, `/library/sections` and
+`/library/sections/{id}/all` (Plex metadata is counted under `item`, parts under
+`playback`). So `/api/v1/libraries/{id}/items` is in the group but is not alone,
+and the reading is a calibrated delta, summed over every node and role, because
+a cluster client may be served by any node.
+
+```bash
+# The roster (bash: delta uses process substitution): every cluster node, by its public neutral name. Map each name to
+# the node's address locally (/etc/hosts or ssh config); do not edit real host
+# names into this document.
+NODES="media1 lab3 lab4 lab6"
+PORT=${PORT:-32400}
+
+# lib > FILE: one "<node> <count>" line per node. Fails, and the reading must
+# be discarded, if any node does not answer or exports no library counter.
+lib() {
+  for n in $NODES; do
+    c=$(curl -fsS --max-time 5 "http://$n:$PORT/metrics" |
+        awk '/^plurx_http_route_seconds_count\{route_group="library",/ {s+=$2; f=1}
+             END {if (!f) exit 1; printf "%d\n", s}') ||
+      { echo "lib: no library counter from $n" >&2; return 1; }
+    echo "$n $c"
+  done
+}
+
+# delta BEFORE AFTER: the summed per-node increase. VOID (non-zero exit, no
+# number) if any node's counter went down — a restart reset it, so the delta
+# would undercount.
+delta() {
+  join <(sort "$1") <(sort "$2") |
+    awk '{d=$3-$2; if (d<0) {print "VOID: " $1 " counter went down" > "/dev/stderr"; bad=1}; s+=d}
+         END {if (bad || NR==0) exit 1; print s}'
+}
+
+# Usage: lib > r0 || exit 1; <do the step>; lib > r1 || exit 1; delta r0 r1
 ```
+
+A reading that fails `lib` or that `delta` voids is repeated, never recorded
+as 0.
 
 1. **Quiet check.** Read `lib`, wait 60 s with the device idle on Home, read
    again. The delta must be 0; if it is not, background library traffic
@@ -480,8 +514,8 @@ lib() { for n in $NODES; do curl -s "http://$n:8080/metrics"; done |
    delta − `k` = *N*. Wait 30 s without input and read again: delta 0 (no
    `offset=200` before scrolling).
 4. **Scroll.** Scroll to the very end and read. Expect about
-   `Σ ceil(items_i / 200)` − *N* further requests across the libraries — every
-   page once, none twice.
+   `Σ max(1, ceil(items_i / 200))` − *N* further requests across the libraries
+   (an empty library still costs its one request) — every page once, none twice.
 5. **Watch filter.** Change the filter to Unwatched and read when the count
    line settles: the drive-to-completion walk adds the remaining pages, once.
 
@@ -489,7 +523,7 @@ Pass/fail is decided by steps 3 and 4; steps 1 and 2 make the number
 attributable. A delta higher than expected, with a clean quiet check, is a
 real extra request and fails the bar.
 
-**Before-numbers.** §6 asked for before/after numbers. 5.2–5.5 are already on
+**Before-numbers.** *Coordinator decision, awaiting Paul's review.* §6 asked for before/after numbers. 5.2–5.5 are already on
 every shipped build, so a before reading is not available from the fleet; the
 bars in 5.2–5.5 are absolute (one round trip per library; under 16 ms per
 keystroke or frame) and are judged on the after reading alone.
@@ -565,4 +599,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | A03 measured two-row prefetch | `codex/native-review-completion-0928` | Integrated b0933f3a5: actual adaptive columns, exclusive boundary and empty/overflow safety. Android4 and Apple3 regression sources compile on both Apple platforms; no test execution yet. Apple199/Android136 reserved. Physical6000-title and page-arrival focus remain open. |
 
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | 5.2-5.5 query/filter/focus regression completion | `codex/a03-completion-0928` (next separate batch) | Apple5b32b380e extracts existing task ownership into an internal production coordinator and adds three query/completion/stale-result/150 ms regression sources. Android75e3d561f adds two actual-pager watch-filter cases, one production-grid Compose D-pad page-arrival case and its source wiring contract. Author app and test-source compilation passes; no next-batch behavior tests, review, push, signed products or devices yet. Apple200/Android137 source claims reserved above corrected PR600199/136. Named6000-title and physical frame/request/focus evidence remain open. Android category query remains excluded by section5.5. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Acceptance by route metric; doc comment | `opus/client-evidence` into the architecture effort | 5.2/5.4 acceptance redefined as the calibrated all-node `route_group="library"` delta (§6.1), since plurxd has no access log. The Android `libraryPages` KDoc no longer claims `sortMerged` and a fixed server sort; the function has no caller and the legacy walk is `LibraryPager.loadLegacyWholeCollection`. iOS and tvOS simulator suites ran on mba (Xcode 27.0): `LibraryMergeTests` and `LibraryGridCoordinatorTests` passed; seven unrelated failures are recorded in the A-02 log. Physical items listed in §6.2. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Acceptance by route metric; doc comment | `opus/client-evidence` into the architecture effort | 5.2/5.4 acceptance redefined as the calibrated all-node `route_group="library"` delta (§6.1), since plurxd has no access log. The Android `libraryPages` KDoc no longer claims `sortMerged` and a fixed server sort; the function has no caller and the legacy walk is `LibraryPager.loadLegacyWholeCollection`. iOS and tvOS simulator suites ran on maca (maca, Xcode 27.0): `LibraryMergeTests` and `LibraryGridCoordinatorTests` passed; seven unrelated failures are recorded in the A-02 log. Physical items listed in §6.2. |

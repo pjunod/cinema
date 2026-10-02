@@ -166,7 +166,7 @@ measured 2026-09-30), so the reading carries over to the effort branch.
 | TOTAL PSS idle (Home) | 63–70 MB (Java ~6.9 MB allocated, graphics 27 MB) |
 | TOTAL PSS playing | 4K remux 132 MB, **158 MB peak while stalled** (Java ~59 MB, graphics 54 MB); 1080p 91–142 MB as the buffer filled; 720p steady 111–126 MB |
 | TOTAL PSS primed | 137–**146 MB** with a successor alive — **not** a valid primed reading, see below |
-| Low-memory kills / OOM | none; `logcat -b crash` last entry predates the run (2026-09-25) |
+| Crash / OOM | no crash or OOM entries in the crash buffer during the run (`logcat -b crash`; its last entry is from 2026-09-25). Low-memory-killer and `ApplicationExitInfo` history were not captured |
 | Network | **2.4 GHz Wi-Fi** (802.11n, 2412 MHz, link 130–144 Mb/s; Ethernet unused). Measured delivery about 20 Mb/s (`wlan0` rx 19–22 Mb/s in 10 s windows; `adb push` about 18 Mb/s) |
 | Stalls | 73 Mb/s DV Profile 7 remux (played as HDR10, TrueHD so remux, not direct play): three "Playback is stalled" dialogs in about 16 min, panel counted **3 supply / 0 decode**. 720p (4.2 Mb/s): zero buffering transitions in 5 min, 50 s buffered on device |
 | Supported / active modes | 19 modes: 720p 50/59.94/60; 1080p 23.976/24/25/29.97/30/50/59.94/60; 2160p 23.976/24/25/29.97/30/50/59.94/60. Active 2160p60 throughout (HDR10 only advertised) |
@@ -560,8 +560,11 @@ on 2.4 GHz Wi-Fi against a 73 Mb/s remux), which no buffer size fixes. So:
 
 What would reopen it: a television whose stalls are counted as decode- or
 buffer-side while delivery meets the stream's bitrate, or a valid primed-successor
-PSS (on a build carrying `320535286`) that leaves less than half the granted heap
-free. The supply-side remedy the evidence does point at — Auto quality stepping
+reading (on a build carrying `320535286`) whose Dalvik allocation — the
+`dumpsys meminfo` Dalvik Heap "Alloc" column, at most about 68 MB on 142 — exceeds
+half of the granted `Runtime.maxMemory()` (192 MiB on the Google TV). Total PSS
+is not the comparison: it includes native and graphics memory that the Java heap
+limit does not govern. The supply-side remedy the evidence does point at — Auto quality stepping
 down when delivery is far below the stream (on 142 Auto stayed on the 73 Mb/s
 original through three stall dialogs) — belongs to the native adaptive-quality
 work, not to this plan.
@@ -577,8 +580,8 @@ tests.operations.test_docs_index` passes.
 
 
 **M5 precondition, 2026-10-02.** The matched path needs the replicated setting
-`playback.display_mode_match` turned **on** (Settings → Developer → Match display
-mode). It is **currently off** on the fleet: `/api/v1/server` returned
+`playback.display_mode_match` turned **on** (Settings → Developer → **Android TV display-mode
+matching**). It is **currently off** on the fleet: `/api/v1/server` returned
 `display_mode_match: false`, and every 2026-10-02 play logged
 `playback_display_mode outcome=disabled`. With it off the Google TV stayed at
 2160p60 before, during and after playback (the setting-OFF row of §6 is
@@ -598,9 +601,15 @@ display completes the switch later the HDMI resync lands seconds into playback
 with no telemetry recording when. The same is true of the owner-changed return
 after the wait. This is a real gap, not yet observed: it can only happen with the
 setting on. M5 must look for it explicitly — note any mode change after first
-frame and its time — and if one is seen, the correction is either to clear
-`preferredDisplayModeId` on timeout or to log a `late_switch` event from the
-still-registered listener. The `late` path (`onTracksChanged`, no source rate)
+frame and its time. The recommended correction is to clear
+`preferredDisplayModeId` (back to 0, as `reset` does) when the wait times out
+while this owner is still current: that removes the late switch at its root.
+Merely logging a late switch would need a *new* listener registered at the
+timeout and held until `reset(owner)` — the wait's own listener cannot do it,
+because `withTimeoutOrNull` cancels the wait and `invokeOnCancellation`
+unregisters that listener (`DisplayModeMatcher.kt`, the `match` wait). On the
+owner-changed return the request must not be cleared blindly, since the new
+owner may have set its own. The `late` path (`onTracksChanged`, no source rate)
 switches mid-play by design and is not this gap.
 
 ---
@@ -615,7 +624,7 @@ television with a real HDMI sink proves the switch, so:
 **GPT prompt — display mode:**
 
 ```text
-Shield and Google TV, plurx setting "Match display mode" ON in Settings →
+Shield and Google TV, plurx setting "Android TV display-mode matching" ON in Settings →
 Developer, TV's own Match Content OFF. Play "Harbor Lights" (23.976, HDR10)
 from the start; within 10 s run `adb shell dumpsys display | grep
 mActiveMode` and read the TV's info panel (the TV's own HDMI-mode overlay, not
