@@ -294,7 +294,9 @@ impl StateMachineSqlite {
         #[cfg(feature = "s3")] s3_config: Option<Arc<crate::s3::S3Config>>,
         do_reset_metadata: bool,
         #[cfg(feature = "backup")] local_backup_keep_days: u16,
+        staged_startup: bool,
     ) -> Result<StateMachineSqlite, StorageError<NodeId>> {
+        let mut startup_writer = crate::startup_cleanup::StartupStorageOwner::new(staged_startup);
         // IMPORTANT: Do NOT change the order of the db exists check!
         // DB recovery will fail otherwise!
         let mut db_exists = Self::db_exists(data_dir, filename_db).await;
@@ -329,6 +331,9 @@ impl StateMachineSqlite {
             #[cfg(feature = "backup")]
             local_backup_keep_days,
         );
+        // Retain the handle before the first post-spawn await. Recoverable
+        // read-pool/recovery errors and constructor panic cannot orphan it.
+        startup_writer.protect_writer(write_tx.clone());
 
         let read_pool = Self::connect_read_pool(
             path_db.as_ref(),
@@ -371,6 +376,7 @@ impl StateMachineSqlite {
             slf.update_state_machine_(snapshot.path).await?;
         }
 
+        startup_writer.handoff();
         Ok(slf)
     }
 
@@ -1604,6 +1610,7 @@ mod snapshot_metrics_contracts {
             false,
             #[cfg(feature = "backup")]
             30,
+            false,
         )
         .await
     }
