@@ -567,7 +567,7 @@ impl Encoder {
 }
 
 /// The DRI render node for VAAPI, overridable via `PLURX_VAAPI_DEVICE`.
-fn vaapi_device() -> String {
+pub(super) fn vaapi_device() -> String {
     std::env::var("PLURX_VAAPI_DEVICE")
         .ok()
         .filter(|v| !v.is_empty())
