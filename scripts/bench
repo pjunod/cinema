@@ -185,6 +185,11 @@ SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SHA256SUM_LINE = re.compile(r"^([0-9a-f]{64}) [ *](.+)$")
 RATE_MODE_FIELD = "transcode_rate_mode"
 QUALITY_FIELD = "transcode_quality"
+# Present only on a server whose settings DTO reports an unset rate mode as
+# null (and the default it resolves to here). An older server reports unset as
+# "bitrate", so a restore of what it showed would store an explicit bitrate.
+RATE_MODE_DEFAULT_FIELD = "transcode_rate_mode_default"
+RATE_MODES = ("bitrate", "quality")
 ORIGIN_TOLERANCE_MS = 50
 MIN_CAPTURE_FREE_BYTES = 512 * 1024 * 1024
 
@@ -1058,14 +1063,31 @@ def percentile(values, percent):
 
 
 def setting_contract(settings):
+    """Record the requested pair exactly as stored, so the restore puts it back.
+
+    An unset mode (JSON null) is restored as null — the explicit "use each
+    family's default" request — and an explicit choice as that choice. The
+    harness never writes back a displayed default: doing so is what pinned a
+    measured cluster to an explicit bitrate and made a family default flip
+    inert. A server that cannot tell unset from bitrate is refused before any
+    mutation, because the harness could not restore it faithfully.
+    """
     if RATE_MODE_FIELD not in settings or QUALITY_FIELD not in settings:
         raise BenchError(
             "server has no N1 rate-mode/quality settings contract; use --modes vbr on current main"
         )
+    if RATE_MODE_DEFAULT_FIELD not in settings:
+        raise BenchError(
+            "server reports an unset rate mode as its default, so restoring the value it shows "
+            "would store an explicit bitrate; upgrade the server before a full comparison"
+        )
+    original_rate = settings[RATE_MODE_FIELD]
+    if original_rate is not None and original_rate not in RATE_MODES:
+        raise BenchError(f"server reported an unknown requested rate mode {original_rate!r}")
     return {
         "rate_field": RATE_MODE_FIELD,
         "quality_field": QUALITY_FIELD,
-        "original_rate": settings[RATE_MODE_FIELD],
+        "original_rate": original_rate,
         "original_quality": settings[QUALITY_FIELD],
     }
 

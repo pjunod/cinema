@@ -197,6 +197,7 @@ class FullApi:
         self.settings = {
             "transcode_rate_mode": "bitrate",
             "transcode_quality": None,
+            "transcode_rate_mode_default": "bitrate",
             "api_secret": "must-not-leak",
         }
         self.puts = []
@@ -1007,6 +1008,78 @@ class RateControlBenchCase(unittest.TestCase):
             "transcode_rate_mode": "quality",
             "transcode_quality": None,
         })
+
+    def test_an_unset_rate_mode_is_restored_as_unset_never_as_the_displayed_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references)
+            api.settings["transcode_rate_mode"] = None
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            self.assertTrue(report["passed"], report["failures"])
+            self.assertEqual(api.puts[-1], {
+                "transcode_rate_mode": None,
+                "transcode_quality": None,
+            })
+            self.assertIsNone(api.settings["transcode_rate_mode"])
+            self.assertNotIn({"transcode_rate_mode": "bitrate", "transcode_quality": None},
+                             api.puts[2:])
+
+    def test_unset_restore_failure_reports_the_clear_as_the_manual_body(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references, active_counts=[0, 0, 0], default_active=1)
+            api.settings["transcode_rate_mode"] = None
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            failure = next(
+                failure for failure in report["failures"]
+                if failure["code"] == "setting_restore_failed"
+            )
+            self.assertEqual(failure["required_manual_restore"], {
+                "transcode_rate_mode": None,
+                "transcode_quality": None,
+            })
+
+    def test_explicit_rate_mode_and_quality_are_restored_exactly(self):
+        api = FullApi({})
+        api.settings.update({"transcode_rate_mode": "quality", "transcode_quality": 19})
+        contract = BENCH["setting_contract"](api.call("/settings"))
+        BENCH["restore_rate_settings"](api, contract, 0.0, 1.0)
+        self.assertEqual(api.puts, [{"transcode_rate_mode": "quality", "transcode_quality": 19}])
+
+    def test_server_that_cannot_report_unset_is_refused_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            corpus, references = write_corpus(root)
+            server_manifest = write_server_manifest(root, references)
+            api = FullApi(references)
+            del api.settings["transcode_rate_mode_default"]
+            with mock.patch.dict(G, patched_harness()):
+                report = BENCH["rate_control_report"](
+                    harness_args(root, corpus, server_manifest), api=api
+                )
+            self.assertFalse(report["passed"])
+            self.assertEqual(api.puts, [])
+            self.assertTrue(any(
+                failure["code"] == "harness_error"
+                and "explicit bitrate" in failure["detail"]
+                for failure in report["failures"]
+            ), report["failures"])
+        with self.assertRaises(BENCH["BenchError"]):
+            BENCH["setting_contract"]({
+                "transcode_rate_mode": "cq",
+                "transcode_quality": None,
+                "transcode_rate_mode_default": "bitrate",
+            })
 
     def test_full_subset_is_diagnostic_nonzero_even_when_measurements_pass(self):
         with tempfile.TemporaryDirectory() as directory:
