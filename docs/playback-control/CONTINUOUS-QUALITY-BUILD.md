@@ -2053,3 +2053,20 @@ selection remains in the master query. Caption and strict-envelope regressions
 are authored. Pinned compilation and normal hooks apply without unit execution.
 Production client adoption, controlled cold-rung behavior, durable family
 reconstruction and native qualification remain unfinished.
+
+
+### 10.55 Rolling readiness for one selection
+
+The autonomous schedule envelope can now request a bounded next append window
+for an existing wanted transaction. It verifies the next actual video/AAC
+samples and publishes owner readiness without inventing another selection,
+advancing the command sequence, or changing scheduled dependencies. A window
+cannot also carry a selection command. Every scheduling operation still runs
+through physical verification and durable reservation publication. Cancellation,
+supersession and owner changes reject late window results.
+
+The real autonomous campaign covers advancing readiness after reservation,
+preserving the original intent/sequence and pins, and refusing a renewed window
+after lost-append cancellation. Source and normal-hook compilation apply;
+unit execution remains deferred. Production append acknowledgements and
+presentation integration remain unfinished.

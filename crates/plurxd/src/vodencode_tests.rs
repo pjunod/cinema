@@ -442,7 +442,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
         attachment: attachment.clone(), transaction_id: transaction_id.clone(), operation: QualityOperation::Prepare {
             intent_revision: 1, target_rendition_id: rung.rendition_id().into() } };
     let mut schedule = super::vod_serve_quality::QualityScheduleRequest { version: 1, generation: generation.clone(), control_epoch: 1,
-        attachment, transition: Some(prepare.clone()), frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
+        attachment, transition: Some(prepare.clone()), window: None, frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
             timescale: rung.grid().numerator, through_tick: 0 }) };
     let prepared = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await
         .expect("owner prepares actual family");
@@ -458,11 +458,22 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert_eq!(reserved.ledger.transactions[0].state, QualityState::Scheduled);
     assert!(!reserved.ledger.shared_audio_reserved().is_empty(), "same CAS pins verified AAC dependencies");
     assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), reserved.ledger.transactions[0].reserved);
+    let mut window = schedule.clone(); window.transition = None;
+    window.window = Some(super::vod_serve_quality::QualityReadyWindow { transaction_id: transaction_id.clone(),
+        frontier: super::vod_serve_quality::QualityAppendFrontier { timescale: rung.grid().numerator,
+            through_tick: reserved.ledger.transactions[0].reserved[0].through_tick } });
+    let extended = serve.quality_schedule_before(&parent, "node-a", &window, Instant::now() + Duration::from_secs(12)).await.expect("next append window");
+    assert_eq!(extended.ledger.latest_intent_revision, reserved.ledger.latest_intent_revision);
+    assert_eq!(extended.ledger.accepted_sequence, reserved.ledger.accepted_sequence);
+    assert_eq!(extended.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
+    assert_eq!(extended.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
+    assert!(extended.ledger.transactions[0].ready[0].from_tick >= reserved.ledger.transactions[0].reserved[0].through_tick);
     transition.sequence = 3;
     transition.operation = QualityOperation::CancelUnappended { completed: reserved.ledger.transactions[0].reserved.clone() };
     schedule.transition = Some(transition.clone());
     let cancelled = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("lost append cancellation");
     assert_eq!(cancelled.ledger.transactions[0].state, QualityState::Appended);
+    assert!(serve.quality_schedule_before(&parent, "node-a", &window, Instant::now() + Duration::from_secs(12)).await.is_err(), "cancelled intent cannot renew readiness");
     assert_eq!(cancelled.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
     assert_eq!(cancelled.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
     transition.sequence = 4;

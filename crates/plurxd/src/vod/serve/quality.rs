@@ -15,6 +15,8 @@ pub(crate) struct QualityScheduleRequest {
     pub attachment: QualityAttachment,
     pub transition: Option<QualityTransitionRequest>,
     pub frontier: Option<QualityAppendFrontier>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<QualityReadyWindow>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,6 +24,18 @@ pub(crate) struct QualityAppendFrontier {
     pub timescale: u32,
     pub through_tick: u64,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualityReadyWindow {
+    pub transaction_id: String,
+    pub frontier: QualityAppendFrontier,
+}
+impl QualityAppendFrontier {
+    fn valid(&self) -> bool {
+        (1..=1_000_000).contains(&self.timescale) && self.through_tick <= 9_007_199_254_740_991
+    }
+}
+
 impl QualityScheduleRequest {
     pub(crate) fn valid(&self) -> bool {
         self.version == 1
@@ -35,14 +49,18 @@ impl QualityScheduleRequest {
                     && request.attachment == self.attachment
             })
             && match self.transition.as_ref().map(|request| &request.operation) {
-                Some(QualityOperation::Prepare { .. }) => {
-                    self.frontier.as_ref().is_some_and(|frontier| {
-                        (1..=1_000_000).contains(&frontier.timescale)
-                            && frontier.through_tick <= 9_007_199_254_740_991
-                    })
-                }
+                Some(QualityOperation::Prepare { .. }) => self
+                    .frontier
+                    .as_ref()
+                    .is_some_and(|frontier| frontier.valid()),
                 _ => self.frontier.is_none(),
             }
+            && self.window.as_ref().is_none_or(|window| {
+                self.transition.is_none()
+                    && self.frontier.is_none()
+                    && uuid::Uuid::parse_str(&window.transaction_id).is_ok()
+                    && window.frontier.valid()
+            })
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,13 +112,14 @@ impl VodServe {
             .quality_ledger(&request.generation)
             .await
             .map_err(|error| error.to_string())?;
-        let facts_only = match request.transition.as_ref() {
-            Some(transition) => !matches!(
-                transition.operation,
-                QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
-            ),
-            None => existing.is_some(),
-        };
+        let facts_only = request.window.is_none()
+            && match request.transition.as_ref() {
+                Some(transition) => !matches!(
+                    transition.operation,
+                    QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
+                ),
+                None => existing.is_some(),
+            };
         let (owner, verified) = if facts_only {
             // Disposal and completed append facts remain reducible after a
             // producer/source failure. They introduce no physical reservation.
@@ -167,7 +186,7 @@ impl VodServe {
                 }
                 ledger
             } else {
-                if facts_only {
+                if facts_only || request.window.is_some() {
                     return Err("quality facts have no attached ledger".into());
                 }
                 QualityLedger::new(
@@ -349,6 +368,86 @@ impl VodServe {
                 }
             }
         }
+        if let Some(window) = &request.window {
+            let family = family.ok_or("quality window has no verified family")?;
+            let snapshot = self
+                .shared
+                .store
+                .quality_ledger(&request.generation)
+                .await
+                .map_err(|error| error.to_string())?
+                .ok_or("quality window ledger disappeared")?;
+            let tx = snapshot
+                .ledger
+                .transactions
+                .iter()
+                .find(|tx| tx.transaction_id == window.transaction_id)
+                .ok_or("quality window transaction disappeared")?;
+            if tx.cancel_requested
+                || tx.intent_superseded
+                || !matches!(
+                    tx.state,
+                    QualityState::Ready
+                        | QualityState::Scheduled
+                        | QualityState::Appended
+                        | QualityState::Presented
+                        | QualityState::Disposed
+                )
+            {
+                return Err("quality window target is no longer wanted".into());
+            }
+            let target = tx.target_rendition_id.clone();
+            let preparation_deadline = deadline
+                .checked_sub(Duration::from_secs(3))
+                .unwrap_or(deadline);
+            let intervals = self
+                .quality_ready_before(
+                    session_id,
+                    family,
+                    &target,
+                    window.frontier.timescale,
+                    window.frontier.through_tick,
+                    preparation_deadline,
+                )
+                .await?;
+            let mut settled = false;
+            for _ in 0..4 {
+                let snapshot = self
+                    .shared
+                    .store
+                    .quality_ledger(&request.generation)
+                    .await
+                    .map_err(|error| error.to_string())?
+                    .ok_or("quality window ledger disappeared")?;
+                if snapshot.ledger.attachment != request.attachment
+                    || snapshot.ledger.control_epoch != request.control_epoch
+                {
+                    return Err("quality window owner changed".into());
+                }
+                let mut candidate = snapshot.ledger.clone();
+                candidate
+                    .ready(&window.transaction_id, intervals.clone())
+                    .map_err(|error| error.to_string())?;
+                if self
+                    .publish_quality_candidate(QualityCandidatePublication {
+                        session_id,
+                        owner: &owner,
+                        owner_node_id,
+                        snapshot: Some(&snapshot),
+                        candidate: &candidate,
+                        family: Some(family),
+                        deadline,
+                    })
+                    .await?
+                {
+                    settled = true;
+                    break;
+                }
+            }
+            if !settled {
+                return Err("quality window revision changed repeatedly".into());
+            }
+        }
         let snapshot = self
             .shared
             .store
@@ -482,6 +581,7 @@ mod tests {
             attachment: attachment.clone(),
             frontier: None,
             transition: None,
+            window: None,
         };
         assert!(request.valid());
         request.transition = Some(QualityTransitionRequest {
