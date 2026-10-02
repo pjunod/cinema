@@ -223,7 +223,7 @@ internal class DirectedChange(
 }
 
 /**
- * How far ahead of the incumbent the successor is parked.
+ * Estimated wall time needed to park the successor ahead of the incumbent.
  *
  * Long enough to cover a cold seek on the slowest measured device — the
  * tunneled Google TV of M5.5 — with margin, and short enough that the viewer's
@@ -239,11 +239,8 @@ internal const val RENDEZVOUS_PAUSED_POLL_MS = 500L
 
 /**
  * How often the hold looks for the successor to have landed on the rendezvous.
- *
- * Its own cadence rather than the one-second ladder tick. At 2x a 1 500 ms lead
- * is 750 ms of wall time, so a sampler that looks once a second discovers the
- * successor has arrived only after the incumbent has already gone past — and
- * turns every fast-rate handoff into a re-park.
+ * Its own cadence observes seek and decoded readiness before the meeting point
+ * rather than waiting for the one-second ladder tick.
  */
 internal const val RENDEZVOUS_READY_POLL_MS = 100L
 
@@ -311,7 +308,8 @@ internal class RendezvousHold(
     private var ready = false
 
     /** Pick the first rendezvous and send the successor to it, parked. */
-    fun park(nowMs: Long, incumbentFilmMs: Long): Park = repark(nowMs, incumbentFilmMs)
+    fun park(nowMs: Long, incumbentFilmMs: Long, speed: Double = 1.0): Park =
+        repark(nowMs, incumbentFilmMs, speed)
 
     /** The successor's seek landed and it holds runway through the rendezvous. */
     fun ready(nowMs: Long) {
@@ -334,7 +332,7 @@ internal class RendezvousHold(
     fun delayMs(incumbentFilmMs: Long, speed: Double): Long {
         val target = rendezvousFilmMs ?: return pausedPollMs
         if (!speed.isFinite() || speed <= 0.0) return pausedPollMs
-        val remaining = target - incumbentFilmMs
+        val remaining = target.toDouble() - incumbentFilmMs.toDouble()
         if (remaining <= 0) return 0L
         return (remaining / speed).toLong().coerceAtLeast(0L)
     }
@@ -355,7 +353,7 @@ internal class RendezvousHold(
         speed: Double,
         alignmentWindowMs: Double = slackMs.toDouble(),
     ): Step {
-        val target = rendezvousFilmMs ?: return Step.Repark(repark(nowMs, incumbentFilmMs))
+        val target = rendezvousFilmMs ?: return Step.Repark(repark(nowMs, incumbentFilmMs, speed))
         // Short of the rendezvous: the incumbent is still on its way, or it is
         // paused and will resume. Neither is a miss; recompute and wait.
         val window = alignmentWindowMs.takeIf { it.isFinite() && it > 0 }
@@ -368,18 +366,19 @@ internal class RendezvousHold(
         // At or past the rendezvous without a successor waiting there: a seek
         // that took longer than the lead, a forward seek, or a rate change.
         if (reparks >= maxReparks) return Step.Abandon("rendezvous_missed")
-        return Step.Repark(repark(nowMs, incumbentFilmMs))
+        return Step.Repark(repark(nowMs, incumbentFilmMs, speed))
     }
 
-    private fun repark(nowMs: Long, incumbentFilmMs: Long): Park {
+    private fun repark(nowMs: Long, incumbentFilmMs: Long, speed: Double): Park {
         if (rendezvousFilmMs != null) reparks += 1
-        // The lead for the next attempt is the larger of the device-class
-        // estimate and what this device's last seek actually cost, so a second
-        // attempt is never aimed at a point the first one already proved is too
-        // close. Slack on top, because the seek still has to land *before* the
-        // incumbent arrives rather than with it.
-        val lead = maxOf(leadMs, observedSeekMs + slackMs)
-        val target = incumbentFilmMs + lead
+        // Seek latency is wall time. Convert the larger of the estimate and
+        // observed latency plus margin to film time at the incumbent's rate.
+        // Retain the physical overlap deadline in the controller.
+        val measuredWallLead = observedSeekMs.coerceAtMost(Long.MAX_VALUE - slackMs) + slackMs
+        val wallLead = maxOf(leadMs, measuredWallLead)
+        val rate = speed.takeIf { it.isFinite() && it > 0 }?.coerceAtMost(16.0) ?: 1.0
+        val filmLead = kotlin.math.ceil(wallLead.toDouble() * rate).toLong().coerceAtLeast(1)
+        val target = incumbentFilmMs.coerceAtMost(Long.MAX_VALUE - filmLead) + filmLead
         rendezvousFilmMs = target
         parkIssuedAtMs = nowMs
         ready = false

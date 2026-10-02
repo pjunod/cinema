@@ -4078,7 +4078,7 @@ class Controller internal constructor(
         rendezvous = hold
         // The incumbent is *not* touched here, and that is the change. It keeps
         // playing all the way to the meeting point.
-        parkSuccessor(hold.park(monotonicNowMs(), realPosition()), originMs, successor)
+        parkSuccessor(hold.park(monotonicNowMs(), realPosition(), player.playbackParameters.speed.toDouble()), originMs, successor)
         beginRendezvous(hold, originMs)
     }
 

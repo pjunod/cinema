@@ -10,8 +10,8 @@ import kotlin.test.assertTrue
  * The two clocks are not decoration. *Film* time is what both pipelines measure
  * positions in and what the 250 ms commit window is expressed in; *wall* time is
  * what a coroutine delay and a seek are measured in. They run at the same rate
- * only at 1x, and the whole arithmetic under test is the conversion between
- * them — a 1 500 ms lead is 3 000 ms of waiting at 0.5x and 750 ms at 2x.
+ * only at 1x. A 1 500 ms wall lead therefore covers 750 ms of film at
+ * 0.5x and 3 000 ms of film at 2x.
  *
  * What is being proved is **convergence**, not that a target was computed. An
  * earlier draft of this milestone proposed seeking the successor 1.5 s ahead
@@ -96,7 +96,7 @@ private class Sim(
  * fire.
  */
 private fun run(sim: Sim, hold: RendezvousHold = RendezvousHold()): Outcome {
-    sim.seek(hold.park(sim.wallMs, sim.incumbentFilmMs))
+    sim.seek(hold.park(sim.wallMs, sim.incumbentFilmMs, sim.speed))
     while (sim.wallMs < SIM_LIMIT_MS) {
         if (!hold.isReady) {
             sim.advance(POLL_MS)
@@ -169,20 +169,20 @@ class RendezvousModelTest {
     }
 
     /**
-     * Film distance is fixed; wall distance is not. Half speed doubles the
-     * wait and double speed halves it, and the meeting point is the same frame
-     * in all three.
+     * The lead covers the same wall-time seek budget at every playback rate.
+     * Its film distance changes with the incumbent, rather than cutting the
+     * seek budget in half at double speed.
      */
     @Test
-    fun theLeadIsFilmTimeAndTheWaitIsWallTime() {
+    fun wallLeadIsConvertedToFilmDistanceAtThePlaybackRate() {
         for (rate in listOf(0.5, 1.0, 2.0)) {
             val sim = Sim(seekMs = 200, speedAt = { rate })
             val outcome = committed(run(sim))
-            assertEquals(RENDEZVOUS_LEAD_MS, outcome.filmMs, "rate=$rate")
+            assertEquals((RENDEZVOUS_LEAD_MS * rate).toLong(), outcome.filmMs, "rate=$rate")
             assertEquals(0, outcome.reparks, "rate=$rate")
-            // Wall time to cover a fixed film distance scales with the rate.
+            // The seek budget is wall time, independent of playback rate.
             assertEquals(
-                (RENDEZVOUS_LEAD_MS / rate).toLong(),
+                RENDEZVOUS_LEAD_MS,
                 outcome.wallMs,
                 "rate=$rate",
             )
@@ -217,7 +217,7 @@ class RendezvousModelTest {
      */
     @Test
     fun anIncumbentThatOutrunsTheLeadFailsAfterTwoReparks() {
-        val sim = Sim(seekMs = 2_000, speedAt = { 8.0 })
+        val sim = Sim(seekMs = 2_000, speedAt = { 64.0 })
         val outcome = run(sim)
         assertTrue(outcome is Outcome.Abandoned, "expected an abandon, got $outcome")
         assertEquals(RENDEZVOUS_MAX_REPARKS, outcome.reparks)
@@ -290,6 +290,19 @@ class RendezvousModelTest {
             assertTrue(hold.fire(1500, parked.rendezvousFilmMs, parked.rendezvousFilmMs,
                 true, 1.0, window) is RendezvousHold.Step.Abandon)
         }
+    }
+
+    @Test
+    fun observedSeekLatencyRemainsWallTimeWhenReparkingAtFastRates() {
+        for (rate in listOf(0.5, 2.0, 8.0)) {
+            val outcome = committed(run(Sim(seekMs = 2_400, speedAt = { rate })))
+            assertEquals(1, outcome.reparks, "rate=$rate")
+            assertEquals(5_050L, outcome.wallMs, "rate=$rate")
+        }
+        val hold = RendezvousHold()
+        val park = hold.park(0, Long.MAX_VALUE - 1, 2.0)
+        assertEquals(Long.MAX_VALUE, park.rendezvousFilmMs)
+        assertEquals(false, park.playWhenReady)
     }
 
 }

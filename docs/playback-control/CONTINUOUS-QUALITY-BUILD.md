@@ -2853,3 +2853,20 @@ production and test-source compilation passed (`compileDebugKotlin` and
 `compileDebugUnitTestKotlin`, 13 seconds). No unit test was executed. This
 repairs the prepared path; the continuous adapter and physical qualification
 remain unfinished.
+
+
+### 10.91 Android converts rendezvous seek latency into the incumbent's film clock
+
+The measured seek duration is wall time. The old repark calculation added it
+to a film-time lead without applying playback rate, so a fast incumbent could
+outrun every attempt despite a usable decoder. The initial estimate and the
+observed seek duration plus margin now become film distance at the current
+rate. Paused or invalid rates use the ordinary parked estimate; calculation
+saturates rather than wrapping near the timeline bound. The controller keeps
+the same physical overlap deadline and bounded repark count.
+
+The authored clock-model regressions cover 0.5x, 2x and 8x delayed seeks, a
+fixed wall-time estimate across rates, saturation and bounded failure beyond
+the supported lead calculation. Android production and final regression
+sources compile. Unit execution remains deferred until the final review;
+physical timing and the continuous adapter remain outstanding.
