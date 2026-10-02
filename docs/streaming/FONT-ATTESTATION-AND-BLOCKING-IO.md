@@ -1,6 +1,6 @@
 # Font attestation and blocking I/O — stat off the runtime now, freeze the font environment per recipe next
 
-**Status:** M1 merged (PR #413, in `main`) · M2 merged (PR #553,
+**Status:** open · M1 merged (PR #413, in `main`) · M2 merged (PR #553,
 `2b09d7a32`) · M2 owned-lab evidence PASS on lab3, 2026-10-02 (§5.2.1); the
 lab4/media1 reading and M1's "before" are still owed (§5.1) · **Executes:** §2.7, F-stream-7, assessment
 correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
