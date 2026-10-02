@@ -926,6 +926,7 @@
             request: crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -2094,6 +2095,7 @@
             request: crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2361,6 +2363,7 @@
                 request: crate::transcode::SessionRequest {
                     quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
@@ -2657,3 +2660,9 @@
             );
         }
     }
+
+#[test]
+fn native_http_cannot_select_service_vod_only_policy() {
+    let public: CreateSession = serde_json::from_value(serde_json::json!({"playback_id":"native", "vod_only":true})).expect("native body");
+    assert!(!public.into_request(1, 360).vod_only);
+}

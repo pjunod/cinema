@@ -338,6 +338,7 @@
         let staged_request = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             file_id: fixture.file_id(),
             playback_id: route.playback_id.clone(),
             request_id: Some(staged_incarnation_id.to_owned()),
@@ -452,6 +453,7 @@
         let request = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             file_id: fixture.file_id(),
             playback_id: predecessor.playback_id.clone(),
             request_id: Some(incarnation_id.clone()),
@@ -743,6 +745,7 @@
             &crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -816,6 +819,7 @@
             &crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
             },
@@ -1057,6 +1061,7 @@
         let candidate = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1250,6 +1255,7 @@
             &crate::transcode::SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -1410,6 +1416,7 @@
         let candidate = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };
@@ -1813,6 +1820,7 @@
         crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             control_sequence: None,
             file_id: 11,
             playback_id: "stage-player".to_owned(),

@@ -1,0 +1,2924 @@
+{
+  "schema_version": 1,
+  "milestone": "J0",
+  "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+  "client": {
+    "name": "Infuse",
+    "version": "8.5.6",
+    "build": "8.5.5763",
+    "bundle_id": "com.firecore.infuse",
+    "device": "Apple TV 4K (3rd generation)",
+    "model": "AppleTV14,1",
+    "os": "tvOS 27.0",
+    "os_build": "24J361"
+  },
+  "protocol_baseline": {
+    "server_version": "10.11.11",
+    "base_path": "/jellyfin"
+  },
+  "acceptance_boundary": "Physical reference client flows; production Plurx adapter is not implemented or accepted.",
+  "observations": {
+    "connect": "Password login and movie detail/artwork succeeded under base path.",
+    "direct": "Static MKV rendered at 95.750s; Infuse labels static file delivery DirectStream. Authorization header and Range bytes=0- observed.",
+    "direct_seek": "Forward 60 seconds rendered 179.833s; backward 60 then pause rendered 163.792s; Stopped retained that position.",
+    "explicit_transcoding": "Details context menu Transcoding -> 0.75 Mbps (480p), Start from Beginning; visible frame 5.625s. Video encoded, audio copy; TS HLS HTTP 200/206.",
+    "renegotiation": "Bitrate request produced one PlaySessionId; immediate audio/subtitle request names CurrentPlaySessionId and produces a replacement before Playing.",
+    "profile": "No DirectPlayProfiles sent. MaxStaticBitrate and profile MaxStreamingBitrate 200 Mbit/s; per-play ceiling 750 Kbit/s. Video codec CSV hevc,h264,av1.",
+    "long_pause": {
+      "pause_seconds": 374.353,
+      "paused_reports": 2,
+      "same_play_session_id": "4ead0dc7ad38863c93798dcc5b143d8b",
+      "resume": "Unpause followed by 120-second forward seek; reference media returned 206 and visible timestamp 225.417s.",
+      "boundary": "Reference route only; native long-pause route recovery still fails as separately recorded."
+    },
+    "remaining": [
+      "native fMP4 delivery",
+      "subsequent-page corpus verification"
+    ],
+    "abrupt_kill": {
+      "method": "devicectl SIGKILL only Infuse, relaunch then resume synthetic title",
+      "old_play_session_id": "4ead0dc7ad38863c93798dcc5b143d8b",
+      "new_play_session_id": "15a81aad988977141b624a0141270669",
+      "resume_position_seconds": 285.3333343,
+      "same_device_identity": true,
+      "old_stopped_observed": false,
+      "replacement": "New Playing after a fresh PlaybackInfo; old play has no Stopped."
+    },
+    "subtitle": {
+      "advertised_delivery": "External subtitle Codec=subrip, DeliveryUrl=Stream.vtt?ApiKey=<redacted>",
+      "actual_client_request": "GET /Videos/{id}/{source}/Subtitles/0/0/Stream.srt, Authorization header, Range bytes=0-, HTTP 200",
+      "physical_cue": "J0 synthetic subtitle at two minutes, visible at 124.583s",
+      "boundary": "SRT reference path verified; native VTT-only Infuse delivery remains unproved."
+    }
+  },
+  "route_inventory": [
+    {
+      "method": "GET",
+      "path": "/jellyfin/System/Info/Public",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "POST",
+      "path": "/jellyfin/Users/AuthenticateByName",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/UserViews",
+      "query_keys": [
+        "includeExternalContent",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/UserViews/GroupingOptions",
+      "query_keys": [
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Library/VirtualFolders",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/DisplayPreferences/usersettings",
+      "query_keys": [
+        "client",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Users/{id}",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/UserItems/Resume",
+      "query_keys": [
+        "fields",
+        "limit",
+        "mediaTypes",
+        "recursive",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Shows/NextUp",
+      "query_keys": [
+        "fields",
+        "limit",
+        "startIndex",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items/Latest",
+      "query_keys": [
+        "fields",
+        "limit",
+        "parentId",
+        "startIndex",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items//",
+      "query_keys": [
+        "fields",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        404
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items/{id}/Images/Primary",
+      "query_keys": [
+        "tag"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items/{id}/LocalTrailers",
+      "query_keys": [
+        "fields",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items/{id}",
+      "query_keys": [
+        "fields",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 3
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Items/{id}/SpecialFeatures",
+      "query_keys": [
+        "fields",
+        "userId"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/MediaSegments/{id}",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 1
+    },
+    {
+      "method": "POST",
+      "path": "/jellyfin/Items/{id}/PlaybackInfo",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 3
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Videos/{id}/stream",
+      "query_keys": [
+        "MediaSourceId",
+        "Static"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200,
+        204,
+        206
+      ],
+      "count": 3
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Videos/{id}/{id}/Subtitles/0/0/Stream.srt",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 2
+    },
+    {
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        204
+      ],
+      "count": 2
+    },
+    {
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        204
+      ],
+      "count": 27
+    },
+    {
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Stopped",
+      "query_keys": [],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        204
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/videos/{id}/master.m3u8",
+      "query_keys": [
+        "apiKey",
+        "audioBitrate",
+        "audioCodec",
+        "audioStreamIndex",
+        "breakOnNonKeyFrames",
+        "deviceId",
+        "enableAudioVbrEncoding",
+        "h264-level",
+        "h264-profile",
+        "h264-videobitdepth",
+        "maxFramerate",
+        "mediaSourceId",
+        "minSegments",
+        "playSessionId",
+        "requireAvc",
+        "segmentContainer",
+        "tag",
+        "transcodeReasons",
+        "transcodingMaxAudioChannels",
+        "videoBitrate",
+        "videoCodec"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Videos/{id}/main.m3u8",
+      "query_keys": [
+        "apiKey",
+        "audioBitrate",
+        "audioCodec",
+        "audioStreamIndex",
+        "breakOnNonKeyFrames",
+        "deviceId",
+        "enableAudioVbrEncoding",
+        "h264-level",
+        "h264-profile",
+        "h264-videobitdepth",
+        "maxFramerate",
+        "mediaSourceId",
+        "minSegments",
+        "playSessionId",
+        "requireAvc",
+        "segmentContainer",
+        "tag",
+        "transcodeReasons",
+        "transcodingMaxAudioChannels",
+        "videoBitrate",
+        "videoCodec"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        200
+      ],
+      "count": 1
+    },
+    {
+      "method": "GET",
+      "path": "/jellyfin/Videos/{id}/hls1/main/{segment}.ts",
+      "query_keys": [
+        "actualSegmentLengthTicks",
+        "apiKey",
+        "audioBitrate",
+        "audioCodec",
+        "audioStreamIndex",
+        "breakOnNonKeyFrames",
+        "deviceId",
+        "enableAudioVbrEncoding",
+        "h264-level",
+        "h264-profile",
+        "h264-videobitdepth",
+        "maxFramerate",
+        "mediaSourceId",
+        "minSegments",
+        "playSessionId",
+        "requireAvc",
+        "runtimeTicks",
+        "segmentContainer",
+        "tag",
+        "transcodeReasons",
+        "transcodingMaxAudioChannels",
+        "videoBitrate",
+        "videoCodec"
+      ],
+      "credential_carriers": [
+        "authorization"
+      ],
+      "statuses": [
+        206
+      ],
+      "count": 98
+    }
+  ],
+  "profiles": [
+    {
+      "request": {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 198,
+        "kind": "request",
+        "time": 1790978776337,
+        "method": "POST",
+        "path": "/jellyfin/Items/0007ae92b91fafeee480293ad01b13cc/PlaybackInfo",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "904",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Version": "8.5.6",
+            "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+            "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+            "Client": "Infuse-Direct"
+          }
+        },
+        "body": {
+          "AutoOpenLiveStream": true,
+          "DeviceProfile": {
+            "MaxStreamingBitrate": 200000000,
+            "TranscodingProfiles": [
+              {
+                "MinSegments": 1,
+                "AudioCodec": "aac",
+                "Container": "aac",
+                "BreakOnNonKeyFrames": true,
+                "MaxAudioChannels": "2",
+                "Type": "Audio",
+                "Context": "Streaming",
+                "Protocol": "hls"
+              },
+              {
+                "AudioCodec": "aac",
+                "MinSegments": 1,
+                "Container": "ts",
+                "ManifestSubtitles": "vtt",
+                "MaxAudioChannels": "2",
+                "BreakOnNonKeyFrames": true,
+                "Type": "Video",
+                "Context": "Streaming",
+                "VideoCodec": "hevc,h264,av1",
+                "Protocol": "hls"
+              }
+            ],
+            "SubtitleProfiles": [
+              {
+                "AllowChunkedResponse": true,
+                "Format": "vtt",
+                "Method": "External"
+              },
+              {
+                "Format": "ass",
+                "Method": "External"
+              },
+              {
+                "Format": "ssa",
+                "Method": "External"
+              }
+            ],
+            "MusicStreamingTranscodingBitrate": 192000,
+            "MaxStaticBitrate": 200000000
+          },
+          "IsPlayback": true,
+          "UserId": "4f0c0b2615a093c8a8c7d1878ef98b6d",
+          "EnableDirectPlay": true,
+          "MediaSourceId": "0007ae92b91fafeee480293ad01b13cc",
+          "MaxStreamingBitrate": 200000000,
+          "DirectPlayProtocols": [
+            "Http"
+          ]
+        }
+      },
+      "response": {
+        "status": 200,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "MediaSources": [
+          {
+            "SupportsTranscoding": true,
+            "SupportsDirectStream": false,
+            "SupportsDirectPlay": false,
+            "TranscodingUrl": "/videos/50236063456e57bb005da188b2d9be64/master.m3u8?DeviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&MediaSourceId=0007ae92b91fafeee480293ad01b13cc&VideoCodec=hevc%2Ch264%2Cav1&AudioCodec=aac&AudioStreamIndex=3&VideoBitrate=199808000&AudioBitrate=192000&AudioSampleRate=48000&MaxFramerate=24&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&PlaySessionId=0d3fe7aca7e9f24303daab3b4b909440&ApiKey=%3Credacted%3E&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&SubtitleMethod=Encode&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-audiochannels=1&aac-profile=lc&TranscodeReasons=DirectPlayError",
+            "TranscodingSubProtocol": "hls",
+            "TranscodingContainer": "ts"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 238,
+        "kind": "request",
+        "time": 1790979292538,
+        "method": "POST",
+        "path": "/jellyfin/Items/0007ae92b91fafeee480293ad01b13cc/PlaybackInfo",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "846",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Version": "8.5.6",
+            "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+            "Client": "Infuse-Direct",
+            "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+          }
+        },
+        "body": {
+          "MediaSourceId": "0007ae92b91fafeee480293ad01b13cc",
+          "UserId": "4f0c0b2615a093c8a8c7d1878ef98b6d",
+          "IsPlayback": true,
+          "AutoOpenLiveStream": true,
+          "DeviceProfile": {
+            "TranscodingProfiles": [
+              {
+                "MaxAudioChannels": "2",
+                "Type": "Audio",
+                "Context": "Streaming",
+                "Container": "aac",
+                "AudioCodec": "aac",
+                "Protocol": "hls",
+                "BreakOnNonKeyFrames": true,
+                "MinSegments": 1
+              },
+              {
+                "MaxAudioChannels": "2",
+                "Type": "Video",
+                "VideoCodec": "hevc,h264,av1",
+                "ManifestSubtitles": "vtt",
+                "Context": "Streaming",
+                "Container": "ts",
+                "AudioCodec": "aac",
+                "Protocol": "hls",
+                "BreakOnNonKeyFrames": true,
+                "MinSegments": 1
+              }
+            ],
+            "MusicStreamingTranscodingBitrate": 192000,
+            "MaxStaticBitrate": 200000000,
+            "SubtitleProfiles": [
+              {
+                "Method": "External",
+                "AllowChunkedResponse": true,
+                "Format": "vtt"
+              },
+              {
+                "Method": "External",
+                "Format": "ass"
+              },
+              {
+                "Method": "External",
+                "Format": "ssa"
+              }
+            ],
+            "MaxStreamingBitrate": 200000000
+          },
+          "MaxStreamingBitrate": 750000
+        }
+      },
+      "response": {
+        "status": 200,
+        "PlaySessionId": "db9724440fa72ece7a319fb62b6d906c",
+        "MediaSources": [
+          {
+            "SupportsTranscoding": true,
+            "SupportsDirectStream": false,
+            "SupportsDirectPlay": false,
+            "TranscodingUrl": "/videos/50236063456e57bb005da188b2d9be64/master.m3u8?DeviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&MediaSourceId=0007ae92b91fafeee480293ad01b13cc&VideoCodec=hevc%2Ch264%2Cav1&AudioCodec=aac&AudioStreamIndex=3&VideoBitrate=558000&AudioBitrate=192000&MaxFramerate=24&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&PlaySessionId=db9724440fa72ece7a319fb62b6d906c&ApiKey=%3Credacted%3E&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&SubtitleMethod=Encode&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&TranscodeReasons=ContainerBitrateExceedsLimit",
+            "TranscodingSubProtocol": "hls",
+            "TranscodingContainer": "ts"
+          }
+        ]
+      }
+    },
+    {
+      "request": {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 239,
+        "kind": "request",
+        "time": 1790979313445,
+        "method": "POST",
+        "path": "/jellyfin/Items/0007ae92b91fafeee480293ad01b13cc/PlaybackInfo",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "949",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+            "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+            "Client": "Infuse-Direct",
+            "Version": "8.5.6"
+          }
+        },
+        "body": {
+          "AudioStreamIndex": 2,
+          "AutoOpenLiveStream": true,
+          "DeviceProfile": {
+            "MaxStaticBitrate": 200000000,
+            "MusicStreamingTranscodingBitrate": 192000,
+            "SubtitleProfiles": [
+              {
+                "Format": "vtt",
+                "AllowChunkedResponse": true,
+                "Method": "External"
+              },
+              {
+                "Format": "ass",
+                "Method": "External"
+              },
+              {
+                "Format": "ssa",
+                "Method": "External"
+              }
+            ],
+            "TranscodingProfiles": [
+              {
+                "Context": "Streaming",
+                "Container": "aac",
+                "MaxAudioChannels": "2",
+                "Protocol": "hls",
+                "AudioCodec": "aac",
+                "BreakOnNonKeyFrames": true,
+                "MinSegments": 1,
+                "Type": "Audio"
+              },
+              {
+                "VideoCodec": "hevc,h264,av1",
+                "ManifestSubtitles": "vtt",
+                "Context": "Streaming",
+                "Container": "ts",
+                "MaxAudioChannels": "2",
+                "Protocol": "hls",
+                "AudioCodec": "aac",
+                "BreakOnNonKeyFrames": true,
+                "MinSegments": 1,
+                "Type": "Video"
+              }
+            ],
+            "MaxStreamingBitrate": 200000000
+          },
+          "MediaSourceId": "0007ae92b91fafeee480293ad01b13cc",
+          "MaxStreamingBitrate": 750000,
+          "IsPlayback": true,
+          "SubtitleStreamIndex": 0,
+          "UserId": "4f0c0b2615a093c8a8c7d1878ef98b6d",
+          "CurrentPlaySessionId": "db9724440fa72ece7a319fb62b6d906c"
+        }
+      },
+      "response": {
+        "status": 200,
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "MediaSources": [
+          {
+            "SupportsTranscoding": true,
+            "SupportsDirectStream": false,
+            "SupportsDirectPlay": false,
+            "TranscodingUrl": "/videos/50236063456e57bb005da188b2d9be64/master.m3u8?DeviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&MediaSourceId=0007ae92b91fafeee480293ad01b13cc&VideoCodec=hevc%2Ch264%2Cav1&AudioCodec=aac&AudioStreamIndex=2&VideoBitrate=558000&AudioBitrate=192000&MaxFramerate=24&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&PlaySessionId=4ead0dc7ad38863c93798dcc5b143d8b&ApiKey=%3Credacted%3E&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&TranscodeReasons=ContainerBitrateExceedsLimit",
+            "TranscodingSubProtocol": "hls",
+            "TranscodingContainer": "ts"
+          }
+        ]
+      }
+    }
+  ],
+  "selected_trace": [
+    {
+      "id": 200,
+      "time": 1790978776472,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/stream?MediaSourceId=0007ae92b91fafeee480293ad01b13cc&Static=true",
+      "headers": {
+        "range": "bytes=0-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {},
+      "status": 206
+    },
+    {
+      "id": 202,
+      "time": 1790978822145,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "471",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "PositionTicks": 0,
+        "PlayMethod": "DirectStream",
+        "IsPaused": false,
+        "SubtitleStreamIndex": -1,
+        "RunTimeTicks": 6600210000,
+        "AudioStreamIndex": 3,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440"
+      },
+      "status": 204
+    },
+    {
+      "id": 203,
+      "time": 1790978832277,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "AudioStreamIndex": 3,
+        "PositionTicks": 102080003,
+        "RunTimeTicks": 6600210000,
+        "PlayMethod": "DirectStream",
+        "EventName": "TimeUpdate",
+        "IsPaused": false,
+        "SubtitleStreamIndex": -1
+      },
+      "status": 204
+    },
+    {
+      "id": 204,
+      "time": 1790978842335,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "EventName": "TimeUpdate",
+        "AudioStreamIndex": 3,
+        "SubtitleStreamIndex": -1,
+        "PositionTicks": 202079997,
+        "PlayMethod": "DirectStream",
+        "IsPaused": false,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "RunTimeTicks": 6600210000
+      },
+      "status": 204
+    },
+    {
+      "id": 206,
+      "time": 1790978852384,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "AudioStreamIndex": 3,
+        "PositionTicks": 302080010,
+        "RunTimeTicks": 6600210000,
+        "PlayMethod": "DirectStream",
+        "IsPaused": false,
+        "EventName": "TimeUpdate",
+        "SubtitleStreamIndex": -1
+      },
+      "status": 204
+    },
+    {
+      "id": 207,
+      "time": 1790978862441,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "IsPaused": false,
+        "PlayMethod": "DirectStream",
+        "AudioStreamIndex": 3,
+        "SubtitleStreamIndex": -1,
+        "RunTimeTicks": 6600210000,
+        "PositionTicks": 402079999,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "EventName": "TimeUpdate"
+      },
+      "status": 204
+    },
+    {
+      "id": 208,
+      "time": 1790978872492,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "EventName": "TimeUpdate",
+        "PositionTicks": 501669987,
+        "IsPaused": false,
+        "RunTimeTicks": 6600210000,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "AudioStreamIndex": 3
+      },
+      "status": 204
+    },
+    {
+      "id": 209,
+      "time": 1790978882551,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "AudioStreamIndex": 3,
+        "PositionTicks": 602080000,
+        "RunTimeTicks": 6600210000,
+        "PlayMethod": "DirectStream",
+        "EventName": "TimeUpdate",
+        "IsPaused": false,
+        "SubtitleStreamIndex": -1
+      },
+      "status": 204
+    },
+    {
+      "id": 210,
+      "time": 1790978885311,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/stream?MediaSourceId=0007ae92b91fafeee480293ad01b13cc&Static=true",
+      "headers": {
+        "range": "bytes=364959144-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {},
+      "status": 204
+    },
+    {
+      "id": 211,
+      "time": 1790978892625,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "RunTimeTicks": 6600210000,
+        "EventName": "TimeUpdate",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "IsPaused": false,
+        "AudioStreamIndex": 3,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "PositionTicks": 707079995
+      },
+      "status": 204
+    },
+    {
+      "id": 212,
+      "time": 1790978902680,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "SubtitleStreamIndex": -1,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "RunTimeTicks": 6600210000,
+        "EventName": "TimeUpdate",
+        "IsPaused": false,
+        "AudioStreamIndex": 3,
+        "PlayMethod": "DirectStream",
+        "PositionTicks": 807079984
+      },
+      "status": 204
+    },
+    {
+      "id": 213,
+      "time": 1790978912732,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "IsPaused": false,
+        "RunTimeTicks": 6600210000,
+        "AudioStreamIndex": 3,
+        "PlayMethod": "DirectStream",
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PositionTicks": 907080021,
+        "EventName": "TimeUpdate"
+      },
+      "status": 204
+    },
+    {
+      "id": 214,
+      "time": 1790978922792,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PositionTicks": 1007079960,
+        "SubtitleStreamIndex": -1,
+        "EventName": "TimeUpdate",
+        "PlayMethod": "DirectStream",
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "IsPaused": false,
+        "AudioStreamIndex": 3,
+        "RunTimeTicks": 6600210000
+      },
+      "status": 204
+    },
+    {
+      "id": 215,
+      "time": 1790978932845,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "EventName": "TimeUpdate",
+        "PositionTicks": 1107079998,
+        "IsPaused": false,
+        "RunTimeTicks": 6600210000,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "AudioStreamIndex": 3
+      },
+      "status": 204
+    },
+    {
+      "id": 216,
+      "time": 1790978939801,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "499",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "AudioStreamIndex": 3,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "RunTimeTicks": 6600210000,
+        "PositionTicks": 1177079995,
+        "IsPaused": true,
+        "PlayMethod": "DirectStream",
+        "SubtitleStreamIndex": -1,
+        "EventName": "Pause"
+      },
+      "status": 204
+    },
+    {
+      "id": 217,
+      "time": 1790978939852,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "502",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "PositionTicks": 1780000059,
+        "PlayMethod": "DirectStream",
+        "AudioStreamIndex": 3,
+        "IsPaused": false,
+        "SubtitleStreamIndex": -1,
+        "EventName": "Unpause",
+        "RunTimeTicks": 6600210000,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440"
+      },
+      "status": 204
+    },
+    {
+      "id": 218,
+      "time": 1790978945484,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/stream?MediaSourceId=0007ae92b91fafeee480293ad01b13cc&Static=true",
+      "headers": {
+        "range": "bytes=96429627-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {},
+      "status": 200
+    },
+    {
+      "id": 219,
+      "time": 1790978949893,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "PositionTicks": 1872499963,
+        "EventName": "TimeUpdate",
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "RunTimeTicks": 6600210000,
+        "AudioStreamIndex": 3,
+        "IsPaused": false,
+        "PlayMethod": "DirectStream"
+      },
+      "status": 204
+    },
+    {
+      "id": 220,
+      "time": 1790978959963,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "SubtitleStreamIndex": -1,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "PlayMethod": "DirectStream",
+        "EventName": "TimeUpdate",
+        "IsPaused": false,
+        "PositionTicks": 1972500099,
+        "AudioStreamIndex": 3,
+        "RunTimeTicks": 6600210000
+      },
+      "status": 204
+    },
+    {
+      "id": 221,
+      "time": 1790978970024,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "PositionTicks": 2072500038,
+        "AudioStreamIndex": 3,
+        "EventName": "TimeUpdate",
+        "RunTimeTicks": 6600210000,
+        "IsPaused": false
+      },
+      "status": 204
+    },
+    {
+      "id": 223,
+      "time": 1790978980079,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "505",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "PositionTicks": 2172499977,
+        "AudioStreamIndex": 3,
+        "EventName": "TimeUpdate",
+        "RunTimeTicks": 6600210000,
+        "IsPaused": false
+      },
+      "status": 204
+    },
+    {
+      "id": 224,
+      "time": 1790978985596,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "499",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "SubtitleStreamIndex": -1,
+        "PlayMethod": "DirectStream",
+        "PositionTicks": 2227500101,
+        "AudioStreamIndex": 3,
+        "EventName": "Pause",
+        "RunTimeTicks": 6600210000,
+        "IsPaused": true
+      },
+      "status": 204
+    },
+    {
+      "id": 225,
+      "time": 1790978985650,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "502",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "PlayMethod": "DirectStream",
+        "RunTimeTicks": 6600210000,
+        "PositionTicks": 1630000051,
+        "IsPaused": false,
+        "SubtitleStreamIndex": -1,
+        "AudioStreamIndex": 3,
+        "EventName": "Unpause"
+      },
+      "status": 204
+    },
+    {
+      "id": 226,
+      "time": 1790978987656,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "499",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "IsPaused": true,
+        "PlayMethod": "DirectStream",
+        "AudioStreamIndex": 3,
+        "SubtitleStreamIndex": -1,
+        "RunTimeTicks": 6600210000,
+        "PositionTicks": 1637920044,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "EventName": "Pause"
+      },
+      "status": 204
+    },
+    {
+      "id": 227,
+      "time": 1790979023855,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Stopped",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "321",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {
+        "Failed": false,
+        "PlaySessionId": "0d3fe7aca7e9f24303daab3b4b909440",
+        "PositionTicks": 1637920044
+      },
+      "status": 204
+    },
+    {
+      "id": 240,
+      "time": 1790979313487,
+      "method": "GET",
+      "path": "/jellyfin/videos/50236063456e57bb005da188b2d9be64/master.m3u8?deviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&mediaSourceId=0007ae92b91fafeee480293ad01b13cc&videoCodec=hevc%2Ch264%2Cav1&audioCodec=aac&audioStreamIndex=2&videoBitrate=558000&audioBitrate=192000&maxFramerate=24&segmentContainer=ts&minSegments=1&breakOnNonKeyFrames=True&playSessionId=4ead0dc7ad38863c93798dcc5b143d8b&apiKey=%3Credacted%3E&transcodingMaxAudioChannels=2&requireAvc=false&enableAudioVbrEncoding=true&tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&transcodeReasons=ContainerBitrateExceedsLimit",
+      "headers": {
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {},
+      "status": 200
+    },
+    {
+      "id": 241,
+      "time": 1790979313509,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/main.m3u8?deviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&mediaSourceId=0007ae92b91fafeee480293ad01b13cc&videoCodec=hevc%2Ch264%2Cav1&audioCodec=copy&audioStreamIndex=2&videoBitrate=558000&audioBitrate=192000&maxFramerate=24&segmentContainer=ts&minSegments=1&breakOnNonKeyFrames=True&playSessionId=4ead0dc7ad38863c93798dcc5b143d8b&apiKey=%3Credacted%3E&transcodingMaxAudioChannels=2&requireAvc=false&enableAudioVbrEncoding=true&tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&transcodeReasons=ContainerBitrateExceedsLimit",
+      "headers": {
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {},
+      "status": 200
+    },
+    {
+      "id": 242,
+      "time": 1790979313588,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/hls1/main/0.ts?deviceId=305c4bf7d47c5fcd01fa1cb3389d99f4&mediaSourceId=0007ae92b91fafeee480293ad01b13cc&videoCodec=hevc%2Ch264%2Cav1&audioCodec=copy&audioStreamIndex=2&videoBitrate=558000&audioBitrate=192000&maxFramerate=24&segmentContainer=ts&minSegments=1&breakOnNonKeyFrames=True&playSessionId=4ead0dc7ad38863c93798dcc5b143d8b&apiKey=%3Credacted%3E&transcodingMaxAudioChannels=2&requireAvc=false&enableAudioVbrEncoding=true&tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&transcodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+      "headers": {
+        "range": "bytes=0-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {},
+      "status": 206
+    },
+    {
+      "id": 272,
+      "time": 1790979316846,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "467",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "PositionTicks": 0,
+        "SubtitleStreamIndex": 0,
+        "RunTimeTicks": 6600210000,
+        "PlayMethod": "Transcode",
+        "IsPaused": false,
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "AudioStreamIndex": 2
+      },
+      "status": 204
+    },
+    {
+      "id": 276,
+      "time": 1790979326892,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "500",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "AudioStreamIndex": 2,
+        "IsPaused": false,
+        "PlayMethod": "Transcode",
+        "EventName": "TimeUpdate",
+        "RunTimeTicks": 6600210000,
+        "SubtitleStreamIndex": 0,
+        "PositionTicks": 102500004
+      },
+      "status": 204
+    },
+    {
+      "id": 282,
+      "time": 1790979336937,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "500",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "Client": "Infuse-Direct",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "EventName": "TimeUpdate",
+        "PositionTicks": 202916667,
+        "IsPaused": false,
+        "RunTimeTicks": 6600210000,
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "SubtitleStreamIndex": 0,
+        "PlayMethod": "Transcode",
+        "AudioStreamIndex": 2
+      },
+      "status": 204
+    },
+    {
+      "id": 285,
+      "time": 1790979342635,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "494",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PlayMethod": "Transcode",
+        "RunTimeTicks": 6600210000,
+        "EventName": "Pause",
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "IsPaused": true,
+        "SubtitleStreamIndex": 0,
+        "PositionTicks": 257916668,
+        "AudioStreamIndex": 2
+      },
+      "status": 204
+    },
+    {
+      "id": 288,
+      "time": 1790979342738,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "498",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "SubtitleStreamIndex": 0,
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "RunTimeTicks": 6600210000,
+        "EventName": "Unpause",
+        "IsPaused": false,
+        "AudioStreamIndex": 2,
+        "PlayMethod": "Transcode",
+        "PositionTicks": 1460000017
+      },
+      "status": 204
+    },
+    {
+      "id": 317,
+      "time": 1790979344116,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "495",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {
+        "PlayMethod": "Transcode",
+        "RunTimeTicks": 6600210000,
+        "EventName": "Pause",
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "IsPaused": true,
+        "SubtitleStreamIndex": 0,
+        "PositionTicks": 1462916708,
+        "AudioStreamIndex": 2
+      },
+      "status": 204
+    },
+    {
+      "id": 320,
+      "time": 1790979344222,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "497",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "SubtitleStreamIndex": 0,
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "RunTimeTicks": 6600210000,
+        "EventName": "Unpause",
+        "IsPaused": false,
+        "AudioStreamIndex": 2,
+        "PlayMethod": "Transcode",
+        "PositionTicks": 839999961
+      },
+      "status": 204
+    },
+    {
+      "id": 349,
+      "time": 1790979345637,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "494",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PositionTicks": 862916679,
+        "SubtitleStreamIndex": 0,
+        "EventName": "Pause",
+        "PlayMethod": "Transcode",
+        "PlaySessionId": "4ead0dc7ad38863c93798dcc5b143d8b",
+        "AudioStreamIndex": 2,
+        "IsPaused": true,
+        "RunTimeTicks": 6600210000
+      },
+      "status": 204
+    },
+    {
+      "id": 459,
+      "time": 1790979868944,
+      "method": "POST",
+      "path": "/jellyfin/Items/0007ae92b91fafeee480293ad01b13cc/PlaybackInfo",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "904",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94"
+        }
+      },
+      "body": {},
+      "status": 200
+    },
+    {
+      "id": 462,
+      "time": 1790979869030,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/stream?MediaSourceId=0007ae92b91fafeee480293ad01b13cc&Static=true",
+      "headers": {
+        "range": "bytes=0-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct"
+        }
+      },
+      "body": {},
+      "status": null
+    },
+    {
+      "id": 463,
+      "time": 1790979914900,
+      "method": "GET",
+      "path": "/jellyfin/Videos/0007ae92b91fafeee480293ad01b13cc/0007ae92b91fafeee480293ad01b13cc/Subtitles/0/0/Stream.srt",
+      "headers": {
+        "range": "bytes=0-",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {},
+      "status": 200
+    },
+    {
+      "id": 466,
+      "time": 1790979920340,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "479",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4",
+          "Client": "Infuse-Direct",
+          "Version": "8.5.6"
+        }
+      },
+      "body": {
+        "PlayMethod": "DirectStream",
+        "PlaySessionId": "15a81aad988977141b624a0141270669",
+        "AudioStreamIndex": 2,
+        "SubtitleStreamIndex": 0,
+        "IsPaused": false,
+        "RunTimeTicks": 6600210000,
+        "PositionTicks": 2853333343
+      },
+      "status": 204
+    },
+    {
+      "id": 485,
+      "time": 1790980071106,
+      "method": "POST",
+      "path": "/jellyfin/Sessions/Playing/Progress",
+      "headers": {
+        "content-type": "application/json",
+        "user-agent": "Infuse-Direct/8.5.6",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "content-length": "504",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "authorization_identity": {
+          "Version": "8.5.6",
+          "Client": "Infuse-Direct",
+          "Device": "9bf622f7bdde50fcabbec64581f5ca94",
+          "DeviceId": "305c4bf7d47c5fcd01fa1cb3389d99f4"
+        }
+      },
+      "body": {
+        "RunTimeTicks": 6600210000,
+        "PlaySessionId": "15a81aad988977141b624a0141270669",
+        "EventName": "TimeUpdate",
+        "AudioStreamIndex": 2,
+        "PlayMethod": "DirectStream",
+        "IsPaused": false,
+        "PositionTicks": 4350830190,
+        "SubtitleStreamIndex": 0
+      },
+      "status": 204
+    }
+  ],
+  "controlled_vtt_probe": {
+    "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+    "mutation": "Only PlaybackInfo response subtitle Codec changed from subrip to webvtt; advertised VTT DeliveryUrl retained. No source/media/control mutation.",
+    "actual": "Infuse constructed Stream.vtt; HTTP 200 text/vtt, 375 bytes; opening cue visible at 2.125 seconds.",
+    "restored": "Probe flag removed; reference responses transparent again.",
+    "boundary": "Reference VTT transport accepted; compatibility mapping must describe actual delivered text codec, independently of stored source codec.",
+    "trace": [
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 5,
+        "kind": "request",
+        "time": 1790980219837,
+        "method": "POST",
+        "path": "/jellyfin/Items/b87d84e4767ba0b6c5db53f854843bf0/PlaybackInfo",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "904",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Infuse-Direct",
+            "Version": "8.5.6",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce"
+          }
+        },
+        "body": {
+          "MediaSourceId": "b87d84e4767ba0b6c5db53f854843bf0",
+          "MaxStreamingBitrate": 200000000,
+          "EnableDirectPlay": true,
+          "AutoOpenLiveStream": true,
+          "IsPlayback": true,
+          "DirectPlayProtocols": [
+            "Http"
+          ],
+          "DeviceProfile": {
+            "SubtitleProfiles": [
+              {
+                "AllowChunkedResponse": true,
+                "Format": "vtt",
+                "Method": "External"
+              },
+              {
+                "Format": "ass",
+                "Method": "External"
+              },
+              {
+                "Format": "ssa",
+                "Method": "External"
+              }
+            ],
+            "TranscodingProfiles": [
+              {
+                "BreakOnNonKeyFrames": true,
+                "Context": "Streaming",
+                "Container": "aac",
+                "Protocol": "hls",
+                "Type": "Audio",
+                "MaxAudioChannels": "2",
+                "MinSegments": 1,
+                "AudioCodec": "aac"
+              },
+              {
+                "ManifestSubtitles": "vtt",
+                "Context": "Streaming",
+                "Container": "ts",
+                "BreakOnNonKeyFrames": true,
+                "Protocol": "hls",
+                "VideoCodec": "hevc,h264,av1",
+                "Type": "Video",
+                "MaxAudioChannels": "2",
+                "MinSegments": 1,
+                "AudioCodec": "aac"
+              }
+            ],
+            "MaxStreamingBitrate": 200000000,
+            "MaxStaticBitrate": 200000000,
+            "MusicStreamingTranscodingBitrate": 192000
+          },
+          "UserId": "cffe2888eb2922c47abec89f51b859c6"
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 5,
+        "kind": "response",
+        "time": 1790980219862,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 1935,
+        "body": {
+          "MediaSources": [
+            {
+              "Protocol": "File",
+              "Id": "b87d84e4767ba0b6c5db53f854843bf0",
+              "Path": "/media/Movies/J0%20Tracks%20(2026).mkv",
+              "Type": "Default",
+              "Container": "mkv",
+              "Size": 410811287,
+              "Name": "deb907c8a1567120374e0fb93c8cb93f",
+              "IsRemote": false,
+              "ETag": "0b60db84695ac642d1c36fd3928f63df",
+              "RunTimeTicks": 6600210000,
+              "ReadAtNativeFramerate": false,
+              "IgnoreDts": false,
+              "IgnoreIndex": false,
+              "GenPtsInput": false,
+              "SupportsTranscoding": true,
+              "SupportsDirectStream": false,
+              "SupportsDirectPlay": false,
+              "IsInfiniteStream": false,
+              "UseMostCompatibleTranscodingProfile": false,
+              "RequiresOpening": false,
+              "RequiresClosing": false,
+              "RequiresLooping": false,
+              "SupportsProbing": true,
+              "VideoType": "VideoFile",
+              "MediaStreams": [
+                {
+                  "Codec": "subrip",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedUndefined": "Undefined",
+                  "LocalizedDefault": "Default",
+                  "LocalizedForced": "Forced",
+                  "LocalizedExternal": "External",
+                  "LocalizedHearingImpaired": "Hearing Impaired",
+                  "DisplayTitle": "English - SUBRIP - External",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 0,
+                  "Width": 0,
+                  "Type": "Subtitle",
+                  "Index": 0,
+                  "IsExternal": true,
+                  "DeliveryMethod": "External",
+                  "DeliveryUrl": "/Videos/f623ab241f54c52d2d49e6386b616203/b87d84e4767ba0b6c5db53f854843bf0/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+                  "IsExternalUrl": false,
+                  "IsTextSubtitleStream": true,
+                  "SupportsExternalStream": true,
+                  "Path": "/media/Movies/J0%20Tracks%20(2026).en.srt",
+                  "Level": 0
+                },
+                {
+                  "Codec": "h264",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "SDR",
+                  "VideoRangeType": "SDR",
+                  "AudioSpatialFormat": "None",
+                  "DisplayTitle": "720p H264 SDR",
+                  "NalLengthSize": "4",
+                  "IsInterlaced": false,
+                  "IsAVC": true,
+                  "BitRate": 4979372,
+                  "BitDepth": 8,
+                  "RefFrames": 1,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 720,
+                  "Width": 1280,
+                  "AverageFrameRate": 24,
+                  "RealFrameRate": 24,
+                  "ReferenceFrameRate": 24,
+                  "Profile": "Constrained Baseline",
+                  "Type": "Video",
+                  "AspectRatio": "16:9",
+                  "Index": 1,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "PixelFormat": "yuv420p",
+                  "Level": 31,
+                  "IsAnamorphic": false
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "English - AAC - Mono - Default",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 2,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "fra",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "French - AAC - Mono",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 3,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                },
+                {
+                  "Codec": "subrip",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedUndefined": "Undefined",
+                  "LocalizedDefault": "Default",
+                  "LocalizedForced": "Forced",
+                  "LocalizedExternal": "External",
+                  "LocalizedHearingImpaired": "Hearing Impaired",
+                  "DisplayTitle": "English - SUBRIP",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 0,
+                  "Width": 0,
+                  "Type": "Subtitle",
+                  "Index": 4,
+                  "IsExternal": false,
+                  "DeliveryMethod": "External",
+                  "DeliveryUrl": "/Videos/f623ab241f54c52d2d49e6386b616203/b87d84e4767ba0b6c5db53f854843bf0/Subtitles/4/0/Stream.vtt?ApiKey=%3Credacted%3E",
+                  "IsExternalUrl": false,
+                  "IsTextSubtitleStream": true,
+                  "SupportsExternalStream": true,
+                  "Level": 0
+                }
+              ],
+              "MediaAttachments": [],
+              "Formats": [],
+              "Bitrate": 5363372,
+              "RequiredHttpHeaders": {},
+              "TranscodingUrl": "/videos/f623ab241f54c52d2d49e6386b616203/master.m3u8?DeviceId=ae454930511387cc0536589c59e9d3ce&MediaSourceId=b87d84e4767ba0b6c5db53f854843bf0&VideoCodec=hevc%2Ch264%2Cav1&AudioCodec=aac&AudioStreamIndex=2&VideoBitrate=199808000&AudioBitrate=192000&AudioSampleRate=48000&MaxFramerate=24&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&PlaySessionId=f4e832b8e0fd7ea439d123ad5d5c1e88&ApiKey=%3Credacted%3E&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-audiochannels=1&aac-profile=lc&TranscodeReasons=DirectPlayError",
+              "TranscodingSubProtocol": "hls",
+              "TranscodingContainer": "ts",
+              "DefaultAudioStreamIndex": 2,
+              "DefaultSubtitleStreamIndex": 0,
+              "HasSegments": false
+            }
+          ],
+          "PlaySessionId": "f4e832b8e0fd7ea439d123ad5d5c1e88"
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 5,
+        "kind": "probe_response_override",
+        "time": 1790980219863,
+        "probe": "external_webvtt_metadata",
+        "body": {
+          "MediaSources": [
+            {
+              "Protocol": "File",
+              "Id": "b87d84e4767ba0b6c5db53f854843bf0",
+              "Path": "/media/Movies/J0%20Tracks%20(2026).mkv",
+              "Type": "Default",
+              "Container": "mkv",
+              "Size": 410811287,
+              "Name": "deb907c8a1567120374e0fb93c8cb93f",
+              "IsRemote": false,
+              "ETag": "0b60db84695ac642d1c36fd3928f63df",
+              "RunTimeTicks": 6600210000,
+              "ReadAtNativeFramerate": false,
+              "IgnoreDts": false,
+              "IgnoreIndex": false,
+              "GenPtsInput": false,
+              "SupportsTranscoding": true,
+              "SupportsDirectStream": false,
+              "SupportsDirectPlay": false,
+              "IsInfiniteStream": false,
+              "UseMostCompatibleTranscodingProfile": false,
+              "RequiresOpening": false,
+              "RequiresClosing": false,
+              "RequiresLooping": false,
+              "SupportsProbing": true,
+              "VideoType": "VideoFile",
+              "MediaStreams": [
+                {
+                  "Codec": "webvtt",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedUndefined": "Undefined",
+                  "LocalizedDefault": "Default",
+                  "LocalizedForced": "Forced",
+                  "LocalizedExternal": "External",
+                  "LocalizedHearingImpaired": "Hearing Impaired",
+                  "DisplayTitle": "English - SUBRIP - External",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 0,
+                  "Width": 0,
+                  "Type": "Subtitle",
+                  "Index": 0,
+                  "IsExternal": true,
+                  "DeliveryMethod": "External",
+                  "DeliveryUrl": "/Videos/f623ab241f54c52d2d49e6386b616203/b87d84e4767ba0b6c5db53f854843bf0/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+                  "IsExternalUrl": false,
+                  "IsTextSubtitleStream": true,
+                  "SupportsExternalStream": true,
+                  "Path": "/media/Movies/J0%20Tracks%20(2026).en.srt",
+                  "Level": 0
+                },
+                {
+                  "Codec": "h264",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "SDR",
+                  "VideoRangeType": "SDR",
+                  "AudioSpatialFormat": "None",
+                  "DisplayTitle": "720p H264 SDR",
+                  "NalLengthSize": "4",
+                  "IsInterlaced": false,
+                  "IsAVC": true,
+                  "BitRate": 4979372,
+                  "BitDepth": 8,
+                  "RefFrames": 1,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 720,
+                  "Width": 1280,
+                  "AverageFrameRate": 24,
+                  "RealFrameRate": 24,
+                  "ReferenceFrameRate": 24,
+                  "Profile": "Constrained Baseline",
+                  "Type": "Video",
+                  "AspectRatio": "16:9",
+                  "Index": 1,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "PixelFormat": "yuv420p",
+                  "Level": 31,
+                  "IsAnamorphic": false
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "English - AAC - Mono - Default",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 2,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "fra",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "French - AAC - Mono",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 3,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                },
+                {
+                  "Codec": "webvtt",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedUndefined": "Undefined",
+                  "LocalizedDefault": "Default",
+                  "LocalizedForced": "Forced",
+                  "LocalizedExternal": "External",
+                  "LocalizedHearingImpaired": "Hearing Impaired",
+                  "DisplayTitle": "English - SUBRIP",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 0,
+                  "Width": 0,
+                  "Type": "Subtitle",
+                  "Index": 4,
+                  "IsExternal": false,
+                  "DeliveryMethod": "External",
+                  "DeliveryUrl": "/Videos/f623ab241f54c52d2d49e6386b616203/b87d84e4767ba0b6c5db53f854843bf0/Subtitles/4/0/Stream.vtt?ApiKey=%3Credacted%3E",
+                  "IsExternalUrl": false,
+                  "IsTextSubtitleStream": true,
+                  "SupportsExternalStream": true,
+                  "Level": 0
+                }
+              ],
+              "MediaAttachments": [],
+              "Formats": [],
+              "Bitrate": 5363372,
+              "RequiredHttpHeaders": {},
+              "TranscodingUrl": "/videos/f623ab241f54c52d2d49e6386b616203/master.m3u8?DeviceId=ae454930511387cc0536589c59e9d3ce&MediaSourceId=b87d84e4767ba0b6c5db53f854843bf0&VideoCodec=hevc%2Ch264%2Cav1&AudioCodec=aac&AudioStreamIndex=2&VideoBitrate=199808000&AudioBitrate=192000&AudioSampleRate=48000&MaxFramerate=24&SegmentContainer=ts&MinSegments=1&BreakOnNonKeyFrames=True&PlaySessionId=f4e832b8e0fd7ea439d123ad5d5c1e88&ApiKey=%3Credacted%3E&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-audiochannels=1&aac-profile=lc&TranscodeReasons=DirectPlayError",
+              "TranscodingSubProtocol": "hls",
+              "TranscodingContainer": "ts",
+              "DefaultAudioStreamIndex": 2,
+              "DefaultSubtitleStreamIndex": 0,
+              "HasSegments": false
+            }
+          ],
+          "PlaySessionId": "f4e832b8e0fd7ea439d123ad5d5c1e88"
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 8,
+        "kind": "request",
+        "time": 1790980266665,
+        "method": "GET",
+        "path": "/jellyfin/Videos/b87d84e4767ba0b6c5db53f854843bf0/b87d84e4767ba0b6c5db53f854843bf0/Subtitles/0/0/Stream.vtt",
+        "headers": {
+          "range": "bytes=0-",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Version": "8.5.6",
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 8,
+        "kind": "response",
+        "time": 1790980266674,
+        "status": 200,
+        "headers": {
+          "content-type": "text/vtt",
+          "content-length": "375",
+          "credential_carriers": []
+        },
+        "bytes": 375,
+        "body": null
+      }
+    ]
+  },
+  "episode_browse": {
+    "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+    "operation": "My Jellyfin -> J0 TV -> J0 Show; first episode played",
+    "actual": "Series, season and two episodes returned; synthetic first episode rendered at 3.042 seconds.",
+    "paging": "Series request startIndex=0/limit=50; season requests include startIndex=0/limit=200. Two-episode corpus does not prove a subsequent page.",
+    "trace": [
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 32,
+        "kind": "request",
+        "time": 1790980552103,
+        "method": "GET",
+        "path": "/jellyfin/Items/5e6b8532901af2cb17221ee2d771c8a7?userId=cffe2888eb2922c47abec89f51b859c6&fields=DateCreated%2CEtag%2CGenres%2CMediaSources%2CAlternateMediaSources%2COverview%2CParentId%2CPath%2CProviderIds%2CSortName%2CRecursiveItemCount%2CChildCount",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "Version": "8.5.6",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 32,
+        "kind": "response",
+        "time": 1790980552121,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 808,
+        "body": {}
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 34,
+        "kind": "request",
+        "time": 1790980552157,
+        "method": "GET",
+        "path": "/jellyfin/Items?userId=cffe2888eb2922c47abec89f51b859c6&excludeLocationTypes=Virtual&parentId=5e6b8532901af2cb17221ee2d771c8a7&sortBy=SortName&sortOrder=Ascending&includeItemTypes=Series&recursive=true&startIndex=0&limit=50&fields=DateCreated%2CEtag%2CGenres%2CMediaSources%2CAlternateMediaSources%2COverview%2CParentId%2CPath%2CProviderIds%2CSortName%2CRecursiveItemCount%2CChildCount",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Version": "8.5.6",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 34,
+        "kind": "response",
+        "time": 1790980552201,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 676,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Series"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 35,
+        "kind": "request",
+        "time": 1790980553638,
+        "method": "GET",
+        "path": "/jellyfin/Items/0eb322d06b0681edaf4ccfcb057fb395?userId=cffe2888eb2922c47abec89f51b859c6&fields=DateCreated%2CEtag%2CGenres%2CMediaSources%2CAlternateMediaSources%2COverview%2CParentId%2CPath%2CProviderIds%2CSortName%2CRecursiveItemCount%2CChildCount",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "Version": "8.5.6",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Client": "Infuse-Direct"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 35,
+        "kind": "response",
+        "time": 1790980553660,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 896,
+        "body": {}
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 36,
+        "kind": "request",
+        "time": 1790980553676,
+        "method": "GET",
+        "path": "/jellyfin/Shows/0eb322d06b0681edaf4ccfcb057fb395/Seasons?userId=cffe2888eb2922c47abec89f51b859c6&excludeLocationTypes=Virtual&fields=Genres%2CParentId",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Version": "8.5.6",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 36,
+        "kind": "response",
+        "time": 1790980553743,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 510,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Season"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 37,
+        "kind": "request",
+        "time": 1790980553753,
+        "method": "GET",
+        "path": "/jellyfin/Shows/0eb322d06b0681edaf4ccfcb057fb395/Episodes?userId=cffe2888eb2922c47abec89f51b859c6&excludeLocationTypes=Virtual&fields=Etag%2CMediaSources%2CAlternateMediaSources%2CGenres%2COverview%2CParentId%2CProviderIds",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Client": "Infuse-Direct",
+            "Version": "8.5.6"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 37,
+        "kind": "response",
+        "time": 1790980553798,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 1861,
+        "body": {
+          "TotalRecordCount": 2,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Episode",
+          "Episode"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 58,
+        "kind": "request",
+        "time": 1790980554058,
+        "method": "GET",
+        "path": "/jellyfin/Shows/0eb322d06b0681edaf4ccfcb057fb395/Seasons?userId=cffe2888eb2922c47abec89f51b859c6&excludeLocationTypes=Virtual&startIndex=0&limit=200&fields=Genres%2CParentId",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Version": "8.5.6"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 58,
+        "kind": "response",
+        "time": 1790980554075,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 510,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Season"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 67,
+        "kind": "request",
+        "time": 1790980555207,
+        "method": "POST",
+        "path": "/jellyfin/Items/f3a8cd42df14e74a1927c5b346c6f5b0/PlaybackInfo",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "904",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Infuse-Direct",
+            "Version": "8.5.6",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce"
+          }
+        },
+        "body": {}
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 67,
+        "kind": "response",
+        "time": 1790980555226,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 1699,
+        "body": {
+          "PlaySessionId": "17ce1d307b09b0b033951784ea583047"
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 70,
+        "kind": "request",
+        "time": 1790980555267,
+        "method": "GET",
+        "path": "/jellyfin/Videos/f3a8cd42df14e74a1927c5b346c6f5b0/stream?MediaSourceId=f3a8cd42df14e74a1927c5b346c6f5b0&Static=true",
+        "headers": {
+          "range": "bytes=0-",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Version": "8.5.6",
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 71,
+        "kind": "request",
+        "time": 1790980555779,
+        "method": "GET",
+        "path": "/jellyfin/Shows/0eb322d06b0681edaf4ccfcb057fb395/Seasons?userId=cffe2888eb2922c47abec89f51b859c6&excludeLocationTypes=Virtual&startIndex=0&limit=200&fields=Genres%2CParentId",
+        "headers": {
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "application/json",
+          "accept-encoding": "gzip, deflate",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Infuse-Direct",
+            "Device": "085d562a51a06310c34cee9852e935cb",
+            "Version": "8.5.6",
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce"
+          }
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 71,
+        "kind": "response",
+        "time": 1790980555793,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 510,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Season"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 72,
+        "kind": "request",
+        "time": 1790980558633,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing",
+        "headers": {
+          "content-type": "application/json",
+          "user-agent": "Infuse-Direct/8.5.6",
+          "accept": "*/*",
+          "accept-encoding": "gzip, deflate",
+          "content-length": "471",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "DeviceId": "ae454930511387cc0536589c59e9d3ce",
+            "Client": "Infuse-Direct",
+            "Version": "8.5.6",
+            "Device": "085d562a51a06310c34cee9852e935cb"
+          }
+        },
+        "body": {
+          "PlayMethod": "DirectStream",
+          "PlaySessionId": "17ce1d307b09b0b033951784ea583047",
+          "PositionTicks": 0,
+          "IsPaused": false
+        }
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 72,
+        "kind": "response",
+        "time": 1790980558733,
+        "status": 204,
+        "headers": {
+          "credential_carriers": []
+        },
+        "bytes": 0
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 70,
+        "kind": "response",
+        "time": 1790980561523,
+        "status": 206,
+        "headers": {
+          "content-type": "video/mp4",
+          "content-length": "400229792",
+          "credential_carriers": []
+        },
+        "bytes": 400229792
+      }
+    ]
+  }
+}

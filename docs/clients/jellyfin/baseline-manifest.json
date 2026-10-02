@@ -21,12 +21,12 @@
     "infuse": {
       "version": "8.5.6",
       "build": "8.5.5763",
-      "platform": "tvOS",
-      "os_version": "27.0",
+      "os": "tvOS 27.0",
       "os_build": "24J361",
-      "device_model": "AppleTV14,1",
-      "inventory_status": "connected",
-      "flow_status": "not_tested"
+      "device_model": "Apple TV 4K (3rd generation)",
+      "model": "AppleTV14,1",
+      "inventory_status": "paired_physical_device",
+      "flow_status": "reference_direct_and_explicit_encoded_hls_rendered"
     },
     "androidtv": {
       "source_commit": "984181a3d6ab14e9a6d2dcc850c582e1c138bd95",
@@ -83,6 +83,6 @@
       "bytes": 400229792
     }
   ],
-  "evidence_boundary": "Reference playback and labeled controlled native delivery spike are measured; production compatibility adapter and Infuse physical flows remain untested.",
+  "evidence_boundary": "Physical Android TV and Infuse reference playback and labeled controlled native delivery spike are measured; production compatibility adapter remains unimplemented.",
   "fixtures_revised_at_utc": "2026-10-02T20:47:44.046931+00:00"
 }

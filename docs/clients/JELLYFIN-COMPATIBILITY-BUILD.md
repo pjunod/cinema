@@ -600,8 +600,16 @@ requests through [prodsched.rs](../../crates/plurxd/src/prodsched.rs), with a
 180-second ahead horizon. [vodserve.rs](../../crates/plurxd/src/vodserve.rs)
 uses a 300-second idle TTL; successful delivery updates the touch clock in
 [vod/serve/delivery.rs](../../crates/plurxd/src/vod/serve/delivery.rs). Native
-control is optional on that path. Reuse passive delivery; no synthetic
-ControlRequestV1 or new actor ingress is required for this first release.
+control is optional on that reader path. Reuse passive delivery and do not
+synthesize `ControlRequestV1`. **J0 measured an owner-integration gap:** after
+a 343.445-second physical pause the reader was idle-reaped, the owner cleanup
+ended its durable route, and the next real request returned
+`410 media_session_ended`. The reader-only resurrection regression is
+insufficient. [ADR-J0-1](JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md) proposes a
+bounded, server-owned passive route grant separate from producer lifetime.
+Its service/worker policy and integrated/physical recovery proof must settle
+before J4; the claim that no additional native lifetime seam is needed is
+withdrawn.
 
 **The rolling fallback is different.** The native
 [create manager](../../crates/plurxd/src/transcode/manager/create.rs) can turn

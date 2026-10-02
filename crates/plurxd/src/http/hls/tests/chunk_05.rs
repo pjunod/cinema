@@ -44,6 +44,7 @@
         let request = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "guard-lifetime-player".to_owned(),
@@ -193,6 +194,7 @@
         let request = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "cleanup-shape-player".to_owned(),

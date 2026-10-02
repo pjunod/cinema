@@ -37,7 +37,7 @@ are established separately from interoperability:
 |---|---|---|
 | Reference server | Jellyfin 10.11.11, upstream commit `1fbd8739292cce610231be93daf43368733edf63`; official container index digest and arm64 image ID in manifest | Disposable synthetic library; not a Plurx deployment |
 | Schema | OpenAPI served by that container under `/jellyfin`, 315 paths; SHA-256 in manifest | Raw hash includes the served origin; separate canonical hash removes only `servers` |
-| Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | App/device inventory measured; client flows not tested |
+| Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | Physical direct/HLS/seek/lifecycle and SRT/VTT flows measured; native fMP4 pending |
 | Android TV | Installed official release 0.19.10 / 191099, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | Physical Google TV Streamer connected; Android 14 / API 34 / UTTK.260317.003 measured; Media3 ExoPlayer 1.8.0 measured from current app runtime logs |
 | Android TV dependencies | Kotlin SDK 1.7.1, Media3 1.8.0 from pinned `gradle/libs.versions.toml` | Source provenance, not device capability evidence |
 
@@ -72,10 +72,10 @@ scratch after retaining minimized fixtures and findings.
 | Harness public system info, public users, Quick Connect status under `/jellyfin` | 200, JSON read successfully | Reference bootstrap only |
 | Harness authentication | 200; dedicated account authenticated | Reference account only |
 | Harness movie projection | Eleven-minute movie, one media source | Reference library preparation only |
-| Infuse connect/browse/direct/seek/transcode | Not tested | Required J0 client gate |
+| Infuse connect/browse/direct/seek/transcode | Physical Infuse 8.5.6 connected; movie details/artwork, static MKV and explicit 750 Kbit/s encoded HLS rendered; forward/backward seeks and 374.353-second same-play pause/resume measured | Remaining native fMP4, subtitle and episode probes |
 | Android TV connect/browse/HLS/remux | Connect, password login, movie details/artwork, direct MKV and 720 Kbit/s encoded HLS rendered on physical TV; 332.6-second pause/resume, forward/backward seek and app-kill replacement measured | Required J0 client gate |
 | Both clients' image/subtitle/media credential carriers and version-implied calls | Android: anonymous artwork/direct media; ApiKey on SRT and HLS; MediaSegments and Intros observed. Infuse unmeasured | Required policy/design evidence before J2 |
-| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Native VOD reap/background and Infuse untested | Required lifecycle evidence before advancing J0 |
+| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Infuse: 374.353-second same-play resume and SIGKILL replacement without old Stopped. Native VOD reap confirmed; recovery returns 410 | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
 | Missing duration | New copy/encoded regression refuses absent, zero and negative durations without attaching sessions/renditions | Native prerequisite evidence; HTTP/client mapping pending |
@@ -241,6 +241,44 @@ VOD-only policy and client-side timing remain unbuilt/unmeasured. Test linking
 reported the macOS compact-unwind size warning; execution passed. Workspace
 Clippy with `-D warnings`, formatting, catalog lint and served JavaScript
 syntax passed through the normal tracked hook.
+
+### Infuse physical reference flow
+
+[The minimized Infuse observation](jellyfin/infuse-connection-observation.json)
+records Apple TV 4K (third generation), tvOS 27.0 / 24J361 and Infuse 8.5.6
+build 8.5.5763. Password login, movie detail and artwork requests retain the
+configured `/jellyfin` base path. Static MKV renders with `Range: bytes=0-`
+and an authorization header; Infuse reports `DirectStream` even though this
+is static file delivery, so that label alone does not prove server remux.
+
+The details context menu's Transcoding → 0.75 Mbps (480p) action sends a
+750,000-bit/s play ceiling. Its profile omits `DirectPlayProfiles`, advertises
+TS HLS with `hevc,h264,av1` and AAC, and advertises external VTT/ASS/SSA.
+A subsequent track request names `CurrentPlaySessionId` and replaces the
+negotiation before `Playing`. Encoded TS HLS renders. Media requests carry
+an authorization header and an API-key query. After a 374.353-second pause,
+the same play resumes and a 120-second seek renders at 225.417 seconds.
+This proves the reference client behavior, not native route resurrection.
+
+The initial sync also asks for `UserItems/Resume`, `UserViews/GroupingOptions`,
+`Library/VirtualFolders`, `DisplayPreferences/usersettings`, `Items/Latest`
+and `RandomSeriesItems`. Freeze the subset only after episode and subtitle
+flows. Abrupt SIGKILL and relaunch resume at 285.333 seconds with a new play id, the
+same device identity and no old `Stopped`. An external SRT cue renders at
+124.583 seconds. Although the reference advertised `Stream.vtt`, the original
+`Codec=subrip` metadata made Infuse construct `Stream.srt`; a controlled
+`Codec=webvtt` response instead produces `Stream.vtt` with HTTP 200/text-vtt.
+The VTT opening cue renders at 2.125 seconds. The probe changes only
+subtitle delivery metadata; the reference responses are restored. Native
+fMP4 delivery remains open. Series/season/two-episode browsing and first
+episode playback render; initial paging requests use series limit 50 and
+season limit 200. A subsequent-page corpus remains unproved.
+
+The internal per-create `vod_only` policy now refuses unindexed copy before
+rolling allocation with recovery globally enabled. Three focused regressions
+prove that refusal, worker/durable JSON preservation and distinct identity,
+and native HTTP ignoring the client-supplied policy knob. Actual worker
+dispatch and passive route retention remain separate unproved seams.
 
 ## 4. Milestone admission — J0 remains open
 

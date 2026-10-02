@@ -1274,7 +1274,8 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.file_id > 0
+    (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
+        && request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
@@ -5455,6 +5456,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         request: SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -5896,6 +5898,7 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6919,6 +6922,7 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7065,6 +7069,7 @@ mod tests {
             request: SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7954,6 +7959,38 @@ mod tests {
                 &HashSet::new(),
             ),
             "the exemption is exact and lasts only while the seed is fresh"
+        );
+    }
+
+    #[test]
+    fn service_vod_only_policy_survives_worker_and_durable_recipe_without_native_identity_change() {
+        let native = valid_start_request();
+        let native_value = serde_json::to_value(&native).expect("native envelope");
+        assert!(native_value["request"].get("vod_only").is_none());
+        let legacy: RemoteStartRequest =
+            serde_json::from_value(native_value).expect("legacy recipe");
+        assert!(!legacy.request.vod_only);
+
+        assert_eq!(
+            native.request.durable_intent_fingerprint(native.user_id),
+            legacy.request.durable_intent_fingerprint(legacy.user_id)
+        );
+        let mut service = native.clone();
+        service.request.vod_only = true;
+        assert_ne!(
+            native.request.durable_intent_fingerprint(native.user_id),
+            service.request.durable_intent_fingerprint(service.user_id)
+        );
+        let encoded = serde_json::to_vec(&service).expect("worker and durable envelope");
+        let mut recovered: RemoteStartRequest =
+            serde_json::from_slice(&encoded).expect("policy round trip");
+        assert!(recovered.request.vod_only);
+        assert!(recovered.is_valid());
+        recovered.request.presentation = crate::transcode::Presentation::Live;
+        assert!(!recovered.is_valid());
+        assert!(
+            !takeover_recipe_is_valid(&recovered),
+            "takeover cannot turn VOD-only into rolling"
         );
     }
 

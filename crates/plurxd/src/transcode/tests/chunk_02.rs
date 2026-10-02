@@ -16,6 +16,7 @@
         let copy = |convert: bool| SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "p".to_owned(),

@@ -207,6 +207,7 @@ impl CreateSession {
         crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,
