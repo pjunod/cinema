@@ -529,7 +529,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "claim_analysis_request_compatible",
+        method: "claim_analysis_request_for_capacity",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
