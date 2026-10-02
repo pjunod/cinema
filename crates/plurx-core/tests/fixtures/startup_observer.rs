@@ -92,19 +92,53 @@ where
 
 #[derive(Default)]
 pub struct MeasuredPeers {
-    managers: std::sync::Mutex<Vec<MembershipManager>>,
-    tasks: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    managers: std::sync::Mutex<Vec<(String, MembershipManager)>>,
+    tasks: std::sync::Mutex<Vec<(String, tokio::task::JoinHandle<()>)>>,
 }
 
 impl Drop for MeasuredPeers {
     fn drop(&mut self) {
-        for task in self.tasks.get_mut().expect("test task ownership") {
+        for (_, task) in self.tasks.get_mut().expect("test task ownership") {
             task.abort();
         }
     }
 }
 
 impl MeasuredPeers {
+    pub async fn stop_node(&self, node: &str) {
+        let mut stopped = Vec::new();
+        {
+            let mut tasks = self.tasks.lock().expect("test task ownership");
+            let mut index = 0;
+            while index < tasks.len() {
+                if tasks[index].0 == node {
+                    stopped.push(tasks.swap_remove(index).1);
+                } else {
+                    index += 1;
+                }
+            }
+            self.managers
+                .lock()
+                .expect("test managers")
+                .retain(|(id, _)| id != node);
+        }
+        // These are test-owned HTTP/prober tasks, never durable storage workers.
+        for task in &stopped {
+            task.abort();
+        }
+        for task in stopped {
+            if let Err(error) = task.await {
+                if error.is_panic() {
+                    std::panic::resume_unwind(error.into_panic());
+                }
+                assert!(
+                    error.is_cancelled(),
+                    "unexpected test task failure: {error}"
+                );
+            }
+        }
+    }
+
     pub fn route(manager: MembershipManager) -> axum::Router {
         axum::Router::new()
             .route(CLOCK_PATH, axum::routing::get(measured_clock))
@@ -133,7 +167,7 @@ impl StartupClockObserver for MeasuredObserver<'_> {
     fn start(
         &self,
         manager: MembershipManager,
-        _node: String,
+        node: String,
     ) -> Pin<Box<dyn Future<Output = Result<(), StoreError>> + Send + '_>> {
         Box::pin(async move {
             if let Some(bind) = self.bind {
@@ -145,38 +179,44 @@ impl StartupClockObserver for MeasuredObserver<'_> {
                     .tasks
                     .lock()
                     .expect("test listener ownership")
-                    .push(tokio::spawn(async move {
-                        axum::serve(listener, route)
-                            .await
-                            .expect("test clock listener");
-                    }));
+                    .push((
+                        node.clone(),
+                        tokio::spawn(async move {
+                            axum::serve(listener, route)
+                                .await
+                                .expect("test clock listener");
+                        }),
+                    ));
             }
             self.owner
                 .managers
                 .lock()
                 .expect("test managers")
-                .push(manager.clone());
+                .push((node.clone(), manager.clone()));
             self.owner
                 .tasks
                 .lock()
                 .expect("test probe ownership")
-                .push(tokio::spawn(async move {
-                    let mut next_periodic = tokio::time::Instant::now();
-                    loop {
-                        // Match the daemon's ten-second periodic cadence.
-                        // An actually refused guard demands a fresh real
-                        // exchange after applied membership changes. Never
-                        // replace safe original tickets every polling tick.
-                        if tokio::time::Instant::now() >= next_periodic
-                            || manager.clock_guard().acquire().is_err()
-                        {
-                            measured_round(&manager).await;
-                            next_periodic =
-                                tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                .push((
+                    node,
+                    tokio::spawn(async move {
+                        let mut next_periodic = tokio::time::Instant::now();
+                        loop {
+                            // Match the daemon's ten-second periodic cadence.
+                            // An actually refused guard demands a fresh real
+                            // exchange after applied membership changes. Never
+                            // replace safe original tickets every polling tick.
+                            if tokio::time::Instant::now() >= next_periodic
+                                || manager.clock_guard().acquire().is_err()
+                            {
+                                measured_round(&manager).await;
+                                next_periodic = tokio::time::Instant::now()
+                                    + std::time::Duration::from_secs(10);
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                }));
+                    }),
+                ));
             // The selector's unchanged original deadline bounds this await.
             // Both real local and coordinator guards must observe the newly
             // committed member before the selector attempts promotion.
@@ -187,7 +227,7 @@ impl StartupClockObserver for MeasuredObserver<'_> {
                     .lock()
                     .expect("test managers")
                     .iter()
-                    .all(|manager| manager.clock_guard().acquire().is_ok());
+                    .all(|(_, manager)| manager.clock_guard().acquire().is_ok());
                 if ready {
                     return Ok(());
                 }
@@ -318,6 +358,7 @@ async fn measured_round(manager: &MembershipManager) {
         let Ok(body) = response.bytes().await else {
             return;
         };
+        let observed_at = std::time::Instant::now();
         let t4 = now_ms();
         let mut payload = 200_u16.to_be_bytes().to_vec();
         payload.extend_from_slice(&body);
@@ -350,7 +391,7 @@ async fn measured_round(manager: &MembershipManager) {
             PeerClockOffset::Bounded {
                 offset_us: (answer.received_unix_ms - t1 + answer.sent_unix_ms - t4) * 500,
                 uncertainty_us: rtt * 500 + 1000,
-                observed_at: std::time::Instant::now(),
+                observed_at,
             },
         );
     }
