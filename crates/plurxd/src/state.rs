@@ -3295,6 +3295,7 @@ impl JobManager {
                 clock_ms(),
                 retry_failed,
                 DV_CONVERSION_QUEUE_BATCH_MAX,
+                true,
             )
             .await
     }
@@ -3417,6 +3418,7 @@ impl JobManager {
                             clock_ms(),
                             false,
                             DV_CONVERSION_QUEUE_BATCH_MAX,
+                            false,
                         )
                         .await?;
                     if !loss.is_cancelled() {

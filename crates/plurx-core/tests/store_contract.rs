@@ -11314,8 +11314,35 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
 /// `IF NOT EXISTS`, so their objects are left in place and replay cleanly.
 /// One list, so the next non-idempotent migration is reversed in one place.
 #[cfg(feature = "hiqlite-contract-tests")]
+async fn downgrade_dv_request_provenance(client: &Client) {
+    client
+        .txn([
+            (
+                "DROP TRIGGER dv_queue_admission_settings_ai",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN requested_manually",
+                hiqlite::params!(),
+            ),
+            (
+                plurx_core::store::validation_pre_provenance_admission_trigger(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("rewind conversion provenance")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit provenance rewind");
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
 fn post_v39_downgrade_statements() -> Vec<(&'static str, hiqlite::Params)> {
     [
+        "DROP TRIGGER dv_queue_admission_settings_ai",
+        "ALTER TABLE dv_conversions DROP COLUMN requested_manually",
+        plurx_core::store::validation_pre_provenance_admission_trigger(),
         "ALTER TABLE files DROP COLUMN downloaded_subtitles",
         "ALTER TABLE files DROP COLUMN luminance_source",
         "ALTER TABLE files DROP COLUMN mastering_max_luminance",
@@ -12159,7 +12186,9 @@ fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
         conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
             .expect("populated upgrade workload");
         conn.execute_batch(
-            "DROP INDEX analysis_requests_result_target_force; PRAGMA user_version = 87;",
+            "DROP INDEX analysis_requests_result_target_force;
+             ALTER TABLE dv_conversions DROP COLUMN requested_manually;
+             PRAGMA user_version = 87;",
         )
         .expect("pre-index upgrade source");
     }
@@ -12399,7 +12428,7 @@ async fn replicated_v23_store_migrates_the_conversion_ledger_on_daemon_open() {
         .await
         .expect("inspect conversion ledger");
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].value, 10);
+    assert_eq!(rows[0].value, 11);
 }
 
 /// A v25 store gains the attempt history on the next daemon open, and every
@@ -13034,7 +13063,7 @@ async fn replicated_v24_store_migrates_recovery_guards_and_rejects_malformed_sha
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_conversions')",
-            10,
+            11,
         ),
         (
             "SELECT COUNT(*) AS value FROM pragma_table_info('dv_recovery_guards')",
@@ -16489,7 +16518,11 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
         0
     );
     connection
-        .execute_batch("DELETE FROM background_job_migration; PRAGMA user_version = 70;")
+        .execute_batch(
+            "DELETE FROM background_job_migration;
+            ALTER TABLE dv_conversions DROP COLUMN requested_manually;
+            PRAGMA user_version = 70;",
+        )
         .expect("stage pre-queue fixture");
     drop(connection);
     let upgraded = SqliteStore::open(&source_path).expect("apply common queue migration");
@@ -16996,6 +17029,7 @@ async fn sqlite_import_refuses_unrecoverable_committed_claims_before_raft_and_re
             "DROP INDEX dv_conversions_recovery_guard;
              DROP TABLE dv_recovery_guards;
              ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
+             ALTER TABLE dv_conversions DROP COLUMN requested_manually;
              PRAGMA user_version = 43;",
         )
         .expect("downgrade malformed fixture to exact v43 shape");
@@ -19822,6 +19856,18 @@ async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutatio
     }
     client
         .txn(vec![
+            (
+                "DROP TRIGGER dv_queue_admission_settings_ai".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE dv_conversions DROP COLUMN requested_manually".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                plurx_core::store::validation_pre_provenance_admission_trigger().to_owned(),
+                hiqlite::params!(),
+            ),
             (
                 "DROP INDEX analysis_requests_result_target_force".to_owned(),
                 hiqlite::params!(),
@@ -27246,7 +27292,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             "{backend}: Off mode must not create a ledger row"
         );
         let off_batch = store
-            .queue_library_dv_conversion_batch(library.id, 99, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 99, false, 1, true)
             .await
             .expect_err("off mode refuses library batch admission");
         assert!(
@@ -27283,13 +27329,13 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("ineligible HLG"));
 
         let first = store
-            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1, false)
             .await
             .expect("first bounded auto queue");
         assert_eq!(first.queued, 1, "{backend}");
         assert!(first.saturated, "{backend}");
         let second = store
-            .queue_library_dv_conversion_batch(library.id, 101, false, 1)
+            .queue_library_dv_conversion_batch(library.id, 101, false, 1, false)
             .await
             .expect("second bounded auto queue");
         assert_eq!(second.queued, 1, "{backend}");
@@ -27333,6 +27379,13 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .await
             .expect("bounded ledger projection");
         assert_eq!(ledgers.len(), 3, "{backend}");
+        for row in &ledgers {
+            assert_eq!(
+                row.requested_manually,
+                row.file_id == p7_race,
+                "{backend}: admission origin"
+            );
+        }
         assert!(ledgers
             .windows(2)
             .all(|rows| rows[0].file_id < rows[1].file_id));
@@ -27397,7 +27450,7 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
             .expect("failed"));
         assert_eq!(
             store
-                .queue_library_dv_conversion_batch(library.id, 103, false, 64)
+                .queue_library_dv_conversion_batch(library.id, 103, false, 64, true)
                 .await
                 .expect("auto does not retry")
                 .queued,
@@ -27464,12 +27517,21 @@ async fn dv_conversion_contract_runs_through_dyn_store() {
         );
         assert_eq!(
             store
-                .queue_library_dv_conversion_batch(library.id, 105, true, 64)
+                .queue_library_dv_conversion_batch(library.id, 105, true, 64, true)
                 .await
                 .expect("manual retry")
                 .queued,
             1,
             "{backend}: the operator can retry a corrected source"
+        );
+        assert!(
+            store
+                .dv_conversion(p7)
+                .await
+                .expect("retried ledger")
+                .expect("admitted retry has a ledger")
+                .requested_manually,
+            "{backend}: explicit batch retry replaces automatic provenance"
         );
         assert!(store
             .mark_dv_conversion_running(p7, 80_000)
@@ -28101,7 +28163,7 @@ async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
         }
 
         let initial = store
-            .queue_library_dv_conversion_batch(library.id, 100, false, 2)
+            .queue_library_dv_conversion_batch(library.id, 100, false, 2, true)
             .await
             .expect("queue initial bounded prefix");
         assert_eq!(initial.queued, 2, "{backend}");
@@ -28118,7 +28180,7 @@ async fn dv_conversion_retry_batch_does_not_starve_never_queued_files() {
         }
 
         let retry = store
-            .queue_library_dv_conversion_batch(library.id, 102, true, 2)
+            .queue_library_dv_conversion_batch(library.id, 102, true, 2, true)
             .await
             .expect("retry bounded prefix without starving new work");
         assert_eq!(retry.queued, 2, "{backend}");
@@ -34837,6 +34899,35 @@ async fn replicated_schema_marker(client: &Client) -> i64 {
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
+    async fn rewind_non_idempotent_columns(client: &Client) {
+        downgrade_dv_request_provenance(client).await;
+        // v60 also adds a column. Remove its dependent triggers before replaying
+        // that step, including when the v48 index migration itself is a no-op.
+        client
+            .txn([
+                (
+                    "DROP TRIGGER background_transcode_producer_recorded",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_transcode_producer_backfill",
+                    hiqlite::params!(),
+                ),
+                (
+                    "DROP TRIGGER background_job_verify_transcode_command",
+                    hiqlite::params!(),
+                ),
+                (
+                    "ALTER TABLE background_transcode_artifacts DROP COLUMN producer_payload",
+                    hiqlite::params!(),
+                ),
+            ])
+            .await
+            .expect("rewind producer provenance")
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .expect("commit producer provenance rewind");
+    }
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -34865,6 +34956,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
         "a fresh cluster is created with them"
     );
 
+    rewind_non_idempotent_columns(&client).await;
     let mut rewind = ITEM_READ_INDEXES
         .iter()
         .map(|index| (format!("DROP INDEX {index}"), hiqlite::params!()))
@@ -34905,6 +34997,7 @@ async fn replicated_v47_store_migrates_the_read_indexes_on_daemon_open() {
     // The indexes present with the marker behind: the step is `IF NOT
     // EXISTS` throughout, so a repeated attempt moves the marker instead of
     // refusing.
+    rewind_non_idempotent_columns(&client).await;
     client
         .txn([(
             "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
