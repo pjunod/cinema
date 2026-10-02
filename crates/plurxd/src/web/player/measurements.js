@@ -725,10 +725,25 @@ function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.n
 function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 // Artwork with a graceful fallback: initials on a tinted card when there's
 // no poster (so a seasons grid never shows blank rectangles).
-function artHtml(it, cls){
+function gridPosterSource(it){
+  const src=it.poster;
+  if(it.kind==='photo'||typeof src!=='string'||!Array.isArray(it.poster_sizes)
+      ||!it.poster_sizes.includes('w300')
+      ||!it.poster_sizes.every(size=>['w300','w500','w780'].includes(size))) return src;
+  // Only the advertised poster endpoint opts in. Keep explicit size choices,
+  // revision/query identity and non-poster artwork unchanged.
+  if(!/^\/api\/v1\/images\/[^/?#]+(?:\?[^#]*)?(?:#.*)?$/.test(src)) return src;
+  const hashAt=src.indexOf('#');
+  const address=hashAt<0?src:src.slice(0,hashAt);
+  const fragment=hashAt<0?'':src.slice(hashAt);
+  const queryAt=address.indexOf('?');
+  if(queryAt>=0&&new URLSearchParams(address.slice(queryAt+1)).has('size')) return src;
+  return address+(queryAt<0?'?':'&')+'size=w300'+fragment;
+}
+function artHtml(it, cls, gridPoster=false){
   // A photo whose thumbnail hasn't been generated yet still has itself to
   // show — the endpoint falls back to the original.
-  const src=it.poster||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
+  const src=(gridPoster?gridPosterSource(it):it.poster)||it.backdrop||(it.kind==='photo'?`/api/v1/items/${it.id}/photo?size=thumb`:null);
   // `decoding="async"` keeps a grid of posters off the main thread's critical
   // path: the browser may decode each image whenever it likes instead of
   // blocking the paint that reveals the card. It is advisory and understood
