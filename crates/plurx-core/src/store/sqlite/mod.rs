@@ -1189,6 +1189,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::PREPARATION_INDEX_SCHEMA,
     // v90: distinguish explicit conversion attempts from automatic discovery.
     super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
+    // v91: transactional playback planning settings generation.
+    super::PLAYBACK_INPUT_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2943,9 +2945,10 @@ mod tests {
         // v86 compacts settled receipts under waiter pressure; v87 adds
         // expiring viewer interests through analysis and artifacts; v88 adds the
         // unconditional result-key/target/force index for bounded cleanup.
-        // v89 indexes preparation history; v90 records explicit DV requests.
+        // v89 indexes preparation history; v90 records explicit DV requests;
+        // v91 records transactional planning generation.
         assert_eq!(
-            version, 90,
+            version, 91,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

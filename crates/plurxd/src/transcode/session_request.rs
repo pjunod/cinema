@@ -480,6 +480,9 @@ pub struct SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -493,7 +496,9 @@ pub struct CandidateExecutionContext {
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     #[serde(skip)]
-    pub candidate_context: Option<CandidateExecutionContext>,
+    pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
+    #[serde(skip)]
+    pub candidate_context: Option<Box<CandidateExecutionContext>>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,

@@ -35,6 +35,9 @@ use super::{AudioSink, DeviceProfile};
 /// This is what the `hdr` and `hdr10t` flags were each half of. `Pq` covers
 /// HDR10 and HDR10+, which differ only in dynamic metadata the display reads;
 /// `Hlg` is a different curve and a different answer.
+pub const MAX_CLIENT_DECODER_ENTRIES: usize = 64;
+pub const DECODER_COMPACTION_CONTRACT: &str = "compact-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transfer {
@@ -222,6 +225,10 @@ pub struct LearnedLimit {
 /// echo.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DeviceCaps {
+    /// Advertised only after the server negotiates compact-v1. Legacy v2 alone
+    /// makes no entry-count promise and retains direct/copy/manual admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoder_compaction: Option<String>,
     /// Document version. `2` is this shape; anything else is refused rather
     /// than guessed at.
     #[serde(default)]
@@ -367,6 +374,7 @@ impl DeviceCaps {
             })
             .collect();
         Self {
+            decoder_compaction: None,
             // A legacy query has no slot for an overlay claim, so this is
             // empty — but a reader must not take that as a refusal. The
             // legacy path is a MIXED-FLEET path, not an old-client one: both

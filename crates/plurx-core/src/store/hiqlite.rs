@@ -154,7 +154,9 @@ const PREPARATION_INDEX_SCHEMA_VERSION: i64 = 67;
 const PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION;
 const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
 const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
+const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
+const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1606,6 +1608,9 @@ impl HiqliteAuthStore {
         // installed here too: the store contract
         // `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
         // compares the two object for object and fails when they drift.
+        for result in timeout_store(client.batch(super::PLAYBACK_INPUT_SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
@@ -3133,6 +3138,9 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
+                    Box::pin(self.migrate_playback_inputs()).await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3140,6 +3148,21 @@ impl HiqliteAuthStore {
                 }
             }
         }
+    }
+
+    // Isolate each new migration state machine from the large version dispatcher.
+    async fn migrate_playback_inputs(&self) -> Result<(), StoreError> {
+        let now = self.now()?;
+        for result in self.client().batch(super::PLAYBACK_INPUT_SCHEMA).await? {
+            result.map_err(database_error)?;
+        }
+        let attempt = self.client().txn(vec![(
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
+                    )]).await;
+        self.settle_migration_attempt(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE, attempt)
+            .await?;
+        Ok(())
     }
 
     /// A second voter can observe the same predecessor before the first
@@ -5183,7 +5206,8 @@ fn schema_migration_action(
         | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE
         | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
-        | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE => {
+        | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
+        | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -5677,6 +5701,51 @@ dump_row!(MediaSessionTerminalAckDumpRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_generation_covers_tied_updates_deletes_import_and_rollback() {
+        let conn = rusqlite::Connection::open_in_memory().expect("database");
+        conn.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);").expect("settings");
+        conn.execute_batch(super::super::PLAYBACK_INPUT_SCHEMA)
+            .expect("generation schema");
+        let generation = || {
+            conn.query_row(
+                "SELECT generation FROM playback_input_generation WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("generation")
+        };
+        conn.execute(
+            "INSERT INTO settings VALUES('playback.audio_lang', 'eng', 1)",
+            [],
+        )
+        .expect("insert");
+        assert_eq!(generation(), 1);
+        conn.execute(
+            "UPDATE settings SET value = 'fra' WHERE key = 'playback.audio_lang'",
+            [],
+        )
+        .expect("tied update");
+        assert_eq!(generation(), 2);
+        conn.execute("DELETE FROM settings WHERE key = 'playback.audio_lang'", [])
+            .expect("delete");
+        assert_eq!(generation(), 3);
+        conn.execute_batch(
+            "BEGIN; INSERT INTO settings VALUES('transcode.hwaccel', 'vaapi', 1); ROLLBACK;",
+        )
+        .expect("rollback");
+        assert_eq!(generation(), 3);
+        conn.execute_batch("INSERT INTO settings VALUES('jobs.last_scan', '2', 1);")
+            .expect("job write");
+        assert_eq!(generation(), 3);
+        // Raw SQL is the import/migration path, so it must also bump atomically.
+        conn.execute_batch(
+            "BEGIN; INSERT INTO settings VALUES('transcode.hwaccel', 'qsv', 1); COMMIT;",
+        )
+        .expect("import");
+        assert_eq!(generation(), 4);
+    }
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
@@ -7234,9 +7303,9 @@ mod tests {
             "v67 advances exactly one step to request provenance"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 63,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 64,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v68 step"
+            "this implementation contains every additive v5→v69 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

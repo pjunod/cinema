@@ -1281,6 +1281,15 @@ mod tests {
         crate::queue_fixture::remove_common_queue_schema(&connection);
         connection
             .execute_batch(
+                "DROP TRIGGER IF EXISTS playback_settings_insert;
+             DROP TRIGGER IF EXISTS playback_settings_update;
+             DROP TRIGGER IF EXISTS playback_settings_delete;
+             DROP TABLE IF EXISTS playback_input_generation;
+             ",
+            )
+            .expect("remove v91 planning generation");
+        connection
+            .execute_batch(
                 // Everything v44 and later built has to go, or the replayed
                 // migration meets its own leftovers instead of a v43 database:
                 // v44's recovery guards, v45's negative index, v46's attempt
@@ -1468,7 +1477,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 46] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 47] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1556,6 +1565,7 @@ mod tests {
             // which also removes v89's source-scoped preparation index.
             "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
             "ADD COLUMN requested_manually",
+            "CREATE TABLE IF NOT EXISTS playback_input_generation",
         ];
 
         assert!(

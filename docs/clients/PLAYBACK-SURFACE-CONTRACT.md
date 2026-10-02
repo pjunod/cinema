@@ -437,7 +437,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 9 | `vod_transcode_unavailable` | start | `stopped` | yes | class default | – |  |
 | 10 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default | – |  |
 | 11 | `vod_disabled` | start | `stopped` | yes | class default | – |  |
-| 12 | `create_503_not_yet` | start | `preparing` | no | class default | – | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending`; retryable by the owner (M5) |
+| 12 | `create_503_not_yet` | start | `preparing` | no | class default | – | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested` · `transcode_capacity_pending` · `quality_catalog_unavailable`; retryable by the owner (M5) |
 | 13 | `client_preparing` | any | `preparing` | no | class default | – |  |
 | 14 | `change_failed` | change | `refused` | no | `retry` | – |  |
 | 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | – | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |

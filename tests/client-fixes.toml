@@ -3298,3 +3298,19 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = 'class="pseek-arrows"'
 test = "tests/playback/seek-control.test.js"
 test_anchor = "10 and 30 second buttons accumulate mixed taps and clamp at title bounds"
+
+[[fixes]]
+id = "android.tcl-decoder-envelope-compaction"
+commits = ["067021dc8"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun compactVideoEntries(rows: List<VideoEntry>): List<VideoEntry>"
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "fun mediatekRegistryCompactsThroughActualWirePolicyWithoutDroppingProfiles()"
+
+[[fixes]]
+id = "apple.catalog-discovery-existing-retry-owner"
+commits = ["56e52c50e", "3b13d6acf"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = '"quality_catalog_unavailable",'
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testOnlyTheContractsNotYetCodesAreRetried() throws"

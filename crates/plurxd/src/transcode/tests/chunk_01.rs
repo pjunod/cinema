@@ -1955,6 +1955,7 @@
             Pipeline::Cpu,
         ));
         let req = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -2023,6 +2024,7 @@
             Arc::clone(&store), dir.path().to_owned(), EncoderCaps::default(), Pipeline::Cpu,
         );
         let mut req = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -3096,6 +3098,7 @@
     #[test]
     fn the_grade_is_part_of_a_request_identity() {
         let request = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 5,
@@ -3115,6 +3118,7 @@
             transport: None,
         };
         let hdr10 = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             hdr10: true,
             ..request.clone()

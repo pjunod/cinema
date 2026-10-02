@@ -1741,6 +1741,7 @@ enum PlaybackCreateRetry {
         "vod_index_pending",
         "vod_engine_unattested",
         "transcode_capacity_pending",
+        "quality_catalog_unavailable",
     ]
 
     enum Step: Equatable {
