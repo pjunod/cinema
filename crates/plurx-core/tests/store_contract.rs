@@ -20,6 +20,9 @@ use queue_fixture::QueueFixture;
 
 #[path = "store_contract/background_jobs.rs"]
 mod background_jobs;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "store_contract/session_principals.rs"]
+mod session_principals;
 #[path = "store_contract/sharing.rs"]
 mod sharing;
 

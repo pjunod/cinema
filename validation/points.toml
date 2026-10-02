@@ -1151,6 +1151,10 @@ contract = "Invitation consumption, export scope, credential rotation, receiver 
 paths = [
   "crates/plurx-core/src/sharing.rs",
   "crates/plurx-core/src/playback_principal.rs",
+  "crates/plurx-core/src/store/session_principal_rebuild.sql",
+  "crates/plurx-core/src/store/session_principal_tests.rs",
+  "crates/plurx-core/tests/fixtures/session-principal-local.sql",
+  "crates/plurx-core/tests/store_contract/session_principals.rs",
   "crates/plurx-core/src/sharing_tls.rs",
   "crates/plurx-core/src/sharing_dns.rs",
   "crates/plurxd/src/sharing.rs",

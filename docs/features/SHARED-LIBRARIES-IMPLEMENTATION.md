@@ -1671,7 +1671,9 @@ non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
 
 The unpublished S3 worktree starts from local S2 checkpoint `269900c6a`;
 its final review branch must be ported to the current gated effort. The
-primary checkout and the S2 compiler archive remain untouched.
+primary checkout remains untouched. The S2 disabled-import fix was subsequently
+ported into this worktree, and its exact `6b2c69dbb` archive passed the pinned
+Linux recovery and disabled-import refusal tests (0.49 and 0.20 seconds).
 
 `PlaybackPrincipal` now distinguishes a real local numeric user from a grant
 UUID and validated 64-character viewer pseudonym. Only its constructor
@@ -1691,4 +1693,35 @@ migration acceptance is claimed.
 ```sh
 cargo test --locked -p plurx-core --features hiqlite-store --lib playback_principal::tests -- --nocapture
 cargo clippy --locked -p plurx-core --features hiqlite-store --lib -- -D warnings
+```
+
+**Candidate ownership rebuild:** a frozen seven-table rebuild is now exercised
+against SQLite v92 and the actual three-voter replicated v70 schema. It
+backfills canonical local keys, changes all six ownership composite primary
+keys, keeps the incarnation/session namespace, adds checked nullable principal
+projections, and preserves every pre-existing column in the populated fixture.
+The Library-channel session-recipe table is the seventh ownership table.
+Terminal acknowledgements and job leases remain unchanged and retained rows
+stay FK-free. Existing desired-revision, drain, publication, recipe-retirement
+and background-viewer triggers are recreated; the latter also require
+principal-aware joins across the rebuilt tables.
+
+Three SQLite tests passed. The replicated case passed in 9.39 seconds after
+one fixture correction: Hiqlite requires explicit user `is_admin`/`created_at`
+values where SQLite has defaults. A failing final write rolls the entire
+replicated DDL/backfill transaction back, then the successful transaction
+retains the original data. Both engines refuse an old local insert which
+omits `owner_key` and an upsert using the old `(user_id, request_id)` conflict
+target. These are SQL-shape probes, not execution of an old daemon binary.
+They provide evidence for the coordinated-drain fallback; they do not qualify
+a live upgrade, the membership floor or backup restoration.
+
+The rebuild is not installed in the runtime migration chain. The remaining
+S3 work is the principal-aware Store/runtime conversion, owner-existence and
+admission checks, full predicate/decoder census, cluster floor and forwarding,
+actual old-binary and rollback qualification. Shared playback remains unavailable.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals::sharing_principal_rebuild_is_atomic_and_preserves_rows_on_three_voters -- --exact --nocapture
 ```

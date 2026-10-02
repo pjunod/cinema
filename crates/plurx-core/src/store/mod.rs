@@ -314,6 +314,14 @@ ALTER TABLE files ADD COLUMN max_fall INTEGER;
 ALTER TABLE files ADD COLUMN mastering_max_luminance INTEGER;
 ALTER TABLE files ADD COLUMN luminance_source TEXT CHECK (luminance_source IN ('stream','frame','none'));";
 
+/// Frozen ownership rebuild; both backends must install the same statements.
+/// Incompatible writers must be drained before applying this schema.
+pub const MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA: &str =
+    include_str!("session_principal_rebuild.sql");
+
+#[cfg(all(test, feature = "hiqlite-store"))]
+mod session_principal_tests;
+
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
 /// One statement, because SQLite's append-only migration list keeps one
