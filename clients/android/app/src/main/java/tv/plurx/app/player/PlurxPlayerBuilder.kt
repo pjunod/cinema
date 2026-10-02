@@ -29,6 +29,7 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
         dataSource: DataSource.Factory,
         audioLanguage: String? = null,
         transferListener: TransferListener? = null,
+        continuousSources: ContinuousSourceRegistry? = null,
     ): ExoPlayer {
         require(role != PlayerRole.Offline || dataSource is CacheDataSource.Factory) {
             "Offline playback requires a cache-only data source"
@@ -41,7 +42,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             }
             dataSource.setTransferListener(transferListener)
         }
-        val selector = DefaultTrackSelector(context).apply {
+        val selector = (if (continuousSources == null) DefaultTrackSelector(context)
+            else DefaultTrackSelector(context, ContinuousTrackSelectionFactory(continuousSources::binding))).apply {
             parameters = buildUponParameters()
                 .setPreferredAudioLanguage(audioLanguage)
                 .setTunnelingEnabled(

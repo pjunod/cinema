@@ -27,6 +27,9 @@ internal class ContinuousVideoSelection(family: JsonObject, private val protocol
     }
     private val rows = this.family.getValue("video").jsonArray.map { it.jsonObject }
     private val choice = AtomicReference<ReservedVideoChoice?>(null)
+    private val supported = AtomicReference<Set<String>>(emptySet())
+
+    fun supportedRenditions(): Set<String> = supported.get()
     private val selections = IdentityHashMap<TrackGroup, ContinuousRenditionSelection>()
 
     fun publishReserved(throughTick: Long, automatic: Boolean): Boolean {
@@ -68,7 +71,9 @@ internal class ContinuousVideoSelection(family: JsonObject, private val protocol
             val format = group.getFormat(index)
             rows.singleOrNull { matches(format, it) }?.text("rendition_id") ?: return null
         }
-        if (mapping.values.toSet().size != mapping.size || wanted.renditionId !in mapping.values) return null
+        if (mapping.values.toSet().size != mapping.size) return null
+        supported.set(mapping.values.toSet())
+        if (wanted.renditionId !in mapping.values) return null
         val old = selections[group]
         if (old != null && old.matches(definition.tracks, definition.type)) return old
         if (selections.size >= 8 && old == null) return null

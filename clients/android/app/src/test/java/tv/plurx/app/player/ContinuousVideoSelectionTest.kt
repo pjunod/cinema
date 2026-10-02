@@ -91,7 +91,9 @@ class ContinuousVideoSelectionTest {
         assertFalse(binding.publishReserved(48, automatic = false))
         val group = TrackGroup(format(720, 1_000_000), format(1080, 2_000_000))
         val definition = androidx.media3.exoplayer.trackselection.ExoTrackSelection.Definition(group, 0, 1)
+        assertTrue(binding.supportedRenditions().isEmpty())
         val selected = requireNotNull(binding.selection(definition))
+        assertEquals(setOf("b".repeat(64), "c".repeat(64)), binding.supportedRenditions())
         assertEquals(720, selected.selectedFormat.height)
         assertSame(selected, binding.selection(definition))
     }

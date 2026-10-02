@@ -2973,3 +2973,44 @@ not unlock it automatically. Safari qualification is pending a manual unlock.
 The isolated nuc3 source transfer remains pending explicit destination
 authorization following automatic approval rejection. Independent native
 source work continues while those qualification paths are unavailable.
+
+
+### 10.96 Android connects reserved loading to actual queue acceptance
+
+The controlled data source uses a captured-profile upstream, confines every
+request to the owning parent and family playlists, reserves cold video before
+its GET, and reserves missing AAC pins using the actual decode clock. It
+verifies the complete immutable artifact before exposing any retry slice;
+inherited Range headers cannot turn that verification into a partial read.
+Media payloads remain bounded at 16 MiB and VOD playlists at 2 MiB. Pending
+reservation cancellation and final byte publication share a lifetime fence.
+Loader-thread provenance remains available until close, including extractor
+callbacks after a read returns. It carries the actual attachment owner.
+
+The reservation owner serializes initial and changed demand, schedules exact
+ready intervals before publishing the retained selection, and refuses an
+unsupported target before preparing it. Actual supported formats are
+published from the selection thread as an immutable snapshot. On uncertain
+optional admission the previous demand is retained; pending ordering must be
+replayed before a restorative preparation can enter the ledger. A failed
+optional admission now attempts that restoration within the caller's remaining
+budget; cancellation propagates to the owning teardown instead.
+
+The extractor wrapper delegates the pinned Media3 implementation and checks
+the queue write index before and after metadata insertion under its monitor.
+Rejected metadata never credits acceptance. Reused extractors use the current
+verified load context rather than the URI from extractor construction. A
+bounded inventory requires extraction EOF, the expected accepted sample
+count and a contiguous single-queue span before crediting an entire append.
+Queue front removal remains distinct from decoder and audio-sink release.
+No requested discard or player clock is treated as physical disposal.
+
+Each constructed player now has its own registry. A wrapped controlled source
+binds selection before creating the actual Media3 period and removes only
+that binding on release. Ordinary periods retain the adaptive selection
+factory. The controller still needs enrollment, quality intent, render/sink
+ownership and teardown integration; these components do not qualify native
+playback by themselves. Production and regression sources compile, including
+reservation ordering, unsupported target retention, retry ranges and actual
+supported-format snapshots. Unit execution remains deferred to the final
+fast lane after adversarial review.
