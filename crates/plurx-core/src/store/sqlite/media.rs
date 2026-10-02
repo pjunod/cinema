@@ -2098,6 +2098,63 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        self.with_conn(move |conn| {
+            let rows = conn
+                .prepare(
+                    "SELECT id, path, size, mtime, probe_json FROM files
+                      WHERE hdr IS NOT NULL AND luminance_source = 'none'
+                        AND probe_json IS NOT NULL AND id > ?1
+                      ORDER BY id LIMIT ?2",
+                )?
+                .query_map(params![after_id, limit.max(0)], |row| {
+                    Ok(MissingVideoCodecTag {
+                        id: row.get(0)?,
+                        path: row.get(1)?,
+                        size: row.get(2)?,
+                        mtime: row.get(3)?,
+                        probe_json: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+    }
+
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET max_cll = ?1, max_fall = ?2,
+                                  mastering_max_luminance = ?3, luminance_source = 'frame'
+                  WHERE id = ?4 AND path = ?5 AND size = ?6 AND mtime = ?7
+                    AND probe_json = ?8 AND luminance_source = 'none'",
+                params![
+                    max_cll,
+                    max_fall,
+                    mastering_max_luminance,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn set_file_dolby_vision(
         &self,
         file_id: i64,

@@ -656,7 +656,9 @@ fn recognized_extensions(library: &Library) -> String {
 /// File size and mtime (unix seconds). The `io::Error` is kept rather than
 /// flattened to `None` so a stat failure can tell the operator *why* (denied,
 /// dangling symlink, vanished mid-scan) instead of just incrementing a counter.
-async fn file_stat(path: &Path) -> std::io::Result<(i64, i64)> {
+/// A file's catalogue identity on disk: size in bytes and mtime in whole
+/// seconds, the two values every scan stores and compares.
+pub async fn file_stat(path: &Path) -> std::io::Result<(i64, i64)> {
     let meta = tokio::fs::metadata(path).await?;
     let size = meta.len() as i64;
     let mtime = meta
