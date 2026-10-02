@@ -91,6 +91,19 @@ COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
 # somebody's television. Debian packages come from one immutable snapshot;
 # Jellyfin's separately published deb is verified against its repository's
 # SHA-256 metadata for each architecture before apt resolves its dependencies.
+#
+# The layer is reproducible: two cold builds of one commit on 2026-10-02
+# differed only in build-time state, so the end of this RUN removes it. Apt,
+# dpkg and alternatives logs are timestamped; ldconfig's aux-cache records
+# inode times; fontconfig's caches embed the font directories' build-time
+# mtimes (which the exporter's timestamp rewrite then contradicts, so they are
+# stale in the shipped image anyway; children rebuild theirs once under their
+# writable XDG_CACHE_HOME). `useradd` stamps the account's last-change day from
+# SOURCE_DATE_EPOCH or the clock, so it is given the Debian snapshot's date,
+# which is already this layer's input; the commit's own time is not, because
+# declaring it here would rebuild this whole layer on every commit.
+# docs/ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md §5.6 has the
+# comparison.
 RUN sed -i \
         -e 's|http://deb.debian.org/debian-security|http://snapshot.debian.org/archive/debian-security/'"${DEBIAN_SNAPSHOT}"'/|' \
         -e 's|http://deb.debian.org/debian|http://snapshot.debian.org/archive/debian/'"${DEBIAN_SNAPSHOT}"'/|' \
@@ -167,8 +180,12 @@ RUN sed -i \
     && mkdir -p /usr/share/doc/plurx \
     && dpkg-query -W -f='${Package}=${Version}\n' | LC_ALL=C sort \
         > /usr/share/doc/plurx/media-runtime-packages.txt \
+    && rm -rf /var/log/apt/* /var/log/*.log /var/cache/ldconfig/aux-cache \
+        /var/cache/fontconfig/*.cache-* \
     && groupadd -r plurx \
-    && useradd -r -g plurx -d /var/lib/plurx plurx \
+    && snapshot_day=$(printf '%s' "$DEBIAN_SNAPSHOT" | cut -c1-8) \
+    && SOURCE_DATE_EPOCH=$(date -u -d "$snapshot_day" +%s) \
+        useradd -r -g plurx -d /var/lib/plurx plurx \
     && mkdir -p /var/lib/plurx \
     && chown plurx:plurx /var/lib/plurx
 
