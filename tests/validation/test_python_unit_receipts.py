@@ -280,6 +280,15 @@ class Case(Helper, unittest.TestCase):
                 with self.assertRaisesRegex(receipts.ReceiptError, "CLI applicability"):
                     receipts.execute(journal(), Path(root) / "receipt.json")
             discovery.assert_not_called()
+        raw_state = {**journal(), "commit": current_commit,
+                     "applicability_commit": current_commit,
+                     "passes": {changed: old_pass}}
+        with patch.object(receipts, "SourceApplicability", return_value=guard()), \
+                patch.object(receipts, "discover") as discovery:
+            with tempfile.TemporaryDirectory() as root:
+                with self.assertRaisesRegex(receipts.ReceiptError, "lack current applicability"):
+                    receipts.execute(raw_state, Path(root) / "receipt.json")
+            discovery.assert_not_called()
         source = Path(receipts.__file__).read_text()
         self.assertIn("applicability=SourceApplicability(commit)", source)
         self.assertIn('"applicability_commit": commit', source)
