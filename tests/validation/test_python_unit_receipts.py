@@ -293,6 +293,55 @@ class Case(Helper, unittest.TestCase):
         self.assertIn("applicability=SourceApplicability(commit)", source)
         self.assertIn('"applicability_commit": commit', source)
 
+    def test_sibling_definition_metadata_binds_fixture_without_replaying_bodies(self):
+        """ONE new local fixture edge; earlier combined success stays retained."""
+        prefix = b'''import unittest
+FLAG = None
+def configure(value):
+    global FLAG
+    FLAG = value
+    return lambda fn: fn
+class Case(unittest.TestCase):
+    def test_kept(self):
+        self.assertTrue(FLAG)
+'''
+        old_commit, current_commit = "a" * 40, "b" * 40
+        path = "tests/validation/test_fixture.py"
+        key = "validation:test_fixture.Case.test_kept"
+        prior = {"commit": old_commit, "run": 10}
+        for declaration, introspect in (
+                (b"    @configure(True)\n    def test_sibling(self):\n", False),
+                (b"    def test_sibling(self, value=configure(True)):\n", False),
+                (b"    def test_sibling(self, *, value=configure(True)):\n", False),
+                (b"    def test_sibling(self, value: configure(True)):\n", True),
+                (b"    def test_sibling(self) -> configure(True):\n", True),
+                (b"    @configure(True)\n    async def test_sibling(self):\n", False)):
+            with self.subTest(declaration=declaration):
+                old = prefix + declaration + b"        pass\n"
+                changed = old.replace(b"configure(True)", b"configure(False)")
+                # Execute only this controlled fixture's class definitions, not
+                # any repository or fixture test method. Python may defer an
+                # annotation until inspection; its fixture effect is still bound.
+                for raw, expected in ((old, True), (changed, False)):
+                    namespace = {}
+                    exec(compile(raw, "owned-synthetic-fixture", "exec"), namespace)
+                    if introspect:
+                        namespace["Case"].test_sibling.__annotations__
+                    self.assertIs(namespace["FLAG"], expected)
+                source = {(old_commit, path): old, (current_commit, path): changed}
+                def guard():
+                    return receipts.SourceApplicability(
+                        current_commit, lambda commit, name: source[commit, name],
+                        lambda name: source[current_commit, name])
+                invalidated = guard()
+                self.assertFalse(invalidated(key, prior))
+                invalidated.finish({})
+                source[current_commit, path] = old.replace(
+                    b"        pass\n", b"        raise AssertionError('body never executed')\n")
+                preserved = guard()
+                self.assertTrue(preserved(key, prior), "sibling body alone is not fixture metadata")
+                preserved.finish({key: prior})
+
     def test_skip_never_counts_as_success(self):
         state, events = journal(), []
         self.assertEqual(self.execute(state, {

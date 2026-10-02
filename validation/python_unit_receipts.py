@@ -546,13 +546,26 @@ class SourceApplicability:
         require(len({node.name for node in classes}) == len(classes),
                 "Ambiguous unit class definition")
         # Bind helpers, setup/teardown, module fixtures, imports, class bases
-        # and decorators. Omit sibling test methods, not their shared context.
+        # and decorators. Omit sibling bodies, not definition-time effects.
         context = copy.deepcopy(tree)
         for node in context.body:
             if isinstance(node, ast.ClassDef):
-                node.body = [item for item in node.body
-                             if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                             or not item.name.startswith("test")]
+                bound = []
+                for item in node.body:
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) \
+                            and item.name.startswith("test"):
+                        metadata = (item.decorator_list or item.args.defaults
+                                    or any(value is not None for value in item.args.kw_defaults)
+                                    or item.returns is not None or getattr(item, "type_params", [])
+                                    or any(isinstance(arg, ast.arg) and arg.annotation is not None
+                                           for arg in ast.walk(item.args)))
+                        if not metadata:
+                            continue
+                        # Keep ordering/signature and annotation/decorator/default
+                        # expressions; they can mutate fixtures or be introspected.
+                        item.body = [ast.Pass()]
+                    bound.append(item)
+                node.body = bound
                 if not node.body:
                     node.body = [ast.Pass()]
         context_hash = hashlib.sha256(
