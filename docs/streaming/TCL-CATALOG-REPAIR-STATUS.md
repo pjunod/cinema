@@ -1,6 +1,6 @@
 # TCL catalog repair — implementation and evidence
 
-**Status:** post-review validation · **Updated:** 2026-10-02
+**Status:** validation fixes complete; CI policy decision pending · **Updated:** 2026-10-02
 
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
@@ -228,3 +228,23 @@ CI-pinned FFmpeg 6, so the evidence does not claim a green current-head CI run.
 The previous seven non-unit gates remain recorded at `8ff4d6997`. The original
 checkout remains untouched. No physical playback acceptance or deployment is
 claimed. The main workflow policy conflict is the remaining merge decision.
+
+
+Final code commit: `5a4ce349d`; tracked pinned-Rust formatting, all-target
+workspace Clippy and served-JavaScript syntax passed. History and all 15
+Regression-Test fields resolve. Current-source preflight initially hit host
+sandbox restrictions on process inspection and loopback fixtures. Only those
+failed cases were rerun with the necessary permissions: 13 passed; the Linux
+janitor case still failed on macOS because GNU `timeout` is absent there. Its
+unchanged committed script/test were then tested in a temporary Linux container
+with no credentials or .git: the one case passed in 2.03 seconds. The container,
+source extraction and newly pulled image are removed after verification.
+This preserves the passing Linux CI janitor evidence without changing unrelated
+production code. Current validation/operations evidence is complete across
+those targeted reruns; one Linux-only validation case remains represented by
+the prior Linux CI pass rather than a macOS run.
+
+All fixes and this page are published in PR #718. The PR is held as draft
+solely to avoid allocating the unconditional full unit rerun before the user
+resolves the conflict between that workflow and failed-only reruns. No merge
+or green current-head aggregate CI gate is claimed.
