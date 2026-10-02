@@ -1563,7 +1563,13 @@ No production process, firewall or Tailscale setting was used. Regression tests
 also prove a consumed-invitation replay cannot widen narrowed scope, and an
 unchanged scope does not advance the catalogue generation.
 
-**Still owed:** S1 task PR and gate. S2 requires disposable two-NAT/Tailscale
+**Task:** [S1 PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746) targets
+`effort/shared-libraries`. Manual effort run 3884 refused its first catalog
+mapping: the two new store adapters must also select `cluster.auth` in the
+CI scope resolver. That mapping was corrected, and all 253 validation tests
+passed locally (one platform-specific skip). The runtime source is unchanged.
+
+**Still owed:** the gate on the corrected S1 candidate. S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
