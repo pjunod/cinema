@@ -480,7 +480,9 @@ evidence Q11 requires (Shield on the same AVR; a phone on Bluetooth;
 Safari/Chrome on the laptop). The server needs no change.
 
 Acceptance: per client, the M3 observations repeated; a phone claim of 2
-channels produces the M4 stereo matrix path.
+channels produces the M4 stereo matrix path whenever the server encodes for it
+(a DTS/TrueHD source, an A/V offset, or a full transcode of undecodable audio);
+decodable AAC/AC-3/E-AC-3 still direct-plays or copies under decision 6.
 
 **2026-10-02 client claims built (claude-opus-5-5):** Android spells
 `audio_sinks` from the probes it already had — the HDMI sink's PCM channel
@@ -547,21 +549,27 @@ undecodable audio). Device observations remain owed.
    closed before a copy is admitted; missing evidence takes the encode
    fallback.
 4. **No feature gate or setting is added.** The server accepts and reports an
-   evidence-bearing claim, but no shipped client sends one. A Developer toggle
+   evidence-bearing claim; from 2026-10-02 the Apple, Android and web clients
+   send one. A Developer toggle
    would imply an enablement choice where the remaining boundary is physical
    evidence, not preference.
-6. **A decoding client's route does not refuse a copy (2026-10-02).** A
-   sink's channel count is what the route reproduces and decides what the
-   server encodes. A client that decodes the codec mixes any decodable layout
-   down for its own output — what it already does on a direct play — so copy
-   and direct play require the channel count to fit the route only for a
-   bitstream passed through undecoded. Without this, the first stereo phone
-   claim would have turned every 5.1 direct play into a server remux with
-   re-encoded audio.
 5. **Decoder, sink and passthrough are separate authority.** A sink codec does
    not populate the decoder set. Copy requires an explicit decoder plus a
    compatible sink, or a true passthrough claim plus a compatible sink; both
-   require exact source/sink sample-rate agreement.
+   require exact source/sink sample-rate agreement. *(Narrowed by decision 6:
+   the rate rule applies to passthrough only.)*
+6. **A decoding client's route does not refuse a copy (2026-10-02).** A
+   sink's channel count is what the route reproduces and decides what the
+   server encodes. A client that decodes the codec mixes any decodable layout
+   down and resamples any rate for its own output — what it already does on a
+   direct play — so copy and direct play require the channel count and the
+   sample rate to fit only for a bitstream passed through undecoded, and a
+   codec the claim does not mention (DTS, TrueHD, Opus) keeps the codec-list
+   answer. Without this, the first claims would have turned 5.1 direct plays
+   on stereo routes, DTS/TrueHD receiver passthrough, Opus WebM and odd-rate
+   MP3/AAC into server remuxes with re-encoded audio. Server nodes must be
+   updated before clients that send claims (an older server applies the
+   strict rule).
 
 ---
 
