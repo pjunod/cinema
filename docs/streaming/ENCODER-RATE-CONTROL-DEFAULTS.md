@@ -479,13 +479,17 @@ flipped):
 - The pair is tri-state end to end. `GET /api/v1/settings` reports an unset
   mode as `null` and shows what it resolves to beside it
   (`transcode_rate_mode_default`, `transcode_rate_mode_default_encoder`,
-  `transcode_quality_default` — this node's selected family; display only).
+  `transcode_quality_default` — the answering node's selected family, so the
+  web label reads "on this node"; display only).
   `PUT` accepts `{"transcode_rate_mode": null, "transcode_quality": null}` as
   the explicit clear, still as one complete pair; it stores an empty mode,
   which every node reads back as unset. Explicit values and their
   effective-policy snapshots are unchanged. Settings → Playback → Advanced
   server delivery gains an **Encoder rate control** card whose **Default (per
-  encoder)** option saves the clear; no other Save sends the pair.
+  encoder)** option saves the clear; no other Save sends the pair. Its quality
+  value is enabled and sent only with Quality: outside Quality it changes no
+  output but would move the speculative key's `quality:` component and cancel
+  queued rows cluster-wide.
 - `scripts/bench` restores the pair exactly as found: unset as `null`,
   explicit as itself. It refuses, before any mutation, a server whose settings
   response lacks `transcode_rate_mode_default`, because such a server cannot
@@ -501,7 +505,14 @@ flipped):
   (`an_unset_rate_control_pair_keeps_the_explicit_bitrate_policy_generation`
   still pins it), so this deploys without cancelling a queued row; a later
   flip of one family moves exactly the rows that family may claim, and rows
-  queued under an explicit choice keep their identity. A change to a family's
+  queued under an explicit choice keep their identity. One bounded cost
+  belongs to that future flip, not to this change: while its PR rolls out,
+  nodes still on the old binary spell unset auto rows `requested:bitrate` and
+  updated nodes spell the per-family list, so each side cancels
+  (`policy_changed`) the other's queued auto rows until every node runs the
+  new binary. That is the intended re-queue arriving in two waves for the
+  deploy window, not a regression; pinned-family rows of unflipped families
+  and every explicit-choice row are unaffected. A change to a family's
   `default_quality()` is still not spelled in the key (neither unset nor
   explicit-quality-without-override rows move); that is a separate,
   deliberate decision if one is ever made.
