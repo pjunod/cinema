@@ -97,7 +97,10 @@ object Caps {
         }
         val video = videoCodecCaps(videoLimits)
 
-        val audio = audioCodecClaims(decoderMimes, sinkEncodings(context))
+        val encodings = sinkEncodings(context)
+        val audio = audioCodecClaims(decoderMimes, encodings)
+        val sinkFacts = liveSinkFacts(context)
+        val audioSinks = audioSinkClaims(decoderMimes, encodings, sinkFacts.aacChannels)
 
         val hdrTypes = displayHdrTypes(context)
         // Ask the same Media3 decoder selector that ExoPlayer uses. The raw
@@ -131,6 +134,7 @@ object Caps {
         Log.i(
             LOG_TAG,
             "model=${Build.MODEL} hdrTypes=${hdrTypes.sorted()} " +
+                "audioSinks=${audioSinks.joinToString { "${it.codec}:${it.max_channels}${if (it.passthrough) "p" else ""}" }} " +
                 "dvDecoders=${dolbyVisionDecoderProbe.names} " +
                 "rawDvProfiles=${rawDolbyVisionProfiles.sorted()} " +
                 "claimedDvProfiles=$dolbyVisionProfiles caps=$result",
@@ -148,6 +152,7 @@ object Caps {
                     build = BuildConfig.VERSION_CODE.toString().take(48),
                     ua = Build.MODEL.take(160),
                 ),
+                audioSinks = audioSinks,
             ),
         )
     }
