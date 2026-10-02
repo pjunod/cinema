@@ -12872,6 +12872,308 @@ mod tests {
         assert!(committed_unready.contains("params!(members_json)"));
     }
 
+    /// Actual Hiqlite learner + actual signed response, not a clock sample or
+    /// a manufactured applied-membership watch. This is route authorization.
+    #[test]
+    fn k06_aged_committed_learner_clock_response_keeps_other_routes_live_only() {
+        // The full import/real learner futures exceed default libtest stack.
+        // Own a finite stack explicitly; ordinary suites need no global env.
+        let worker = std::thread::Builder::new()
+            .name("k06-aged-clock-response".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned fixture runtime")
+                    .block_on(Box::pin(aged_committed_learner_clock_response_fixture()));
+            })
+            .expect("owned fixture thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn aged_committed_learner_clock_response_fixture() {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::config::Config;
+        use std::borrow::Cow;
+
+        struct SingletonObserver;
+        impl StartupClockObserver for SingletonObserver {
+            fn start(
+                &self,
+                manager: MembershipManager,
+                _node: String,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<(), crate::error::StoreError>> + Send + '_>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|error| crate::error::StoreError::Database(error.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual singleton watch");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert!(roster.peers.is_empty());
+                    let guard = manager.clock_guard();
+                    let round = guard
+                        .roster_for_peer_directory(&roster)
+                        .expect("proved singleton");
+                    assert!(
+                        guard.publish(round, BTreeMap::new()),
+                        "no remote samples exist"
+                    );
+                    Ok(())
+                })
+            }
+        }
+        fn addresses() -> Vec<std::net::SocketAddr> {
+            let held: Vec<_> = (0..3)
+                .map(|_| {
+                    std::net::TcpListener::bind("127.0.0.1:0").expect("reserve owned fixture port")
+                })
+                .collect();
+            held.iter()
+                .map(|listener| listener.local_addr().expect("owned port"))
+                .collect()
+        }
+        let root = tempfile::tempdir().expect("leader root");
+        let ports = addresses();
+        let mut config = Config::default();
+        config.storage.data_dir = root.path().into();
+        config.server.bind = ports[0];
+        config.cluster.raft_bind = ports[1];
+        config.cluster.api_bind = ports[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", ports[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(
+            crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"),
+        );
+        let selected = Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&SingletonObserver),
+        ))
+        .await
+        .expect("actual singleton activation");
+        let manager = selected.membership_manager();
+        let token = manager
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("owned join token");
+        let learner_root = tempfile::tempdir().expect("learner root");
+        let learner_ports = addresses();
+        let learner_id = uuid::Uuid::new_v4().to_string();
+        let (protocol_min, protocol_max) =
+            manager.active_protocol_range().await.expect("actual range");
+        manager
+            .redeem(&RedeemJoinRequest {
+                token_digest: join_token_digest(&token.token),
+                raft_id: token.raft_id,
+                node_id: learner_id.clone(),
+                hostname: "clock-fixture".into(),
+                raft_address: learner_ports[1].to_string(),
+                api_address: learner_ports[2].to_string(),
+                http_base: format!("http://{}", learner_ports[0]),
+                schema_version: AUTH_SCHEMA_VERSION,
+                protocol_version: protocol_min,
+                protocol_min,
+                protocol_max,
+                live_tv_v1: true,
+            })
+            .await
+            .expect("actual token-authorized staged identity");
+        let leader = manager.replicated_inner().expect("actual leader");
+        let local = ClusterPeer {
+            raft_id: token.raft_id,
+            raft_address: learner_ports[1].to_string(),
+            api_address: learner_ports[2].to_string(),
+        };
+        let policy = Arc::new(StartupMembershipAdmission::default());
+        let learner_client = Box::pin(tokio::time::timeout(
+            Duration::from_secs(45),
+            Box::pin(hiqlite::start_node_for_clock_observation(
+                hiqlite::NodeConfig {
+                    node_id: token.raft_id,
+                    nodes: vec![Node::from(&leader.local), Node::from(&local)],
+                    listen_addr_api: Cow::Borrowed("127.0.0.1"),
+                    listen_addr_raft: Cow::Borrowed("127.0.0.1"),
+                    data_dir: Cow::Owned(learner_root.path().to_string_lossy().into_owned()),
+                    filename_db: Cow::Borrowed("clock-test.db"),
+                    secret_raft: leader.secrets.raft.clone(),
+                    secret_api: leader.secrets.api.clone(),
+                    tls_raft: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
+                    tls_api: Some(hiqlite::tls::ServerTlsConfig::TlsAutoCertificates),
+                    learner_only: true,
+                    health_check_delay_secs: 0,
+                    ..crate::cluster::migration::production_hiqlite_defaults_with_read_pool(1)
+                },
+                policy,
+            )),
+        ))
+        .await
+        .expect("bounded learner startup")
+        .expect("actual learner");
+        let mut identity = selected.identity.clone();
+        identity.node_id.clone_from(&learner_id);
+        identity.raft_id = token.raft_id;
+        let learner = Box::pin(MembershipManager::clock_observation(
+            learner_client.clone(),
+            selected.replication_monitor(),
+            Arc::clone(&selected.store),
+            identity,
+            local,
+            config.cluster.join_url.clone(),
+            format!("http://{}", learner_ports[0]),
+            JoinSecrets {
+                raft: leader.secrets.raft.clone(),
+                api: leader.secrets.api.clone(),
+                credential_key: leader.secrets.credential_key.clone(),
+            },
+            ActivitySigningKey::from_seed_hex(&"12".repeat(32)).expect("fixture durable key"),
+            leader.activation_marker.clone(),
+            ClusterRole::Voter,
+            learner_root.path().into(),
+        ))
+        .await
+        .expect("actual committed learner observation manager");
+        let applied = learner_client
+            .local_db_raft_metrics()
+            .expect("actual local watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.members.contains(&token.raft_id));
+        assert!(
+            !applied.voters.contains(&token.raft_id),
+            "no promotion/fabricated admission"
+        );
+        let aged = unix_ms().expect("now") - NODE_REACHABLE_WINDOW_MS - 1_000;
+        assert_eq!(
+            leader
+                .client
+                .execute(
+                    "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
+                    params!(aged, learner_id.as_str())
+                )
+                .await
+                .expect("age actual committed identity"),
+            1
+        );
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let body = b"actual signed fixture response, not a measured clock sample";
+        let clock_path = "/_internal/v1/clock";
+        let target = selected.identity.node_id.as_str();
+        let signature = learner
+            .sign_internal_peer_response(target, &nonce, clock_path, body)
+            .expect("signed clock response");
+        assert!(manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("clock authorization"));
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                "wrong-target",
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("wrong-target refusal"));
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                b"forged body",
+                &signature
+            )
+            .await
+            .expect("forged response refusal"));
+        let ordinary_path = "/api/v1/internal/auth/cache-revocation";
+        let ordinary_signature = learner
+            .sign_internal_peer_response(target, &nonce, ordinary_path, body)
+            .expect("signed ordinary response");
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                ordinary_path,
+                body,
+                &ordinary_signature
+            )
+            .await
+            .expect("ordinary aged member refusal"));
+        leader
+            .client
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at=$1 WHERE node_id=$2",
+                params!(unix_ms().expect("current heartbeat"), learner_id.as_str()),
+            )
+            .await
+            .expect("fresh actual identity");
+        assert!(manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                ordinary_path,
+                body,
+                &ordinary_signature
+            )
+            .await
+            .expect("ordinary live member acceptance"));
+        leader
+            .client
+            .execute(
+                "UPDATE cluster_nodes SET removed_at=$1 WHERE node_id=$2",
+                params!(unix_ms().expect("actual removal time"), learner_id.as_str()),
+            )
+            .await
+            .expect("actual durable removal");
+        assert!(!manager
+            .authorize_internal_peer_member_response(
+                &learner_id,
+                target,
+                &nonce,
+                clock_path,
+                body,
+                &signature
+            )
+            .await
+            .expect("removed peer refusal"));
+        // Existing Hiqlite TLS shutdown assertion occurs only after writer drain.
+        let stopped = tokio::spawn(async move { learner_client.shutdown().await }).await;
+        match stopped {
+            Ok(result) => result.expect("learner drain"),
+            Err(error) if error.is_panic() => {
+                let payload = error.into_panic();
+                let text = payload
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| payload.downcast_ref::<&str>().copied());
+                assert_eq!(
+                    text,
+                    Some("The global Hiqlite shutdown handler to always listen: SendError { .. }")
+                );
+            }
+            Err(error) => panic!("learner shutdown task: {error}"),
+        }
+        selected.shutdown().await.expect("leader drain");
+    }
+
     #[test]
     fn committed_roster_bound_fails_closed_instead_of_truncating() {
         let members = (0_u64..=MAX_COMMITTED_ROSTER_MEMBERS as u64).collect::<BTreeSet<_>>();
