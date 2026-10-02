@@ -43,6 +43,12 @@ auth windows are unchanged; no switch, deployment, lab launch or clock step
 is authorized. The 24-hour enforcing acceptance and approved drill remain
 later qualification, as recorded in the companion design's October 1 ruling.
 
+**2026-10-01 private preparation extension:** root may prepare E1 consumer
+source privately while the owned measurement window is unavailable, following
+the [enforcement plan](CLOCK-SKEW-ENFORCEMENT-IMPLEMENTATION.md)'s dated scope.
+Successful identified observation still precedes enforcement effort
+integration; preparation does not supply or replace that evidence.
+
 Inspected at `f319fa779`; symbols are more durable than September 21 line
 numbers. No clock route, prober or shared clock-policy runtime exists here.
 
