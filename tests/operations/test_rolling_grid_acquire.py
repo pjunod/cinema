@@ -69,7 +69,11 @@ class RollingAcquireOwnershipTests(unittest.TestCase):
         self.assertFalse(group.owned)
 
     def test_actual_manifest_refuses_foreign_owner_short_source_and_changed_frame_page(self):
-        with tempfile.TemporaryDirectory(prefix="rolling-contract-",dir="/private/tmp") as directory:
+        # The validator permits these existing private roots; Linux need not
+        # provide macOS's /private/tmp. Never create a host-global directory.
+        owned_base = next(path for path in (Path("/private/tmp"), Path("/var/tmp"))
+                          if path.is_dir() and path.resolve() == path)
+        with tempfile.TemporaryDirectory(prefix="rolling-contract-", dir=owned_base) as directory:
             root=Path(directory);root.chmod(0o700)
             nonce="a"*64
             (root/"owner.json").write_text(json.dumps({"nonce":nonce}))

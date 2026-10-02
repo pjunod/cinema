@@ -84,6 +84,36 @@ def fence_arm(case: unittest.TestCase, attempt: str, fence: str) -> str:
 
 
 class AttemptScopeCensusCase(unittest.TestCase):
+    def test_a05_boundary_named_fences_preserve_original_scope_and_no_allowlist_growth(self) -> None:
+        expected = {
+            "seekIntentAfterOptionalBoundary": ("issueSeek", ["viewerAction", "seek"]),
+            "autoBoundaryOwnerCurrent": ("autoBoundaryIsCurrent", ["lifecycle", "open", "viewerAction"]),
+            "autoBoundarySeekCurrent": ("autoBoundaryIsCurrent", ["seek"]),
+            "autoBoundaryResumeCurrent": ("autoBoundaryResumeIsLive", ["lifecycle", "open", "viewerAction"]),
+            "autoBoundaryCommitViewerCurrent": ("commitPreparedSuccessor", ["viewerAction"]),
+            "autoBoundaryCommitOwnerCurrent": ("commitPreparedSuccessor", ["lifecycle", "open", "viewerAction"]),
+            "autoBoundaryCommitSeekCurrent": ("commitPreparedSuccessor", ["seek"]),
+            "autoResumeFallbackCurrent": ("setPlaybackRequested", ["lifecycle", "open", "viewerAction"]),
+            "autoResumeCompletedViewerCurrent": ("setPlaybackRequested", ["viewerAction"]),
+        }
+        self.assertEqual(audit(repository_read), ())
+        document = tomllib.loads(repository_read(ALLOWLIST))
+        self.assertFalse(any(key.startswith(("autoBoundary", "commitPreparedSuccessor::boundary"))
+                             for key in document["allowed"]))
+        self.assertEqual(document["allowed"]["setPlaybackRequested::self.viewerActionEpoch == actionEpoch"], 3)
+        self.assertEqual(document["allowed"]["setPlaybackRequested::self.lifecycleGeneration == lifecycle"], 2)
+        attempt = repository_read(ATTEMPT_SOURCE)
+        source = repository_read(SOURCE)
+        for fence, (function, scopes) in expected.items():
+            with self.subTest(fence=fence):
+                self.assertEqual(document["fences"][fence], {"function": function, "scopes": scopes})
+                fence_call(self, source, fence)
+                changed = replace_once(self, attempt, fence_arm(self, attempt, fence),
+                                       f"case .{fence}: return [.initialDecision]")
+                errors = audit(read_with(**{ATTEMPT_SOURCE: changed}))
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn(f"AttemptFence.{fence}", errors[0])
+
     def test_the_repository_agrees_with_its_own_census(self) -> None:
         self.assertEqual(audit(repository_read), ())
 
