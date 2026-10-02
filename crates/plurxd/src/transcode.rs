@@ -784,6 +784,7 @@ use terminal_admission::*;
 mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
+pub(crate) use manager_candidates::QUALITY_PLANNING_KEYS;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]

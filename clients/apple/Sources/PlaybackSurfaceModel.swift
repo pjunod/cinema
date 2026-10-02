@@ -438,7 +438,7 @@ enum PlaybackSurfaceContract {
             .preparing,
             codes: [
                 "startup_timeout", "media_owner_transition", "vod_index_pending",
-                "vod_engine_unattested", "transcode_capacity_pending",
+                "vod_engine_unattested", "transcode_capacity_pending", "quality_catalog_unavailable",
             ],
             retryable: true
         ),

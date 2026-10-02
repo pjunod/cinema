@@ -205,6 +205,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             file_id,
             playback_id: self.playback_id,
@@ -1049,6 +1050,8 @@ pub(crate) async fn resolve_height(
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
+    /// Canonical request-local evidence. Never reconstruct it from control caps.
+    pub quality_catalog: Option<crate::media_pool::QualityCatalogResult>,
     pub request: crate::transcode::SessionRequest,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
@@ -1073,6 +1076,7 @@ pub(crate) struct ResolvedPlan {
 }
 
 pub(crate) struct PlanInputs<'a> {
+    pub snapshot: Option<&'a plurx_core::store::PlaybackPlanningSnapshot>,
     pub state: &'a AppState,
     pub user_id: i64,
     pub file_id: i64,
@@ -1105,6 +1109,7 @@ pub(crate) async fn resolve_plan(
     mut body: CreateSession,
 ) -> Result<ResolvedPlan, ApiError> {
     let PlanInputs {
+        snapshot,
         state,
         user_id,
         file_id,
@@ -1118,6 +1123,7 @@ pub(crate) async fn resolve_plan(
     let mut height =
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
+    let mut retained_catalog = None;
     let mut candidate_copy = false;
     if body.copy == Some(true) {
         if let (Some(source), Some(caps)) = (
@@ -1128,7 +1134,12 @@ pub(crate) async fn resolve_plan(
                     .any(|entry| entry.max_width.is_some() || entry.max_frame_rate.is_some())
             }),
         ) {
-            if let Some(facts) = state.transcode.quality_source_facts(source).await {
+            let facts = if let Some(snapshot) = snapshot {
+                crate::transcode::TranscodeManager::quality_facts_from_snapshot(snapshot)
+            } else {
+                state.transcode.quality_source_facts(source).await
+            };
+            if let Some(facts) = facts {
                 if let (Some(width), Some(height)) = (facts.width(), facts.height()) {
                     let rate = facts
                         .frame_rate()
@@ -1157,11 +1168,18 @@ pub(crate) async fn resolve_plan(
     }
 
     if let (Some(source), Some(caps)) = (source, body.caps.as_ref()) {
-        let enabled = state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-            .await?
-            .is_some_and(|value| value.trim() == "1");
+        let enabled = if let Some(snapshot) = snapshot {
+            snapshot
+                .settings
+                .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                .is_some_and(|value| value.trim() == "1")
+        } else {
+            state
+                .store
+                .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+                .await?
+                .is_some_and(|value| value.trim() == "1")
+        };
         let requested = body
             .intent
             .as_ref()
@@ -1177,10 +1195,16 @@ pub(crate) async fn resolve_plan(
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
         {
-            body.audio = state
-                .transcode
-                .candidate_audio_index(source, body.audio)
-                .await;
+            body.audio = if let Some(snapshot) = snapshot {
+                crate::transcode::TranscodeManager::candidate_audio_from_snapshot(
+                    snapshot, body.audio,
+                )
+            } else {
+                state
+                    .transcode
+                    .candidate_audio_index(source, body.audio)
+                    .await
+            };
             let catalogue_result = state
                 .media_pool
                 .quality_catalog(
@@ -1198,35 +1222,65 @@ pub(crate) async fn resolve_plan(
                     },
                 )
                 .await;
+            tracing::info!(target: "plurxd::http::hls", file_id, purpose = "selection", complete = catalogue_result.complete,
+                causes = ?catalogue_result.causes, "create catalog accounting");
+            if let Some(crate::media_pool::CatalogCause::RequestInvalid(error)) =
+                catalogue_result.causes.first()
+            {
+                return Err(ApiError::typed_detail(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_capabilities",
+                    "quality catalog request is invalid",
+                    serde_json::json!({"clause": error.clause, "observed": error.observed, "limit": error.limit}),
+                ));
+            }
             let authority_refused = catalogue_result.authority_refused;
-            let worker_catalog = catalogue_result.candidates;
-            let catalog: Vec<_> = worker_catalog
+            let worker_catalog = &catalogue_result.candidates;
+            let has_complete_rows = worker_catalog.iter().any(|entry| {
+                entry.dispatch_supported && !entry.partial && entry.candidate.decoder_compatible
+            });
+            let initial_auto =
+                requested.is_none() && body.quality_auto == Some(true) && body.height != Some(1440);
+            let eligible_workers: Vec<_> = worker_catalog
+                .iter()
+                .filter(|entry| {
+                    entry.dispatch_supported
+                        && (!entry.partial
+                            || (!has_complete_rows
+                                && initial_auto
+                                && entry.node_id == state.node_id))
+                })
+                .collect();
+            let catalog: Vec<_> = eligible_workers
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
             let picked = if requested.is_none() && body.height != Some(1440) {
-                state
-                    .transcode
-                    .quality_display_aspect(source)
-                    .await
-                    .and_then(|aspect| {
-                        plurx_core::playback::candidate::select_quality_candidate(
-                            &catalog,
-                            aspect,
-                            caps.display
-                                .as_ref()
-                                .and_then(|display| display.presentation_target),
-                            None,
-                        )
+                (if let Some(snapshot) = snapshot {
+                    crate::transcode::TranscodeManager::quality_facts_from_snapshot(snapshot)
+                        .filter(|facts| facts.normalization_transform_known())
+                        .and_then(|facts| facts.displayed_aspect())
+                } else {
+                    state.transcode.quality_display_aspect(source).await
+                })
+                .and_then(|aspect| {
+                    plurx_core::playback::candidate::select_quality_candidate(
+                        &catalog,
+                        aspect,
+                        caps.display
+                            .as_ref()
+                            .and_then(|display| display.presentation_target),
+                        None,
+                    )
+                })
+                .or_else(|| {
+                    catalog.iter().find(|candidate| {
+                        candidate.target_height == height as u32
+                            && candidate.decoder_compatible
+                            && candidate.route
+                                == plurx_core::playback::candidate::CandidateRoute::Encode
                     })
-                    .or_else(|| {
-                        catalog.iter().find(|candidate| {
-                            candidate.target_height == height as u32
-                                && candidate.decoder_compatible
-                                && candidate.route
-                                    == plurx_core::playback::candidate::CandidateRoute::Encode
-                        })
-                    })
+                })
             } else {
                 catalog.iter().find(|candidate| {
                     requested.map_or(candidate.target_height == 1440, |id| candidate.id == id)
@@ -1234,6 +1288,18 @@ pub(crate) async fn resolve_plan(
                 })
             };
             let candidate = picked.ok_or_else(|| {
+                if !catalogue_result.complete
+                    || catalogue_result
+                        .causes
+                        .contains(&crate::media_pool::CatalogCause::PeerProtocol)
+                {
+                    return ApiError::typed_detail(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "quality_catalog_unavailable",
+                        "quality discovery is incomplete; retry with the existing startup owner",
+                        serde_json::json!({"complete": false, "causes": catalogue_result.causes}),
+                    );
+                }
                 let reason =
                     candidate_refusal_reason(&catalog, requested, body.height, authority_refused);
                 tracing::warn!(
@@ -1261,11 +1327,21 @@ pub(crate) async fn resolve_plan(
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
             height = i64::from(candidate.target_height);
             let mut context = crate::transcode::TranscodeManager::candidate_context(candidate);
-            context.owner_node_id = worker_catalog
+            context.owner_node_id = eligible_workers
                 .iter()
                 .find(|entry| entry.candidate.id == candidate.id)
+                .filter(|entry| entry.dispatch_supported)
                 .map(|entry| entry.node_id.clone());
-            candidate_context = Some(context);
+            context.canonical_caps = Some(caps.clone());
+            context.planning_binding = worker_catalog
+                .iter()
+                .find(|entry| {
+                    entry.candidate.id == candidate.id
+                        && context.owner_node_id.as_deref() == Some(entry.node_id.as_str())
+                })
+                .and_then(|entry| entry.binding.clone());
+            candidate_context = Some(Box::new(context));
+            retained_catalog = Some(catalogue_result);
         }
     } else if body.intent.as_ref().is_some_and(|intent| {
         matches!(
@@ -1296,6 +1372,9 @@ pub(crate) async fn resolve_plan(
     }
     let mut request = body.into_request(file_id, height);
     request.candidate_context = candidate_context;
+    request.quality_catalog = retained_catalog
+        .as_ref()
+        .map(|catalog| Arc::new(catalog.clone()));
     if request
         .request_id
         .as_ref()
@@ -1337,6 +1416,7 @@ pub(crate) async fn resolve_plan(
         };
     }
     Ok(ResolvedPlan {
+        quality_catalog: retained_catalog,
         request,
         height,
         intent_fingerprint: fingerprint,
@@ -1432,6 +1512,59 @@ async fn create_with_purpose(
     req: CreateSession,
     library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    let remaining = headers
+        .get("x-plurx-startup-remaining-ms")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(10_000);
+    if remaining == 0 {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "startup_timeout",
+            "no startup allowance remains",
+        ));
+    }
+    let budget = crate::media_pool::CreateStartupBudget::new(remaining);
+    let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let before = counts.snapshot();
+    let started = tokio::time::Instant::now();
+    let result = budget
+        .scope(plurx_core::store::scope_http_store_operations(
+            counts.clone(),
+            tokio::time::timeout_at(
+                budget.deadline,
+                create_with_purpose_inner(user, state, id, headers, remote, req, library_channel),
+            ),
+        ))
+        .await;
+    let after = counts.snapshot();
+    tracing::info!(target: "plurxd::http::hls",
+        file_id = id,
+        catalog_calls = budget.calls(),
+        authority_reads = after[0].saturating_sub(before[0]),
+        local_reads = after[1].saturating_sub(before[1]),
+        mutations = after[2].saturating_sub(before[2]),
+        elapsed_ms = started.elapsed().as_millis(),
+        "create startup read budget finished"
+    );
+    result.map_err(|_| {
+        ApiError::typed(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "startup_timeout",
+            "session creation exceeded its remaining startup allowance",
+        )
+    })?
+}
+
+async fn create_with_purpose_inner(
+    user: plurx_core::domain::User,
+    state: AppState,
+    id: i64,
+    headers: HeaderMap,
+    remote: Option<std::net::SocketAddr>,
+    req: CreateSession,
+    library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
+) -> Result<Json<StartResponse>, ApiError> {
     if let Some(caps) = req.caps.as_ref() {
         super::super::stream::validate_device_caps(caps)?;
     }
@@ -1517,11 +1650,17 @@ async fn create_with_purpose(
     // The source height answers three things now: Auto, the ladder in the
     // response, and the snap's source-height escape. One read, from the read
     // pool.
-    let source = state
+    let planning_snapshot = state
         .store
-        .get_file(id)
+        .playback_planning_snapshot(id, &crate::transcode::QUALITY_PLANNING_KEYS)
         .await
-        .map_err(|error| session_store_error("reading the source file", error))?;
+        .map_err(|error| session_store_error("reading playback planning inputs", error))?;
+    if let Some(snapshot) = planning_snapshot.as_ref() {
+        crate::media_pool::capture_create_planning_binding(snapshot);
+    }
+    let source = planning_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.file.clone());
     // The HDR subtitle-burn guard used to stand here, keyed on the source's
     // own `hdr` column. It now runs after `resolve_plan`, against the grade
     // this request actually resolves to — see
@@ -1559,6 +1698,15 @@ async fn create_with_purpose(
                 .and_then(|display| display.presentation_target)
                 .map_or(1, |target| target.revision),
         )
+        .map_err(|cause| {
+            tracing::warn!(target: "plurxd::http::hls",
+                file_id = id,
+                video_entries = caps.video.len(),
+                cause,
+                "optional decoder snapshot unavailable; legacy playback admission preserved"
+            );
+        })
+        .ok()
     });
     let candidate_target = req.caps.as_ref().and_then(|caps| {
         caps.display
@@ -1587,7 +1735,10 @@ async fn create_with_purpose(
             req.caps.as_ref(),
             req.overrides.as_ref(),
             file,
-            &super::super::stream::render_caps(&state).await,
+            &match planning_snapshot.as_ref() {
+                Some(snapshot) => super::super::stream::render_caps_from_snapshot(&state, snapshot),
+                None => super::super::stream::render_caps(&state).await,
+            },
             req.preserve_dolby_vision == Some(true),
             req.hdr10 == Some(true),
             unix_ms(),
@@ -1624,6 +1775,7 @@ async fn create_with_purpose(
             })?;
     let resolved = resolve_plan(
         PlanInputs {
+            snapshot: planning_snapshot.as_ref(),
             state: &state,
             user_id: user.id,
             file_id: id,
@@ -1634,7 +1786,8 @@ async fn create_with_purpose(
         req,
     )
     .await?;
-    let request = resolved.request;
+    let mut quality_catalog = resolved.quality_catalog;
+    let mut request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
@@ -1846,28 +1999,31 @@ async fn create_with_purpose(
     );
 
     let advertise_control = plurx_core::store::stored_switch(
-        state
-            .store
-            .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
-            .await
-            .map_err(|error| session_store_error("reading the control protocol setting", error))?
-            .as_deref(),
+        planning_snapshot
+            .as_ref()
+            .and_then(|snapshot| {
+                snapshot
+                    .settings
+                    .get(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+            })
+            .map(String::as_str),
         true,
     );
 
-    let quality_enabled = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
+    let quality_enabled = planning_snapshot
+        .as_ref()
+        .and_then(|snapshot| {
+            snapshot
+                .settings
+                .get(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
+        })
         .is_some_and(|value| value.trim() == "1");
-    let mut quality_owners = std::collections::HashSet::new();
-    if quality_enabled && candidate_decoder_caps.is_some() {
-        quality_owners.insert(state.node_id.clone());
+    if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
-            quality_owners.extend(
+            quality_catalog = Some(
                 state
                     .media_pool
-                    .quality_candidates(
+                    .quality_catalog(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
                             copy_contract: request.kind.copy_contract(),
@@ -1881,19 +2037,31 @@ async fn create_with_purpose(
                             presentation: request.presentation,
                         },
                     )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.node_id),
+                    .await,
+            );
+            tracing::info!(target: "plurxd::http::hls",
+                file_id = id,
+                purpose = "optional_metadata",
+                "create catalog accounting"
             );
         }
-        if let Some(owner) = request
-            .candidate_context
-            .as_ref()
-            .and_then(|context| context.owner_node_id.as_ref())
-        {
-            quality_owners.insert(owner.clone());
-        }
     }
+    request.quality_catalog = quality_catalog
+        .as_ref()
+        .map(|catalog| Arc::new(catalog.clone()));
+    let quality_owners: std::collections::HashSet<_> = if candidate_decoder_caps.is_some() {
+        quality_catalog
+            .as_ref()
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .filter(|entry| {
+                entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
+            })
+            .map(|entry| entry.node_id.clone())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
         state
             .store
@@ -1915,6 +2083,13 @@ async fn create_with_purpose(
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
     let remote_request = RemoteStartRequest {
+        candidate_catalog: request.candidate_context.as_ref().and_then(|context| {
+            Some(crate::media_sessions::CandidateCatalogContext {
+                caps: context.canonical_caps.clone()?,
+                candidate: context.selected_candidate.clone(),
+                binding: context.planning_binding.clone()?,
+            })
+        }),
         candidate_id: request
             .candidate_context
             .as_ref()
@@ -1959,7 +2134,7 @@ async fn create_with_purpose(
             "the channel session purpose could not be recorded; retry shortly".to_owned(),
         ));
     }
-    let placement_deadline = super::super::peer_transport::deadline_after(START_DEADLINE);
+    let placement_deadline = crate::media_pool::create_stage_deadline(START_DEADLINE);
 
     // Every activation is a predecessor CAS, including an ordinary start.
     // Capturing the exact route before worker placement gives a
@@ -2145,7 +2320,7 @@ async fn create_with_purpose(
                 recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
-            let mut start_task = tokio::spawn(async move {
+            let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let started = transcode
                     .create_cluster_session(
                         &worker_request,
@@ -2386,47 +2561,26 @@ async fn create_with_purpose(
     } else {
         info.playlist_url
     };
-    let display_aware_enabled = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
     let response = StartResponse {
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        quality_candidates: if let (true, Some(source), Some(caps)) = (
-            display_aware_enabled && quality_negotiated,
-            source.as_ref(),
-            candidate_decoder_caps.as_ref(),
-        ) {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        &state,
-                        crate::media_pool::QualityCatalogRequest {
-                            copy_contract: request.kind.copy_contract(),
-                            file_id: source.id,
-                            source_size: source.size,
-                            source_mtime: source.mtime,
-                            caps: caps.device_caps(),
-                            audio_index: request.audio_index,
-                            audio_offset_ms: request.audio_offset_ms,
-                            subtitle_burn: request.subtitle_burn,
-                            presentation: request.presentation,
-                        },
-                    )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.candidate)
-                    .collect(),
-            )
-        } else {
-            None
-        },
+        quality_catalog_status: quality_catalog.as_ref().map(
+            |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
+        ),
+        quality_candidates: quality_negotiated.then(|| {
+            quality_catalog
+                .as_ref()
+                .into_iter()
+                .flat_map(|result| result.candidates.iter())
+                .filter(|entry| {
+                    entry.dispatch_supported && (!entry.partial || entry.node_id == state.node_id)
+                })
+                .map(|entry| entry.candidate.clone())
+                .collect()
+        }),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
@@ -3723,6 +3877,13 @@ pub(super) fn exact_release_class(route: &MediaSessionRoute) -> crate::transcode
 }
 
 pub(super) fn session_start_error(file_id: i64, error: String) -> ApiError {
+    if crate::transcode::is_catalog_input_error(&error) {
+        return ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "quality_catalog_unavailable",
+            error,
+        );
+    }
     if error.contains("already used") {
         return ApiError::Conflict(error);
     }

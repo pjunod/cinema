@@ -26,6 +26,7 @@ use crate::state::{AppState, IntegrationMetrics, ScanStatus, StoreMetricsCache, 
 
 #[derive(Serialize)]
 pub struct ServerInfo {
+    pub decoder_compaction_contract: &'static str,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     pub name: String,
@@ -87,6 +88,7 @@ pub async fn server_info(State(state): State<AppState>) -> Result<Json<ServerInf
         .await?
         .is_some_and(|value| value.trim() == "1");
     Ok(Json(ServerInfo {
+        decoder_compaction_contract: plurx_core::playback::DECODER_COMPACTION_CONTRACT,
         display_aware_auto_protocol: Some("route-v1".to_owned()),
         name,
         version: crate::version::SEMVER,
