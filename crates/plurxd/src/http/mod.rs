@@ -6,8 +6,10 @@
 //! in later slices.
 
 mod analysis;
+mod analysis_reconcile;
 mod auth;
 mod background_jobs;
+mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
@@ -289,6 +291,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/reanalyze"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
         | "/api/v1/files/{id}/timeline-annotations/{kind}"
@@ -298,6 +301,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/analysis/jobs/{id}"
         | "/api/v1/analysis/jobs/{id}/retry"
         | "/api/v1/analysis/reopen"
+        | "/api/v1/analysis/reconcile"
         | "/api/v1/dvr/status"
         | "/api/v1/dvr/overview"
         | "/api/v1/dvr/recordings"
@@ -1398,6 +1402,7 @@ pub fn router(state: AppState) -> Router {
             get(chapter_thumbs::serve),
         )
         .route("/dv-conversions", get(dv_disk::status))
+        .route("/files/{id}/preparation", get(preparation::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/analysis/jobs/{id}", get(analysis::job))
@@ -1587,6 +1592,7 @@ pub fn router(state: AppState) -> Router {
         .route("/analysis/jobs/{id}", delete(analysis::cancel_job))
         .route("/analysis/jobs/{id}/retry", post(analysis::retry_job))
         .route("/analysis/reopen", post(analysis::reopen))
+        .route("/analysis/reconcile", post(analysis_reconcile::reconcile))
         .route("/files/{id}/offline-packages", post(offline::create))
         .route("/files/{id}/publication", post(publication::open))
         .layer(axum::middleware::from_fn(json_long_deadline));
@@ -9533,6 +9539,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn preparation_status_is_viewer_readable_and_does_not_enqueue_work() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seed = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/preparation", seed.file);
+        assert_eq!(
+            call(&app, get(&uri, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token");
+        let before = state
+            .store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 100,
+            })
+            .await
+            .expect("jobs")
+            .jobs
+            .len();
+        let (status, result) = call(&app, get(&uri, Some(viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["file_id"], seed.file.to_string());
+        assert_eq!(result["active"], false);
+        assert!(result.get("subtitles").is_some());
+        assert!(result.get("versions").is_some());
+        assert!(result.get("path").is_none());
+        assert_eq!(
+            state
+                .store
+                .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                    node_id: None,
+                    state: None,
+                    kind: None,
+                    after_id: None,
+                    limit: 100
+                })
+                .await
+                .expect("jobs")
+                .jobs
+                .len(),
+            before
+        );
+    }
+
+    #[tokio::test]
     async fn user_management_lifecycle_and_lockout_guards() {
         let app = test_app();
         let admin = setup_admin(&app).await;
@@ -16344,6 +16418,57 @@ mod tests {
         assert_eq!(credits["start_ms"], 8_500_000);
         assert_eq!(credits["provenance"], "manual");
         assert_eq!(credits["confidence"], 1_000);
+    }
+
+    #[tokio::test]
+    async fn reconciliation_api_requires_admin_and_exact_apply_selection() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let url = "/api/v1/analysis/reconcile";
+        assert_eq!(
+            call(&app, post(url, None, json!({}))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, preview) = call(&app, post(url, Some(&admin), json!({}))).await;
+        assert_eq!(status, StatusCode::OK, "{preview}");
+        assert_eq!(preview["dry_run"], true);
+        assert_eq!(preview["candidates"], json!([]));
+        for bad in [
+            json!({"dry_run":false}),
+            json!({"dry_run":false,"cursor":"old","candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]}),
+            json!({"dry_run":false,"candidates":[{"request_id":"x","candidate_id":"bad"}]}),
+            json!({"dry_run":true,"candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]}),
+        ] {
+            assert_eq!(
+                call(&app, post(url, Some(&admin), bad)).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            call(&app, post(url, Some(&admin), json!({"force":true})))
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "0")
+            .await
+            .expect("disable analysis queue");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    url,
+                    Some(&admin),
+                    json!({"dry_run":false,
+            "candidates":[{"request_id":"x","candidate_id":"a".repeat(64)}]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[tokio::test]

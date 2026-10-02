@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 240
+One binary serves everything on one port (`:32400` by default). plurx has 242
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2026,10 +2026,11 @@ page is capped at 256.
 
 ## 16. The analysis queue
 
-Every route here is admin.
+The preparation status read requires an authenticated viewer; every other route here is admin.
 
 | Method | Path | What it does |
 |---|---|---|
+| GET | `/api/v1/files/{id}/preparation` | Read-only per-file preparation facts; authenticated viewers, no work enqueued |
 | POST | `/api/v1/files/{id}/analysis` | Durably requests analysis for one or both components. 202 |
 | GET | `/api/v1/analysis/summary` | Counters plus a queue-health verdict |
 | GET | `/api/v1/analysis/jobs` | Keyset history page with server-side filter and search |
@@ -2037,8 +2038,60 @@ Every route here is admin.
 | DELETE | `/api/v1/analysis/jobs/{id}` | Cooperative cancellation |
 | POST | `/api/v1/analysis/jobs/{id}/retry` | Creates a successor for one terminal job |
 | POST | `/api/v1/analysis/reopen` | Bulk reopen; **dry-run by default** |
+| POST | `/api/v1/analysis/reconcile` | Preview and replace obsolete unfinished requests; **dry-run by default** |
 | PUT | `/api/v1/files/{id}/timeline-annotations/{kind}` | Writes a durable manual boundary |
 | DELETE | `/api/v1/files/{id}/timeline-annotations/{kind}` | Discards it, with explicit confirmation |
+
+The preparation response has `file_id` as a decimal string, `checked_at_ms`,
+`source_current`, and `active` (actual queued/running work). Its `playback`,
+`subtitles`, `markers`, `probe`, `metadata`, `versions`, `thumbnails`,
+`conversion`, `search`, and `downloads` objects distinguish completed,
+missing, failed, unknown, optional and on-demand work. No field disables play.
+Subtitle completion follows the configured preferred track when present,
+otherwise all tracks. It is independent of this playback's selection. Styled
+tracks require both WebVTT and Matroska outputs. Embedded-track receipts must
+match a previously recorded attestation for the current local source object;
+without that evidence status is unknown. Reading status never hashes media or
+starts extraction. Empty tracks are settled but explicitly labelled empty.
+Prepared versions count current-source published artifacts with complete holder
+records; playback still verifies copies when used. Metadata completion for TV
+children belongs to the provider-enriched show. Home/recording metadata and
+chapter thumbnails are not portrayed as background work that must finish.
+
+### Reconcile obsolete unfinished requests
+
+**Reconciliation:** `POST /analysis/reconcile` with `{}` previews up to 100
+unfinished requests in request-ID order. Pass the returned `next_cursor` as
+`cursor` until it is null to inspect the entire backlog. Each candidate includes
+its title, original and replacement node IDs, reason, eligibility, and an opaque
+`candidate_id`. Preview never mutates the queue.
+
+Apply with `{"dry_run":false,"candidates":[{"request_id":"…",
+"candidate_id":"…"}]}` (at most 100 selections). Keep
+`reassign_unavailable` identical between preview and apply. The server derives
+the replacement again and checks the preview identity before an atomic
+create-or-join and retirement. A changed request returns `changed`; a successful
+repair returns `reconciled`. Re-preview after any interrupted batch. Applying
+while content analysis is disabled returns 409.
+
+Only queued fragment-index requests without a worker result are eligible.
+Current requests, running/submitted work, live playback interests, and worker
+retry deadlines are preserved. The engine comes from the target node's current
+worker report, which must be less than 30 seconds old. Peers predating this
+field are unknown. Explicit `reassign_unavailable:true` permits moving unknown
+targets to the receiving node only when that node can access the source.
+Same-engine forced rebuilds cannot be moved across nodes while their original
+forced slot exists; preview reports `rebuild_target`. Other components and
+terminal history are outside this operation. Predictive requests retain their
+producer's expiry ownership and report `producer_owned`; a different generation
+alone does not make a playback request obsolete.
+
+The operation retains the predecessor with `request_reconciled`, subject to
+normal history retention, and does not delete artifacts or rewrite attempts.
+Ordinary successors join an identical existing generation. Forced successors
+retain rebuild intent and use a deterministic identity for safe retries, joining
+an active forced rebuild on the same target when its source, engine and video
+match. A forced slot on a different target reports `rebuild_target` in preview.
 
 ### 16.1 Two vocabularies
 

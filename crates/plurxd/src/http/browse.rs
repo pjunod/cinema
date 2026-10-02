@@ -29,7 +29,7 @@ const MAX_LIMIT: i64 = 200;
 /// another merely truncated is a file an operator has to act on, and the badge
 /// that says "pending" for it is the one that never resolves. `None` when the
 /// indexer has not tried yet, which is the honest reading of `pending`.
-fn index_refusal_summary(
+pub(super) fn index_refusal_summary(
     outcomes: &[plurx_core::segplan::FragmentIndexOutcome],
 ) -> Option<(bool, String)> {
     use plurx_core::segplan::IndexRefusal;

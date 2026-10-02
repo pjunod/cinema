@@ -1465,6 +1465,10 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
+.PHONY: media-preparation-browser-check
+media-preparation-browser-check: ## Focused media-info browser regression (PLAYWRIGHT_MODULE may name an installed Playwright)
+	@node --test tests/web/media-preparation.browser.cjs
+
 .PHONY: web-check
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
@@ -1487,11 +1491,13 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/layout-containment.test.js
 	@node tests/web/calm-library.test.js
 	@node tests/web/page-read-budget.test.js
+	@node --test tests/web/media-preparation.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
 	# Every child process is listed with its priority class and a stop (P-02 §3.2).
 	@node tests/web/activity-processes.test.js
 	@node tests/web/analysis-node-names.test.js
+	@node --test tests/web/analysis-reconciliation.test.js
 	@node tests/web/settings-sections.test.js
 	@node --test tests/web/subtitle-downloads.test.js
 	# A cluster fault must reach the panel, not the login page.

@@ -5,6 +5,7 @@
 // provides smaller projections to Activity and Settings.
 let ANALYSIS_BUSY=null, ANALYSIS_PENDING=null, ANALYSIS_SUMMARY_BUSY=null, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
 let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
+let ANALYSIS_RECONCILE={open:false,busy:false,reassign:false,rows:[],scanned:0,complete:false,error:"",result:null,names:{}};
 async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin){ location.hash="#/activity"; return; }
   layoutChrome("activity",`<div class="analysis-head"><div><h1>Content analysis</h1>
@@ -104,7 +105,8 @@ function analysisPhase(row){
 }
 function analysisErrorInfo(code){
   const known={
-    foreground_preempted:["Paused for playback","A playback or offline job needed the shared media worker.","No action is needed; analysis retries automatically when the worker is idle.","warn"],
+    foreground_preempted:["Analysis deferred","The last attempt yielded because media capacity was unavailable or analysis was paused.","This is a saved interruption reason, not a live playback status. Eligible work retries automatically; use Reconcile analysis to inspect older requests.","warn"],
+    request_reconciled:["Request superseded","Reconciliation secured a current request before retiring this older one.","The original attempt history and published indexes are preserved.","warn"],
     source_unavailable:["Source file is unavailable","The node could not open the media file at its catalogued location.","Check that the library mount is online and the file is readable, then retry.","bad"],
     source_catalog_read_failed:["Catalog read failed","The server could not load the file or probe facts needed to plan analysis.","Check storage health and server logs, then retry.","bad"],
     source_attestation_failed:["Source verification failed","The file could not be read consistently enough to prove its content identity.","Check the mount and whether another process is replacing the file, then retry.","bad"],
@@ -334,6 +336,82 @@ function openAnalysisSettings(){
   if(settingsTab()==="analysis"&&isSettingsRoute(location.hash)) viewSettings(++PAGE_RENDER_GENERATION,false);
   else location.hash="#/settings/analysis";
 }
+function analysisReconcileReason(reason){
+  return ({engine_changed:"Worker version changed",source_changed:"Source file changed",target_changed:"Move to this node",current:"Current request — keep waiting",worker_owned:"Already assigned to a worker",other_component:"Managed by another analysis worker",producer_owned:"Managed by predictive preparation",worker_unknown:"Target node unavailable or needs an update",rebuild_target:"Rebuild requires its original node; restore it or cancel the request before requesting a new rebuild",source_missing:"Source no longer in the catalog",source_unavailable:"Source unavailable on this node"})[reason]||reason;
+}
+function analysisReconcileHtml(){
+  const r=ANALYSIS_RECONCILE;
+  if(!r.open)return "";
+  const eligible=r.rows.filter(row=>row.eligible),counts=new Map();
+  for(const row of r.rows)counts.set(row.reason,(counts.get(row.reason)||0)+1);
+  return `<section class="analysis-causes" aria-label="Reconcile analysis"><h2>Reconcile analysis</h2>
+    <p>Inspect all unfinished requests, including work outside this page. Replace obsolete requests with current analysis, joining existing work where possible. Completed indexes and attempt history are kept; running jobs and worker retry schedules continue unchanged.</p>
+    <label class="chk"><input type="checkbox" ${r.reassign?'checked':''} ${r.busy?'disabled':''} onchange="setAnalysisReconcileReassign(this.checked)"> Move requests whose target cannot report its worker version to this node, if their source is accessible here</label>
+    <p class="hint">Leave this unchecked for an offline node you intend to bring back. Older servers may need an update before they can report their worker version.</p>
+    <div class="row"><button class="ghost" ${r.busy?'disabled':''} onclick="previewAnalysisReconciliation()">${r.busy?'Working…':'Preview reconciliation'}</button>
+    <button ${r.busy||!r.complete||!eligible.length?'disabled':''} onclick="applyAnalysisReconciliation()">Apply ${eligible.length} ${eligible.length===1?'repair':'repairs'}</button>
+    <button class="ghost" ${r.busy?'disabled':''} onclick="toggleAnalysisReconciliation()">Close</button></div>
+    <p role="status">${r.scanned} requests inspected${r.complete?' · Preview complete':r.busy?' · Scanning or applying…':''}${r.result?` · ${r.result.reconciled} reconciled, ${r.result.changed} changed or already handled`:''}</p>
+    ${r.error?`<p role="alert">${esc(r.error)} Any acknowledged repairs remain applied. Preview again before continuing.</p>`:''}
+    ${counts.size?`<ul>${[...counts].map(([reason,count])=>`<li>${esc(analysisReconcileReason(reason))}: ${count}</li>`).join('')}</ul>`:''}
+    ${eligible.length?`<details><summary>Repair preview · first ${Math.min(eligible.length,50)} of ${eligible.length}</summary><div class="tbl"><table><thead><tr><th>File</th><th>Reason</th><th>Current target</th><th>New target</th></tr></thead><tbody>${eligible.slice(0,50).map(row=>`<tr><td>${esc(row.title)}</td><td>${esc(analysisReconcileReason(row.reason))}</td><td>${esc(analysisNodeDetail(r.names,row.target_node_id))}</td><td>${esc(analysisNodeDetail(r.names,row.replacement_node_id))}</td></tr>`).join('')}</tbody></table></div></details>`:''}
+  </section>`;
+}
+function repaintAnalysisReconciliation(){
+  if(location.hash==="#/analysis"&&ANALYSIS_SNAPSHOT)paintAnalysis(ANALYSIS_SNAPSHOT);
+}
+function resetAnalysisReconciliation(){
+  ANALYSIS_RECONCILE={open:false,busy:false,reassign:false,rows:[],scanned:0,complete:false,error:"",result:null,names:{}};
+}
+function toggleAnalysisReconciliation(){
+  if(ANALYSIS_RECONCILE.busy)return;
+  ANALYSIS_RECONCILE.open=!ANALYSIS_RECONCILE.open;
+  repaintAnalysisReconciliation();
+}
+function setAnalysisReconcileReassign(value){
+  if(ANALYSIS_RECONCILE.busy)return;
+  ANALYSIS_RECONCILE={...ANALYSIS_RECONCILE,reassign:!!value,rows:[],scanned:0,complete:false,error:"",result:null};
+  repaintAnalysisReconciliation();
+}
+async function previewAnalysisReconciliation(){
+  if(ANALYSIS_RECONCILE.busy)return;
+  const r={...ANALYSIS_RECONCILE,open:true,busy:true,rows:[],scanned:0,complete:false,error:"",result:null};
+  ANALYSIS_RECONCILE=r;repaintAnalysisReconciliation();
+  const authGeneration=AUTH_GENERATION,cursors=new Set();let cursor="";
+  try{
+    do{
+      if(authGeneration!==AUTH_GENERATION||r!==ANALYSIS_RECONCILE)return;
+      if(cursors.has(cursor))throw new Error("The server repeated a reconciliation page.");
+      cursors.add(cursor);
+      const page=await api("/analysis/reconcile",{method:"POST",body:{dry_run:true,cursor,reassign_unavailable:r.reassign}});
+      if(authGeneration!==AUTH_GENERATION||r!==ANALYSIS_RECONCILE)return;
+      r.rows.push(...page.candidates);r.scanned+=page.candidates.length;r.names=page.node_hostnames||{};
+      cursor=page.next_cursor||"";repaintAnalysisReconciliation();
+    }while(cursor);
+    r.complete=true;
+  }catch(error){r.error=error.message||"Reconciliation preview failed";}
+  finally{r.busy=false;repaintAnalysisReconciliation();}
+}
+async function applyAnalysisReconciliation(){
+  const r=ANALYSIS_RECONCILE;
+  if(r.busy||!r.complete)return;
+  const rows=r.rows.filter(row=>row.eligible);
+  if(!rows.length)return;
+  const authGeneration=AUTH_GENERATION;
+  r.busy=true;r.complete=false;r.error="";r.result={reconciled:0,changed:0};repaintAnalysisReconciliation();
+  try{
+    for(let start=0;start<rows.length;start+=100){
+      if(authGeneration!==AUTH_GENERATION||r!==ANALYSIS_RECONCILE)return;
+      const candidates=rows.slice(start,start+100).map(({request_id,candidate_id})=>({request_id,candidate_id}));
+      const done=await api("/analysis/reconcile",{method:"POST",body:{dry_run:false,reassign_unavailable:r.reassign,candidates}});
+      if(authGeneration!==AUTH_GENERATION||r!==ANALYSIS_RECONCILE)return;
+      for(const result of done.results)r.result[result.status==="reconciled"?'reconciled':'changed']++;
+      repaintAnalysisReconciliation();
+    }
+    await renderAnalysis(PAGE_RENDER_GENERATION,true);
+  }catch(error){r.error=error.message||"Reconciliation stopped";}
+  finally{r.busy=false;repaintAnalysisReconciliation();}
+}
 function analysisDiagnosticText(row,names){
   const diagnostic=row.index_diagnostic||{};
   const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
@@ -497,6 +575,8 @@ function paintAnalysis(snapshot){
   const summaryWarning=counts.available===false?`<div class="analysis-stale" role="status" aria-live="polite">The recent summary is temporarily unavailable. The history and selected-filter total below are still current.</div>`:"";
   main.innerHTML=`<div class="analysis-head"><div><h1>Content analysis</h1><p>Everything that determines whether a file can use fixed-timeline VOD HLS: source verification, index builds, failures, and recent published results.</p></div>
       <div class="analysis-actions"><span class="analysis-live ${ANALYSIS_VIEW.auto?'':'paused'}" role="status" aria-live="polite">${ANALYSIS_VIEW.auto?'Summary auto-refreshing':'Summary auto-refresh paused'}</span><button class="ghost sm" data-analysis-focus="auto" aria-pressed="${ANALYSIS_VIEW.auto}" onclick="toggleAnalysisAuto()">${ANALYSIS_VIEW.auto?'Pause':'Resume'}</button><button class="ghost sm" data-analysis-focus="refresh" onclick="refreshAnalysisNow(this)">Refresh history</button><button class="ghost sm" data-analysis-focus="settings" onclick="openAnalysisSettings()">Settings</button></div></div>
+    <div class="row"><button class="ghost sm" data-analysis-focus="reconcile" onclick="toggleAnalysisReconciliation()">Reconcile analysis…</button></div>
+    ${analysisReconcileHtml()}
     ${summaryWarning}
     ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
     <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${counts.available===false?"—":counts.running??"—"}</span><span class="k">Running</span></div><div class="analysis-metric"><span class="n">${counts.available===false?"—":counts.queued??"—"}</span><span class="k">Queued</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>

@@ -1183,9 +1183,15 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
-    // v88: independent quality cancellation, without ending the incumbent.
+    // v88: bounded fragment retention probes, including empty result keys.
+    super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
+    // v89: file/source-indexed preparation status reads.
+    super::background_jobs::PREPARATION_INDEX_SCHEMA,
+    // v90: distinguish explicit conversion attempts from automatic discovery.
+    super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
+    // v91: independent quality cancellation, without ending the incumbent.
     super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
-    // v89: parent-fenced continuous media facts and dependency reservations.
+    // v92: parent-fenced continuous media facts and dependency reservations.
     super::quality_ledger::SCHEMA,
 ];
 
@@ -1564,6 +1570,30 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
+    fn dv_request_provenance_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let shape = conn
+            .query_row(
+                r#"SELECT type, "notnull", dflt_value FROM pragma_table_info('dv_conversions')
+               WHERE name = 'requested_manually'"#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match shape {
+            None => Ok(false),
+            Some((kind, true, Some(default))) if kind == "INTEGER" && default == "0" => Ok(true),
+            Some(_) => Err(StoreError::Migration(
+                "invalid Dolby Vision request provenance column".into(),
+            )),
+        }
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
@@ -1603,6 +1633,7 @@ impl SqliteStore {
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
             {
                 Ok(())
             } else {
@@ -2914,9 +2945,12 @@ mod tests {
         // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
         // resource claims, subtitle reconciliation and bounded job history;
         // v86 compacts settled receipts under waiter pressure; v87 adds
-        // expiring viewer interests through analysis and artifacts.
+        // expiring viewer interests through analysis and artifacts; v88 adds the
+        // unconditional result-key/target/force index for bounded cleanup.
+        // v89 indexes preparation history; v90 records explicit DV requests.
+        // v91 adds exact quality cancellation; v92 adds continuous dependencies.
         assert_eq!(
-            version, 87,
+            version, 92,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

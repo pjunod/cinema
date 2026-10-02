@@ -148,9 +148,15 @@ const RECEIPT_PRESSURE_SCHEMA_VERSION: i64 = 64;
 const RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
 const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 65;
 const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
-const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 66;
-const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
-const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 67;
+const ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION: i64 = 66;
+const ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+const PREPARATION_INDEX_SCHEMA_VERSION: i64 = 67;
+const PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION;
+const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
+const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
+const QUALITY_CANCELLATION_SCHEMA_VERSION: i64 = 69;
+const QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
+const QUALITY_LEDGER_SCHEMA_VERSION: i64 = 70;
 const QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE: i64 = QUALITY_CANCELLATION_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = QUALITY_LEDGER_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
@@ -3115,6 +3121,51 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION, now, ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::background_jobs::PREPARATION_INDEX_SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(PREPARATION_INDEX_SCHEMA_VERSION, now, PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN.to_owned(), params!()),
+                        ("DROP TRIGGER dv_queue_admission_settings_ai".to_owned(), params!()),
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_TRIGGER.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(DV_REQUEST_PROVENANCE_SCHEMA_VERSION, now, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -5186,6 +5237,9 @@ fn schema_migration_action(
         | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
         | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
         | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE
+        | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
+        | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
         | QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE
         | QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
@@ -7260,9 +7314,31 @@ mod tests {
             "v64 advances to the viewer-analysis schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 60,
+            PREPARATION_INDEX_SCHEMA_VERSION, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+            "request provenance starts from the preparation-index schema"
+        );
+        assert_eq!(
+            DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_REQUEST_PROVENANCE_SCHEMA_VERSION,
+            "v67 advances exactly one step to request provenance"
+        );
+        assert_eq!(
+            DV_REQUEST_PROVENANCE_SCHEMA_VERSION, QUALITY_CANCELLATION_SCHEMA_MIGRATION_SOURCE,
+            "quality cancellation follows published request provenance"
+        );
+        assert_eq!(
+            QUALITY_CANCELLATION_SCHEMA_VERSION, QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE,
+            "continuous dependencies follow quality cancellation"
+        );
+        assert_eq!(
+            QUALITY_LEDGER_SCHEMA_MIGRATION_SOURCE + 1,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v65 step"
+            "the continuous ledger is the final additive step"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 65,
+            AUTH_SCHEMA_VERSION,
+            "this implementation contains every additive v5→v70 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

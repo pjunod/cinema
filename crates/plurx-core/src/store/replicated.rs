@@ -859,6 +859,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "reconcile_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        // Both conditional writes always run; SQL secures the successor before
+        // retiring its predecessor. The final row count is returned after commit.
+        shape: TransactionShape::BatchWrite,
+    },
 ];
 
 /// hiqlite 0.14.0 `store/state_machine/sqlite/state_machine.rs:401-510`
@@ -1190,7 +1199,9 @@ mod tests {
         // E2 retires the unfenced manifest-cursor transaction.
         // DVR catalog cleanup removes the linked rows and clears the recording
         // links together so a failed delete remains retryable.
-        assert_eq!(methods.len(), 95);
+        // Reconciliation adds one atomic successor-insert / predecessor-retire
+        // batch. Its SQL predicates own all branching, as in the replicated twin.
+        assert_eq!(methods.len(), 96);
     }
 
     #[test]

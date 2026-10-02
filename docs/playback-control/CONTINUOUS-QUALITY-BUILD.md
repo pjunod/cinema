@@ -2313,3 +2313,15 @@ post-End refusal. Pinned all-target compilation includes both Store backends.
 Unit execution remains deferred. Controlled cold-rung admission and native
 continuous adapters remain unfinished; this closes the autonomous family's
 durable description path, not physical-media qualification.
+
+
+### 10.66 Integrate current main without reusing shipped migration numbers
+
+Main through `0f71852bc` is integrated. Its result lookup, preparation index
+and Dolby Vision request provenance migrations retain their published order.
+The unpublished quality cancellation and continuous ledger migrations follow
+as SQLite v91/v92 and replicated v69/v70. The migration-chain assertions name
+both new predecessors, and independent web control regressions are retained.
+Pinned workspace/all-target compilation checks the integrated source; unit
+execution remains deferred to final review and the fast lane. Controlled and
+native integration and physical qualification remain unfinished.

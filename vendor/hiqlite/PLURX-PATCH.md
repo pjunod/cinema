@@ -61,6 +61,12 @@ made-up URL and prevents the fork from being declared fully tracked.
   a monotonic lease and matching the proof to their local Raft observation. A
   P3a leader's three-column response remains a valid Authority/readiness proof
   but maps to protocol `0`, so bounded local reads stay closed during rollout.
+  Its quorum-read and local-apply stages share the original absolute one-second
+  deadline. Slow observations (at least 100 ms) carry the phase, pending read
+  index and local applied index; the final leadership checks and required apply
+  wait are preserved. Slow state-machine applications report only Raft index,
+  term, elapsed milliseconds and a static operation class, never SQL or binds.
+
 - The SQLite snapshot builder and installer publish process-local, lock-free
   duration histograms through `Client::local_db_snapshot_metrics`. Explicit
   RAII start/finish hooks classify build/install success and every error or

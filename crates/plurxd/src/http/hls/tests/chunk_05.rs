@@ -7,7 +7,7 @@
     /// already retryable, and a takeover for the player still waits on the
     /// gate. The worker is published as the guard's own incarnation at owner
     /// epoch 1, so the cleanup's owner-fenced abort reaches it.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         let dir = crate::test_tempdir().expect("state dir");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
@@ -120,6 +120,11 @@
             .await
             .expect("settle retry claim"));
 
+        // SQLite uses real blocking work. Keep time running through those
+        // awaits above so an idle runtime cannot advance background timers
+        // while the cleanup's wall-clock safety hold is counting down.
+        // Only the gate-wait assertion needs a controlled clock.
+        tokio::time::pause();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let blocked = tokio::spawn({
             let state = fixture.state.clone();
@@ -155,6 +160,7 @@
             blocked.await.expect("replacement waiter task").is_err(),
             "cleanup must retain the replacement gate"
         );
+        tokio::time::resume();
 
         held.release();
         released_rx
@@ -455,9 +461,13 @@
             incarnation_id,
         ));
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        // Cleanup may retry for its entire settlement budget. Allow scheduling
+        // slack on a busy runner instead of imposing a shorter test deadline.
+        let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET * 2;
         loop {
-            let retry_now_ms = unix_ms();
+            // Keep the original lease live regardless of wall-clock delays:
+            // only guard cleanup, never lease expiry, may enable this retry.
+            let retry_now_ms = now_ms;
             match state
                 .store
                 .claim_media_session_request(

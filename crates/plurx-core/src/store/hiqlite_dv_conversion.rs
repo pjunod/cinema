@@ -77,7 +77,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
 const JOINED_CONVERSION_COLS: &str = "d.file_id AS file_id, d.state AS state,
     d.el_type AS el_type, d.original_path AS original_path,
     d.bytes_before AS bytes_before, d.bytes_after AS bytes_after, d.error AS error,
-    d.queued_at_ms AS queued_at_ms, d.finished_at_ms AS finished_at_ms,
+    d.queued_at_ms AS queued_at_ms, d.finished_at_ms AS finished_at_ms, d.requested_manually AS requested_manually,
     d.recovery_guard_id AS recovery_guard_id, g.guard_id AS guard_id,
     g.file_id AS guard_file_id, g.library_id AS guard_library_id,
     g.source_path AS guard_source_path, g.recovery_path AS guard_recovery_path,
@@ -102,6 +102,7 @@ struct ConversionRow {
     error: Option<String>,
     queued_at_ms: i64,
     finished_at_ms: Option<i64>,
+    requested_manually: Option<i64>,
 }
 
 impl From<&mut Row<'_>> for ConversionRow {
@@ -116,6 +117,7 @@ impl From<&mut Row<'_>> for ConversionRow {
             error: row.get("error"),
             queued_at_ms: row.get("queued_at_ms"),
             finished_at_ms: row.get("finished_at_ms"),
+            requested_manually: row.get("requested_manually"),
         }
     }
 }
@@ -138,6 +140,7 @@ impl ConversionRow {
             error: self.error,
             queued_at_ms: self.queued_at_ms,
             finished_at_ms: self.finished_at_ms,
+            requested_manually: self.requested_manually == Some(1),
             recovery_guard: None,
         })
     }
@@ -161,6 +164,7 @@ struct QueueAdmissionEnvelope {
     error: Option<String>,
     queued_at_ms: Option<i64>,
     finished_at_ms: Option<i64>,
+    requested_manually: Option<i64>,
     recovery_guard_id: Option<String>,
     guard_id: Option<String>,
     guard_file_id: Option<i64>,
@@ -205,6 +209,7 @@ impl QueueAdmissionEnvelope {
                 StoreError::Database("Dolby Vision queue outcome has no queue timestamp".to_owned())
             })?,
             finished_at_ms: self.finished_at_ms,
+            requested_manually: self.requested_manually == Some(1),
             recovery_guard: None,
         };
         if let Some(recovery_guard_id) = self.recovery_guard_id.as_deref() {
@@ -760,7 +765,7 @@ impl DvConversionStore for HiqliteAuthStore {
                           d.original_path AS original_path,
                           d.bytes_before AS bytes_before, d.bytes_after AS bytes_after,
                           d.error AS error, d.queued_at_ms AS queued_at_ms,
-                          d.finished_at_ms AS finished_at_ms,
+                          d.finished_at_ms AS finished_at_ms, d.requested_manually AS requested_manually,
                           d.recovery_guard_id AS recovery_guard_id,
                           g.guard_id AS guard_id, g.file_id AS guard_file_id,
                           g.library_id AS guard_library_id,
@@ -821,6 +826,8 @@ impl DvConversionStore for HiqliteAuthStore {
                           'queued_at_ms',
                             CASE WHEN outcome = 'queued' THEN requested_queued_at_ms
                                  ELSE queued_at_ms END,
+                          'requested_manually',
+                            CASE WHEN outcome = 'queued' THEN 1 ELSE requested_manually END,
                           'finished_at_ms',
                             CASE WHEN outcome = 'queued' THEN NULL ELSE finished_at_ms END,
                           'recovery_guard_id',
@@ -879,6 +886,7 @@ impl DvConversionStore for HiqliteAuthStore {
         queued_at_ms: i64,
         retry_failed: bool,
         limit: i64,
+        requested_manually: bool,
     ) -> Result<DvConversionQueueBatch, StoreError> {
         let limit = limit.clamp(0, DV_CONVERSION_QUEUE_BATCH_MAX);
         if limit == 0 {
@@ -897,8 +905,8 @@ impl DvConversionStore for HiqliteAuthStore {
             .execute_returning_map_one::<_, QueueAdmissionRow>(
                 "WITH requested(
                        library_id, queued_at_ms, retry_failed, batch_limit,
-                       mode_key, request_key) AS
-                       (VALUES ($1, $2, $3, $4, $5, $6)),
+                       mode_key, request_key, requested_manually) AS
+                       (VALUES ($1, $2, $3, $4, $5, $6, $7)),
                  mode_snapshot AS (
                    SELECT requested.*,
                           CASE WHEN json_valid(mode_setting.value)
@@ -944,6 +952,7 @@ impl DvConversionStore for HiqliteAuthStore {
                           'requested_library_id', library_id,
                           'requested_queued_at_ms', queued_at_ms,
                           'retry_failed', retry_failed,
+                          'requested_manually', requested_manually,
                           'candidate_ids', json(candidate_ids),
                           'queued', queued),
                         queued_at_ms
@@ -955,7 +964,8 @@ impl DvConversionStore for HiqliteAuthStore {
                     retry_failed,
                     limit,
                     keys::LIBRARY_DV_DISK_CONVERT,
-                    request_key
+                    request_key,
+                    requested_manually
                 ),
             )
             .await?;

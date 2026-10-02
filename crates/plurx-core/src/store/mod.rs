@@ -27,6 +27,9 @@ pub use file_grants::{FileGrant, FileGrantStore, NewFileGrant, FILE_GRANTS_SCHEM
 mod continuous_family;
 mod fragindex;
 mod fragment_index_cluster;
+#[cfg(test)]
+#[path = "../../tests/support/fragment_prune_budget.rs"]
+mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
 mod quality_cancellation;
@@ -137,6 +140,8 @@ pub mod offline_expiry;
 pub mod replicated;
 pub mod watched_drain;
 
+#[cfg(feature = "hiqlite-contract-tests")]
+pub use dv_conversion::validation_pre_provenance_admission_trigger;
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
@@ -936,10 +941,10 @@ pub use fragment_index_cluster::{
     CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
     DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
     DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
-    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
+    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
+    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
+    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -2054,6 +2059,8 @@ pub mod keys {
     /// Node-local, like the transcode-cleanup stamp: an index lives on the
     /// node that built it, so when it last ran is a fact about that node.
     pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
+    /// Shared success stamp for catalog retention, independent of discovery.
+    pub const JOB_LAST_FRAGMENT_INDEX_CLEANUP: &str = "jobs.last_fragment_index_cleanup";
     /// Last file examined by this node's bounded VOD index walk. Without a
     /// cursor, one slow or malformed title at the front of a library consumes
     /// every pass and later files can never become playable.

@@ -191,6 +191,44 @@ pub fn status() -> serde_json::Value {
     };
     serde_json::json!({"state":if ENABLED.load(Ordering::Acquire){r.phase}else{"disabled"},"indexed":r.index.rows.len(),"model":"all-MiniLM-L6-v2","revision":REVISION})
 }
+/// Use the same content and model identity as the indexing worker. A library-
+/// wide ready count is not evidence that this particular item was indexed.
+pub(crate) async fn item_preparation(
+    state: &AppState,
+    id: i64,
+) -> Result<serde_json::Value, plurx_core::error::StoreError> {
+    if state
+        .store
+        .get_setting(super::SEMANTIC_KEY)
+        .await?
+        .as_deref()
+        != Some("true")
+    {
+        return Ok(
+            serde_json::json!({"state":"off","detail":"Semantic search indexing is disabled"}),
+        );
+    }
+    let entries = state
+        .store
+        .classification_page(id.saturating_sub(1), 1)
+        .await?;
+    let Some(entry) = entries
+        .first()
+        .filter(|e| e.input().is_ok_and(|i| i.id == id))
+    else {
+        return Ok(
+            serde_json::json!({"state":"not_applicable","detail":"No semantic search input for this item"}),
+        );
+    };
+    let lookup = state
+        .store
+        .embedding_for(id, &source_key(entry), &model_identity().digest())
+        .await?;
+    Ok(
+        serde_json::json!({"state":if lookup.artifact.is_some(){"ready"}else{"pending"},
+        "detail":if lookup.artifact.is_some(){"Search representation matches the current metadata and model"}else{"Current search representation has not been published"}}),
+    )
+}
 pub fn disable() {
     ENABLED.store(false, Ordering::Release);
     if let Ok(mut r) = runtime().try_lock() {

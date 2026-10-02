@@ -2664,7 +2664,7 @@ impl LeaseHeartbeat {
     }
 }
 
-fn analysis_request_generation(
+pub(crate) fn analysis_request_generation(
     file: &MediaFile,
     component: &str,
     pipeline_version: &str,
@@ -3295,6 +3295,7 @@ impl JobManager {
                 clock_ms(),
                 retry_failed,
                 DV_CONVERSION_QUEUE_BATCH_MAX,
+                true,
             )
             .await
     }
@@ -3417,6 +3418,7 @@ impl JobManager {
                             clock_ms(),
                             false,
                             DV_CONVERSION_QUEUE_BATCH_MAX,
+                            false,
                         )
                         .await?;
                     if !loss.is_cancelled() {
@@ -7076,6 +7078,16 @@ impl JobManager {
             record_discard(Discard::SourceMoved);
             return None;
         }
+        // Persist the already verified observation, allowing read-only status
+        // to bind publication receipts to this object without rehashing media.
+        if let Err(error) = self
+            .store
+            .record_fragment_index_source(&attested.observation)
+            .await
+        {
+            tracing::warn!(file_id, %error, "recording subtitle source observation");
+            return None;
+        }
         let harvest = pending.judge().await;
         let verdicts: Vec<_> = harvest
             .outcomes()
@@ -7575,6 +7587,62 @@ impl JobManager {
         }
     }
 
+    /// Catalog retention consumes its own success interval, including no-op
+    /// passes. The shared lease/stamp coordinates both discovery permits and
+    /// all voters; a busy discovery must not invent cursor progress.
+    async fn prune_fragment_index_catalog(
+        &self,
+        cache_root: &std::path::Path,
+        permit_lost: &tokio_util::sync::CancellationToken,
+    ) {
+        const CLEANUP_MINS: i64 = 15;
+        const RETAIN_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+        let key = keys::JOB_LAST_FRAGMENT_INDEX_CLEANUP;
+        if permit_lost.is_cancelled()
+            || !crate::schedule::due(now(), self.job_stamp(key).await, CLEANUP_MINS)
+        {
+            return;
+        }
+        let lease = match self
+            .acquire_job("media:fragment-index:cleanup".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "acquiring fragment-index cleanup lease");
+                return;
+            }
+        };
+        // Another permit may have completed while this one waited for a lease.
+        if !permit_lost.is_cancelled()
+            && !lease.loss_token().is_cancelled()
+            && crate::schedule::due(now(), self.job_stamp(key).await, CLEANUP_MINS)
+        {
+            match self
+                .store
+                .prune_cluster_fragment_indexes(clock_ms().saturating_sub(RETAIN_MS), 128)
+                .await
+            {
+                Ok(cache_keys) => {
+                    // Stamp success before local I/O. Zero removed rows still
+                    // used the maintenance interval; discovery stays due.
+                    if !lease.loss_token().is_cancelled() {
+                        self.stamp(key, &lease.publisher(self.store.as_ref())).await;
+                    }
+                    for cache_key in cache_keys {
+                        crate::fragment_index_cluster::remove_local_blob(cache_root, &cache_key)
+                            .await;
+                    }
+                }
+                Err(error) => tracing::warn!(%error, "pruning fragment-index catalog generations"),
+            }
+        }
+        if let Err(error) = lease.release().await {
+            tracing::warn!(%error, "releasing fragment-index cleanup lease");
+        }
+    }
+
     async fn discover_cluster_fragment_indexes_with_permit(
         self: &Arc<Self>,
         transcode: Arc<TranscodeManager>,
@@ -7588,20 +7656,8 @@ impl JobManager {
             return;
         }
         let cache_root = crate::fragment_index_cluster::cache_root(transcode.runtime_cache_dir());
-        const RETAIN_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
-        let prune_before = clock_ms().saturating_sub(RETAIN_MS);
-        match self
-            .store
-            .prune_cluster_fragment_indexes(prune_before, 128)
-            .await
-        {
-            Ok(cache_keys) => {
-                for cache_key in cache_keys {
-                    crate::fragment_index_cluster::remove_local_blob(&cache_root, &cache_key).await;
-                }
-            }
-            Err(error) => tracing::warn!(%error, "pruning fragment-index catalog generations"),
-        }
+        self.prune_fragment_index_catalog(&cache_root, permit_lost)
+            .await;
         let sweep_cursor = self.fragment_index_sweep_cursor.lock().await.clone();
         match crate::fragment_index_cluster::sweep_local_orphans(
             self.store.as_ref(),
@@ -8161,6 +8217,13 @@ impl JobManager {
             return Err(AnalysisResolutionError::ClaimLost);
         }
         let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        self.store
+            .record_fragment_index_source(&attested.observation)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_write_failed",
+                charge_attempt: true,
+            })?;
         let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
         let rows = self
             .store
@@ -10475,7 +10538,7 @@ mod tests {
 
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {
-        use plurx_core::store::ClusterFragmentIndexStore as _;
+        use plurx_core::store::{ClusterFragmentIndexStore as _, UserStore as _};
         use plurx_core::transcode::CopyVideoOptions;
         let store = SqliteStore::open_in_memory().expect("store");
         store
@@ -10557,6 +10620,32 @@ mod tests {
         assert_eq!(first.target_node_id, "node-a");
         assert_eq!(first.priority, "normal");
         assert!(!first.force_rebuild);
+        let viewer = store
+            .create_user("first-play-viewer", "hash", false)
+            .await
+            .expect("viewer");
+        let joined = enqueue_copy_preparation_for_object_with_viewer(
+            &store,
+            "node-a",
+            &file,
+            convert,
+            None,
+            Some(&PlaybackViewerDemand {
+                user_id: viewer.id,
+                playback_id: "first-play".into(),
+            }),
+        )
+        .await
+        .expect("viewer joins exact preparation");
+        assert_eq!(joined.request_id, first.request_id);
+        let promoted = store
+            .analysis_request(&first.request_id)
+            .await
+            .expect("read viewer demand")
+            .expect("request");
+        assert_eq!(promoted.priority, "foreground");
+        assert_eq!(promoted.trigger, "playback");
+        assert_eq!(promoted.requested_generation, first.requested_generation);
         assert_eq!(
             store.analysis_requests(10).await.expect("requests").len(),
             4
@@ -13000,6 +13089,72 @@ mod tests {
             jobs.all_statuses().await.contains_key(&library.id),
             "and must start it once it carries one"
         );
+    }
+
+    #[tokio::test]
+    async fn successful_zero_row_cleanup_does_not_repeat_or_advance_busy_discovery() {
+        let dir = tempfile::tempdir().expect("cleanup fixture");
+        let path = dir.path().join("cleanup.db");
+        let store = Arc::new(SqliteStore::open(&path).expect("store"));
+        let jobs = manager(store.clone(), dir.path());
+        let lost = CancellationToken::new();
+        jobs.prune_fragment_index_catalog(dir.path(), &lost).await;
+        let stamp = store
+            .get_setting(keys::JOB_LAST_FRAGMENT_INDEX_CLEANUP)
+            .await
+            .expect("success stamp")
+            .expect("zero-row success consumes interval");
+        // Insert an eligible row AFTER success. If busy minute wakes repeat
+        // prune, this row disappears even though discovery made no progress.
+        rusqlite::Connection::open(&path).expect("seed connection").execute_batch(
+            "INSERT INTO cluster_fragment_index_jobs(cache_key,target_node_id,file_id,source_size,source_mtime,source_sha256,pipeline_sha256,state,not_before_ms,created_at_ms,updated_at_ms)
+             VALUES ('due-later','node',999,1,1,'source','pipeline','ready',1,1,1)")
+             .expect("seed eligible history");
+        for _ in 0..15 {
+            jobs.prune_fragment_index_catalog(dir.path(), &lost).await;
+        }
+        assert!(store
+            .cluster_fragment_index_job("due-later", "node")
+            .await
+            .expect("history")
+            .is_some());
+        assert_eq!(
+            store
+                .get_setting(keys::JOB_LAST_FRAGMENT_INDEX_CLEANUP)
+                .await
+                .expect("unchanged stamp"),
+            Some(stamp)
+        );
+        assert_eq!(
+            store
+                .get_setting(&jobs.local_job_key(keys::JOB_LAST_VOD_INDEX))
+                .await
+                .expect("discovery stamp"),
+            None
+        );
+        assert_eq!(
+            store
+                .get_setting(&jobs.local_job_key(keys::JOB_VOD_INDEX_CURSOR))
+                .await
+                .expect("discovery cursor"),
+            None
+        );
+        // Both cluster-wide discovery permits still share this stamp.
+        let authority = MovableJobAuthority::learner();
+        authority.promote();
+        let other = Arc::new(JobManager::new_with_scan_prune_percent(
+            store.clone(),
+            dir.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "other-node".to_owned(),
+            authority,
+        ));
+        other.prune_fragment_index_catalog(dir.path(), &lost).await;
+        assert!(store
+            .cluster_fragment_index_job("due-later", "node")
+            .await
+            .expect("shared interval")
+            .is_some());
     }
 
     #[tokio::test]

@@ -997,14 +997,17 @@ impl RideAlongPlan {
         let mut outputs = Vec::with_capacity(self.tracks.len() * 2);
         for &ordinal in &self.tracks {
             let kind = self.kind(ordinal);
-            match kind {
-                ProbedKind::Pgs => outputs.push((ordinal, kind, RepresentationFormat::Sup)),
-                ProbedKind::Text => outputs.push((ordinal, kind, RepresentationFormat::Webvtt)),
-                ProbedKind::TextStyled => {
-                    outputs.push((ordinal, kind, RepresentationFormat::Webvtt));
-                    outputs.push((ordinal, kind, RepresentationFormat::Matroska));
-                }
-            }
+            let source_kind = match kind {
+                ProbedKind::Pgs => TrackKind::Pgs,
+                ProbedKind::Text => TrackKind::Text,
+                ProbedKind::TextStyled => TrackKind::TextStyled,
+            };
+            outputs.extend(
+                source_kind
+                    .representations()
+                    .iter()
+                    .map(|format| (ordinal, kind, *format)),
+            );
         }
         outputs
     }
