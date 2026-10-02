@@ -59,6 +59,67 @@ struct ObserverInner {
     completion: watch::Sender<Completion>,
     control: Mutex<OwnerControl>,
     waiters: Semaphore,
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    test: TestObservationControl,
+}
+
+/// Instance-owned scheduling only: no clock, directory, sample or publication
+/// is supplied by this seam. Production builds contain none of these fields.
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+#[derive(Default)]
+struct TestObservationControl {
+    hold_periodic: std::sync::atomic::AtomicBool,
+    periodic: tokio::sync::Notify,
+    before_round: Mutex<Option<Arc<TestObservationGate>>>,
+    before_final_query: Mutex<Option<Arc<TestObservationGate>>>,
+    audit: Mutex<Vec<TestRoundAudit>>,
+    final_query_results: Mutex<Vec<bool>>,
+}
+
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+pub(crate) struct TestObservationGate {
+    reached: Semaphore,
+    release: Semaphore,
+}
+
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+impl TestObservationGate {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: Semaphore::new(0),
+            release: Semaphore::new(0),
+        })
+    }
+
+    async fn hold(&self) {
+        self.reached.add_permits(1);
+        self.release
+            .acquire()
+            .await
+            .expect("test gate open")
+            .forget();
+    }
+
+    pub(crate) async fn reached(&self) {
+        self.reached
+            .acquire()
+            .await
+            .expect("test gate open")
+            .forget();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[cfg(all(test, feature = "cluster-integration-tests"))]
+#[derive(Clone)]
+pub(crate) struct TestRoundAudit {
+    pub(crate) completed: bool,
+    pub(crate) directory: PeerDirectory,
+    pub(crate) filter_depths: BTreeMap<String, usize>,
+    pub(crate) ticket: Option<ClockDecisionTicket>,
 }
 
 /// The handle is retained across pending-to-normal HTTP activation. Only one
@@ -89,7 +150,75 @@ impl ClockObserver {
                 running: false,
             }),
             waiters: Semaphore::new(CLOCK_WAITER_LIMIT),
+            #[cfg(all(test, feature = "cluster-integration-tests"))]
+            test: TestObservationControl::default(),
         }))
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_hold_periodic(&self, held: bool) {
+        self.0
+            .test
+            .hold_periodic
+            .store(held, std::sync::atomic::Ordering::SeqCst);
+        self.0.test.periodic.notify_one();
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_gate_next_round(&self) -> Arc<TestObservationGate> {
+        let gate = TestObservationGate::new();
+        *self.0.test.before_round.lock().expect("test gate lock") = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_gate_final_query(&self) -> Arc<TestObservationGate> {
+        let gate = TestObservationGate::new();
+        *self
+            .0
+            .test
+            .before_final_query
+            .lock()
+            .expect("test gate lock") = Some(Arc::clone(&gate));
+        gate
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_audit(&self) -> Vec<TestRoundAudit> {
+        self.0.test.audit.lock().expect("test audit lock").clone()
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_is_running(&self) -> bool {
+        self.0.control.lock().expect("test owner lock").running
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_final_query_results(&self) -> Vec<bool> {
+        self.0
+            .test
+            .final_query_results
+            .lock()
+            .expect("test query audit lock")
+            .clone()
+    }
+
+    #[cfg(all(test, feature = "cluster-integration-tests"))]
+    pub(crate) fn test_demand_round(&self) {
+        self.request_round().expect("live test owner");
+    }
+
+    async fn periodic_tick(&self, interval: &mut tokio::time::Interval) {
+        #[cfg(all(test, feature = "cluster-integration-tests"))]
+        while self
+            .0
+            .test
+            .hold_periodic
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            self.0.test.periodic.notified().await;
+        }
+        interval.tick().await;
     }
 
     pub(crate) fn belongs_to(&self, membership: &MembershipManager) -> bool {
@@ -236,12 +365,34 @@ impl ClockObserver {
         if auth.node_id != barrier.learner_id {
             return Err(());
         }
+        // The test waits BEFORE the final query obtains any SQLite snapshot.
+        // Nothing is held after this awaited membership operation.
+        #[cfg(all(test, feature = "cluster-integration-tests"))]
+        {
+            let gate = self
+                .0
+                .test
+                .before_final_query
+                .lock()
+                .expect("test gate lock")
+                .take();
+            if let Some(gate) = gate {
+                gate.hold().await;
+            }
+        }
         let roster = self
             .0
             .membership
             .clock_peers_after_authenticated_request(auth)
-            .await
-            .map_err(|_| ())?;
+            .await;
+        #[cfg(all(test, feature = "cluster-integration-tests"))]
+        self.0
+            .test
+            .final_query_results
+            .lock()
+            .expect("test query audit lock")
+            .push(roster.is_ok());
+        let roster = roster.map_err(|_| ())?;
         if roster.membership.as_ref() != Some(&barrier.leadership.membership)
             || peer_directory(&roster).as_ref() != Some(&barrier.directory)
             || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)
@@ -271,10 +422,26 @@ impl ClockObserver {
         loop {
             tokio::select! {
                 () = shutdown.cancelled() => break,
-                _ = interval.tick() => {},
+                () = self.periodic_tick(&mut interval) => {},
                 request = requests.recv() => if request.is_none() { break; },
             }
             self.begin_round(&mut requests);
+            #[cfg(all(test, feature = "cluster-integration-tests"))]
+            {
+                let gate = self
+                    .0
+                    .test
+                    .before_round
+                    .lock()
+                    .expect("test gate lock")
+                    .take();
+                if let Some(gate) = gate {
+                    tokio::select! {
+                        () = shutdown.cancelled() => break,
+                        () = gate.hold() => {},
+                    }
+                }
+            }
             let round = tokio::select! {
                 () = shutdown.cancelled() => break,
                 round = observation_round(
@@ -286,6 +453,21 @@ impl ClockObserver {
                     &mut membership,
                 ) => round,
             };
+            #[cfg(all(test, feature = "cluster-integration-tests"))]
+            self.0
+                .test
+                .audit
+                .lock()
+                .expect("test audit lock")
+                .push(TestRoundAudit {
+                    completed: round.is_some(),
+                    directory: previous_directory.clone(),
+                    filter_depths: filters
+                        .iter()
+                        .map(|(node, filter)| (node.clone(), filter.0.len()))
+                        .collect(),
+                    ticket: round.as_ref().map(|round| round.ticket),
+                });
             self.finish_round(round);
         }
     }
