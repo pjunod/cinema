@@ -231,9 +231,6 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
-    // S-08's re-armed field-order backfill stamps itself done and deletes the
-    // superseded pass's stamp and node cursors in one write.
-    "put_setting_retiring",
     // The generation-fenced settings write. It belongs beside `put_settings`
     // rather than in a Live TV group: nothing about it is Live TV specific,
     // and any caller that needs a settings batch to land only against an
@@ -18312,11 +18309,7 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
-    // S-08's re-armed field-order backfill adds `put_setting_retiring` on
-    // `SettingsStore`: stamp the new pass done and delete the superseded
-    // pass's stamp and node cursors in one write. Covered on both backends by
-    // `rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_pass`.
-    assert_eq!(declared.len(), 451, "review the Store method count");
+    assert_eq!(declared.len(), 450, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -18851,7 +18844,7 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
 }
 
 #[tokio::test]
-async fn rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_pass() {
+async fn rearmed_field_order_backfill_converges_null_rows_left_by_the_first_pass() {
     for_each_backend(|store, backend| async move {
         let library = store
             .create_library(&NewLibrary {
@@ -18928,18 +18921,12 @@ async fn rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_
             .await
             .unwrap_or_else(|error| panic!("{backend}: unprobed file: {error}"));
 
-        // The first pass's leftovers, plus neighbours that only share a prefix.
+        // The first pass already stamped itself done; that stamp must not stop
+        // the second pass, and the second pass leaves it where it is.
         store
-            .put_settings(&[
-                (plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_V1_DONE, "1"),
-                ("jobs.field_order_backfill_cursor.node.node-a", "77"),
-                ("jobs.field_order_backfill_cursor.node.node-b", "91"),
-                ("jobs.field_order_backfill_v2_cursor.node.node-a", "3"),
-                ("jobs.field_order_backfill_cursor_unrelated", "keep"),
-                ("jobs.field_order_backfilledness", "keep"),
-            ])
+            .put_setting("jobs.field_order_backfilled", "1")
             .await
-            .unwrap_or_else(|error| panic!("{backend}: seed settings: {error}"));
+            .unwrap_or_else(|error| panic!("{backend}: seed first-pass stamp: {error}"));
 
         let field_order = |id: i64| {
             let store = Arc::clone(&store);
@@ -18990,34 +18977,11 @@ async fn rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_
             Some("1"),
             "{backend}"
         );
-        for retired in [
-            plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_V1_DONE,
-            "jobs.field_order_backfill_cursor.node.node-a",
-            "jobs.field_order_backfill_cursor.node.node-b",
-            "jobs.field_order_backfill_v2_cursor.node.node-a",
-        ] {
-            assert!(!settings.contains_key(retired), "{backend}: {retired} left behind");
-        }
-        for neighbour in [
-            "jobs.field_order_backfill_cursor_unrelated",
-            "jobs.field_order_backfilledness",
-        ] {
-            assert_eq!(
-                settings.get(neighbour).map(String::as_str),
-                Some("keep"),
-                "{backend}: {neighbour} only shares a prefix"
-            );
-        }
-
-        // A family that would delete the write it accompanies is refused.
-        assert!(store
-            .put_setting_retiring(
-                "jobs.example.node.node-a",
-                "1",
-                &["jobs.example"],
-            )
-            .await
-            .is_err(), "{backend}");
+        assert_eq!(
+            settings.get("jobs.field_order_backfilled").map(String::as_str),
+            Some("1"),
+            "{backend}: the first pass's stamp is left in place, like every superseded backfill's"
+        );
     })
     .await;
 }

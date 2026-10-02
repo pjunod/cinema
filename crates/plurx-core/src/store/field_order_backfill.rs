@@ -4,8 +4,7 @@
 //! ([`crate::domain::FIELD_ORDER_UNKNOWN`]); this walk gives every probed row
 //! whose column is still `NULL` the token the scanner would write for the
 //! same retained document, through the exactly fenced update, and stamps the
-//! pass complete — retiring the superseded first pass's keys — once a page
-//! comes back empty. The daemon owns the lease and the node-local cursor;
+//! pass complete once a page comes back empty. The daemon owns the lease and the node-local cursor;
 //! everything that decides what a row receives lives here, so the store
 //! contract exercises the production page on both backends.
 
@@ -26,9 +25,7 @@ pub struct FieldOrderBackfillPage {
 
 /// Walk at most `limit` probed `NULL` rows strictly after `cursor`.
 ///
-/// An empty page stamps [`keys::JOB_FIELD_ORDER_BACKFILL_DONE`] and, in the
-/// same write, deletes the first pass's stamp and both passes' node-local
-/// cursors, so a finished backfill leaves only its stamp behind.
+/// An empty page stamps [`keys::JOB_FIELD_ORDER_BACKFILL_DONE`].
 pub async fn field_order_backfill_page(
     store: &dyn Store,
     cursor: i64,
@@ -37,15 +34,7 @@ pub async fn field_order_backfill_page(
     let pending = store.files_missing_field_order(cursor, limit).await?;
     if pending.is_empty() {
         store
-            .put_setting_retiring(
-                keys::JOB_FIELD_ORDER_BACKFILL_DONE,
-                "1",
-                &[
-                    keys::JOB_FIELD_ORDER_BACKFILL_V1_DONE,
-                    keys::JOB_FIELD_ORDER_BACKFILL_V1_CURSOR,
-                    keys::JOB_FIELD_ORDER_BACKFILL_CURSOR,
-                ],
-            )
+            .put_setting(keys::JOB_FIELD_ORDER_BACKFILL_DONE, "1")
             .await?;
         return Ok(FieldOrderBackfillPage {
             cursor,

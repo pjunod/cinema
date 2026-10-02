@@ -451,9 +451,12 @@ two bars above.
   already wrote for those rows), so the SQLite and Hiqlite upserts and the
   background probe job's facts document all store the same value; `NULL`
   now means only "never probed". The backfill was re-armed under new keys
-  (`jobs.field_order_backfilled_v2`, `jobs.field_order_backfill_v2_cursor`)
-  and, in the transaction that stamps it done, deletes the first pass's
-  stamp and both passes' node-local cursors (`SettingsStore::put_setting_retiring`).
+  (`jobs.field_order_backfilled_v2`, `jobs.field_order_backfill_v2_cursor`);
+  the new stamp alone re-arms the loop. The first pass's stamp and cursors
+  stay in place, as every superseded backfill's do: `NULL` and `unknown`
+  behave identically, so there is nothing to clean up for, and deleting the
+  first stamp would only make a not-yet-upgraded node in a rolling deploy
+  run the first pass again and re-create it.
   **Identity:** no artifact key moves. The catalogue column feeds only
   `ScanType::from_field_order`, which reads `NULL` and `unknown` alike, so
   the deinterlace decision and `plan_digest` are unchanged; `FactsDigest`
@@ -584,4 +587,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`a55bad845`) | Ten-second-media `idet` pass uses the snapshotted FFprobe and held descriptor under the existing overall deadline, output caps, cancellation/reap and offset ownership. Verdict is cached/digested, strict >90% progressive overrides bwdif, and three fixed metric labels are exported. Real FFmpeg/FFprobe descriptor acceptance confirms both overrule and confirmation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) | **needs:** run the §5.5 media1 QSV/VAAPI prompt and record idet, cadence, signalstats and wall-time comparisons. Hardware graphs remain conservatively declined; no unqualified filter was added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Review disposition | [#417 comment 3298](http://192.168.4.7:3000/noirr/plurx/pulls/417#issuecomment-3298) (`9789ca4ed`, merged with `6063b37c0` in `3fd0d8ac1`) | Both P1 findings resolved: the three special Dolby Vision/HDR10 graphs apply the recorded bwdif decision before scale without moving Dolby Vision reshape, and Live TV selects one complete final H.264 limit only after output cadence is known. Focused argv, 30/60 fps capability, rational bitrate, affected compile and all-target Clippy evidence is green. M5 remains honestly blocked on media1 qualification. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M1 defect + M5 | branch `opus/s08-interlace-continuation` (unpushed) | `parse_probe_json` owns `unknown`; backfill re-armed under v2 keys and retires the first pass's stamp and cursors in its completing write; store contract on both backends. M5 measured on lab3 (§9): hardware deinterlace not adopted, CPU bwdif stays; §5.5 bars replaced by §9.3. Open question 4 closed. Routing by the M4 verdict recorded as a gap (§8), not forced. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M1 defect + M5 | branch `opus/s08-interlace-continuation` (unpushed) | `parse_probe_json` owns `unknown`; backfill re-armed under v2 keys (first pass's stamp left in place); store contract on both backends. M5 measured on lab3 (§9): hardware deinterlace not adopted, CPU bwdif stays; §5.5 bars replaced by §9.3. Open question 4 closed. Routing by the M4 verdict recorded as a gap (§8), not forced. |
