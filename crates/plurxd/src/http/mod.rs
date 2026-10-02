@@ -696,14 +696,18 @@ impl PlexCensus {
     /// Restore the durable census from `data_dir` and write it back at once,
     /// marked as running, so a crash before the first periodic write still
     /// leaves a bounded gap. Never fails: an unusable file starts a new census
-    /// with the reason logged. Called once, before the listener accepts; the
-    /// returned start is what was logged, for a caller that wants to assert it.
+    /// with the reason logged. `floor_unix_s` is the earliest clock reading
+    /// trusted (the build's source date); below it, or with no clock, nothing
+    /// is written until a later write sees a trustworthy one. Called once,
+    /// before the listener accepts; the returned start is what was logged.
     pub(crate) async fn restore_durable(
         &self,
         data_dir: &std::path::Path,
-        now_unix_s: u64,
+        now_unix_s: Option<u64>,
+        floor_unix_s: u64,
     ) -> plex_census::CensusStart {
-        let (ledger, start) = plex_census::CensusLedger::restore(data_dir, now_unix_s).await;
+        let (ledger, start) =
+            plex_census::CensusLedger::restore(data_dir, now_unix_s, floor_unix_s).await;
         ledger.log_start(&start);
         if self.ledger.set(ledger).is_err() {
             tracing::warn!("the Plex façade census was already restored in this process");
@@ -718,15 +722,16 @@ impl PlexCensus {
         start
     }
 
-    /// Write the durable census; `stopping` records a clean stop and is final.
-    /// `Ok(false)` when there is no ledger or the clean stop already landed.
+    /// Write the durable census; `clean` records a clean stop and is final.
+    /// `Ok(false)` when there is no ledger, the clean stop already landed, or
+    /// the clock is unreadable or below the build's source date.
     pub(crate) async fn flush_durable(
         &self,
-        now_unix_s: u64,
-        stopping: bool,
+        now_unix_s: Option<u64>,
+        clean: bool,
     ) -> std::io::Result<bool> {
         match self.ledger.get() {
-            Some(ledger) => ledger.flush(&self.cells, now_unix_s, stopping).await,
+            Some(ledger) => ledger.flush(&self.cells, now_unix_s, clean).await,
             None => Ok(false),
         }
     }
