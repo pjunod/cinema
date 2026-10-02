@@ -2945,8 +2945,10 @@ mod tests {
         // v86 compacts settled receipts under waiter pressure; v87 adds
         // expiring viewer interests through analysis and artifacts; v88 adds the
         // unconditional result-key/target/force index for bounded cleanup.
+        // v89 indexes preparation history; v90 records explicit DV requests;
+        // v91 records transactional planning generation.
         assert_eq!(
-            version, 89,
+            version, 91,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

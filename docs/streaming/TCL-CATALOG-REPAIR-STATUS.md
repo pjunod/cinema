@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`955e1551e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+(`7f738563e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -124,3 +124,7 @@ Regressions cover the legacy required/optional distinction, owned worker versus
 background accounting, manual/copy catalog retention, generation invalidation
 through the common producer entry, and audio-dependent follow-up identities.
 These are being compiled; no passing test result is claimed yet.
+
+Review findings commit: `3b13d6acf`, tracked hook passed. Main advanced only with
+schema expectation fixes; the combined assertions now deliberately cover
+SQLite 91 and replicated 69 before the final test pass.
