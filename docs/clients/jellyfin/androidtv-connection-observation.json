@@ -4485,5 +4485,418 @@
     "persistent_failure_budget_seconds": 15,
     "persistent_failure_result": "bounded_refusal",
     "boundary": "Disposable synchronous harness with one 15-second deadline and finite retry schedule; production facade retry/service extraction remains unbuilt."
+  },
+  "episode_browse": {
+    "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+    "operation": "J0 TV -> J0 Show -> Season 1",
+    "actual": "Physical series detail, one season and two episode entries displayed; native adapter unimplemented.",
+    "paging": "Series and season items startIndex=0/limit=100. NextUp expansion also calls Items with startIndex=1 and the season parentId, returning the second episode.",
+    "trace": [
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 105,
+        "kind": "request",
+        "time": 1790980792308,
+        "method": "GET",
+        "path": "/jellyfin/Items?startIndex=0&limit=100&recursive=true&sortOrder=Ascending&parentId=30bb9ee91500a06ace10d6191679ffcf&fields=Trickplay&includeItemTypes=Series&sortBy=SortName&enableTotalRecordCount=true&enableImages=true",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 105,
+        "kind": "response",
+        "time": 1790980792374,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 607,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Series"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 111,
+        "kind": "request",
+        "time": 1790980836974,
+        "method": "GET",
+        "path": "/jellyfin/Items/87a225a570f2e3c6e37d9b673a64c6d9",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 111,
+        "kind": "response",
+        "time": 1790980836996,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 896,
+        "body": {}
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 112,
+        "kind": "request",
+        "time": 1790980837046,
+        "method": "GET",
+        "path": "/jellyfin/Shows/NextUp?limit=1&fields=Trickplay&seriesId=87a225a570f2e3c6e37d9b673a64c6d9&enableTotalRecordCount=true&disableFirstEpisode=false&enableResumable=true&enableRewatching=false",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 113,
+        "kind": "request",
+        "time": 1790980837065,
+        "method": "GET",
+        "path": "/jellyfin/Shows/Upcoming?fields=Trickplay&parentId=87a225a570f2e3c6e37d9b673a64c6d9",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 114,
+        "kind": "request",
+        "time": 1790980837066,
+        "method": "GET",
+        "path": "/jellyfin/Items/87a225a570f2e3c6e37d9b673a64c6d9/Similar?limit=20&fields=Trickplay",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 115,
+        "kind": "request",
+        "time": 1790980837066,
+        "method": "GET",
+        "path": "/jellyfin/Shows/87a225a570f2e3c6e37d9b673a64c6d9/Seasons?fields=Trickplay",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 114,
+        "kind": "response",
+        "time": 1790980837094,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 74,
+        "body": {
+          "TotalRecordCount": 0,
+          "StartIndex": 0
+        },
+        "item_types": []
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 116,
+        "kind": "request",
+        "time": 1790980837112,
+        "method": "GET",
+        "path": "/jellyfin/Shows/NextUp?fields=Trickplay&seriesId=87a225a570f2e3c6e37d9b673a64c6d9&enableTotalRecordCount=true&disableFirstEpisode=false&enableResumable=true&enableRewatching=false",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 115,
+        "kind": "response",
+        "time": 1790980837117,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 646,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Season"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 113,
+        "kind": "response",
+        "time": 1790980837157,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 74,
+        "body": {
+          "TotalRecordCount": 0,
+          "StartIndex": 0
+        },
+        "item_types": []
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 112,
+        "kind": "response",
+        "time": 1790980837161,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 1864,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Episode"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 116,
+        "kind": "response",
+        "time": 1790980837161,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 1864,
+        "body": {
+          "TotalRecordCount": 1,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Episode"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 117,
+        "kind": "request",
+        "time": 1790980837244,
+        "method": "GET",
+        "path": "/jellyfin/Items?startIndex=1&parentId=ca812989b1443bf97da47ceecc3c16c6&enableTotalRecordCount=true&enableImages=true",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 117,
+        "kind": "response",
+        "time": 1790980837276,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 590,
+        "body": {
+          "TotalRecordCount": 2,
+          "StartIndex": 1
+        },
+        "item_types": [
+          "Episode"
+        ]
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 126,
+        "kind": "request",
+        "time": 1790980906793,
+        "method": "GET",
+        "path": "/jellyfin/Items/ca812989b1443bf97da47ceecc3c16c6/SpecialFeatures",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 127,
+        "kind": "request",
+        "time": 1790980906794,
+        "method": "GET",
+        "path": "/jellyfin/Items?startIndex=0&limit=100&parentId=ca812989b1443bf97da47ceecc3c16c6&fields=Trickplay&enableTotalRecordCount=true&enableImages=true",
+        "headers": {
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "04dbc484c0a96860e725ffa19440aa0d",
+            "Device": "bba72ef183b2fc463cf07d2bcd275e57"
+          }
+        },
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 126,
+        "kind": "response",
+        "time": 1790980906817,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 28,
+        "body": null
+      },
+      {
+        "capture_session": "464049f4-6859-4ff8-8466-39410943472b",
+        "id": 127,
+        "kind": "response",
+        "time": 1790980906824,
+        "status": 200,
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "credential_carriers": []
+        },
+        "bytes": 2087,
+        "body": {
+          "TotalRecordCount": 2,
+          "StartIndex": 0
+        },
+        "item_types": [
+          "Episode",
+          "Episode"
+        ]
+      }
+    ]
   }
 }

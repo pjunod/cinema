@@ -32,7 +32,8 @@
       "boundary": "Reference route only; native long-pause route recovery still fails as separately recorded."
     },
     "remaining": [
-      "native fMP4 delivery",
+      "production native init-prefix adapter qualification",
+      "passive route resurrection",
       "subsequent-page corpus verification"
     ],
     "abrupt_kill": {
@@ -48,7 +49,7 @@
       "advertised_delivery": "External subtitle Codec=subrip, DeliveryUrl=Stream.vtt?ApiKey=<redacted>",
       "actual_client_request": "GET /Videos/{id}/{source}/Subtitles/0/0/Stream.srt, Authorization header, Range bytes=0-, HTTP 200",
       "physical_cue": "J0 synthetic subtitle at two minutes, visible at 124.583s",
-      "boundary": "SRT reference path verified; native VTT-only Infuse delivery remains unproved."
+      "boundary": "Physical SRT reference delivery and controlled VTT metadata delivery proved; production native subtitle adapter remains unproved."
     }
   },
   "route_inventory": [
@@ -2920,5 +2921,652 @@
         "bytes": 400229792
       }
     ]
+  },
+  "controlled_native_vod_probe": {
+    "source_commit": "549eb3d884844d3fcf6763da2cc92a1357834a4d",
+    "binary_sha256": "5f6acae04fd94d7ae8e9cb3e911fe0b7adfb61d78d18698db82448afd43ec2e6",
+    "build_stamp": "v0.3.0-5484-gac484fe91-dirty (stale metadata; source content committed before binary link)",
+    "fixture_native_file_id": 1,
+    "policy_boundary": "Owned isolated daemon disables rolling recovery globally; trusted per-create policy is proved separately by service regressions. No facade auth, worker execution or passive lifetime acceptance.",
+    "mutation_boundary": [
+      "PlaybackInfo redirected to one owned native encoded VOD capability; subtitles removed for this transport-only probe",
+      "Master wrapper and item-relative child aliases added to match actual client requests",
+      "Successful experiment concatenates the exact 1275-byte native initialization object before every native fragment and declares the exact combined length; no ffmpeg, encoding, media timestamp rewriting or native controls in the proxy",
+      "Raw capabilities omitted; URL query casing accepted only for one exact value with conflicting duplicates refused"
+    ],
+    "initialization_sha256": "a23435cb83e7993946ffd8c026b62cde6d8b38a3e813539e9b195a93d1c32590",
+    "experiments": [
+      {
+        "capture_session": "b5d37387-dad1-4a6f-818f-124b8b7847fc",
+        "result": "media playlist supplied as entry: no init or segment requested",
+        "trace": [
+          {
+            "capture_session": "b5d37387-dad1-4a6f-818f-124b8b7847fc",
+            "id": 16,
+            "kind": "request",
+            "time": 1790981192761,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "b5d37387-dad1-4a6f-818f-124b8b7847fc",
+            "id": 16,
+            "kind": "native_response",
+            "time": 1790981192767,
+            "status": 200,
+            "bytes": 10369,
+            "filename": "index.m3u8",
+            "probe": "single_fixture_native_vod_alias"
+          }
+        ]
+      },
+      {
+        "capture_session": "e48ed6ec-f0c5-4116-8c69-7be3fc584e71",
+        "result": "master wrapper: relative child resolved under Videos/item and returned 404",
+        "trace": [
+          {
+            "capture_session": "e48ed6ec-f0c5-4116-8c69-7be3fc584e71",
+            "id": 4,
+            "kind": "request",
+            "time": 1790981532449,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "e48ed6ec-f0c5-4116-8c69-7be3fc584e71",
+            "id": 5,
+            "kind": "request",
+            "time": 1790981532462,
+            "method": "GET",
+            "path": "/jellyfin/Videos/839b5590d47d0a394246a9c90fb9c3d4/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "e48ed6ec-f0c5-4116-8c69-7be3fc584e71",
+            "id": 4,
+            "kind": "native_master_response",
+            "time": 1790981532449,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          }
+        ]
+      },
+      {
+        "capture_session": "56c30e35-9f5a-492b-802a-3f4b96587cf2",
+        "result": "absolute child still prepended under Videos/item; rejected",
+        "trace": [
+          {
+            "capture_session": "56c30e35-9f5a-492b-802a-3f4b96587cf2",
+            "id": 16,
+            "kind": "request",
+            "time": 1790981657120,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "56c30e35-9f5a-492b-802a-3f4b96587cf2",
+            "id": 17,
+            "kind": "request",
+            "time": 1790981657131,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fc3cc6f82c0c950052a840c8fbe32a66/http://192.168.4.143:18097/jellyfin/__j0native/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "56c30e35-9f5a-492b-802a-3f4b96587cf2",
+            "id": 16,
+            "kind": "native_master_response",
+            "time": 1790981657120,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          }
+        ]
+      },
+      {
+        "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+        "result": "item-relative master/media routes: fragment 200 but no EXT-X-MAP initialization request; loading failed",
+        "trace": [
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 17,
+            "kind": "request",
+            "time": 1790981764117,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 18,
+            "kind": "request",
+            "time": 1790981764126,
+            "method": "GET",
+            "path": "/jellyfin/Videos/4164b5f8444730690e0065a1dd720ea4/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 19,
+            "kind": "request",
+            "time": 1790981764169,
+            "method": "GET",
+            "path": "/jellyfin/Videos/4164b5f8444730690e0065a1dd720ea4/seg00000.m4s?MediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 17,
+            "kind": "native_master_response",
+            "time": 1790981764117,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 18,
+            "kind": "native_response",
+            "time": 1790981764129,
+            "status": 200,
+            "bytes": 10369,
+            "filename": "media.m3u8",
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "54dc2d23-89b1-4737-9a90-cc4643e1e1ec",
+            "id": 19,
+            "kind": "native_response",
+            "time": 1790981764174,
+            "status": 200,
+            "bytes": 313302,
+            "filename": "seg00000.m4s",
+            "probe": "single_fixture_native_vod_alias"
+          }
+        ]
+      },
+      {
+        "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+        "result": "fmp4 container label: same omission and loading failure",
+        "trace": [
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 17,
+            "kind": "request",
+            "time": 1790981859313,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 18,
+            "kind": "request",
+            "time": 1790981859324,
+            "method": "GET",
+            "path": "/jellyfin/Videos/ac63d666710188f818462469b154231d/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 19,
+            "kind": "request",
+            "time": 1790981859364,
+            "method": "GET",
+            "path": "/jellyfin/Videos/ac63d666710188f818462469b154231d/seg00000.m4s?MediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 17,
+            "kind": "native_master_response",
+            "time": 1790981859313,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 18,
+            "kind": "native_response",
+            "time": 1790981859326,
+            "status": 200,
+            "bytes": 10369,
+            "filename": "media.m3u8",
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "58f3da66-388d-4bf6-9a4c-20edd291a6b0",
+            "id": 19,
+            "kind": "native_response",
+            "time": 1790981859368,
+            "status": 200,
+            "bytes": 313302,
+            "filename": "seg00000.m4s",
+            "probe": "single_fixture_native_vod_alias"
+          }
+        ]
+      },
+      {
+        "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+        "result": "native init prefixed to each native fragment without content length: explicit size error",
+        "trace": [
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 4,
+            "kind": "request",
+            "time": 1790981927872,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 5,
+            "kind": "request",
+            "time": 1790981927882,
+            "method": "GET",
+            "path": "/jellyfin/Videos/d59fef194aa15b4bd9a2fde381fbd585/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 6,
+            "kind": "request",
+            "time": 1790981927925,
+            "method": "GET",
+            "path": "/jellyfin/Videos/d59fef194aa15b4bd9a2fde381fbd585/seg00000.m4s?MediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 4,
+            "kind": "native_master_response",
+            "time": 1790981927872,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 5,
+            "kind": "native_response",
+            "time": 1790981927885,
+            "status": 200,
+            "bytes": 10369,
+            "filename": "media.m3u8",
+            "probe": "single_fixture_native_vod_alias",
+            "init_prefix_bytes": 0
+          },
+          {
+            "capture_session": "b0f2a42b-fe27-433f-8a59-f29b556a89a1",
+            "id": 6,
+            "kind": "native_response",
+            "time": 1790981927930,
+            "status": 200,
+            "bytes": 313302,
+            "filename": "seg00000.m4s",
+            "probe": "single_fixture_native_vod_init_prefix",
+            "init_prefix_bytes": 1275
+          }
+        ]
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "result": "native init prefix and exact combined content length: playback and forward/back seeks render",
+        "trace": [
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 16,
+            "kind": "request",
+            "time": 1790982051495,
+            "method": "GET",
+            "path": "/jellyfin/__j0native/index.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 17,
+            "kind": "request",
+            "time": 1790982051507,
+            "method": "GET",
+            "path": "/jellyfin/Videos/ea98c785ec1037cc31ead933f744cb64/media.m3u8?mediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 18,
+            "kind": "request",
+            "time": 1790982051550,
+            "method": "GET",
+            "path": "/jellyfin/Videos/ea98c785ec1037cc31ead933f744cb64/seg00000.m4s?MediaToken=%3Credacted%3E",
+            "credential_carriers": [
+              "authorization"
+            ]
+          },
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 16,
+            "kind": "native_master_response",
+            "time": 1790982051495,
+            "status": 200,
+            "probe": "single_fixture_native_vod_alias"
+          },
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 17,
+            "kind": "native_response",
+            "time": 1790982051510,
+            "status": 200,
+            "bytes": 10369,
+            "filename": "media.m3u8",
+            "probe": "single_fixture_native_vod_alias",
+            "init_prefix_bytes": 0
+          },
+          {
+            "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+            "id": 18,
+            "kind": "native_response",
+            "time": 1790982051555,
+            "status": 200,
+            "bytes": 313302,
+            "filename": "seg00000.m4s",
+            "probe": "single_fixture_native_vod_init_prefix",
+            "init_prefix_bytes": 1275
+          }
+        ]
+      }
+    ],
+    "physical_source_times_seconds": {
+      "opening": 2.333,
+      "forward_120": 144.958,
+      "backward_60": 114.758
+    },
+    "lifecycle_trace": [
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 62,
+        "kind": "request",
+        "time": 1790982054533,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "PositionTicks": 0,
+          "IsPaused": false,
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 68,
+        "kind": "request",
+        "time": 1790982064608,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "EventName": "TimeUpdate",
+          "PositionTicks": 102500000,
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 72,
+        "kind": "request",
+        "time": 1790982070317,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 157083335,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "PlayMethod": "Transcode",
+          "EventName": "Pause",
+          "IsPaused": true
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 74,
+        "kind": "request",
+        "time": 1790982093705,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "EventName": "Unpause",
+          "PositionTicks": 157083335,
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 75,
+        "kind": "request",
+        "time": 1790982093753,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": true,
+          "EventName": "Pause",
+          "PositionTicks": 157083335,
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 78,
+        "kind": "request",
+        "time": 1790982093902,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 1359999981,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "PlayMethod": "Transcode",
+          "EventName": "Unpause",
+          "IsPaused": false
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 125,
+        "kind": "request",
+        "time": 1790982103949,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 1457916685,
+          "EventName": "TimeUpdate",
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 131,
+        "kind": "request",
+        "time": 1790982113996,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 1557916688,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "EventName": "TimeUpdate",
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 133,
+        "kind": "request",
+        "time": 1790982115994,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 1578333368,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": true,
+          "EventName": "Pause",
+          "PlayMethod": "Transcode"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 136,
+        "kind": "request",
+        "time": 1790982116085,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlayMethod": "Transcode",
+          "PositionTicks": 980000048,
+          "EventName": "Unpause",
+          "IsPaused": false,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 183,
+        "kind": "request",
+        "time": 1790982126127,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "EventName": "TimeUpdate",
+          "PlayMethod": "Transcode",
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "PositionTicks": 1083333349
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 189,
+        "kind": "request",
+        "time": 1790982136174,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "EventName": "TimeUpdate",
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "IsPaused": false,
+          "PlayMethod": "Transcode",
+          "PositionTicks": 1183333352
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 195,
+        "kind": "request",
+        "time": 1790982146213,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "PositionTicks": 1283333355,
+          "IsPaused": false,
+          "PlayMethod": "Transcode",
+          "EventName": "TimeUpdate"
+        }
+      },
+      {
+        "capture_session": "ce0aad2d-48f1-456e-b4fc-084662f8509a",
+        "id": 198,
+        "kind": "request",
+        "time": 1790982149143,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "credential_carriers": [
+          "authorization"
+        ],
+        "body": {
+          "PositionTicks": 1308333331,
+          "PlaySessionId": "8cf4be0aab2181c1ef35e93fe1b2c5fe",
+          "PlayMethod": "Transcode",
+          "EventName": "Pause",
+          "IsPaused": true
+        }
+      }
+    ],
+    "long_pause": "In progress; recovery not accepted",
+    "production_adapter": "Not implemented; bounded native publication, range, cancellation and retirement contracts must be proved before promotion."
   }
 }

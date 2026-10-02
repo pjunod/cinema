@@ -175,6 +175,26 @@ Always register the `/jellyfin` nest, even when disabled, with its own JSON
 fallback returns 200 HTML and looks like a broken Jellyfin server. Test both
 the bare mount and subpaths through TLS termination and a reverse proxy.
 
+
+**J0 measured transport amendment (2026-10-02):** Infuse 8.5.6’s Jellyfin
+transcode path expects a master playlist and resolves its media child under
+`/jellyfin/Videos/{item}`; it prepends that item path even to an absolute child.
+Use the measured item-relative route structure, carrying the exact opaque
+binding on every child. It fetches native fMP4 fragments but omits the
+`EXT-X-MAP` initialization request. A controlled wrapper concatenating the
+exact native init bytes with each native fragment, with exact combined content
+length, renders and seeks. The [Infuse observation](jellyfin/infuse-connection-observation.json)
+retains both failures and the successful boundary.
+
+J4 may implement this bounded representation for the measured client/version
+capability only after proving exact native rendition/publication identity for
+both objects, full/range lengths, cancellation, terminal/owner fencing and
+post-idle resurrection. Fetch through shared native services, never loopback
+HTTP. Do not add another encoder, rewrite timestamps, retain unbounded media
+bodies, or infer this capability for arbitrary profiles advertising TS. Keep
+ordinary `EXT-X-MAP` delivery for clients that use it. This amendment makes the
+required transport explicit; it does not qualify the adapter or J0 recovery.
+
 ## 4. Protocol baseline — traces choose the subset
 
 ### 4.1 Freeze a reference before implementing compatibility

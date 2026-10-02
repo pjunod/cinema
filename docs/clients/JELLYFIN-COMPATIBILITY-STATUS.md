@@ -37,15 +37,14 @@ are established separately from interoperability:
 |---|---|---|
 | Reference server | Jellyfin 10.11.11, upstream commit `1fbd8739292cce610231be93daf43368733edf63`; official container index digest and arm64 image ID in manifest | Disposable synthetic library; not a Plurx deployment |
 | Schema | OpenAPI served by that container under `/jellyfin`, 315 paths; SHA-256 in manifest | Raw hash includes the served origin; separate canonical hash removes only `servers` |
-| Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | Physical direct/HLS/seek/lifecycle and SRT/VTT flows measured; native fMP4 pending |
+| Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | Physical reference flows measured; native fMP4 renders with exact init-prefix wrapper; production adapter pending |
 | Android TV | Installed official release 0.19.10 / 191099, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | Physical Google TV Streamer connected; Android 14 / API 34 / UTTK.260317.003 measured; Media3 ExoPlayer 1.8.0 measured from current app runtime logs |
 | Android TV dependencies | Kotlin SDK 1.7.1, Media3 1.8.0 from pinned `gradle/libs.versions.toml` | Source provenance, not device capability evidence |
 
 Server provenance is [the official released tag](https://github.com/jellyfin/jellyfin/releases/tag/v10.11.11).
 The Android candidate is [the official release](https://github.com/jellyfin/jellyfin-androidtv/releases/tag/v0.19.10).
 The pinned Android profile branches at server 10.11 for Dolby Vision range
-predicates and declares VTT external/HLS delivery. Android negotiation and ancillary calls are captured below; Infuse remains
-unmeasured.
+predicates and declares VTT external/HLS delivery. Both clients’ negotiation and ancillary calls are captured below.
 
 **Synthetic corpus:** an eleven-minute 1280×720, 24 fps H.264/AAC MP4; a
 matching MKV with English/French AAC audio and an English SRT track; external
@@ -53,8 +52,9 @@ SRT cues at 1, 120 and 330 seconds; one local poster. The manifest records file
 hashes and sizes. This corpus supports direct, remux, forced bitrate encode,
 track selection and a pause longer than 300 seconds; it does not satisfy the
 HDR/DV acceptance row. Two episode aliases of the same synthetic MP4 now form the TV corpus without
-duplicating source bytes; their reference library scan completed; physical episode browse remains untested. Multiple
-pages and the HDR corpus remain to be prepared. The MKV was regenerated after
+duplicating source bytes; both clients browsed the series and season, and Infuse played the first episode.
+Android also requested offset 1 and received the second episode. A full multi-page
+corpus and the HDR corpus remain to be prepared. The MKV was regenerated after
 a disk-space cleanup; the current manifest records its new container hash.
 
 **Reference preparation:** dedicated random-password test account, synthetic
@@ -72,9 +72,9 @@ scratch after retaining minimized fixtures and findings.
 | Harness public system info, public users, Quick Connect status under `/jellyfin` | 200, JSON read successfully | Reference bootstrap only |
 | Harness authentication | 200; dedicated account authenticated | Reference account only |
 | Harness movie projection | Eleven-minute movie, one media source | Reference library preparation only |
-| Infuse connect/browse/direct/seek/transcode | Physical Infuse 8.5.6 connected; movie details/artwork, static MKV and explicit 750 Kbit/s encoded HLS rendered; forward/backward seeks and 374.353-second same-play pause/resume measured | Remaining native fMP4, subtitle and episode probes |
+| Infuse connect/browse/direct/seek/transcode | Physical Infuse 8.5.6 connected; movie details/artwork, static MKV and explicit 750 Kbit/s encoded HLS rendered; forward/backward seeks and 374.353-second same-play pause/resume measured | Native transport wrapper proved on one fixture; production qualification pending |
 | Android TV connect/browse/HLS/remux | Connect, password login, movie details/artwork, direct MKV and 720 Kbit/s encoded HLS rendered on physical TV; 332.6-second pause/resume, forward/backward seek and app-kill replacement measured | Required J0 client gate |
-| Both clients' image/subtitle/media credential carriers and version-implied calls | Android: anonymous artwork/direct media; ApiKey on SRT and HLS; MediaSegments and Intros observed. Infuse unmeasured | Required policy/design evidence before J2 |
+| Both clients' image/subtitle/media credential carriers and version-implied calls | Android: anonymous artwork/direct media; ApiKey on SRT and HLS; MediaSegments and Intros observed. Infuse: authorization plus API-key HLS query; authorization and Range for SRT/VTT | Required policy/design evidence before J2 |
 | Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Infuse: 374.353-second same-play resume and SIGKILL replacement without old Stopped. Native VOD reap confirmed; recovery returns 410 | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
@@ -237,7 +237,8 @@ negative duration on valid copy and encoded recipes, typed
 
 The preceding tests are native service evidence, not a new compatibility adapter or a proof
 that an external client will request the resurrection path. The per-create
-VOD-only policy and client-side timing remain unbuilt/unmeasured. Test linking
+VOD-only policy is implemented and tested below; actual worker execution and
+passive retention remain unproved. Test linking
 reported the macOS compact-unwind size warning; execution passed. Workspace
 Clippy with `-D warnings`, formatting, catalog lint and served JavaScript
 syntax passed through the normal tracked hook.
@@ -270,9 +271,28 @@ same device identity and no old `Stopped`. An external SRT cue renders at
 `Codec=webvtt` response instead produces `Stream.vtt` with HTTP 200/text-vtt.
 The VTT opening cue renders at 2.125 seconds. The probe changes only
 subtitle delivery metadata; the reference responses are restored. Native
-fMP4 delivery remains open. Series/season/two-episode browsing and first
+fMP4 renders through the measured initialization-prefix wrapper described below. Series/season/two-episode browsing and first
 episode playback render; initial paging requests use series limit 50 and
 season limit 200. A subsequent-page corpus remains unproved.
+
+### Infuse native transport — initialization is required per fragment
+
+The controlled native delivery experiments are retained in the same Infuse
+observation. Supplying a media playlist directly fails before any fragment
+request. A master wrapper makes Infuse fetch its child under
+`/jellyfin/Videos/{item}`; even an absolute child is prepended there. Item-relative
+routes reach the native fragment, but Infuse requests no `EXT-X-MAP` object and
+fails. Changing `TranscodingContainer` from `mp4` to `fmp4` does not alter that.
+
+Prefixing the exact 1,275-byte native initialization object to each native
+fragment and declaring the exact combined content length renders without a
+second encoder or timestamp rewrite. Physical source times are 2.333 seconds
+at opening, 144.958 after a forward 120-second seek and 114.758 after a backward
+60-second seek. Omitting the combined length instead produces Infuse’s explicit
+“Server didn’t report the size of the file” error. This is a single-fixture
+transport spike; production native publication, range, cancellation and terminal
+fences still need tests. The client-specific capability rule and wrapper must
+be proved in J4 rather than treating Infuse’s declared TS profile as fMP4 proof.
 
 The internal per-create `vod_only` policy now refuses unindexed copy before
 rolling allocation with recovery globally enabled. Three focused regressions
@@ -293,9 +313,9 @@ dispatch and passive route retention remain separate unproved seams.
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
 The Android TV reference flow now renders direct and encoded HLS playback.
-Native idle recovery and the Infuse device flow remain open. The Apple TV
-was awakened through its existing Companion pairing and Infuse launched;
-connect/playback remain unproved.
+Native idle recovery and production Infuse transport qualification remain open.
+Both physical clients have connected and played reference direct/encoded media;
+both have rendered native fragments under controlled transport probes.
 Unperformed operations remain **not tested**. Do not mark
 J0 complete, start the full facade route build or reduce the required client
 matrix to compensate. No compatibility release, setting graduation or fleet
