@@ -1154,6 +1154,28 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "an accepted queue is displayed as success without depending on a refresh");
 });
 
+test("Dolby Vision failures follow library policy and explicit request provenance", () => {
+  const render = new Function("exactWireId", "fmtBytes", "dvRecoveryGuardStatusHtml", "esc",
+    `${shippedSource("dvConversionStateHtml")}; return dvConversionStateHtml;`)(
+    f => String(f.id), () => "0 B", g => g ? " · recovery original retained" : "", String);
+  for(const mode of ["off", "manual", "auto"]){
+    for(const requested_manually of [undefined, false, true]){
+      const html=render({id:42,library_id:7},{eligible:true,capabilities:{available:true},
+        library_modes:{7:mode},conversion:{state:"failed",error:"read-only mount",requested_manually,recovery_guard:{state:"active"}}});
+      const showFailure=mode==="auto"||(mode==="manual"&&requested_manually===true);
+      assert.equal(html.includes("Conversion failed: read-only mount"),showFailure,`${mode}/${requested_manually}`);
+      assert.equal(html.includes("Retry conversion"),showFailure);
+      assert.match(html,/recovery original retained/,"hiding historical errors must retain recovery information");
+      if(mode==="off") assert.doesNotMatch(html,/class="problem"/);
+      if(mode==="manual"&&!showFailure) assert.match(html,/>Convert on disk<\/button>/);
+    }
+  }
+  for(const state of ["queued","running","verified","committed"]){
+    const html=render({id:42,library_id:7},{eligible:false,library_modes:{7:"off"},conversion:{state,recovery_guard:{state:"active"}}});
+    assert.match(html,/recovery original retained/,"real work and retained originals stay visible after disabling new work");
+  }
+});
+
 test("Dolby Vision settings controls have accessible names", () => {
   const file = shippedSource("dvConversionStateHtml");
   assert.match(file, /aria-label="Convert file .* from Dolby Vision Profile 7 to Profile 8\.1 on disk"/);
@@ -1247,9 +1269,10 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedIneligible = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: false,
       capabilities: { available: true },
+      library_modes: { "7": "manual" },
     },
   );
   assert.match(failedIneligible,
@@ -1259,7 +1282,7 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedEligible = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: true,
       capabilities: { available: true },
       library_modes: { "7": "manual" },
@@ -1270,14 +1293,14 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedOff = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: true,
       capabilities: { available: true },
       library_modes: {},
     },
   );
-  assert.match(failedOff, /<button[^>]* disabled>Retry conversion<\/button>/,
-    "a failed row cannot retry while its library mode is Off");
+  assert.doesNotMatch(failedOff, /Conversion failed|Retry conversion|class="problem"/,
+    "Off hides old failure and retry without presenting disabled policy as an error");
   assert.match(failedOff, /library Dolby Vision conversion mode is Off/);
   const guardStatus = new Function(
     "esc",
