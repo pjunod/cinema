@@ -829,7 +829,9 @@ pattern = "HlsPresentationResolution"
 # +2 encoded VOD: the frozen-encoding HLS facts branch and its production
 # manager/GET regression use the existing typed presentation owner. Neither
 # adds a worker; both retain the VOD response owner attached to those bytes.
-expected_occurrences = 23
+# S10 public wire: +1 read-only match on the actual public session context;
+# no mocked presentation or new response authority.
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -2480,7 +2482,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # Review64 R4 causal fixture: +9 test-only namespaced tasks in internal_clock.rs.
 # The test retains/joins its real HTTP listeners, observer and signed callers;
 # waiter cancellation does not cancel the observer owner. No production owner.
-expected_occurrences = 715
+# S10 public Copy wire control: +1 owned loopback HTTP serve task, stopped and
+# joined under bounded cleanup. Failure guards retain state and directory.
+expected_occurrences = 716
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3686,7 +3690,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one preceding timeout, retaining the SAME original two-second deadline.
 # Review64 R4: +7 bounded real-handler/test waits, preserving original receipt
 # deadlines and test-owned cleanup. No production timer or renewed clock age.
-expected_occurrences = 1199
+# S10 public wire: +6 test-owned waits (aggregate fetch, actual completion,
+# completion polling, total wall budget, public DELETE cleanup, listener join).
+# They add no production timer or deadline renewal.
+expected_occurrences = 1205
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4506,7 +4513,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # verifies older-completion refusal without ACK. No child or new owner.
 # Review64 R4: +3 actual HTTP response status assertions and the same +1
 # owned/joined finite-stack test thread; none launches a process.
-expected_occurrences = 428
+# S10 public wire: +2 reqwest response.status() reads, not process launches.
+expected_occurrences = 430
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
