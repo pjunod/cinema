@@ -294,6 +294,36 @@ impl Pipeline {
         }
     }
 
+    /// Initialize both device families together. A Vulkan upload uses the
+    /// global filter device, so its VA-API encoder must be an ancestor that
+    /// the final upload can recover with `derive_device=vaapi`.
+    pub fn device_args(self, encoder: Encoder) -> Vec<String> {
+        if self == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+            return vec![
+                "-init_hw_device".into(),
+                format!("vaapi=hw:{}", super::encoder::vaapi_device()),
+                "-init_hw_device".into(),
+                "vulkan=vk@hw".into(),
+                "-filter_hw_device".into(),
+                "vk".into(),
+            ];
+        }
+        let mut args = encoder.init_args();
+        args.extend(self.init_args());
+        args
+    }
+
+    /// Upload software output (including a subtitle composite) to the encoder.
+    /// A bare upload would use Vulkan again and hand the VA-API encoder the
+    /// wrong hardware surface; recover its device from the derived context.
+    pub fn encoder_upload(self, encoder: Encoder) -> Option<&'static str> {
+        if self == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+            Some("format=nv12,hwupload=derive_device=vaapi")
+        } else {
+            encoder.filter_suffix_for(self.output_grade())
+        }
+    }
+
     /// The scale + tone-map segment of the filter chain, for a source with
     /// `hdr_format` targeting `height`.
     ///
@@ -620,6 +650,30 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::domain::FieldOrder;
+
+    #[test]
+    fn paired_devices_preserve_other_pipeline_encoder_contracts() {
+        for &pipeline in CANDIDATES {
+            for encoder in [
+                Encoder::Software,
+                Encoder::Vaapi,
+                Encoder::Qsv,
+                Encoder::Nvenc,
+                Encoder::VideoToolbox,
+            ] {
+                if pipeline == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+                    continue;
+                }
+                let mut expected = encoder.init_args();
+                expected.extend(pipeline.init_args());
+                assert_eq!(pipeline.device_args(encoder), expected);
+                assert_eq!(
+                    pipeline.encoder_upload(encoder),
+                    encoder.filter_suffix_for(pipeline.output_grade())
+                );
+            }
+        }
+    }
 
     #[test]
     fn names_round_trip_and_are_unique() {

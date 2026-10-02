@@ -1585,8 +1585,7 @@ fn hls_args_inner(
     // Hardware device init (VAAPI/QSV) must precede the input, and so must a
     // filter device the pipeline brings of its own (Vulkan for libplacebo,
     // OpenCL for tonemap_opencl).
-    args.extend(encoder.init_args());
-    args.extend(opts.pipeline.init_args());
+    args.extend(opts.pipeline.device_args(encoder));
 
     // Fast input seek for resume/session start.
     if opts.start_seconds > 0.0 {
@@ -1706,8 +1705,9 @@ fn hls_args_inner(
     let subtitle_burn = opts.subtitle_burn.is_some();
     let vendor_gpu =
         matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi) && !subtitle_burn;
-    let suffix = encoder
-        .filter_suffix_for(opts.pipeline.output_grade())
+    let suffix = opts
+        .pipeline
+        .encoder_upload(encoder)
         .filter(|_| !vendor_gpu);
     let mut vf = String::new();
     if let Some(prefix) = &hwdownload {
@@ -2625,6 +2625,62 @@ mod tests {
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
         }
+    }
+
+    #[test]
+    fn vulkan_playback_returns_frames_to_the_vaapi_encoder() {
+        let source = file(Some("hdr10"));
+        let options = TranscodeOptions {
+            pipeline: Pipeline::Libplacebo,
+            target_height: 1080,
+            ..Default::default()
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-init_hw_device vaapi=hw:"), "{joined}");
+        assert!(joined.contains("-init_hw_device vulkan=vk@hw"), "{joined}");
+        assert!(joined.contains("-filter_hw_device vk"), "{joined}");
+        let vf = &args[args
+            .iter()
+            .position(|arg| arg == "-vf")
+            .expect("video filter graph")
+            + 1];
+        assert!(vf.contains("hwupload,libplacebo="), "{vf}");
+        assert!(vf.ends_with("hwupload=derive_device=vaapi"), "{vf}");
+        assert!(joined.contains("h264_vaapi"), "{joined}");
+
+        // The encoder upload must stay after a software subtitle composite.
+        let options = TranscodeOptions {
+            subtitle_burn: Some(SubtitleBurn {
+                subtitle_index: 0,
+                bitmap: true,
+            }),
+            ..options
+        };
+        let args = hls_args(
+            &source,
+            Encoder::Vaapi,
+            &options,
+            Pacing::unpaced(),
+            "/tmp/s",
+        );
+        let graph = &args[args
+            .iter()
+            .position(|arg| arg == "-filter_complex")
+            .expect("subtitle composite graph")
+            + 1];
+        assert!(
+            graph.ends_with(
+                "overlay=eof_action=pass,format=nv12,hwupload=derive_device=vaapi[vout]"
+            ),
+            "{graph}"
+        );
     }
 
     #[test]
