@@ -170,3 +170,13 @@ and rerun failed units only. Main advanced with test stability changes in
 cleanup and concurrent pretranscode claims. The combined ownership totals
 retain both explanations: 684 task sites, 1128 timer sites, 411 method sites.
 The prior unit lane never started. PR is draft during this integration.
+
+At `9dc76758b`, all 253 validation tests passed. Operations ran 584 tests,
+579 passed and five failed: two API route inventory assertions lacked the
+new v2 route/count, and three release claim assertions found Android README
+still at 142. Added the actual v2 request/outcome contract, route total 243,
+and Android build 143 status. Production code is unchanged. Only those five
+failed cases are rerun locally before the next candidate.
+
+The five failed operations cases all passed in the targeted rerun (5 tests,
+zero failures). Previously passing unit and focused client evidence is retained.

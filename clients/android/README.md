@@ -20,7 +20,11 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `142` — a paused transcoding session the server
+> Status: **v0.3.0**, build `143` — decoder envelopes compact conservatively
+> while preserving crossing limits, profiles and display grades. The bounded
+> contract is negotiated with the server; no evidence is truncated. Physical
+> TCL/Streamer acceptance remains outstanding.
+> Build 142 — a paused transcoding session the server
 > retires after its three-minute pause grace no longer surfaces "Playback
 > stopped"; Play reopens at the saved position (not yet on a device). Build
 > 138's per-box Live TV player view (fullscreen fills tablets) was accepted
