@@ -248,6 +248,18 @@ fn fixture_truth() -> (Vec<CaptionCue>, Vec<CaptionCue>) {
 const CAPTION_PROBE: crate::process_control::ChildWork =
     crate::process_control::ChildWork::background("Live TV caption probe");
 
+/// The production source probe as the boot caption probe runs it: the helper
+/// a viewer's start uses, at this module's background class, because nobody
+/// is waiting on a self-test (owned-lab receipt 2026-10-02, defect 1: it ran
+/// at the realtime class on every boot).
+async fn caption_source_facts(
+    system: &SystemInfo,
+    directory: &Path,
+    prefix: &[u8],
+) -> Result<LiveSourceFacts, LiveTvError> {
+    probe_live_source(system, directory, prefix, CAPTION_PROBE.class).await
+}
+
 async fn media_command(command: &mut tokio::process::Command) -> std::process::Output {
     command.kill_on_drop(true);
     let output = tokio::time::timeout(
@@ -674,7 +686,7 @@ async fn run_live_graph(
 ) -> GraphRun {
     let bytes = tokio::fs::read(source).await.expect("source bytes");
     let root = tempfile::tempdir().expect("graph root");
-    let facts = probe_live_source(
+    let facts = caption_source_facts(
         system,
         root.path(),
         &bytes[..bytes.len().min(SOURCE_PREFIX_BYTES)],
@@ -1010,6 +1022,39 @@ fn test_system() -> SystemInfo {
     }
 }
 
+/// The boot caption probe's source probe is background work. Before the
+/// owned-lab fix `probe_live_source` hard-coded the realtime class, so the
+/// startup self-test counted its ffprobe children as
+/// `class="realtime",purpose="Live TV source probe"` and ran them at nice 5 /
+/// OOM +500. Only this module asks for the background class of that purpose,
+/// so a parallel viewer-path test cannot satisfy the assertion.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_boot_caption_probe_runs_its_source_probe_as_background_work() {
+    let background = crate::process_control::ChildWork::background("Live TV source probe");
+    assert_eq!(
+        CAPTION_PROBE.class,
+        crate::process_control::ChildClass::Background
+    );
+    let system = SystemInfo {
+        // Any executable will do: the assertion is the spawn's class, not the
+        // facts, and `true` prints no JSON so the probe answers an error.
+        ffprobe: "true".to_owned(),
+        ..SystemInfo::default()
+    };
+    let root = crate::test_tempdir().expect("caption source probe root");
+    let before = crate::process_control::priority::spawns_of(background);
+    let facts = caption_source_facts(&system, root.path(), b"not a transport stream").await;
+    assert!(
+        facts.is_err(),
+        "an empty probe document is not source facts"
+    );
+    assert!(
+        crate::process_control::priority::spawns_of(background) > before,
+        "the boot caption probe's ffprobe must be counted at the background class"
+    );
+}
+
 #[tokio::test]
 async fn the_caption_fixture_carries_608_and_708() {
     plurx_core::testfixtures::require_ffmpeg();
@@ -1186,7 +1231,7 @@ async fn the_progressive_live_graph_proves_and_advertises_608_and_708() {
     );
 
     let bytes = tokio::fs::read(&fixture).await.expect("fixture bytes");
-    let source = probe_live_source(
+    let source = caption_source_facts(
         &system,
         root.path(),
         &bytes[..bytes.len().min(SOURCE_PREFIX_BYTES)],
