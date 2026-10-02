@@ -3598,3 +3598,23 @@ and unresolved issues. No fast-lane unit execution or main merge happens
 before the human resumes work following that external review. This supersedes
 the earlier autonomous review-to-test-to-merge instruction at that boundary;
 independent implementation and current runtime qualification continue now.
+
+### 10.119 First complete production Chrome manual series
+
+The fresh isolated Linux Chrome run on exact committed source `6ad6c51c9`
+completed twenty alternating 720p / 1080p manual changes in one playback,
+with durable target presentation for every change. The machine receipt is
+`target/playback-lab/reports/continuous-chrome-full-linux-6ad6c51c9.json`.
+Its browser-video score passed: one durable VOD session creation, zero wait
+events, reopens, stalls, hitches or dropped frames, with maximum and p95
+frame gap 66.8 ms. Playback ran 1,193,142 ms including startup and observation.
+This receipt qualifies that manual browser series only. It does not prove
+physical display or audible continuity, real Auto decisions, Firefox, native
+adapters, cancellation, seek, pressure or terminal producer retirement.
+
+The later Auto settlement change is absent from that source snapshot.
+Committed source `a7db2ac28` is now rebuilding with pinned Rust 1.97.1 in
+the explicitly approved isolated Linux directory. The generated thirty-minute
+MPEG-4/AAC fixture has been transferred there for real Auto qualification.
+No unit test has executed, and the adversarial / Fable stop boundary remains
+as recorded in §10.118.
