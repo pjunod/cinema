@@ -7054,3 +7054,45 @@ test("terminal attachment fencing discards stale retried requests",async()=>{
     "successor capture wins over the obsolete ended retry");
   subject.stop();
 });
+
+function quorumDiagnosisHarness(fetcher){
+  const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+  return new Function('PlaybackPolicy','fetch',[
+    "let STREAM_FAILURE=null; const PLAYER={method:'remux',probeUrl:'/stream',started:false,sessionId:'retired',mediaAttachment:{}}; const faults=[],stops=[];",
+    "const TOKEN=null,document={getElementById:()=>({})},performance={now:()=>1},console={warn(){}};",
+    "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function hlsStartupIncomplete(){return false;}function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function stopPlayerForExhaustion(){stops.push(true);}function raisePlaybackSurface(source,fault){faults.push(fault);}function playbackStallActions(){return ['retry','close'];}",
+    shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),
+    shippedSource('probePlaybackSource'),shippedSource('stallDiagnose'),
+    "return {player:PLAYER,faults,stops,diagnose:stallDiagnose,note:(status,body)=>noteStreamFailure(status,body,{attachment:PLAYER.mediaAttachment,resource:'media',request_ordinal:1})};",
+  ].join('\n'))(policy,fetcher);
+}
+
+test("probes preserve fenced retirement and describe unknown HTTP failures factually",async()=>{
+  for(const status of [404,410,503]){
+    const h=quorumDiagnosisHarness(async()=>new Response('',{status}));
+    await h.diagnose();
+    assert.match(h.faults[0].detail,new RegExp(`HTTP ${status}`));
+    assert.doesNotMatch(JSON.stringify(h.faults),/ad.block|extension|ffmpeg failed/i);
+    let probes=0;
+    const fenced=quorumDiagnosisHarness(async()=>{probes++;return new Response('',{status});});
+    fenced.note(503,JSON.stringify({code:'serving_fenced',message:'serving proof expired'}));
+    fenced.note(410,JSON.stringify({code:'session_gone',message:'missing session'}));
+    await fenced.diagnose();
+    assert.equal(probes,0);assert.match(fenced.faults[0].detail,/serving proof expired/);
+  }
+  const typed=quorumDiagnosisHarness(async()=>new Response(JSON.stringify({code:'serving_fenced',message:'authority unavailable'}),{status:503}));
+  await typed.diagnose();
+  assert.equal(typed.player.sessionTerminal.reason,'serving_fenced');
+  assert.match(typed.faults[0].detail,/authority unavailable/);
+});
+
+test("a probe arriving after attachment replacement cannot diagnose the successor",async()=>{
+  const waiting=deferred();
+  const h=quorumDiagnosisHarness(()=>waiting.promise);
+  const operation=h.diagnose();
+  h.player.mediaAttachment={};
+  waiting.resolve(new Response(JSON.stringify({code:'serving_fenced',message:'old attachment'}),{status:503}));
+  await operation;
+  assert.equal(h.faults.length,0);assert.equal(h.stops.length,0);
+  assert.equal(h.player.sessionTerminal,undefined);
+});

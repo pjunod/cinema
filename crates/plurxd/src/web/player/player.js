@@ -372,7 +372,16 @@ function noteStreamFailure(status, body, evidence){
     &&previous.resource===owned.resource
     &&previous.request_ordinal!=null&&owned.request_ordinal!=null
     &&Number(previous.request_ordinal||0)>Number(owned.request_ordinal||0)) return previous;
+  // Retirement is an attachment fact, not a retryable probe opinion. Later
+  // generic refusals cannot rename its cause while the same session is bound.
+  if(previous&&previous.code==='serving_fenced'&&previous.attachment
+    &&previous.attachment===owned.attachment) return previous;
   Object.assign(parsed,{at:Date.now()},owned);
+  if(parsed.code==='serving_fenced'&&owned.attachment&&typeof PLAYER!=='undefined'
+    &&PLAYER&&PLAYER.mediaAttachment===owned.attachment){
+    PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:owned.attachment,
+      reason:'serving_fenced',message:parsed.message};
+  }
   STREAM_FAILURE=parsed;
   return parsed;
 }
@@ -388,6 +397,13 @@ function clearStreamFailureFor(hls){
     clearStreamFailure();
 }
 function currentStreamFailureOverlay(){
+  const terminal=PLAYER&&PLAYER.sessionTerminal;
+  if(terminal&&terminal.attachment===PLAYER.mediaAttachment
+    &&terminal.sessionId===PLAYER.sessionId
+    &&['serving_fenced','authority_fenced'].includes(terminal.reason)) return {
+      title:'The server retired this stream.',
+      detail:terminal.message||'Playback authority was lost. Your place is saved; reopen the stream to continue.',
+      retryable:false};
   if(STREAM_FAILURE&&STREAM_FAILURE.attachment&&PLAYER
     &&STREAM_FAILURE.attachment!==PLAYER.mediaAttachment) return null;
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());

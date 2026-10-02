@@ -6904,3 +6904,34 @@ test("peer VOD Activity cell preserves measured control and producer facts",()=>
   }
   assert.ok(!html.includes("Live scratch"));
 });
+
+test("fenced retirement followed by native error 3 reopens once without codec blame", () => {
+  for (const reason of ['serving_fenced','authority_fenced']) {
+    const build=new Function('PlaybackPolicy','reason',[
+      "let PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0}; const callbacks={},reopens=[],rescues=[];",
+      "PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:PLAYER.mediaAttachment,reason};",
+      "const document={getElementById:()=>({})},console={warn(){}},performance={now:()=>1};",
+      "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function notifyPlaybackControl(){}function clearStall(){}function endWait(){}",
+      "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}",
+      "function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}",
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
+      "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
+      "wirePlayerMedia(v);callbacks.error();callbacks.error();return {player:PLAYER,reopens,rescues};",
+    ].join('\n'));
+    const h=build(policy,reason);
+    assert.equal(h.reopens.length,1);assert.equal(h.reopens[0][0],42);
+    assert.equal(h.rescues.length,0);assert.equal(h.player.triedFallback,undefined);
+  }
+});
+
+test("fenced recovery cannot inherit a predecessor attachment or session", () => {
+  const build=new Function([
+    "const attachment={},PLAYER={sessionId:'new',mediaAttachment:attachment};",
+    "function playbackOwnsAttachedMedia(){return true;}",shippedSource('recoverServingFencedAttachment'),
+    "return p=>recoverServingFencedAttachment({},p);",
+  ].join('\n'))();
+  for(const terminal of [
+    {sessionId:'old',attachment:{},reason:'serving_fenced'},
+    {sessionId:'new',attachment:{},reason:'serving_fenced'},
+  ]) assert.equal(build({sessionId:'new',mediaAttachment:{},sessionTerminal:terminal}),false);
+});

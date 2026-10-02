@@ -516,7 +516,9 @@ function startPlaybackControl(v,p,bootstrap){
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){
-            p.sessionTerminal={sessionId:p.sessionId,attachment,reason:error.terminalReason||null};
+            const previous=p.sessionTerminal;
+            const reason=error.terminalReason||previous&&previous.attachment===attachment&&previous.reason||null;
+            p.sessionTerminal={sessionId:p.sessionId,attachment,reason};
           }
           // The paused presentation was retired: Play must open the one
           // replacement rather than resume a loader into a dead playlist.

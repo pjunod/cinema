@@ -822,6 +822,7 @@ function wirePlayerMedia(v){
         playbackContext()));
       return;
     }
+    if(PLAYER.sessionTerminal&&recoverServingFencedAttachment(v,PLAYER)) return;
     if(finishStallRecovery("failed",msg||"video element error "+code)){
       showStallRecoveryFailure(msg||"The browser reported video error "+code+".");
       return;
