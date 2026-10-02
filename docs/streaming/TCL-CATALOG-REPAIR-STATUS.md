@@ -1,6 +1,6 @@
 # TCL catalog repair — implementation and evidence
 
-**Status:** building · **Updated:** 2026-10-02
+**Status:** post-review validation · **Updated:** 2026-10-02
 
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
@@ -24,7 +24,7 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Android compaction and shared contract | done | No legacy blanket 400 |
 | Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
 | Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
-| Review and fast lane | findings addressed; compiling | Five findings fixed; tests not yet run |
+| Review and fast lane | post-review tests running | Five findings fixed; focused Android, Apple and generation evidence passed |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
 
 ## 2. Decisions — evidence required before dependent changes
@@ -73,16 +73,15 @@ Concrete implementation decisions, 2026-10-02:
    The existing sustainable-quality owner handles later upgrades.
 
 Snapshot enumeration compiles with Rust 1.97.1. Android app and JVM test sources
-compile successfully; tests have not executed. Database triggers cover raw SQL
+compile successfully; focused results are recorded below. Database triggers cover raw SQL
 import writes and same-timestamp updates. Final dispatch binds generation and source/probe identity, and revalidates the
 selected descriptor without another ladder enumeration. Protocol 8 carries this
 strict worker contract; older ingress and sessions need draining on rollout.
 Successor responses retain their selection catalog.
 
-Compiler checks pass on the current implementation. Boundary, legacy, binding
-and expired-budget regressions are written and have not run. Apple compilation
-first hit sandboxed macro/simulator services; an unsandboxed compile is underway.
-No review or test acceptance is claimed.
+Compiler checks pass on the current implementation, including both Apple
+platforms. Boundary, legacy, binding and expired-budget regressions await the
+main fast Rust lane. Physical acceptance remains outstanding.
 
 Main integration, 2026-10-02: preserve main's SQLite v90 and replicated v68 DV
 request provenance migrations, then append planning generation as SQLite v91
@@ -101,8 +100,8 @@ commits ran the tracked lint/format/Clippy/JavaScript hook. The decoder snapshot
 regression now tests overflow at 65, matching the negotiated shared bound.
 
 Batched review: [Forgejo PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718),
-head `30369ca0c`. Draft defers test allocation until the adversarial review is
-addressed. The desktop attachment tool does not accept this Forgejo URL, so the
+reviewed head `30369ca0c`; post-review head `182f7f5a7`. The PR is ready after
+addressing the adversarial review. The desktop attachment tool does not accept this Forgejo URL, so the
 PR and status links remain explicit here. No changes to the original checkout.
 
 ## 4. Adversarial review — candidate `30369ca0c`
@@ -123,8 +122,25 @@ The final agent review requested changes. Five actionable findings were fixed:
 Regressions cover the legacy required/optional distinction, owned worker versus
 background accounting, manual/copy catalog retention, generation invalidation
 through the common producer entry, and audio-dependent follow-up identities.
-These are being compiled; no passing test result is claimed yet.
+These compiled successfully; individual test results follow.
 
 Review findings commit: `3b13d6acf`, tracked hook passed. Main advanced only with
 schema expectation fixes; the combined assertions now deliberately cover
 SQLite 91 and replicated 69 before the final test pass.
+
+## 5. Post-review validation — preserve passing results
+
+- Android: `:app:testDebugUnitTest --tests tv.plurx.app.data.CapsPolicyTest`
+  ran 16 tests: 15 passed, including the 60-row compaction and crossing-envelope
+  fixtures. One existing transfer-curve assertion compared order; its correction
+  compares the unchanged set. Only
+  `CapsPolicyTest.capsDocumentKeepsDisplayPresentationAndDecoderClaimsSeparate`
+  was rerun, and passed. An earlier rerun before the edit still failed.
+- Apple: `xcodebuild ... -only-testing:plurx-iOSTests/AppleClientTests/testOnlyTheContractsNotYetCodesAreRetried test`
+  passed one test, zero failures. The temporary simulator was deleted.
+- Generation: Rust 1.97.1 `cargo test --locked -p plurx-core --features hiqlite-store --lib store::hiqlite::tests::playback_generation_covers_tied_updates_deletes_import_and_rollback -- --exact`
+  passed one test. An earlier unqualified exact filter ran zero tests and is not evidence.
+- Main fast lane at `182f7f5a7`: scope and mobile versions passed; preflight
+  stopped at corrective-history audit because three client commits needed
+  source-to-regression anchors. Those rows are added. Compiler/test jobs were
+  skipped, so the fast Rust unit lane has not yet run.

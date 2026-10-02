@@ -202,7 +202,7 @@ class CapsPolicyTest {
             client = client,
         )
         assertEquals(DisplayCaps(hdr = true, dolby_vision = false), hdr10Only.display)
-        assertTrue(hdr10Only.video.all { it.present == listOf("sdr", "pq", "hlg") })
+        assertTrue(hdr10Only.video.all { it.present.toSet() == setOf("sdr", "pq", "hlg") })
         assertTrue(hdr10Only.video.all { it.dv_profiles == null })
         assertEquals(1080, hdr10Only.video.single { it.codec == "av1" }.max_height)
 
