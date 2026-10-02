@@ -90,6 +90,10 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     {
         result.map_err(database_error)?;
     }
+    client
+        .execute(super::background_jobs::PREPARATION_INDEX_SCHEMA, params!())
+        .await
+        .map_err(database_error)?;
     Ok(())
 }
 

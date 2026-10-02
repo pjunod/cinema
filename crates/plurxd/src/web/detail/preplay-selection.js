@@ -467,7 +467,7 @@ function bookByline(it){
 }
 const DV_PROGRESS_POLL_MS=10000, DV_CONVERSION_LEDGER_READ_MAX=256;
 const DV_CONVERSION_LEDGER_BATCH_MAX=4;
-let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
+let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=null, DV_SETTINGS_POLL_AT=0;
 function dvConversionIsActive(conversion){
   return !!conversion&&["queued","running","verified"].includes(conversion.state);
 }
@@ -531,7 +531,7 @@ function dvConversionStateHtml(file,snapshot){
   const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
   return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
 }
-async function hydrateDvFileActions(files){
+async function hydrateDvFileActions(files,generation=PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin) return false;
   const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
   if(!targets.length) return false;
@@ -557,6 +557,7 @@ async function hydrateDvFileActions(files){
     for(const batch of batches){
       snapshots.push(await api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`));
     }
+    if(generation!==PAGE_RENDER_GENERATION) return false;
     const conversions={}, eligibility={};
     for(const snapshot of snapshots){
       Object.assign(conversions,snapshot.conversions_by_file||{});
@@ -584,6 +585,7 @@ async function hydrateDvFileActions(files){
     }
     return anyActive;
   }catch(e){
+    if(generation!==PAGE_RENDER_GENERATION) return false;
     let anyActive=false;
     for(const file of selectedTargets){
       const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
@@ -594,15 +596,21 @@ async function hydrateDvFileActions(files){
     return anyActive;
   }
 }
-async function pollDvFileActions(files,generation){
-  if(DV_FILE_POLLING||generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||document.visibilityState==="hidden") return;
-  DV_FILE_POLLING=true;
-  try{
-    const active=await hydrateDvFileActions(files);
-    if(!active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")){
-      clearInterval(PAGE_TIMER); PAGE_TIMER=null;
-    }
-  }finally{ DV_FILE_POLLING=false; }
+async function pollDvFileActions(files,generation,force=false){
+  if(generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||(!force&&document.visibilityState==="hidden")) return;
+  // Manual, initial and timer refreshes join the same flight for this page.
+  if(DV_FILE_POLLING?.generation===generation) return DV_FILE_POLLING.promise;
+  const flight={generation,promise:null};
+  DV_FILE_POLLING=flight;
+  flight.promise=(async()=>{
+    try{
+      const results=await Promise.all([hydrateDvFileActions(files,generation),hydrateMediaPreparation(files,generation)]);
+      if(DV_FILE_POLLING!==flight||generation!==PAGE_RENDER_GENERATION) return;
+      if(results.some(Boolean)) armDvFilePoll(files,generation);
+      else { clearInterval(PAGE_TIMER); PAGE_TIMER=null; }
+    }finally{ if(DV_FILE_POLLING===flight) DV_FILE_POLLING=null; }
+  })();
+  return flight.promise;
 }
 function armDvFilePoll(files,generation=PAGE_RENDER_GENERATION){
   DV_FILE_PAGE_FILES=files||[];
@@ -649,9 +657,7 @@ async function viewItem(id,isCurrent=()=>true){
   WATCH_ITEM_PAGE=page;
   document.getElementById("main").innerHTML=layoutView("item",page);
   DV_FILE_PAGE_FILES=page.files||[];
-  hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
-    if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
-  });
+  pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -689,7 +695,7 @@ function classicItemBody(p){
   if(it.recorded_at){ chips.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`); }
   if(p.years){ const y=p.years; chips.push(`<span>${y.from}${y.to>y.from?'–'+y.to:''}</span>`); }
   if(runtime) chips.push(`<span>${fmtDur(runtime)}</span>`);
-  if(it.kind) chips.push(`<span>${esc(it.kind)}</span>`);
+  if(it.kind) chips.push(`<span>${esc(itemKindLabel(it))}</span>`);
   // A container has no watch flag of its own, so say what it's made of:
   // "3 of 10 watched" is the thing the mark-watched buttons below act on.
   if(it.rollup&&it.rollup.leaves){

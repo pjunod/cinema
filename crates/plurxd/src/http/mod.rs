@@ -9,6 +9,7 @@ mod analysis;
 mod analysis_reconcile;
 mod auth;
 mod background_jobs;
+mod preparation;
 pub(crate) use auth::{LoginThrottle, PasswordCapacity};
 mod browse;
 mod chapter_thumbs;
@@ -290,6 +291,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/items/{id}/reanalyze"
         | "/api/v1/items/{id}/refresh-artwork"
         | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/files/{id}/preparation"
         | "/api/v1/files/{id}/analysis"
         | "/api/v1/files/{id}/dv-conversion"
         | "/api/v1/files/{id}/timeline-annotations/{kind}"
@@ -1396,6 +1398,7 @@ pub fn router(state: AppState) -> Router {
             get(chapter_thumbs::serve),
         )
         .route("/dv-conversions", get(dv_disk::status))
+        .route("/files/{id}/preparation", get(preparation::status))
         .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/analysis/jobs/{id}", get(analysis::job))
@@ -9413,6 +9416,74 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn preparation_status_is_viewer_readable_and_does_not_enqueue_work() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seed = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/preparation", seed.file);
+        assert_eq!(
+            call(&app, get(&uri, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token");
+        let before = state
+            .store
+            .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                node_id: None,
+                state: None,
+                kind: None,
+                after_id: None,
+                limit: 100,
+            })
+            .await
+            .expect("jobs")
+            .jobs
+            .len();
+        let (status, result) = call(&app, get(&uri, Some(viewer))).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["file_id"], seed.file.to_string());
+        assert_eq!(result["active"], false);
+        assert!(result.get("subtitles").is_some());
+        assert!(result.get("versions").is_some());
+        assert!(result.get("path").is_none());
+        assert_eq!(
+            state
+                .store
+                .list_jobs(plurx_core::store::background_jobs::JobQuery {
+                    node_id: None,
+                    state: None,
+                    kind: None,
+                    after_id: None,
+                    limit: 100
+                })
+                .await
+                .expect("jobs")
+                .jobs
+                .len(),
+            before
+        );
     }
 
     #[tokio::test]

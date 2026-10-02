@@ -55,6 +55,7 @@ const BORROWED = [
   "fmtBytes",
   "fmtMbps",
   "activityMethodLabel",
+  "activityObservedVodSession",
   "activityStreamState",
   "activityStreamMeters",
   "activityStreamDetails",
