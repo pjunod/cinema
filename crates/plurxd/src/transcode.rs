@@ -800,6 +800,8 @@ mod manager_plan;
 mod manager_produce;
 #[path = "transcode/manager/publication.rs"]
 mod manager_publication;
+#[path = "transcode/manager/rolling_retained.rs"]
+mod manager_rolling_retained;
 #[path = "transcode/manager/start.rs"]
 mod manager_start;
 // split: end manager
