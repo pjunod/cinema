@@ -3247,10 +3247,10 @@ final class PlayerController: ObservableObject {
             let position = realPositionMs()
             let evidence = autoDecodePressure.evidence
             Task { @MainActor [weak self] in
-                guard let self, self.attemptStillCurrent(pressureAttempt, fence: .autoQualityOffer),
+                guard let self, self.attemptStillCurrent(pressureAttempt, fence: .preparedPressureEntry),
                       !self.isChangingStream else { return }
                 guard await self.noteAutoDecodeFailure(pressure: evidence),
-                      self.attemptStillCurrent(pressureAttempt, fence: .autoQualityOffer) else { return }
+                      self.attemptStillCurrent(pressureAttempt, fence: .preparedPressureAcknowledgement) else { return }
                 await self.reopen(at: position, intent: .sameDeliveryRepair)
             }
         }
@@ -6732,7 +6732,7 @@ final class PlayerController: ObservableObject {
             return
         }
         await selectAutoStallRecoveryCandidate(attempt: stallAttempt, deadline: deferralDeadline)
-        guard attemptStillCurrent(stallAttempt, fence: .stallRecovery), started, stallRecoveryStillEligible else { return }
+        guard attemptStillCurrent(stallAttempt, fence: .stallCandidateReturn), started, stallRecoveryStillEligible else { return }
         var decision = sameDeliveryStallRecovery.next(for: event.kind)
         #if os(iOS)
         let hasOfflineAsset = offlineAssetURL != nil
@@ -8512,7 +8512,7 @@ final class PlayerController: ObservableObject {
         let decoderAttempt = snapshotAttempt()
         let autoDecodeRecovery = isCompatibilityFailure ? await noteAutoDecodeFailure() : false
         guard player.currentItem === item,
-              attemptStillCurrent(decoderAttempt, fence: .itemFailureLadder) else { return }
+              attemptStillCurrent(decoderAttempt, fence: .itemDecoderAcknowledgement) else { return }
         // Only a transport failure can be answered by another node; see
         // `isTransportPlaybackFailure`. `!isCompatibilityFailure` is not the
         // same question and would walk the whole list for a terminal 404.
@@ -9503,7 +9503,7 @@ final class PlayerController: ObservableObject {
         let decoderItem = player.currentItem
         _ = await noteAutoDecodeFailure()
         guard player.currentItem === decoderItem,
-              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecodeFailure) else { return }
+              attemptStillCurrent(decoderAttempt, fence: .blackFrameDecoderAcknowledgement) else { return }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
             stopForBlockingSurface()
@@ -10984,7 +10984,7 @@ extension PlayerController {
                       let payload = negativeLinkPayload(),
                       await acknowledgeNegativeLink(payload, receipt: receipt, deadline: deadline),
                       !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline,
-                      attemptStillCurrent(attempt, fence: .stallRecovery),
+                      attemptStillCurrent(attempt, fence: .stallCandidateAcknowledgement),
                       player.currentItem === incumbent, sessionId == incumbentSession,
                       autoActiveCandidateId == current.id, selectedHeight == nil, !selectedQualityIsOriginal,
                       wantsPlayback, surface.presenting, seekState.pendingMs == nil,
@@ -11033,7 +11033,7 @@ extension PlayerController {
               autoDecoderAcknowledgementCurrent(accepted: true, observedAtMs: observedAt,
                 nowMs: PlaybackControlSession.monotonicMs(), remainingMs: 250,
                 sameAttachment: player.currentItem === item && self.sessionId == sessionId),
-              !Task.isCancelled, attemptStillCurrent(captured, fence: .itemFailureLadder),
+              !Task.isCancelled, attemptStillCurrent(captured, fence: .decoderEvidenceAcknowledgement),
               PlaybackControlSession.monotonicMs() >= observedAt,
               ProcessInfo.processInfo.systemUptime < deadline,
               model?.displayAwareAuto == true, model?.autoAbr == true,
