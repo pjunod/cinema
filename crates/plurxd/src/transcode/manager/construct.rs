@@ -953,6 +953,21 @@ impl TranscodeManager {
             })
     }
 
+    /// Own the existing heavy-worker lane, not an encoder estimate invented
+    /// before exact resolution. The rendition driver admits the real bundle.
+    pub(crate) fn admit_encoded_preparation(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        if !self.pretranscode_worker_idle() {
+            return None;
+        }
+        Arc::clone(&self.background_heavy).try_acquire_owned().ok()
+    }
+
+    pub(crate) fn encoded_preparation_still_idle(&self, observation: u64) -> bool {
+        observation != u64::MAX
+            && self.copy_preparation_attachment_observation() == observation
+            && self.pretranscode_publication_yield_reason().is_none()
+    }
+
     pub(crate) fn fragment_worker_idle(&self, admission: &FragmentAdmission) -> bool {
         !self.admissions.live_is_waiting()
             && self.admissions.in_use() == 0

@@ -179,6 +179,21 @@ pub(crate) fn manual_copy_policy_generation(
         .then(|| format!("manual-copy-v2:{}", hex::encode(Sha256::digest(bytes))))
 }
 
+pub(crate) fn encoded_policy_generation(
+    file: &MediaFile,
+    intent: &plurx_core::store::background_jobs::EncodedOutputIntent,
+) -> Option<String> {
+    let bytes = serde_json::to_vec(&(
+        "encoded-output-intent-v1",
+        manual_source_metadata(file)?,
+        &file.subtitle_streams,
+        intent,
+    ))
+    .ok()?;
+    (bytes.len() <= 64 * 1024)
+        .then(|| format!("encoded-output-v1:{}", hex::encode(Sha256::digest(bytes))))
+}
+
 impl RetainedVodArtifact {
     pub(super) fn facts(&self) -> crate::transcode::RetainedOutputFacts {
         crate::transcode::RetainedOutputFacts {
@@ -748,14 +763,25 @@ impl RetainedArtifactRegistry {
         incoming_logical: &Option<super::retained_manifest::LogicalOutput>,
         incoming_file: &MediaFile,
     ) -> Option<Arc<RetainedVodArtifact>> {
-        if rendition.recipe.encoding.is_some()
-            || rendition.recipe.measured_candidate.is_some()
-            || incoming_logical.is_none()
-        {
+        if rendition.recipe.measured_candidate.is_some() || incoming_logical.is_none() {
             return None;
         }
-        let executable = crate::ffmpeg::EncodedExecutable::capture().await.ok()?;
-        let engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok()?;
+        let (executable_digest, engine_digest) = match &rendition.recipe.encoding {
+            Some(encoding) => {
+                if !recipe_engine_is_current(&rendition.recipe).await {
+                    return None;
+                }
+                (
+                    encoding.executable.digest.clone(),
+                    encoding.engine.digest.clone(),
+                )
+            }
+            None => {
+                let executable = crate::ffmpeg::EncodedExecutable::capture().await.ok()?;
+                let engine = crate::ffmpeg::EncodedEngine::capture(None).await.ok()?;
+                (executable.digest, engine.digest)
+            }
+        };
         let source_metadata = manual_source_metadata(incoming_file)?;
         let facts = {
             // Registry is capped at MAX_ARTIFACTS. Keep no lock over awaits.
@@ -764,8 +790,8 @@ impl RetainedArtifactRegistry {
                 let artifact = &entry.artifact;
                 let origin = artifact.private_preparation_origin.get()?;
                 (origin.artifact_id == artifact.id
-                    && origin.executable == executable.digest
-                    && origin.engine == engine.digest
+                    && origin.executable == executable_digest
+                    && origin.engine == engine_digest
                     && origin.source_metadata == source_metadata
                     && artifact.candidate.is_none()
                     && artifact.validated.load(Acquire)
