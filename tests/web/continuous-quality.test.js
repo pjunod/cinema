@@ -56,3 +56,40 @@ test('wrong owner, attachment and unreserved append facts refuse receipts',()=>{
  const unreserved=clone(response);unreserved.ledger.transactions[0].ever_appended=true;unreserved.ledger.transactions[0].appended=[interval];
  assert.equal(valid(unreserved,request),false);
 });
+
+test('durable End proof reconciles a lost reservation ack before named disposal',async()=>{
+ let durable=null,ended=false,revision=0;const requests=[];
+ const client=protocol(bootstrap,attachment,async(url,request)=>{
+  requests.push(clone(request));const command=request.transition;
+  if(command?.operation.kind==='prepare'){const reply=answer(request,++revision);durable=clone(reply.ledger);return reply;}
+  if(command?.operation.kind==='scheduled'){
+   if(ended)throw Object.assign(new Error('ended'),{status:410});
+   durable.accepted_sequence=command.sequence;durable.transactions[0].reserved=[clone(interval)];durable.transactions[0].state='scheduled';
+   ended=true;throw new Error('reservation accepted but acknowledgement lost');
+  }
+  let receipt=null;
+  if(command?.operation.kind==='disposed'){
+   durable.accepted_sequence=command.sequence;durable.transactions[0].reserved=[];durable.transactions[0].disposed=command.operation.artifacts;
+   receipt={version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:clone(request.attachment),
+    accepted_sequence:command.sequence,transaction:clone(durable.transactions[0])};
+  }
+  return {version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:clone(request.attachment),
+   revision:++revision,terminal:true,receipt,ledger:clone(durable)};
+ });
+ await client.transition(uuid(4),{kind:'prepare',intent_revision:1,target_rendition_id:interval.rendition_id},{timescale:24000,through_tick:0});
+ await assert.rejects(client.transition(uuid(4),{kind:'scheduled',intervals:[interval]}));
+ assert.ok(client.pending);assert.equal(client.ledger.transactions[0].reserved.length,0,'lost ack is not absence evidence');
+ const observed=await client.reconcileTerminal();assert.equal(client.pending,null);assert.equal(observed.transactions[0].reserved.length,1);
+ await client.transition(uuid(4),{kind:'disposed',artifacts:[interval.artifact_id]});
+ assert.equal(requests.at(-1).transition.sequence,3);assert.equal(client.ledger.transactions[0].reserved.length,0);
+});
+
+test('an active snapshot cannot clear an uncertain command as terminal',async()=>{
+ let snapshots=false;
+ const client=protocol(bootstrap,attachment,async(url,request)=>{
+  if(!snapshots)throw new Error('disconnected');return {...answer(request,3),terminal:false};
+ });
+ await assert.rejects(client.transition(uuid(4),{kind:'prepare',intent_revision:1,target_rendition_id:interval.rendition_id},{timescale:24000,through_tick:0}));
+ const pending=clone(client.pending);snapshots=true;
+ await assert.rejects(client.reconcileTerminal(),/durable End proof/);assert.deepEqual(clone(client.pending),pending);
+});

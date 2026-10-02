@@ -2180,3 +2180,23 @@ qualification, lost-ack reconciliation across End, controlled cold-rung
 scheduling, shared-cache consumer accounting and native adapters remain
 unfinished. This implements the autonomous two-rung web path in source; it
 does not claim physical audiovisual qualification.
+
+
+### 10.61 Reconcile lost reservations under durable End
+
+The schedule route now permits a bounded read of an existing ledger under
+the exact terminal parent, owner epoch and client attachment. Its explicit
+terminal marker proves durable End; the read neither creates a ledger nor
+reduces any dependency. Active responses omit this additive marker. Late
+Prepare, window and Scheduled operations remain refused.
+
+After actual MediaSource detach, the web adapter first recovers any pending
+canonical acknowledgement. If End has overtaken it, a validated terminal
+snapshot discovers the reservations that actually landed. Cleanup commands
+use a sequence above both durable acceptance and the uncertain request, so
+a late fact cannot overtake disposal. An active snapshot cannot clear the
+uncertainty. Named video and shared AAC disposal then uses the late-fact path
+from §10.56. Owner changes still refuse stale cleanup; they are not absence
+evidence. Regressions cover lost reservation acknowledgement, false active
+proof, read-only retained pins, wrong attachment and refused post-End scheduling.
+Pinned source and normal-hook compilation apply without unit execution.

@@ -71,14 +71,31 @@ pub(crate) struct QualityScheduleResponse {
     pub control_epoch: u64,
     pub attachment: QualityAttachment,
     pub revision: i64,
+    /// A durable End fence permits reconciliation of a lost reservation ack.
+    /// Omit on active replies to preserve the earlier additive v1 wire shape.
+    #[serde(default, skip_serializing_if = "quality_flag_is_false")]
+    pub terminal: bool,
     // A replay returns the original acknowledgement, separately from facts
     // that the owner has learned since that command was accepted.
     pub receipt: Option<QualityTransitionReceipt>,
     pub ledger: QualityLedger,
 }
+fn quality_flag_is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl QualityScheduleResponse {
     pub(crate) fn valid_for(&self, request: &QualityScheduleRequest) -> bool {
         self.version == 1
+            && (!self.terminal
+                || (request.window.is_none()
+                    && request.frontier.is_none()
+                    && request.transition.as_ref().is_none_or(|transition| {
+                        !matches!(
+                            transition.operation,
+                            QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
+                        )
+                    })))
             && self.generation == request.generation
             && self.control_epoch == request.control_epoch
             && self.attachment == request.attachment
@@ -467,6 +484,7 @@ impl VodServe {
             control_epoch: request.control_epoch,
             attachment: request.attachment.clone(),
             revision: snapshot.revision,
+            terminal: false,
             receipt,
             ledger: snapshot.ledger,
         })

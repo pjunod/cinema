@@ -36,7 +36,9 @@ function continuousQualitySameAttachment(a,b){
 function continuousQualityResponse(value,request){
   if(!value||value.version!==1||value.generation!==request.generation
     ||value.control_epoch!==request.control_epoch||!continuousQualitySameAttachment(value.attachment,request.attachment)
-    ||!continuousQualityInteger(value.revision,1))return false;
+    ||!continuousQualityInteger(value.revision,1)
+    ||(value.terminal!=null&&typeof value.terminal!=='boolean')
+    ||(value.terminal&&(request.window||request.frontier||['prepare','scheduled'].includes(request.transition?.operation.kind))))return false;
   const ledger=value.ledger;
   if(!ledger||ledger.version!==1||ledger.generation!==request.generation||ledger.control_epoch!==request.control_epoch
     ||!continuousQualitySameAttachment(ledger.attachment,request.attachment)
@@ -124,17 +126,30 @@ function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQuali
     }catch(error){failure=error;if(error.status&&error.status<500&&error.status!==429)break;}
     throw failure;
   }
-  function queue(make){
+  function own(action){
     if(queued>=32)return Promise.reject(new Error('Continuous quality exchange queue bound'));
-    queued++;
-    const result=tail.then(async()=>{
-      if(pending)await send(pending);
-      const request=make();pending=request;return send(request);
-    });
+    queued++;const result=tail.then(action);
     tail=result.catch(()=>{}).finally(()=>queued--);return result;
   }
+  function queue(make){return own(async()=>{
+    if(pending)await send(pending);
+    const request=make();pending=request;return send(request);
+  });}
+
   return {
     get ledger(){return ledger;},get revision(){return revision;},get pending(){return pending;},
+    recover:()=>own(async()=>{if(pending)await send(pending);return ledger;}),
+    reconcileTerminal:()=>own(async()=>{
+      const request={...identity,transition:null,frontier:null};
+      const response=await exchange(bootstrap.schedule_url,request);
+      if(response?.terminal!==true||!continuousQualityResponse(response,request)||response.revision<revision)
+        throw new Error('Continuous reservation reconciliation needs durable End proof');
+      // End prevents late Prepare/Scheduled writes. Use a sequence beyond an
+      // uncertain completed-fact request too, so its later settlement cannot
+      // overtake the detach disposal that follows this proof.
+      sequence=Math.max(sequence,response.ledger.accepted_sequence,pending?.transition?.sequence||0);
+      ledger=response.ledger;revision=response.revision;pending=null;return ledger;
+    }),
     snapshot:()=>queue(()=>({...identity,transition:null,frontier:null})),
     transition:(transactionId,operation,frontier=null)=>{
       const retained=JSON.parse(JSON.stringify({operation,frontier}));
@@ -504,6 +519,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       // Called only after the hls.js MediaSource has detached. Include pins
       // never delivered to the loader, but never use End as this barrier.
       return serial(async()=>{
+        try{await protocol.recover();}catch(error){await protocol.reconcileTerminal();}
         const ledger=protocol.ledger;if(!ledger)return;
         const audio=(ledger.shared_audio_reserved||[]).map(row=>row.artifact_id);
         const audioOwner=ledger.transactions.at(-1)?.transaction_id;

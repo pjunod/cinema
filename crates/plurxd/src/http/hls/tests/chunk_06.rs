@@ -1413,6 +1413,49 @@
         assert_eq!(continuous_master_with_subtitles(original.as_bytes().to_vec(), &none, None).expect("no native captions"), original.as_bytes());
     }
 
+    #[tokio::test]
+    async fn terminal_quality_snapshot_preserves_pins_and_requires_exact_attachment() {
+        use plurx_core::playback::continuous_quality::{QualityAttachment,QualityLedger,QualityInterval,QualityOperation,QualityTransitionRequest};
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_fixture_route(&fixture,&session_id,"terminal-quality-read").await;
+        let route = fixture.store.media_session_route(&session_id).await.expect("route read").expect("active parent");
+        let attachment = QualityAttachment { client_instance_id:uuid::Uuid::new_v4().to_string(),lifetime_id:"film".into(),
+            attachment_id:uuid::Uuid::new_v4().to_string(),family_id:"a".repeat(64) };
+        let interval = QualityInterval { artifact_id:"b".repeat(64),rendition_id:"c".repeat(64),timescale:24000,
+            from_tick:0,through_tick:48048,byte_length:1024 };
+        let transition = QualityTransitionRequest {version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            sequence:1,attachment:attachment.clone(),transaction_id:uuid::Uuid::new_v4().to_string(),
+            operation:QualityOperation::Prepare { intent_revision:1,target_rendition_id:interval.rendition_id.clone() }};
+        let mut ledger = QualityLedger::new(route.incarnation_id.clone(),route.owner_epoch as u64,attachment.clone()).expect("ledger");
+        ledger.apply(&transition,unix_ms()).expect("intent");ledger.ready(&transition.transaction_id,vec![interval.clone()]).expect("owner ready");
+        let mut scheduled = transition.clone();scheduled.sequence=2;scheduled.operation=QualityOperation::Scheduled {intervals:vec![interval.clone()]};
+        ledger.apply(&scheduled,unix_ms()).expect("scheduled");
+        assert!(fixture.store.write_quality_ledger(&ledger,&route.owner_node_id,0,unix_ms()).await.expect("durable scheduled facts"));
+        fixture.store.end_media_session(&session_id,"deleted",unix_ms()).await.expect("End").expect("terminal parent");
+        let request = crate::vodserve::QualityScheduleRequest { version:1,generation:route.incarnation_id.clone(),control_epoch:route.owner_epoch as u64,
+            attachment,transition:None,frontier:None,window:None };
+        let read = |body:crate::vodserve::QualityScheduleRequest| quality_schedule(State(fixture.state.clone()),AxPath(session_id.clone()),
+            Bytes::from(serde_json::to_vec(&body).expect("request JSON")));
+        let before = fixture.store.quality_ledger(&route.incarnation_id).await.expect("before read").expect("ledger");
+        let response = read(request.clone()).await;
+        assert_eq!(response.status(),StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(),QUALITY_SCHEDULE_MAX_RESPONSE_BYTES).await.expect("bounded body");
+        let reply:crate::vodserve::QualityScheduleResponse=serde_json::from_slice(&body).expect("terminal proof");
+        assert!(reply.terminal && reply.valid_for(&request));assert!(reply.receipt.is_none());
+        assert_eq!(reply.ledger.transactions[0].reserved,vec![interval.clone()]);
+        assert_eq!(fixture.store.quality_ledger(&route.incarnation_id).await.expect("after read").expect("ledger"),before,"read cannot reduce dependencies");
+        let mut wrong = request.clone();wrong.attachment.attachment_id=uuid::Uuid::new_v4().to_string();
+        assert_eq!(read(wrong).await.status(),StatusCode::CONFLICT);
+        let mut late = request.clone();late.transition=Some(scheduled);
+        assert_eq!(read(late).await.status(),StatusCode::GONE,"End cannot reserve late media");
+        let mut disposed = transition;disposed.sequence=3;disposed.operation=QualityOperation::Disposed { artifacts:vec![interval.artifact_id] };
+        let mut completed=request;completed.transition=Some(disposed);
+        assert_eq!(read(completed).await.status(),StatusCode::OK);
+        assert!(fixture.store.quality_reserved_intervals(&interval.rendition_id).await.expect("released pins").is_empty());
+    }
+
     #[test]
     fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};

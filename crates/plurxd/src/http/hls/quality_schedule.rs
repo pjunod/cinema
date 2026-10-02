@@ -102,7 +102,7 @@ async fn quality_schedule_routed(
         use plurx_core::playback::continuous_quality::QualityOperation;
         if request.window.is_some()
             || request.frontier.is_some()
-            || request.transition.as_ref().is_none_or(|transition| {
+            || request.transition.as_ref().is_some_and(|transition| {
                 matches!(
                     transition.operation,
                     QualityOperation::Prepare { .. } | QualityOperation::Scheduled { .. }
@@ -175,7 +175,35 @@ async fn terminal_quality_schedule(
     request: &QualityScheduleRequest,
 ) -> Response {
     let Some(transition) = &request.transition else {
-        return StatusCode::GONE.into_response();
+        let snapshot = match state.store.quality_ledger(&request.generation).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return StatusCode::GONE.into_response(),
+            Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        };
+        if snapshot.owner_node_id != route.owner_node_id
+            || snapshot.owner_epoch != route.owner_epoch
+        {
+            return StatusCode::CONFLICT.into_response();
+        }
+        let reply = crate::vodserve::QualityScheduleResponse {
+            version: 1,
+            generation: request.generation.clone(),
+            control_epoch: request.control_epoch,
+            attachment: request.attachment.clone(),
+            revision: snapshot.revision,
+            terminal: true,
+            receipt: None,
+            ledger: snapshot.ledger,
+        };
+        if !reply.valid_for(request) {
+            return StatusCode::CONFLICT.into_response();
+        }
+        let mut response = Json(reply).into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        return response;
     };
     for _ in 0..4 {
         let expected = match state.store.quality_ledger(&request.generation).await {
@@ -207,6 +235,7 @@ async fn terminal_quality_schedule(
             control_epoch: request.control_epoch,
             attachment: request.attachment.clone(),
             revision: snapshot.revision,
+            terminal: true,
             receipt: Some(receipt),
             ledger: snapshot.ledger,
         };
