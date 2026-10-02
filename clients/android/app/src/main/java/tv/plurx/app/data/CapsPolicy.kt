@@ -372,7 +372,10 @@ internal fun audioSinkClaims(
         }
     }
     dolby("ac3", "audio/ac3", 6, AudioSinkEncoding.AC3)
-    dolby("eac3", "audio/eac3", 8, AudioSinkEncoding.E_AC3, AudioSinkEncoding.E_AC3_JOC)
+    // Plain E-AC-3 is what the server sends; Media3 checks ENCODING_E_AC3
+    // for it, so a sink that only advertises the JOC (Atmos) variant earns
+    // no plain E-AC-3 passthrough claim.
+    dolby("eac3", "audio/eac3", 8, AudioSinkEncoding.E_AC3)
     return claims
 }
 
