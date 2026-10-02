@@ -538,6 +538,39 @@ the panel closed and ~30/min with it open.
 
 ---
 
+### 5.10 Device evidence, 2026-10-02 (claude-opus-5-5)
+
+Collected over wireless adb on the Google TV Streamer (Android 14, the fleet's
+only HDMI player; it stands in for the plan's "Shield" and "Lenovo TV", which
+are not in the reachable fleet — the Lenovo TB322FC is a tablet). Installed
+build 142 (`4f25ab713`); 08:04–08:49 UTC. Private receipt with raw logcat,
+`dumpsys` and timestamps: `ANDROID-EVIDENCE-2026-10-02.md` in the agent
+workspace.
+
+- **M1 — owner pause on HOME.** Without picture-in-picture, the session went
+  PAUSED about 1.2 s after HOME. The controller pauses at `ON_STOP`, and the
+  platform's own pause→stop gap measured about 1.1 s, so the app adds
+  ~0.1 s. With picture-in-picture (the television's auto-enter), playback
+  continues by design. The "within 1 s of Home" bar is therefore a platform
+  timing, not an app property, on this device; the controller-side bar is
+  "PAUSED within 0.2 s of `ON_STOP`, PiP keeps playing" (decision recorded
+  for Paul's review). The earlier ~7 s observation did not reproduce.
+- **M7 — audio focus.** Another app taking focus paused the finite player
+  (pass). Live TV and library channels were not testable: every Live TV tune
+  answered "The server did not answer" during the window.
+- **M9, M4** — not collected (no client-side request count; Live TV down).
+- **Found and fixed here — a prepared successor took audio focus from the
+  player on screen.** The successor was built with Media3 focus handling on
+  and set to play silently; its focus request reached the platform 3 ms
+  before the on-screen player lost focus and paused, the picture froze for
+  20.4 s, and the controller then released both and reopened cold. Focus now
+  belongs to the one audible player (§3.5 roles: `handlesAudioFocus(Successor)
+  == false`; the commit hands focus over, release first, and a rollback hands
+  it back). Regression: `AudioFocusOwnershipTest`. The device re-run of a
+  prepared quality change is owed on a build that carries the fix.
+- Picture-in-picture did not auto-enter once, ~40 s after that cold reopen,
+  and did later in the same session — recorded, unproven, not changed.
+
 ## 6. Verification and rollout
 
 Fast lane: `make android-test` on every PR; `make android-instrumentation`
@@ -606,3 +639,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-25 | gpt-6-astra | agent:/root/d02_remaining | M2 | `codex/d02-remaining` · `2b1cee5f4` | Audiobooks use the Audio player role and `WAKE_MODE_NETWORK`; `PlaybackService` owns the existing MediaSession and Media3 notification, with typed foreground permission, runtime notification request and release teardown. The item model's playable kinds are video and audiobook; music has no playable player route yet, so audiobook is the audio-only classification. Prepared commit and rollback already rebind the MediaSession to the active player through `setPlayer`; M2 reuses those existing calls so notification controls follow the active audio player without changing that contract. Manifest processing and Kotlin compilation passed; Pixel five-minute background/lock-screen/service teardown acceptance remains owed. |
 | 2026-09-25 | gpt-6 | agent:/root/restore_a02 | M1 | `codex/d02-m1-20260924` | Video ON_STOP now sets an owner pause without changing viewer intent, and return resumes only when intent still requests play. PiP and audio-only playback keep playing. Seven attach paths, screen lifecycle/PiP delivery, and a notification Play command while stopped respect the owner pause. Production and test Kotlin compilation passed; the JVM test source compiled but unit tests were deferred to the one ready-PR fast lane. Pixel Home/return and notification acceptance remains owed. **Authorized narrow deviation:** the prepared-commit snapshot now uses `effectivePlayWhenReady()` so a successor cannot bypass the background owner pause; the same snapshot restores the predecessor on rollback. The plan had a stop-and-flag boundary there, and the build owner explicitly resolved it for this change. |
 | 2026-09-28 | gpt-6-astra | 01a0d5b2-d294-70c2-a7e9-d884600c68e0 | D02M3 production callback binding | `codex/native-review-completion-0928` | Integrated b5c745c0b: PlayerScreenOn follows owned controller swaps and real PlayerView; buffering/play/pause/resume instrumentation uses actual ExoPlayer callbacks with an in-memory asset. Production/JVM/instrumentation source compilation passes; execution follows the sole batch review. Lenovo timeout remains open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | §5.6 device evidence + successor focus | Opus D-02 continuation PR | Google TV Streamer, build 142: M1 pause at ON_STOP (~1.2 s after HOME, platform gap ~1.1 s), M7 focus loss pauses (pass); M4/M9 not collected (Live TV unanswered). Root-caused a prepared successor stealing audio focus (20 s freeze then cold reopen) and moved focus to the audible player only (§5.10). |
