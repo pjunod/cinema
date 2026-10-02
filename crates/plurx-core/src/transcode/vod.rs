@@ -517,6 +517,7 @@ impl VodRenditionBandwidth {
 /// drops audio or substitutes a soundtrack from another source object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VodPresentationFamily {
+    id: String,
     video: VodVideoFamily,
     audio: Option<VodSharedAudioRendition>,
 }
@@ -538,10 +539,32 @@ impl VodPresentationFamily {
                 "video family and shared soundtrack do not name the same source and recipe".into(),
             ));
         }
-        Ok(Self { video, audio })
+        // Compatibility is a join class, not an attachment authority. Bind
+        // the exact advertised set and actual init objects so another set of
+        // compatible recipes cannot inherit this family's ledger authority.
+        use sha2::{Digest, Sha256};
+        let mut identity = Sha256::new();
+        identity.update(b"plurx-vod-presentation-family-v1\0");
+        identity.update(video.id.as_bytes());
+        identity.update([video.rungs.len() as u8]);
+        for rung in &video.rungs {
+            identity.update(rung.rendition_id.as_bytes());
+            identity.update(rung.init_id.as_bytes());
+        }
+        identity.update([u8::from(audio.is_some())]);
+        if let Some(audio) = audio.as_ref() {
+            identity.update(audio.rendition_id.as_bytes());
+            identity.update(audio.init_id.as_bytes());
+            identity.update(audio.recipe_id.as_bytes());
+        }
+        Ok(Self {
+            id: hex::encode(identity.finalize()),
+            video,
+            audio,
+        })
     }
     pub fn id(&self) -> &str {
-        self.video.id()
+        &self.id
     }
     pub fn video(&self) -> &VodVideoFamily {
         &self.video
@@ -1393,6 +1416,43 @@ mod tests {
         assert!(VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone())).is_ok());
         let paired = VodPresentationFamily::new(voiced.clone(), Some(soundtrack.clone()))
             .expect("paired soundtrack");
+        let reordered = VodVideoFamily::new(voiced.rungs.iter().rev().cloned().collect())
+            .expect("same sorted membership");
+        assert_eq!(
+            paired.id(),
+            VodPresentationFamily::new(reordered, Some(soundtrack.clone()))
+                .expect("same family")
+                .id()
+        );
+        assert_ne!(
+            paired.id(),
+            paired.video().id(),
+            "join class is not family authority"
+        );
+        let mut changed_membership = voiced.clone();
+        changed_membership.rungs[0].rendition_id = "0".repeat(64);
+        assert_ne!(
+            paired.id(),
+            VodPresentationFamily::new(changed_membership, Some(soundtrack.clone()))
+                .expect("different member in the same join class")
+                .id()
+        );
+        let mut changed_init = voiced.clone();
+        changed_init.rungs[0].init_id = "0".repeat(64);
+        assert_ne!(
+            paired.id(),
+            VodPresentationFamily::new(changed_init, Some(soundtrack.clone()))
+                .expect("different verified init")
+                .id()
+        );
+        let mut changed_audio = soundtrack.clone();
+        changed_audio.rendition_id = "0".repeat(64);
+        assert_ne!(
+            paired.id(),
+            VodPresentationFamily::new(voiced.clone(), Some(changed_audio))
+                .expect("different actual soundtrack")
+                .id()
+        );
         let video_plan = low.grid.plan(4_300, 4_000_000);
         let audio_plan = shared_audio_plan_ticks(low.grid.shared_audio_end_ticks(4_300), 160);
         assert_eq!(

@@ -1666,3 +1666,16 @@ same order. Family children can retire their media demand and parked requests
 without fencing the parent out of its next caption window. This is a lifecycle
 refactor for parent integration, not a claim that family children are attached
 yet. The normal Rust compiler and commit checks apply; no unit execution.
+
+### 10.35 Exact family membership identity
+
+The presentation-family identifier now hashes the canonical verified video
+membership, each actual init identity and the exact shared soundtrack. The
+video compatibility hash remains a join class; it no longer doubles as
+attachment authority. Reordering the same members preserves family identity,
+while replacing a rendition, init object or soundtrack changes it. The
+physical reservation writer already compares the attachment family ID, so
+it now refuses a different compatible set under an existing attachment. The
+family regression covers these distinctions; pinned compilation applies and
+unit execution remains deferred. Durable parent reconstruction still needs
+the family descriptor and actor integration.
