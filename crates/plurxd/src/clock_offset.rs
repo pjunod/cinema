@@ -231,8 +231,17 @@ impl ClockObserver {
         &self,
         barrier: &LearnerClockBarrier,
         completed: ClockDecisionTicket,
+        auth: &plurx_core::cluster::membership::InternalPeerAuth,
     ) -> Result<(), ()> {
-        let roster = self.0.membership.clock_peers().await.map_err(|_| ())?;
+        if auth.node_id != barrier.learner_id {
+            return Err(());
+        }
+        let roster = self
+            .0
+            .membership
+            .clock_peers_after_authenticated_request(auth)
+            .await
+            .map_err(|_| ())?;
         if roster.membership.as_ref() != Some(&barrier.leadership.membership)
             || peer_directory(&roster).as_ref() != Some(&barrier.directory)
             || self.0.membership.clock_leadership_identity().as_ref() != Some(&barrier.leadership)

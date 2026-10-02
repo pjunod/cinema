@@ -211,6 +211,18 @@ that could erase newer evidence. This source is private preparation, not
 runtime or operational acceptance; original causal controls, exact current
 composition, sole review and unchanged measurement gate remain owed.
 
+**2026-10-02 PR725 review64, R4 repair:** the final awaited learner directory
+now reads the exact authenticated sender's removal fence in the SAME
+consistent SQL statement. Pending removals remain in complete peer coverage,
+but cannot borrow request authority from an earlier unfenced snapshot.
+Original target/freshness, applied membership, directory, term and completed
+clock generations are still checked before signing, without consuming the
+nonce twice or adding another await. One new production-SQL regression proves
+unfenced/foreign/pending-removed/durably-removed cases. This narrow control
+does not claim the held-handler race or remaining causal/operational proof.
+The same sole review's selector callers, post-handoff cleanup and original
+activation deadline findings remain open; draft source is not qualified.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

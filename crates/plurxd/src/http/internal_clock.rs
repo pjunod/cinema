@@ -85,20 +85,13 @@ async fn snapshot_for_membership(
             .await
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-        if !tokio::time::timeout_at(
+        tokio::time::timeout_at(
             deadline,
-            membership.revalidate_authenticated_clock_request(&auth),
+            observer.revalidate_learner(&barrier, completed, &auth),
         )
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-        .unwrap_or(false)
-        {
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-        tokio::time::timeout_at(deadline, observer.revalidate_learner(&barrier, completed))
-            .await
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
-            .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     }
     // No nonce is consumed again. All inverse service time remains between
     // t2/t3 and is subtracted from RTT by the unchanged four-stamp arithmetic.
