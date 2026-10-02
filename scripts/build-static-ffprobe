@@ -58,11 +58,17 @@ install -m 0755 ffprobe "$binary"
 cp COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md "$documentation/"
 # Retain the exact upstream source, configuration, dependency copyright and
 # binary identity with the package, so it remains inspectable/rebuildable.
+# The configuration is the resolved `config.h` and `ffbuild/config.mak`, not
+# `ffbuild/config.log`: that log dumps the shell environment (BuildKit's
+# per-build TRACEPARENT), this script's mktemp directory, configure's own
+# random scratch paths and a `mktemp -u` probe, so no two images matched.
 cp "$archive" "$documentation/ffmpeg-${version}.tar.xz"
-cp ffbuild/config.log "$documentation/config.log"
+cp config.h "$documentation/config.h"
+cp ffbuild/config.mak "$documentation/config.mak"
 cp "$work/version" "$documentation/version.txt"
 {
     printf 'source_url=%s\nsource_sha256=%s\n' "$source_url" "$source_sha256"
+    sed -n 's/^#define FFMPEG_CONFIGURATION /configure=/p' config.h
     sha256sum "$binary"
     cat "$work/elf-header" "$work/elf-program-headers"
 } > "$documentation/build.txt"

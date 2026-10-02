@@ -1061,6 +1061,78 @@ acceptance is a playback matrix or a GPU selection under the new unit on a
 lab VM, which a transient unit on nuc3 cannot stand in for; `TasksMax` also
 still lacks its observed peak. The steps are in the execution log.
 
+**Compose rows proposed, 2026-10-02 (claude-opus-5-5, for Paul to ratify;
+nothing deployed).** §7 question 1 found no node running
+`deploy/plurxd.service`, so the systemd rows above harden an install path
+with nothing behind it. What the fleet inherits is the Compose service.
+Rescoping M4 from the unit to Compose is **Paul's call**; this is the
+proposal he would ratify, with the read-only evidence for each row. The
+systemd rows stay as written for bare-metal installs.
+
+Production deploys this repository's own `deploy/docker-compose.yml`:
+`docker inspect plurxd` on lab4 reads
+`com.docker.compose.project.config_files=/opt/noirr/plurx/deploy/docker-compose.yml,/opt/noirr/plurx/deploy/docker-compose.override.yml`
+(working directory `/opt/noirr/plurx/deploy`, a checkout of this repository
+plus the host's untracked override, which the separate ansible repository
+provisions). Because the tracked file **is** what production runs, the rows
+are documented here and not committed to it: a commit there would change the
+fleet on its next deploy without the ratification and lab matrix below.
+
+Evidence, read 2026-10-02 14:38 UTC on all four nodes (lab3, lab4, media1,
+lab6), each container started 06:19–06:33 UTC that day:
+
+```text
+$ docker inspect plurxd --format '{{json .HostConfig}}'        # lab4, abridged
+"LogConfig":{"Type":"json-file","Config":{}} "CapAdd":null "CapDrop":null
+"GroupAdd":["109"] "OomScoreAdj":0 "SecurityOpt":null "PidsLimit":null
+"Ulimits":null "Devices":[{"PathOnHost":"/dev/dri",...}] "Privileged":false
+"ReadonlyPaths":["/proc/bus","/proc/fs","/proc/irq","/proc/sys","/proc/sysrq-trigger"]
+$ docker exec plurxd grep -E '^(Cap|NoNewPrivs|Seccomp)' /proc/1/status   # all four
+CapInh/CapPrm/CapEff/CapAmb 0000000000000000   CapBnd 00000000a80425fb
+NoNewPrivs 0   Seccomp 2
+```
+
+| Compose key | Proposed | Observed today | Why it is safe / what it buys | Validate on the lab instance |
+|---|---|---|---|---|
+| `oom_score_adj` | `-500` | `0` on all four (`HostConfig.OomScoreAdj`, `/proc/1/oom_score_adj`) | M3 (§3.2.2) gives every child `+500` (realtime) or `+800` (background) from its own `pre_exec`. Raising a value needs no capability; the runtime sets `-500` as root, which is also the floor the daemon could not go below later. So children still rank far above the daemon for the OOM killer, which is §3.1's intent, and the daemon no longer ties with a wedged x265 | `/proc/1/oom_score_adj` reads `-500`; under two transcodes each ffmpeg reads `500` or `800`; `plurx_child_priority_unapplied_total` stays 0 |
+| `security_opt` | `["no-new-privileges:true"]` | `NoNewPrivs: 0` | The daemon runs as `1000:1000` (`user:` at `deploy/docker-compose.yml:117`, the override's `group_add` for the render group). Nothing it spawns (ffmpeg, ffprobe, the static probe, `dovi_tool`, `mkvmerge`, `find`) needs a setuid or file-capability gain: the image's only setuid/setgid files are the Debian base's `su`, `mount`, `umount`, `passwd`, `chfn`, `chsh`, `gpasswd`, `newgrp`, `chage`, `expiry` and `unix_chkpwd`, and no file carries a capability xattr (read from every layer of §5.6's image). This is the Compose form of the unit's `NoNewPrivileges=true` and `RestrictSUIDSGID=true` | `NoNewPrivs: 1`; the playback matrix and a DVR recording succeed |
+| `cap_drop` | `[ALL]` | effective, permitted and ambient sets already empty; bounding set `0xa80425fb` (Docker's default fourteen) | An unprivileged process holds no effective capability, so the drop changes only what an `execve` of a setuid or file-capability binary could regain. Ports are 32400–32402/tcp and 32414/udp (no `NET_BIND_SERVICE`); GPU access is the `/dev/dri` device plus the render group, not a capability. A host that overrides `PUID`/`PGID` to 0 would lose `CHOWN`/`DAC_OVERRIDE` over its data directory, so the row says so in its comment | `CapBnd: 0000000000000000`; scratch, DVR and data-dir writes succeed; QSV/VAAPI still selected |
+| `logging` | `driver: json-file`, `max-size: "50m"`, `max-file: "5"` | `json-file` with no options on all four, and `daemon.json` sets none (lab4) | The current container's log was 0.26–4.2 MB after ~8.3 h (largest lab3, ~12 MB/day), and grows without bound for as long as one container lives. 250 MB is about three weeks at that rate, so the week-without-`EMFILE` check (§3.1) can still read `docker logs` | `docker inspect --format '{{json .HostConfig.LogConfig}}'` shows both options; `docker logs` still answers |
+| `pids_limit` | `4096`, **pending** | cgroup `pids.max` is the host slice default (29 428–74 782); `pids.peak` since start 146 (lab3), 150 (lab4), 147 (media1), 195 (lab6) | 195 is 4.8 % of 4096, but the day's load is unknown and is not §3.1's named busy sample (two transcodes, a direct play, a DVR recording). The row lands only when that sample's `pids.peak` is ≤ 1024 (25 %) | `pids.peak` read during the busy sample |
+| `ulimits.nofile` | **not proposed** | soft/hard 524 288 after §3.3's startup raise | 65 536 would lower the limit the daemon already has (§3.1.1) | — |
+
+Already true of the container and so not proposed: `/proc/sys` is mounted
+read-only (`ReadonlyPaths`), the Compose equivalent of
+`ProtectKernelTunables=true`; the container has its own `/tmp` (the
+`PrivateTmp=true` row); Docker's default seccomp profile (`Seccomp: 2`)
+admits `personality(2)` only for a short list of personas, close to what
+`LockPersonality=true` buys. `read_only: true` for the root filesystem is a
+separate question (font and probe caches) and is not part of this proposal.
+
+The rows as they would read in the `plurxd` service of
+`deploy/docker-compose.yml` once ratified:
+
+```yaml
+    oom_score_adj: -500        # children set +500/+800 themselves (§3.2.2)
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL                    # an unprivileged daemon holds none; PUID=0 hosts need CHOWN/DAC_OVERRIDE back
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    # pids_limit: 4096         # pending the busy sample's pids.peak <= 1024
+```
+
+Acceptance, once ratified, on an owned lab instance from the image §5.6
+records (not production): recreate with the rows, read back
+`docker inspect` and `/proc/1/status`, then play direct, copy HLS, a
+transcode with burned text subtitles and one DVR programme, and confirm the
+GPU probe still selects QSV/VAAPI. Any row that breaks a step stays out and
+is recorded. The fleet rollout is a later deploy through the normal path.
+
 ### 5.5 M5 — jellyfin-ffmpeg 8 in CI
 
 The §3.4 container fallback: Dockerfile `ci` stage from `runtime-assets`,
@@ -1193,6 +1265,162 @@ release that the release cut (P-03's `scripts/release-cut`) would have to
 upload beside the image and an operator would have to fetch to
 symbolicate; B is honest and simple and five times the download. Whichever
 lands, `plurxd diagnostic-panic` on the deployed image is the check.
+
+**Reproducible image, 2026-10-02** (claude-opus-5-5, branch
+`opus/p02-repro-continuation`,
+[PR #733](http://forge.lan:3000/noirr/plurx/pulls/733)). This closes M6's
+"`docker build` reproduces" and "image size delta recorded" for the profile C
+tree, and re-runs `plurxd diagnostic-panic` on the image itself.
+
+*The stamp.* `crates/plurxd/build.rs` stamped `PLURX_BUILT_AT` from
+`SystemTime::now()`, so no two builds of a commit could be the same binary.
+It is now the build's source date (`crates/plurxd/build_support/source_date.rs`,
+unit-tested from `version.rs`): `SOURCE_DATE_EPOCH` when set and non-empty,
+else the `HEAD` commit's committer time when the tree is clean, else the
+clock; a malformed `SOURCE_DATE_EPOCH` fails the build. A `-dirty` build is
+not HEAD, so neither the build script nor `make` dates it with HEAD's time
+(review of #733); and `make` takes the date from the checkout it stamps, not
+from a `SOURCE_DATE_EPOCH` left exported in the shell (`make docker
+SOURCE_DATE_EPOCH=…` still overrides deliberately). The field keeps its name and its job (it
+still tells one deploy from the next, because two commits differ in it); its
+meaning is documented as "source date". The Docker context has no `.git`, so
+every image build passes the commit time: `ARG SOURCE_DATE_EPOCH` in the build
+stage, `make docker`/`make docker-up` (through the Compose build args) and
+`scripts/registry-push` derive it with `git log -1 --format=%ct`, and CI
+package-smoke and publish-release pass it from the commit they compile.
+`test_image_builds_pass_the_commit_time_as_source_date_epoch` holds the
+wiring. BuildKit also takes it as the image's `created` time.
+
+*Method.* An isolated `docker-container` builder on lab3 (`opus-p02`,
+BuildKit v0.33.1, buildx 0.30.1; CPU shares 256 on cores 2–15, 18 GB), and
+before each build `docker buildx prune --builder opus-p02 -af`, so the cargo
+registry and both target cache mounts start empty as well
+(`--no-cache` does not empty cache mounts). Each build:
+
+```sh
+docker buildx build --builder opus-p02 --no-cache --provenance=false --sbom=false \
+  --platform linux/amd64 --target runtime \
+  --build-arg PLURX_BUILD_REF="$(git describe --tags --always --dirty)" \
+  --build-arg PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
+  --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+  --output type=oci,dest=buildN.tar,rewrite-timestamp=true .
+```
+
+Provenance is off because the attestation records the build's own start and
+finish times; `rewrite-timestamp=true` clamps every file's mtime in each layer
+to `SOURCE_DATE_EPOCH`.
+
+*Pair 1, `9b45483e7` (the stamp fix alone):* 1,171 s and 901 s. The **Rust
+output reproduced**: `plurxd`
+`59e49410d1170ee4330cad452f66ed177e41e5d0b3581a10e811dff8039115ae`
+(279,098,144 B), `plurxd.dwp`
+`4a038fb5a4e7928def5c8de8da072167ef6f99a26a9f8b361d1ec66b4937f6bd`
+(214,635,552 B), `plurx-cluster-check`
+`eae1fc1dc303e1abc9d16936b51512af09193c27eed4b1f2a8681c6985c296f6`
+(127,421,208 B) and its `.dwp`
+`7660a6515ff7aa17908f84660f50466650ae8b19611248a1d0755cc42d0186bf`
+(79,310,920 B) were byte-identical, as were eight of the nine layers,
+including all four binary layers. The embedded stamp read
+`2026-10-02T14:44:46Z`, the commit time. The **image did not reproduce**:
+manifest `sha256:563b1172…` against `sha256:8470c836…`, because the
+runtime-assets `RUN` layer (`sha256:0dcb08c9…`, 295,570,889 B compressed)
+differed in 10 of its 4,549 entries:
+
+| Entry | Why it differed |
+|---|---|
+| `var/log/dpkg.log`, `var/log/alternatives.log`, `var/log/apt/history.log`, `var/log/apt/term.log` | install timestamps |
+| `var/cache/ldconfig/aux-cache` | inode and change times of the libraries |
+| four `var/cache/fontconfig/*-le64.cache-8` | they embed the font directories' build-time mtimes (with a `rewrite-timestamp` export, as here, those mtimes are then clamped, so the baked caches are also stale; a plain `docker build` keeps them valid) |
+| `usr/share/doc/plurx/ffprobe/config.log` | the configure log dumps the shell environment (BuildKit's per-build `TRACEPARENT`), the script's `mktemp -d` path, configure's own random `ffconf.*` scratch paths and a `mktemp -u` probe |
+
+`/etc/shadow`'s `plurx:!:20728::::::` matched only because both builds ran
+on the same day: `useradd` stamps the last-change day from
+`SOURCE_DATE_EPOCH` or the clock (checked on the pinned bookworm base:
+`SOURCE_DATE_EPOCH=86400 useradd -r t` writes `t:!:1::::::`).
+
+*The layer fix (`9ed98a30c`).* The `RUN` now removes the logs, the aux-cache
+and the fontconfig caches after its last package operation. Dropping the
+font caches is harmless whichever exporter is used: the image carries six
+fonts, which rescan instantly, and each ffmpeg child regenerates its cache
+under its `XDG_CACHE_HOME` on the writable data volume; `useradd` gets `SOURCE_DATE_EPOCH` from the pinned `DEBIAN_SNAPSHOT`
+day, which is already this layer's input. The commit time is deliberately
+not declared in this stage: it would change the `RUN`'s cache key on every
+commit and rebuild apt plus the static probe each time.
+`scripts/build-static-ffprobe` retains the resolved `config.h` and
+`ffbuild/config.mak` (and the configure line in `build.txt`) instead of
+`config.log`. `test_runtime_assets_layer_drops_build_time_state` holds both.
+
+*Pair 2, `9ed98a30c` (both fixes): **reproduced.*** 886 s and 1,201 s. The
+two OCI archives are byte-identical (SHA-256
+`281560581ac5f464a680ee66c6857d3c6058281b7df7276b4e7364a0fe780337`,
+496,409,088 B):
+
+| Object | Digest (both builds) |
+|---|---|
+| `index.json` | `sha256:bed3d8756c79f7049aaabb19bf2ecb1d8344fac54ea7e7edcc57a763d2889a17` |
+| image manifest | `sha256:60afe40502fbd6b8b10b93b527e62a98dff5899f927aadbc6966c9a3559a45c5` |
+| config (the Docker image ID) | `sha256:90e2a1d25c2fd3b7fed38cb66dd9d6f57cb966b4135498aad1d5a0f6eecb65f4`, `created` `2026-10-02T15:27:03Z` (the commit time) |
+| layer 0, `bookworm-slim` | `sha256:774043cc…0150`, 28,238,443 B |
+| layer 1, static-probe script | `sha256:660c43c2…1cda`, 1,805 B |
+| layer 2, media runtime `RUN` | `sha256:e1f2bb64…cedf2`, 295,457,733 B |
+| layers 3–4, notices | `sha256:7017a82b…99fc4`, `sha256:7972f9e3…0c31` |
+| layer 5, `plurxd` | `sha256:04607aab…a24f`, 72,823,873 B |
+| layer 6, `plurxd.dwp` | `sha256:5529463d…050bf`, 46,656,314 B |
+| layer 7, `plurx-cluster-check` | `sha256:3814127d…273d91`, 34,063,466 B |
+| layer 8, `plurx-cluster-check.dwp` | `sha256:f01ac004…65208`, 19,123,030 B |
+
+| File in the image | SHA-256 | Bytes |
+|---|---|---|
+| `plurxd` | `a1df11fbeb99c5dd2ab4043408bbd6507c0da5d78667e82492f4eaf97fa851af` | 279,096,952 |
+| `plurxd.dwp` | `4a038fb5a4e7928def5c8de8da072167ef6f99a26a9f8b361d1ec66b4937f6bd` | 214,635,552 |
+| `plurx-cluster-check` | `9148263cbc0f4bb1ffe0af7db0fe31bbeeed34157fd02903223b6c64e2e5f3df` | 127,421,904 |
+| `plurx-cluster-check.dwp` | `7660a6515ff7aa17908f84660f50466650ae8b19611248a1d0755cc42d0186bf` | 79,310,920 |
+
+Both `.dwp` files are also identical to pair 1's: the commits between them
+change no Rust code.
+
+*Size.* Against the production image on lab3 at the time (`plurx/plurxd:latest`,
+main `dd304bf99`, profile A, so stripped and with no `.dwp`):
+
+| | `docker image inspect .Size` | `plurxd` | `plurx-cluster-check` | `.dwp` files |
+|---|---:|---:|---:|---:|
+| production, main | 1,018,459,699 | 94,160,472 | 40,883,440 | — |
+| effort, profile C | 1,583,182,667 | 279,096,952 | 127,421,904 | 293,946,472 |
+| delta | **+564,722,968 (+55.4 %)** | +184,936,480 | +86,538,464 | +293,946,472 |
+
+The binaries and their debug files account for the whole delta (the runtime
+layer is ~0.7 MB smaller without the removed state). Compressed, the effort
+image's nine layers are 496,382,446 B, of which the four binary layers are
+172,666,683 B.
+
+*`plurxd diagnostic-panic` on the image.* Pair 2's archive was loaded as
+**`plurx-opus-lab:effort-9ed98a30c`** (image ID `sha256:90e2a1d2…65f4`, kept
+on lab3 for an owned lab instance) and run once:
+
+```sh
+docker run --rm --network none --read-only --cpus 1 --memory 512m --pids-limit 64 \
+  --cap-drop ALL --security-opt no-new-privileges:true -e RUST_BACKTRACE=1 \
+  --entrypoint /usr/local/bin/plurxd plurx-opus-lab:effort-9ed98a30c diagnostic-panic
+```
+
+Exit 101; the 3,118-byte log (SHA-256
+`ed1ba83b27972b36997eff0a422e53585c839f1c1338543348067a689013a4da`) resolved
+`plurxd::diagnostic_panic at ./src/crates/plurxd/src/main.rs:505:5`, the
+dispatch at `main.rs:547:37`, the runtime block at `main.rs:488:6` and `main`
+at `main.rs:496:7`, with tokio frames at their registry file:line. Those are
+this tree's lines (`main.rs:505` is the `panic!`). It also ran with M4's
+proposed `cap_drop: ALL` and `no-new-privileges`.
+
+
+*Still not shown.* Both pairs ran on one day on one amd64 host, so a rebuild
+on a later day or on arm64 is unexercised (the `useradd` input is now fixed;
+nothing else in the layer is known to read the date). `make docker` and
+`scripts/registry-push` use the default `docker` driver without
+`rewrite-timestamp`, so their binaries and file contents now reproduce but
+their layer mtimes, and therefore layer digests, still carry the build time;
+reproducing a published digest needs the OCI or image exporter with
+`rewrite-timestamp=true`, which is a change to the fleet publish path and is
+not made here. The binaries themselves are the same from either path.
 
 ### 5.7 M7 — release profile PRs 2–4 (each by its numbers)
 
@@ -1605,6 +1833,7 @@ or M8's actual fuzz campaigns. No production service directive, runner
 configuration, deployment, playback or process-supervision contract changes.
 | Date | Model | Session | Milestone | PR | Evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M6 reproducible image and size; M4 Compose proposal | [#733](http://forge.lan:3000/noirr/plurx/pulls/733) (`opus/p02-repro-continuation`) | `9b45483e7` stamps `built_at` from `SOURCE_DATE_EPOCH` (else commit time, else clock) and every image build passes the commit time; two cold isolated builds then matched in every Rust binary, `.dwp` and binary layer, and differed only in ten build-time entries of the media runtime layer, which `9ed98a30c` removes. Two more cold builds of `9ed98a30c` were byte-identical OCI archives, manifest `sha256:60afe405…`, image ID `sha256:90e2a1d2…`; +564,722,968 B (+55.4 %) over production main, all binaries and debug files. `plurxd diagnostic-panic` on that image resolved file:line frames; the image is kept as `plurx-opus-lab:effort-9ed98a30c`. M4's Compose rows are proposed in §5.4 for Paul (documented only: production deploys this tracked Compose file). Still owed: §3.2's busy-load cadence and the M1/M3 readback with real transcodes, cross-day/arm64 rebuilds, and the publish path's timestamp rewrite (§5.6). |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M8 actual post-merge campaigns; M6 frozen-artifact backtrace | Evidence-only continuation; draft PR pending | All five bounded run3727 campaigns on exact effort `d3dfbe2a` completed; counts/log/ZIP identities in §5.8. Separate frozen `4f243a01` artifact resolved native file/line stack with expected exit101 and owned cleanup. Neither result closes whole P02 or current-main qualification. No fuzz or unit campaign repeated by this docs author. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 
