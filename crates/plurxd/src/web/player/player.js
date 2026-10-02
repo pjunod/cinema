@@ -89,7 +89,7 @@
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
- * @property {{sessionId:string|null,attachment:any,reason:string|null}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
+ * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
  * @property {any} [transportCommand] original transport command awaiting an actual element transition
  * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
@@ -220,6 +220,7 @@
  * @property {number|null} _seekPreview    seek-bar hover position, seconds
  * @property {number|null} _seekPending    keyboard seek target, seconds
  * @property {boolean} [_seekDragging]
+ * @property {number} [_streamProbeOrdinal] sequence of same-attachment diagnostic probes
  * @property {number} [_seekToken]         generation of the latest seek
  * @property {string} _lastFocusedControl  the control focus returns to
  * @property {any} _opener                 the element that opened the player

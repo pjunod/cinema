@@ -7096,3 +7096,31 @@ test("a probe arriving after attachment replacement cannot diagnose the successo
   assert.equal(h.faults.length,0);assert.equal(h.stops.length,0);
   assert.equal(h.player.sessionTerminal,undefined);
 });
+
+
+test("late control terminal and typed 410 preserve authority retirement before native error 3",()=>{
+  const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+  for(const exchange of [
+    {response:{action:{type:'terminal',code:'source_decode_failed'}}},
+    {error:Object.assign(new Error('expired'),{status:410,terminalReason:'control_expired'})},
+  ]){
+    const build=new Function('PlaybackPolicy',[
+      "let STREAM_FAILURE=null,PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0,controlIntentGeneration:0}; const callbacks={},reopens=[],rescues=[];",
+      "const CONTROL_CLIENT_ID='test',window={PlurxPlaybackControl:{}},performance={now:()=>1},console={warn(){}},document={getElementById:()=>({})};",
+      "class Reporter{constructor(config){this.config=config;}start(){}notify(){return null;}} const PlurxPlaybackControl={Reporter,capture:(snapshot,intentGeneration,owner)=>({intentGeneration,owner})};",
+      "function stopPlaybackControl(){}function continueStoppingPlaybackControl(){return false;}function playbackOwnsAttachedMedia(p){return p===PLAYER;}function playbackControlSnapshot(){return {};}function sendPlaybackControl(){}function settlePlaybackControlWaiters(){}function settlePlaybackControlAcknowledgement(){}",
+      "function notifyPlaybackControl(){return null;}function clearStall(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
+      "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}function finishStallRecovery(){return false;}function playbackIsReal(){return false;}function streamRejectionFacts(){return {};}",
+      shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),shippedSource('startPlaybackControl'),
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
+      "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
+      "const reporter=startPlaybackControl(v,PLAYER,{lease_timeout_ms:1000});if(!reporter)throw Error('control owner did not start');wirePlayerMedia(v);",
+      "return {player:PLAYER,reopens,rescues,retire:()=>noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'proof expired'}),{attachment:PLAYER.mediaAttachment}),exchange:event=>reporter.config.onExchange({...event,request:{demand:'active',render_state:'playing'},capture:reporter.config.capture()}),error:()=>callbacks.error(),overlay:currentStreamFailureOverlay};",
+    ].join('\n'));
+    const h=build(policy);h.retire();const fact=h.player.sessionTerminal;h.exchange(exchange);
+    assert.strictEqual(h.player.sessionTerminal,fact,'control cannot rename an attachment authority retirement');
+    assert.match(h.overlay().detail,/proof expired/);
+    if(exchange.response)assert.strictEqual(h.player.controlVerdict,exchange.response.action,'producer action remains independently recorded');
+    h.error();assert.equal(h.reopens.length,1);assert.equal(h.rescues.length,0);
+  }
+});
