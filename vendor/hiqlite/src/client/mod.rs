@@ -54,6 +54,37 @@ pub struct Client {
     pub(crate) inner: Arc<DbClient>,
 }
 
+#[cfg(feature = "validation-test-helpers")]
+impl Client {
+    /// One local writer hold before a matching real transaction commits.
+    /// Validation-only; caller owns release and the maximum is fifty seconds.
+    pub async fn validation_hold_transaction_before_commit(
+        &self,
+        exact_statement: String,
+        until: std::time::Instant,
+    ) -> Result<(tokio::sync::oneshot::Receiver<()>, std::sync::mpsc::Sender<()>), crate::Error> {
+        let now = std::time::Instant::now();
+        if exact_statement.is_empty() || exact_statement.len() > 4096
+            || until <= now || until.duration_since(now) > std::time::Duration::from_secs(50)
+        {
+            return Err(crate::Error::Config("invalid finite precommit control".into()));
+        }
+        let state = self.inner.state.as_ref().ok_or_else(|| crate::Error::Config("precommit control requires local Client".into()))?;
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (release, release_rx) = std::sync::mpsc::channel();
+        let (registered, ack) = tokio::sync::oneshot::channel();
+        state.raft_db.sql_writer.send_async(
+            crate::store::state_machine::sqlite::writer::WriterRequest::RegisterPrecommitHold {
+                hold: crate::store::state_machine::sqlite::writer::ValidationPrecommitHold {
+                    exact_statement, entered, release: release_rx, until,
+                }, registered,
+            }
+        ).await.map_err(|error| crate::Error::Config(error.to_string().into()))?;
+        ack.await.map_err(|error| crate::Error::Config(error.to_string().into()))?;
+        Ok((observed, release))
+    }
+}
+
 pub(crate) struct DbClient {
     pub(crate) state: Option<Arc<AppState>>,
     #[cfg(feature = "cache")]
