@@ -46,7 +46,11 @@ impl StartupClockObserver for AppliedSingletonObserver {
 }
 
 pub async fn select_applied_singleton(config: &Config) -> Result<SelectedStore, StoreError> {
-    select_daemon_store_observing(config, Some(&AppliedSingletonObserver)).await
+    Box::pin(select_daemon_store_observing(
+        config,
+        Some(&AppliedSingletonObserver),
+    ))
+    .await
 }
 
 const CLOCK_PATH: &str = "/_internal/v1/clock";
@@ -81,7 +85,7 @@ impl MeasuredPeers {
             owner: self,
             bind: bind_clock_listener.then_some(config.server.bind),
         };
-        select_daemon_store_observing(config, Some(&observer)).await
+        Box::pin(select_daemon_store_observing(config, Some(&observer))).await
     }
 }
 
