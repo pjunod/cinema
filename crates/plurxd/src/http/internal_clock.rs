@@ -85,6 +85,16 @@ async fn snapshot_for_membership(
             .await
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        if !tokio::time::timeout_at(
+            deadline,
+            membership.revalidate_authenticated_clock_request(&auth),
+        )
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .unwrap_or(false)
+        {
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
         tokio::time::timeout_at(deadline, observer.revalidate_learner(&barrier, completed))
             .await
             .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?

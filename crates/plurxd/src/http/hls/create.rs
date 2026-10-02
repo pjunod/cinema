@@ -1214,6 +1214,16 @@ pub(crate) async fn resolve_plan(
                 .iter()
                 .map(|entry| entry.candidate.clone())
                 .collect();
+            if body.candidate_auto_policy() {
+                catalog = super::candidate_recovery::auto_catalog(
+                    state,
+                    network_identity,
+                    source,
+                    &body.playback_id,
+                    catalog,
+                )
+                .await;
+            }
             if requested.is_none() && body.candidate_auto_policy() {
                 catalog =
                     link_receipts::filter_catalog(state, network_identity, source, catalog).await;
@@ -1980,6 +1990,16 @@ async fn create_with_purpose(
         request_claim_id.clone(),
         incarnation_id.clone(),
     );
+    super::candidate_recovery::observe(
+        &state,
+        identity.as_ref(),
+        source.as_ref(),
+        &request,
+        link_receipts::requested_receipt(&headers),
+        &request_claim_id,
+    )
+    .await
+    .map_err(ApiError::BadRequest)?;
 
     let advertise_control = plurx_core::store::stored_switch(
         state

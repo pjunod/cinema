@@ -194,10 +194,20 @@ pub async fn trigger_election(state: &Arc<AppState>, raft_type: &RaftType) -> Re
     Ok(())
 }
 
+#[cfg(feature = "cache")]
 pub async fn remove_learner(
     state: &Arc<AppState>,
     raft_type: &RaftType,
     node_id: u64,
+) -> Result<(), Error> {
+    remove_learner_with_admission(state, raft_type, node_id, None).await
+}
+
+pub(crate) async fn remove_learner_with_admission(
+    state: &Arc<AppState>,
+    raft_type: &RaftType,
+    node_id: u64,
+    admission: Option<&dyn crate::membership_admission::PreparedMembershipAdmission>,
 ) -> Result<(), Error> {
     info!("Removing Node {} from {:?} Learners", node_id, raft_type);
     let mut set = BTreeSet::new();
@@ -206,6 +216,7 @@ pub async fn remove_learner(
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
                 .raft
@@ -215,6 +226,7 @@ pub async fn remove_learner(
         }
         #[cfg(feature = "cache")]
         RaftType::Cache => {
+            redeem_membership_acquisition(state, admission)?;
             state
                 .raft_cache
                 .raft
@@ -272,6 +284,16 @@ pub async fn remove_voter(
     node_id: u64,
     retain: bool,
 ) -> Result<(), Error> {
+    remove_voter_with_admission(state, raft_type, node_id, retain, None).await
+}
+
+pub(crate) async fn remove_voter_with_admission(
+    state: &Arc<AppState>,
+    raft_type: &RaftType,
+    node_id: u64,
+    retain: bool,
+    admission: Option<&dyn crate::membership_admission::PreparedMembershipAdmission>,
+) -> Result<(), Error> {
     // info!(
     //     "Removing Node from {:?} Voters, new members: {:?}",
     //     raft_type, new_members
@@ -283,6 +305,7 @@ pub async fn remove_voter(
     match raft_type {
         #[cfg(feature = "sqlite")]
         RaftType::Sqlite => {
+            redeem_membership_acquisition(state, admission)?;
             state
                 .raft_db
                 .raft
@@ -293,6 +316,7 @@ pub async fn remove_voter(
         }
         #[cfg(feature = "cache")]
         RaftType::Cache => {
+            redeem_membership_acquisition(state, admission)?;
             state
                 .raft_cache
                 .raft

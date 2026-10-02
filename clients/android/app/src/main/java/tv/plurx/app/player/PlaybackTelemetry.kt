@@ -4,6 +4,9 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -38,6 +41,15 @@ internal data class PlaybackClientLog(
     val encoder: String? = null,
     @SerialName("session_id") val sessionId: String? = null,
     @SerialName("link_sample") val linkSample: CandidateLinkSample? = null,
+    @SerialName("candidate_recovery") val candidateRecovery: CandidateRecoverySample? = null,
+)
+
+@Serializable
+internal data class CandidateRecoverySample(
+    val cause: String = "decode", val event_id: String, val candidate_id: String,
+    val recipe_digest: List<Int>, val age_ms: Int = 0, val decoder_failed: Boolean,
+    val rendered_elapsed_ms: Long, val position_progress_ms: Long,
+    val dropped_frames: Long, val runway_ms: Long,
 )
 
 @Serializable
@@ -105,6 +117,55 @@ internal fun postPlaybackClientLog(
             // Telemetry is best effort and must never become a playback error.
         }
     }
+}
+
+/** One original-budget acknowledgement; no receipt guessing or detached wait. */
+internal fun autoNegativeLinkAcknowledgement(receipt: String, values: List<String>, status: Int,
+                                            sameEndpoint: Boolean, remainingMs: Long): Boolean =
+    remainingMs > 0 && status == 204 && sameEndpoint && values == listOf(receipt) &&
+        Regex("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}").matches(receipt)
+
+internal suspend fun acknowledgeNegativeLink(event: PlaybackClientLog, receipt: String, remainingMs: Long): Boolean {
+    if (remainingMs <= 0 || event.linkSample?.negative != true || event.linkSample.receipt != receipt) return false
+    return acknowledgeClientEvidence(event, receipt, "X-Plurx-Link-Accepted", remainingMs)
+}
+
+internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean, observedAtMs: Long, nowMs: Long,
+    remainingMs: Long, sameAttachment: Boolean): Boolean = accepted && sameAttachment && remainingMs > 0 &&
+    nowMs >= observedAtMs && nowMs - observedAtMs < minOf(remainingMs, 250L)
+
+internal suspend fun acknowledgeDecoderFailure(event: PlaybackClientLog, remainingMs: Long): Boolean {
+    val sample = event.candidateRecovery ?: return false
+    if (sample.cause != "decode") return false
+    return acknowledgeClientEvidence(event, sample.event_id, "X-Plurx-Recovery-Accepted", remainingMs)
+}
+
+private suspend fun acknowledgeClientEvidence(event: PlaybackClientLog, receipt: String, header: String, remainingMs: Long): Boolean {
+    if (remainingMs <= 0) return false
+    val origin = Session.origin
+    val token = Session.token?.takeIf { it.isNotBlank() } ?: return false
+    if (origin.isBlank()) return false
+    val request = try { clientLogRequest(origin, event).newBuilder()
+        .header("Authorization", "Bearer $token").build() } catch (_: Exception) { return false }
+    return withTimeoutOrNull(minOf(remainingMs, 250L)) {
+        suspendCancellableCoroutine { continuation ->
+            val call = Net.capabilityClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : okhttp3.Callback {
+                override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+                    if (continuation.isActive) continuation.resume(false)
+                }
+                override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                    val accepted = response.use {
+                        autoNegativeLinkAcknowledgement(receipt, it.headers.values(header),
+                            it.code, it.request.url == request.url, remainingMs) &&
+                            Session.origin == origin && Session.token == token
+                    }
+                    if (continuation.isActive) continuation.resume(accepted)
+                }
+            })
+        }
+    } ?: false
 }
 
 /**
@@ -413,6 +474,10 @@ internal class OpenPlaybackStallTracker(
     private val startupDeadlineMs: Long = 30_000,
     private val progressThresholdMs: Long = 250,
 ) {
+    /** Original stagnant episode only; a proof wait cannot buy another budget. */
+    fun remainingRecoveryMs(event: Event, capturedAtMs: Long, nowMs: Long): Long =
+        if (!event.establishedPlayback || !event.controlMayDefer || nowMs < capturedAtMs) 0L
+        else (maximumDeferralMs - event.durationMs - (nowMs - capturedAtMs)).coerceAtLeast(0L)
     data class Event(
         val durationMs: Long,
         val positionMs: Long,

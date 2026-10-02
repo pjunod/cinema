@@ -54,8 +54,28 @@ where
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum MembershipChangeReq {
+    FencedRemoveVoter(FencedVoterReduction),
     RemoveVoter { remove_voter: NodeId },
     SetVoters(BTreeSet<NodeId>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FencedVoterReduction {
+    fenced_remove_voter: crate::ReductionFenceReference,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FencedLearnerReduction {
+    fenced_leave: crate::ReductionFenceReference,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum MembershipLeaveReq {
+    Fenced(FencedLearnerReduction),
+    Legacy(ClusterLeaveReq),
 }
 
 #[tracing::instrument(skip_all)]
@@ -289,16 +309,69 @@ pub(crate) async fn post_membership(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
+    if let MembershipChangeReq::FencedRemoveVoter(request) = &payload {
+        if !request.fenced_remove_voter.has_valid_shape() {
+            return Err(Error::Error("invalid exact reduction reference".into()));
+        }
+    }
+    // Capture this receiver's original installed clock before FIRST await.
+    let mut admission = match &payload {
+        MembershipChangeReq::FencedRemoveVoter(request) => {
+            state.membership_admission.as_ref().map(|policy| {
+                policy.prepare(
+                    crate::membership_admission::MembershipAcquisition::Reduction {
+                        reference: request.fenced_remove_voter.clone(),
+                        retain_as_learner: false,
+                    },
+                )
+            })
+        }
+        _ => None,
+    };
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
         return Err(Error::Config("Raft node has not been initialized".into()));
     }
 
-    let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
     let _lock = state.raft_lock.lock().await;
     are_we_leader(&state, &raft_type).await?;
     match payload {
+        MembershipChangeReq::FencedRemoveVoter(request) => {
+            let target = request.fenced_remove_voter.target_raft_id;
+            let metrics = helpers::get_raft_metrics(&state, &raft_type).await;
+            // Already-applied outcome is reconciliation, not a new grant.
+            if metrics
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == target)
+            {
+                let prepared = admission.as_mut().ok_or_else(|| {
+                    Error::Error("fenced reduction requires installed node admission".into())
+                })?;
+                prepared.prepare_proof().await?;
+                if metrics.membership_config.voter_ids().any(|id| id == target) {
+                    helpers::remove_voter_with_admission(
+                        &state,
+                        &raft_type,
+                        target,
+                        false,
+                        admission.as_deref(),
+                    )
+                    .await?;
+                } else {
+                    helpers::remove_learner_with_admission(
+                        &state,
+                        &raft_type,
+                        target,
+                        admission.as_deref(),
+                    )
+                    .await?;
+                }
+            }
+        }
         // Apply the delta against the membership OpenRaft sees while holding
         // the same lock as learner promotion. Two sequential operations can no
         // longer overwrite one another with client-snapshotted absolute sets.
@@ -353,6 +426,34 @@ pub async fn leave_cluster(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let request = get_payload::<MembershipLeaveReq>(&headers, body)?;
+    let (payload, reference) = match request {
+        MembershipLeaveReq::Fenced(request) => {
+            if !request.fenced_leave.has_valid_shape() {
+                return Err(Error::Error("invalid exact reduction reference".into()));
+            }
+            (
+                ClusterLeaveReq {
+                    node_id: request.fenced_leave.target_raft_id,
+                    stay_as_learner: false,
+                },
+                Some(request.fenced_leave),
+            )
+        }
+        MembershipLeaveReq::Legacy(payload) => (payload, None),
+    };
+    // Pure capture is before initialized/leader/lock/Store futures.
+    let mut admission = reference.and_then(|reference| {
+        state.membership_admission.as_ref().map(|policy| {
+            policy.prepare(
+                crate::membership_admission::MembershipAcquisition::Reduction {
+                    reference,
+                    retain_as_learner: false,
+                },
+            )
+        })
+    });
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
@@ -360,16 +461,33 @@ pub async fn leave_cluster(
     }
     are_we_leader(&state, &raft_type).await?;
 
-    let payload = get_payload::<ClusterLeaveReq>(&headers, body)?;
-    leave_cluster_exec(&state.0, &raft_type, payload).await?;
+    leave_cluster_exec_with_admission(
+        &state.0,
+        &raft_type,
+        payload,
+        admission.as_mut().map(|prepared| {
+            &mut **prepared as &mut dyn crate::membership_admission::PreparedMembershipAdmission
+        }),
+    )
+    .await?;
 
     Ok(Response::new(Body::empty()))
 }
 
+#[cfg(feature = "cache")]
 pub async fn leave_cluster_exec(
     state: &Arc<AppState>,
     raft_type: &RaftType,
     payload: ClusterLeaveReq,
+) -> Result<(), Error> {
+    leave_cluster_exec_with_admission(state, raft_type, payload, None).await
+}
+
+async fn leave_cluster_exec_with_admission(
+    state: &Arc<AppState>,
+    raft_type: &RaftType,
+    payload: ClusterLeaveReq,
+    mut admission: Option<&mut (dyn crate::membership_admission::PreparedMembershipAdmission + '_)>,
 ) -> Result<(), Error> {
     info!("{:?} Node {:?}", raft_type, payload);
 
@@ -382,6 +500,12 @@ pub async fn leave_cluster_exec(
         .any(|(id, _)| *id == payload.node_id);
 
     if is_member {
+        if let Some(prepared) = admission.as_mut() {
+            prepared.prepare_proof().await?;
+        }
+        let prepared = admission.as_ref().map(|prepared| {
+            &**prepared as &dyn crate::membership_admission::PreparedMembershipAdmission
+        });
         warn!(
             "Node {} ({:?}) is a cluster member - removing it",
             payload.node_id, raft_type
@@ -393,9 +517,14 @@ pub async fn leave_cluster_exec(
 
         if is_voter {
             warn!("Node {} ({:?}) is a Voter", payload.node_id, raft_type);
-            if let Err(err) =
-                helpers::remove_voter(state, raft_type, payload.node_id, payload.stay_as_learner)
-                    .await
+            if let Err(err) = helpers::remove_voter_with_admission(
+                state,
+                raft_type,
+                payload.node_id,
+                payload.stay_as_learner,
+                prepared,
+            )
+            .await
             {
                 error!(
                     "Error removing Node {} ({:?}) from Voters: {:?}",
@@ -423,7 +552,10 @@ pub async fn leave_cluster_exec(
                 "Node {} ({:?}) is a Learner and should not stay one",
                 payload.node_id, raft_type
             );
-            if let Err(err) = helpers::remove_learner(state, raft_type, payload.node_id).await {
+            if let Err(err) =
+                helpers::remove_learner_with_admission(state, raft_type, payload.node_id, prepared)
+                    .await
+            {
                 error!(
                     "Error removing Node {} ({:?}) from Learners: {:?}",
                     payload.node_id, raft_type, err
