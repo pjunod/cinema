@@ -314,7 +314,7 @@ labels:
 
   # HELP plurx_tone_map_pipeline_sessions_total Sessions started on each tone-map pipeline.
   # TYPE plurx_tone_map_pipeline_sessions_total counter
-  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
+  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
 ```
 
 Both label sets are closed enums (`Encoder`, `Pipeline`), so cardinality is

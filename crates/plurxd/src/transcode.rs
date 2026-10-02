@@ -762,7 +762,7 @@ const QUALIFICATION_ENCODERS: [Encoder; 5] = [
     Encoder::VideoToolbox,
 ];
 const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
-const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
+const QUALIFICATION_PIPELINES: [Pipeline; 9] = [
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
     Pipeline::Libplacebo,
@@ -771,6 +771,7 @@ const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
     Pipeline::DoviPassthrough,
     Pipeline::Hdr10Passthrough,
     Pipeline::Cpu,
+    Pipeline::LibplaceboVaapi,
 ];
 
 // split: begin terminal-admission

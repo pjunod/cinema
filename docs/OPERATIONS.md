@@ -5148,6 +5148,9 @@ Hiqlite operation.
 
 Playback telemetry writer metrics are also node-local and fixed-cardinality;
 they never label a session, file, user, network, or path.
+Each store instance owns a separate writer registration. Expired store
+registrations are discarded when a new writer is registered, so a replacement
+store cannot inherit an abandoned event queue.
 
 | Metric | How to read it |
 |---|---|
@@ -5510,6 +5513,19 @@ the loading overlay a few seconds longer, then playback).
 | A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
 
+**Reading the tone-map speed ratio.** The ratio compares elapsed time for the
+whole short HDR10 probe against the CPU tone-map chain on this node, including
+decode, frame transfers, encode and process startup. It is not the speed of
+the tone-map filter alone or a promise that another GPU's result will match.
+A candidate must produce valid BT.709 output, pass the picture comparison,
+and exceed the reference throughput by 20%.
+
+With a VA-API encoder the probe tries `tonemap_vaapi`, then
+`libplacebo_vaapi` (VA-API decode → Vulkan tone-map → VA-API encode with
+hardware frame mapping), then the existing `libplacebo` path with CPU frame
+transfers, then OpenCL. Unsupported mapping, incorrect output or insufficient
+speed declines only that candidate. Subtitle burns still download the mapped
+SDR frames for composition and upload them to the encoder afterward.
 
 ### Library channel search and classification
 

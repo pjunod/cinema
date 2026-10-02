@@ -53,6 +53,7 @@ impl CodecQualificationMetrics {
             Pipeline::DoviPassthrough => 5,
             Pipeline::Hdr10Passthrough => 6,
             Pipeline::Cpu => 7,
+            Pipeline::LibplaceboVaapi => 8,
         }
     }
 
