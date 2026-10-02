@@ -1111,18 +1111,30 @@ assert.equal(context.ACT_TIMER, null);
 
         makefile = read("Makefile")
         self.assertIn(
-            "SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)",
+            "SOURCE_DATE_EPOCH := $(if $(filter %-dirty,$(BUILD_REF)),,"
+            "$(shell git log -1 --format=%ct 2>/dev/null))",
             makefile,
         )
         commit_time = subprocess.run(
             ["git", "log", "-1", "--format=%ct"],
             cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
         ).stdout.strip()
-        if commit_time and "SOURCE_DATE_EPOCH" not in os.environ:
-            (docker,) = [
-                c for c in make_dry_run_commands("docker") if "docker build" in c
-            ]
-            self.assertIn(f'--build-arg SOURCE_DATE_EPOCH="{commit_time}"', docker)
+
+        def docker_build(*variables: str, env: dict[str, str] | None = None) -> str:
+            result = subprocess.run(
+                ["make", "--no-print-directory", "-n", "docker", *variables],
+                cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+                env={**os.environ, **(env or {})},
+            )
+            (line,) = [c for c in result.stdout.splitlines() if "docker build" in c]
+            return line
+
+        # A clean tree is dated by HEAD, even with an unrelated value exported.
+        clean = docker_build("BUILD_REF=v1.2.3", env={"SOURCE_DATE_EPOCH": "77"})
+        self.assertIn(f'--build-arg SOURCE_DATE_EPOCH="{commit_time}"', clean)
+        # A dirty tree is not HEAD: no date is passed, so build.rs reads the clock.
+        dirty = docker_build("BUILD_REF=v1.2.3-4-gabc-dirty")
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH=""', dirty)
         (pinned,) = [
             c
             for c in make_dry_run_commands("docker", "SOURCE_DATE_EPOCH=1234")

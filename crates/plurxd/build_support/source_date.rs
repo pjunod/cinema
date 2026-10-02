@@ -12,9 +12,9 @@
 //!    sense. Every image build passes the commit's committer time here, because
 //!    the Docker context carries no `.git`.
 //! 2. The `HEAD` commit's committer time, when the crate is built from a
-//!    checkout.
-//! 3. The clock, only when neither exists (a source tarball built with no
-//!    `SOURCE_DATE_EPOCH`).
+//!    clean checkout. A `-dirty` build is not that commit, so it skips this.
+//! 3. The clock, when neither applies (a dirty tree, or a source tarball
+//!    built with no `SOURCE_DATE_EPOCH`).
 //!
 //! Using the clock first, as this stamp once did, made no two builds of one
 //! commit byte-identical, so an image could never be reproduced and compared.
@@ -28,8 +28,14 @@
 /// an error rather than a silent fall back to the clock: the spec asks for the
 /// build to fail, and a fallback would quietly produce the unreproducible
 /// binary the variable was set to prevent.
+///
+/// `dirty` is true when the build's git description ends in `-dirty`: HEAD's
+/// time would then date a tree that is not HEAD, so the clock is used instead.
+/// An explicit `SOURCE_DATE_EPOCH` still wins; every caller in this repository
+/// leaves it empty for a dirty tree.
 pub fn resolve_source_date(
     source_date_epoch: Option<&str>,
+    dirty: bool,
     commit_time: impl FnOnce() -> Option<i64>,
     now: impl FnOnce() -> i64,
 ) -> Result<i64, String> {
@@ -41,7 +47,8 @@ pub fn resolve_source_date(
             )),
         };
     }
-    Ok(commit_time().unwrap_or_else(now))
+    let commit = if dirty { None } else { commit_time() };
+    Ok(commit.unwrap_or_else(now))
 }
 
 /// Unix seconds as `YYYY-MM-DDTHH:MM:SSZ`.

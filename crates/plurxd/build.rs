@@ -49,7 +49,10 @@ fn main() {
         .or_else(git_describe)
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=PLURX_BUILD={build}");
-    println!("cargo:rustc-env=PLURX_BUILT_AT={}", built_at());
+    println!(
+        "cargo:rustc-env=PLURX_BUILT_AT={}",
+        built_at(build.ends_with("-dirty"))
+    );
     embed_windows_manifest();
 }
 
@@ -70,9 +73,9 @@ fn embed_windows_manifest() {
 }
 
 /// The source date as `YYYY-MM-DDTHH:MM:SSZ`; see `build_support/source_date.rs`.
-fn built_at() -> String {
+fn built_at(dirty: bool) -> String {
     let epoch = std::env::var("SOURCE_DATE_EPOCH").ok();
-    let secs = source_date::resolve_source_date(epoch.as_deref(), git_commit_time, || {
+    let secs = source_date::resolve_source_date(epoch.as_deref(), dirty, git_commit_time, || {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
