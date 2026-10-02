@@ -446,9 +446,16 @@ key/token split in §2.3: an admin token handed to a neighbouring application
 also hands over every secret on this route.
 
 `PUT` is PATCH-shaped: **absent means unchanged**, and for credential fields
-an **empty string clears**. `transcode_quality` is the one field that
-distinguishes absent from explicit `null`; `null` restores the family-tuned
-default. Every fallible field is validated and normalized *before* the first
+an **empty string clears**. `transcode_rate_mode` and `transcode_quality`
+distinguish absent from explicit `null`: `null` mode returns the request to
+each encoder family's code default (unset, distinct from an explicit
+`"bitrate"` that survives a default change), and `null` quality restores the
+family-tuned value. `GET` reports an unset mode as `null`, never as the default
+it resolves to; `transcode_rate_mode_default`,
+`transcode_rate_mode_default_encoder` and `transcode_quality_default` show what
+this node's selected family resolves unset values to, for display only. A
+client that writes back what it read must send those `null`s back, not the
+defaults. Every fallible field is validated and normalized *before* the first
 write, because settings are persisted one at a time and a later bad field must
 not leave an earlier policy change in force —
 `dv_disk_keep_original = false` is the destructive case that forced the rule.
@@ -466,9 +473,9 @@ having already committed.
 
 Refusals worth knowing, each a 400 unless noted:
 
-- `transcode_rate_mode must be bitrate or quality` — and whenever either
-  rate-control field is sent, both are required, so a replicated update is one
-  complete pair.
+- `transcode_rate_mode must be bitrate, quality or null` — and whenever
+  either rate-control field is sent (including as `null`), both are required,
+  so a replicated update is one complete pair.
 - `vod_working_set_bytes must be a number`, and a parsed **0** is refused
   rather than stored: 0 means "not configured" to the serving layer, so an
   operator who typed it would silently get a default.

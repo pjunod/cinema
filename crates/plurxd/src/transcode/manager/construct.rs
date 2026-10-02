@@ -841,6 +841,23 @@ impl TranscodeManager {
         requested_encoder: &str,
         prefs: &plurx_core::tracks::LangPrefs,
     ) -> String {
+        Self::pretranscode_policy_generation_with(
+            snapshot,
+            requested_encoder,
+            prefs,
+            Encoder::default_rate_mode,
+        )
+    }
+
+    /// [`Self::pretranscode_policy_generation_for`] with the family-default
+    /// table as a parameter, so a test can show what a default flip moves
+    /// without flipping one.
+    pub(super) fn pretranscode_policy_generation_with(
+        snapshot: RateControlSnapshot,
+        requested_encoder: &str,
+        prefs: &plurx_core::tracks::LangPrefs,
+        default_rate_mode: fn(Encoder) -> RateMode,
+    ) -> String {
         let audio_lang =
             plurx_core::tracks::bcp47_tag(Some(&prefs.audio_lang)).to_ascii_lowercase();
         let sub_lang = plurx_core::tracks::bcp47_tag(Some(&prefs.sub_lang)).to_ascii_lowercase();
@@ -849,22 +866,10 @@ impl TranscodeManager {
             format!("recipe:{CACHE_RECIPE_VERSION}"),
             "contract:hls-mpegts-v1".to_owned(),
             format!("requested-encoder:{requested_encoder}"),
-            // Unset spells exactly what explicit `bitrate` spells. This is a
-            // durable dedupe key: it is stored on every speculative queue row
-            // and a mismatch is a hard `cancel_job(.., "policy_changed")`, not
-            // a yield. Every `Encoder::default_rate_mode()` is Bitrate, so the
-            // two requests resolve to the same effective policy and the key
-            // must not move because the internal type gained a third state —
-            // it would re-queue every speculative row at deploy and flip again
-            // mid-boot on every restart, when the manager's initial
-            // `RateControlSnapshot::bitrate` is replaced by the absent pair.
-            // A PR that flips a family default moves this spelling
-            // deliberately, with the artefact §3.4 requires.
-            format!(
-                "requested:{}",
-                snapshot
-                    .requested_mode
-                    .map_or_else(|| RateMode::Bitrate.as_str(), RateMode::as_str)
+            Self::speculative_rate_policy(
+                snapshot.requested_mode,
+                speculative_encoder_families(requested_encoder),
+                default_rate_mode,
             ),
             format!("quality:{:?}", snapshot.requested_quality),
             format!("audio-lang:{audio_lang}"),
@@ -875,6 +880,59 @@ impl TranscodeManager {
             hasher.update(value.as_bytes());
         }
         format!("speculative-auto-v2:{}", hex::encode(hasher.finalize()))
+    }
+
+    /// The rate-control entry of the speculative dedupe key: the *effective*
+    /// requested mode on every encoder family that may claim the row.
+    ///
+    /// This is durable state. It is stored on every speculative queue row and
+    /// a mismatch is a hard `cancel_job(.., "policy_changed")`, so it must move
+    /// exactly when the policy those rows would be produced under moves:
+    ///
+    /// - An explicit mode spells itself (`requested:bitrate`,
+    ///   `requested:quality`), the pre-tri-state literal. A family default
+    ///   flip never reaches it, so queued rows under an explicit operator
+    ///   choice keep their identity.
+    /// - An unset mode resolves through each claimable family's code default.
+    ///   When those all agree it spells the agreed mode — byte-identical to
+    ///   the explicit request of that mode, because the two produce the same
+    ///   recipes — so today, with every default Bitrate, an unset pair keeps
+    ///   the key every queued row already carries (no deploy or boot churn).
+    ///   When they differ, it spells each family's mode, so a flip of one
+    ///   family moves the rows that family may claim and no others.
+    ///
+    /// The families come from the requested encoder (one family when pinned,
+    /// all of them for auto), never from this node's local pick: the key is
+    /// compared by whichever node claims the row, so a node-local answer
+    /// would cancel rows across a mixed-hardware cluster.
+    pub(super) fn speculative_rate_policy(
+        requested_mode: Option<RateMode>,
+        families: &[Encoder],
+        default_rate_mode: fn(Encoder) -> RateMode,
+    ) -> String {
+        if let Some(mode) = requested_mode {
+            return format!("requested:{}", mode.as_str());
+        }
+        let resolved = families
+            .iter()
+            .map(|family| (*family, default_rate_mode(*family)))
+            .collect::<Vec<_>>();
+        match resolved.first() {
+            Some((_, first)) if resolved.iter().all(|(_, mode)| mode == first) => {
+                format!("requested:{}", first.as_str())
+            }
+            // An empty family list is not produced by
+            // `speculative_encoder_families`; spell it as the legacy literal.
+            None => format!("requested:{}", RateMode::Bitrate.as_str()),
+            Some(_) => format!(
+                "requested:{}",
+                resolved
+                    .iter()
+                    .map(|(family, mode)| format!("{}={}", family.family_name(), mode.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+        }
     }
 
     /// Speculative work never reserves a queue row while foreground/offline

@@ -3777,8 +3777,15 @@ sessions.
 When no mode is stored, the server resolves the selected encoder's code
 default; this is distinct from an operator explicitly choosing `bitrate`.
 Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
-report the map at `encoders.quality_rc.default_rate_mode`; the settings form
-keeps presenting `bitrate` for an absent legacy pair.
+report the map at `encoders.quality_rc.default_rate_mode`. `GET
+/api/v1/settings` reports an unset mode as `null`, with the selected family's
+default beside it in `transcode_rate_mode_default`; Settings → Playback →
+Advanced server delivery → Encoder rate control offers **Default (per
+encoder)**, which saves the clear. Before 2026-10-02 the settings response
+reported an unset pair as `"bitrate"` and `scripts/bench` restored that value,
+which stored an explicit bitrate on any cluster it measured — every node then
+logged `requested_mode="bitrate"` and a family default flip would not reach it.
+Return such a cluster to the defaults with the clear below.
 
 Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
 selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
@@ -3806,11 +3813,20 @@ curl -fsS -X PUT \
   --data '{"transcode_rate_mode":"quality","transcode_quality":22}' \
   http://media1:32400/api/v1/settings
 
-# Return to the byte-for-byte legacy path and clear the override.
+# Pin the byte-for-byte legacy path explicitly and clear the override.
 curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"transcode_rate_mode":"bitrate","transcode_quality":null}' \
+  http://media1:32400/api/v1/settings
+
+# Return to each encoder family's default (unset): the response's
+# transcode_rate_mode is null and the boot/refresh log reads
+# requested_mode="family_default".
+curl -fsS -X PUT \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"transcode_rate_mode":null,"transcode_quality":null}' \
   http://media1:32400/api/v1/settings
 ```
 
@@ -4004,7 +4020,13 @@ as shown without `--quality`.
 
 Omitting `--quality` explicitly sends and verifies
 `transcode_quality: null` for both captures; it does not preserve a preexisting
-override. The original pair is still restored in the final cleanup path.
+override. The original pair is still restored in the final cleanup path,
+exactly as stored: an unset mode goes back as `null` (each family's default),
+never as the default the settings response displays beside it, and an explicit
+choice goes back as that choice. The harness refuses, before any mutation, a
+server whose settings response has no `transcode_rate_mode_default` field —
+such a server reports unset as `"bitrate"`, and restoring that pinned the
+measured cluster to an explicit bitrate until 2026-10-02.
 
 The 2026-08-14 media1 QSV acceptance used deployed build
 `v0.2.7-167-gb6aaed6` and selected default 22. The no-override run passed with

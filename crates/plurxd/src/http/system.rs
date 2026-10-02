@@ -1824,12 +1824,26 @@ pub struct SettingsDto {
     /// How fast a remux may be delivered, as a multiple of real time. "0" means
     /// unpaced — which lets a single stream take the whole link.
     pub stream_readrate: String,
-    /// Requested N1 rate control. The production-effective value may be VBR
-    /// when a family refuses quality mode; `/system` capabilities and boot
-    /// logs carry that validation result.
-    pub transcode_rate_mode: String,
+    /// Requested N1 rate control. JSON `null` means the operator has not
+    /// chosen a mode, so each encoder family's code default applies; an
+    /// explicit `"bitrate"` is an override that survives a family default
+    /// flip. Reporting the unset pair as `"bitrate"` made every client that
+    /// wrote back what it read pin the cluster to an explicit bitrate, which
+    /// left a per-family default flip inert. The production-effective value
+    /// may still be VBR when a family refuses quality mode; `/system`
+    /// capabilities and boot logs carry that validation result.
+    pub transcode_rate_mode: Option<String>,
     /// `None` means use the validated family-tuned default.
     pub transcode_quality: Option<u8>,
+    /// What an unset `transcode_rate_mode` resolves to on this node: the code
+    /// default of the encoder family this node's preference selects. Display
+    /// only — never write it back as a request.
+    pub transcode_rate_mode_default: String,
+    /// The family (`software`, `qsv`, ...) `transcode_rate_mode_default` and
+    /// `transcode_quality_default` describe.
+    pub transcode_rate_mode_default_encoder: String,
+    /// The family-tuned quality an unset `transcode_quality` resolves to.
+    pub transcode_quality_default: u8,
     /// How an HLS session (transcode or copy-video) is paced: the multiple of
     /// real time it settles at, how many seconds it may deliver flat-out first
     /// (that burst IS the viewer's opening buffer), and how far ahead of the
@@ -2086,14 +2100,17 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             transcode_rate_mode.as_deref(),
             transcode_quality.as_deref(),
         );
-    // The settings form keeps its existing compatibility value for an unset
-    // pair. The tri-state is an internal policy distinction: `/system`
-    // reports family defaults, while the form still presents the legacy
-    // bitrate choice until the operator explicitly changes it.
-    let transcode_rate_mode = transcode_rate_mode
-        .unwrap_or(plurx_core::transcode::RateMode::Bitrate)
-        .as_str()
-        .to_owned();
+    // Unset stays unset on the wire. Presenting the family default as if it
+    // were the stored request is what turned every read-modify-write client
+    // (the bench harness's restore, any form Save) into an explicit
+    // `bitrate` pin. The default is reported beside it, for display only.
+    let transcode_rate_mode = transcode_rate_mode.map(|mode| mode.as_str().to_owned());
+    let default_family = state
+        .transcode
+        .encoder_for_preference(setting(keys::HWACCEL).as_deref().unwrap_or_default());
+    let transcode_rate_mode_default = default_family.default_rate_mode().as_str().to_owned();
+    let transcode_rate_mode_default_encoder = default_family.family_name().to_owned();
+    let transcode_quality_default = default_family.default_quality();
     let text = |v: Option<String>, default: &str| -> String {
         v.map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
@@ -2280,6 +2297,9 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         stream_readrate,
         transcode_rate_mode,
         transcode_quality,
+        transcode_rate_mode_default,
+        transcode_rate_mode_default_encoder,
+        transcode_quality_default,
         hls_readrate,
         hls_burst_secs,
         hls_ahead_max_secs,
@@ -2621,8 +2641,10 @@ pub struct UpdateSettings {
     /// N1 requested rate-control family. Whenever either rate-control field is
     /// sent, both are required so a replicated update is one complete pair.
     /// A quality request is behavior-probed before the effective snapshot
-    /// changes; a refused driver remains VBR.
-    pub transcode_rate_mode: Option<String>,
+    /// changes; a refused driver remains VBR. JSON `null` clears the request
+    /// back to each encoder family's code default (absent = unchanged).
+    #[serde(default, deserialize_with = "deserialize_nullable")]
+    pub transcode_rate_mode: Option<Option<String>>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
     pub transcode_quality: Option<Option<u8>>,
@@ -3082,9 +3104,17 @@ pub async fn update_settings(
     let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => None,
         (Some(requested_mode), Some(quality)) => {
-            let mode = plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
-                ApiError::BadRequest("transcode_rate_mode must be bitrate or quality".into())
-            })?;
+            // `null` is the explicit "use each family's default" request.
+            let mode = requested_mode
+                .as_deref()
+                .map(|requested_mode| {
+                    plurx_core::transcode::RateMode::parse(requested_mode).ok_or_else(|| {
+                        ApiError::BadRequest(
+                            "transcode_rate_mode must be bitrate, quality or null".into(),
+                        )
+                    })
+                })
+                .transpose()?;
             Some((mode, quality))
         }
         _ => {
