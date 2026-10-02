@@ -1179,7 +1179,17 @@ impl ReleaseSettlement {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct CandidateCatalogContext {
+    pub caps: plurx_core::playback::DeviceCaps,
+    pub candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub binding: crate::media_pool::PlanningBinding,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct RemoteStartRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate_catalog: Option<CandidateCatalogContext>,
     /// Retained route context. Tolerated by the parser floor, never minted by
     /// it and never sufficient to authorize a worker route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1225,7 +1235,14 @@ fn remote_start_envelope_is_valid(request: &RemoteStartRequest) -> bool {
             })
     })
         && (request.request.continuous_media.is_none() || request.library_channel.is_none())
-        && (request.candidate_id.is_none() || request.decoder_caps.is_some())
+        && (request.candidate_id.is_none() || request.decoder_caps.is_some() && request.candidate_catalog.is_some())
+        && request.candidate_catalog.as_ref().is_none_or(|context| {
+            request.candidate_id == Some(context.candidate.id) && context.candidate.identity_matches()
+                && context.caps.v == 2 && context.caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
+                && context.caps.validate_audio_sinks().is_ok() && context.caps.validate_progressive_hevc_sample_entries().is_ok()
+                && context.binding.generation >= 0 && context.binding.source_digest.len() == 64
+                && context.binding.source_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
         // An explicit snapshot is a current capability constraint, including
         // on ordinary negotiated routes. Empty/all-unavailable is decoder
         // loss, not permission to fall back to legacy unconstrained dispatch.
@@ -5569,6 +5586,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
         typeless_playlist: true,
         request: SessionRequest {
             continuous_media: None,
+            quality_catalog: None,
             candidate_context: None,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
@@ -5997,6 +6015,7 @@ mod tests {
     pub(super) fn valid_start_request() -> RemoteStartRequest {
         let incarnation_id = "00000000-0000-4000-8000-0000000000a1".to_owned();
         RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -6009,6 +6028,7 @@ mod tests {
             library_channel: None,
             request: SessionRequest {
                 continuous_media: None,
+                quality_catalog: None,
                 candidate_context: None,
                 control_sequence: None,
                 file_id: 11,
@@ -6898,7 +6918,40 @@ mod tests {
         assert!(!missing_grade.is_valid());
         missing_grade.request.presentation = crate::transcode::Presentation::Live;
         assert!(!takeover_recipe_is_valid(&missing_grade));
-        request.candidate_id = Some(plurx_core::playback::candidate::CandidateId([0x12; 16]));
+        let recipe_digest = [0x12; 32];
+        let candidate_id =
+            plurx_core::playback::candidate::CandidateId::for_recipe_digest(recipe_digest);
+        request.candidate_id = Some(candidate_id);
+        assert!(
+            !request.is_valid(),
+            "an identity and decoder snapshot alone cannot authorize a candidate"
+        );
+        request.candidate_catalog = Some(CandidateCatalogContext {
+            caps: serde_json::from_value(serde_json::json!({
+                "v": 2, "video": [{"codec":"h264", "present":["sdr"]}],
+                "audio":["aac"], "containers":["mp4"], "transports":["hls"]
+            }))
+            .expect("retained capabilities"),
+            candidate: plurx_core::playback::candidate::QualityCandidate {
+                id: candidate_id,
+                recipe_digest,
+                route: plurx_core::playback::candidate::CandidateRoute::Encode,
+                normalized_geometry: true,
+                width: 1920,
+                height: 1080,
+                target_height: 1080,
+                average_bps: None,
+                peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true,
+                complete_cache: false,
+                sustainable: true,
+            },
+            binding: crate::media_pool::PlanningBinding {
+                generation: 1,
+                source_digest: "0".repeat(64),
+            },
+        });
         request.presentation_target = Some(plurx_core::playback::candidate::PresentationTarget {
             width_px: 2400,
             height_px: 1600,
@@ -7067,6 +7120,7 @@ mod tests {
         vod.recipe_json = serde_json::to_string(&RemoteStartRequest {
             request: SessionRequest {
                 continuous_media: None,
+                quality_catalog: None,
                 candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
@@ -7213,6 +7267,7 @@ mod tests {
         let vod = RemoteStartRequest {
             request: SessionRequest {
                 continuous_media: None,
+                quality_catalog: None,
                 candidate_context: None,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()

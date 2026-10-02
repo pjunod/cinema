@@ -478,8 +478,11 @@ pub struct SessionRecoveryIdentity {
 /// repeated create safe to answer with the session that already exists.
 /// Reconstructed from the retained worker envelope and validated recipe.
 /// Never emitted inside the strict legacy request envelope.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -492,7 +495,7 @@ pub struct CandidateExecutionContext {
 /// Versioned worker media role for one continuous family generation.
 /// Legacy request JSON omits this field; older strict workers refuse it rather
 /// than silently materializing a muxed rendition under a video-only identity.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContinuousMediaRequest {
     pub version: u32,
@@ -506,6 +509,10 @@ pub struct ContinuousMediaRequest {
     /// Omitted for a standalone role or the controlled active video/audio pair.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autonomous_companion: Option<plurx_core::playback::candidate::CandidateId>,
+    /// Exact second recipe from the same canonical catalog. Worker revalidation
+    /// scopes to these two shapes rather than discovering a new whole catalog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion_catalog: Option<Box<plurx_core::playback::candidate::QualityCandidate>>,
     /// Owner-verified immutable output proof, bound once in the durable parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family_descriptor: Option<plurx_core::store::ContinuousFamilyDescription>,
@@ -514,7 +521,7 @@ pub struct ContinuousMediaRequest {
     pub companion_context: Option<Box<ContinuousCompanionContext>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ContinuousCompanionContext {
     pub height: i64,
     pub candidate: CandidateExecutionContext,
@@ -568,6 +575,13 @@ impl ContinuousMediaRequest {
                         .as_ref()
                         .is_none_or(|primary| primary.candidate_id != id)
             })
+            && self.companion_catalog.as_ref().is_none_or(|companion| {
+                self.autonomous_companion == Some(companion.id)
+                    && companion.identity_matches()
+                    && companion.route == plurx_core::playback::candidate::CandidateRoute::Encode
+                    && companion.normalized_geometry
+                    && companion.grade == plurx_core::transcode::OutputGrade::Sdr
+            })
             && self.companion_context.as_ref().is_none_or(|companion| {
                 self.autonomous_companion == Some(companion.candidate.candidate_id)
                     && companion.height >= 2
@@ -595,7 +609,9 @@ pub struct SessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuous_media: Option<Box<ContinuousMediaRequest>>,
     #[serde(skip)]
-    pub candidate_context: Option<CandidateExecutionContext>,
+    pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
+    #[serde(skip)]
+    pub candidate_context: Option<Box<CandidateExecutionContext>>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -1067,4 +1083,27 @@ pub struct StartInfo {
     /// session. A finished transcode-cache hit is seekable VOD to the client
     /// but still belongs to the 60-second rolling registry.
     pub control_lease_timeout_ms: u32,
+}
+
+#[cfg(test)]
+pub(crate) fn continuous_test_candidate_context(
+    id: plurx_core::playback::candidate::CandidateId,
+    digest: [u8; 32],
+    height: u32,
+) -> CandidateExecutionContext {
+    super::TranscodeManager::candidate_context(&plurx_core::playback::candidate::QualityCandidate {
+        id,
+        recipe_digest: digest,
+        route: plurx_core::playback::candidate::CandidateRoute::Encode,
+        normalized_geometry: true,
+        width: height * 16 / 9,
+        height,
+        target_height: height,
+        average_bps: None,
+        peak_bps: None,
+        grade: plurx_core::transcode::OutputGrade::Sdr,
+        decoder_compatible: true,
+        complete_cache: false,
+        sustainable: true,
+    })
 }

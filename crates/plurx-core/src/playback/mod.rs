@@ -22,7 +22,10 @@ pub mod geometry;
 pub mod intent;
 use crate::transcode::OutputGrade;
 pub use audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute, AudioSink, DownmixMatrix};
-pub use caps::{DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps};
+pub use caps::{
+    DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps, DECODER_COMPACTION_CONTRACT,
+    MAX_CLIENT_DECODER_ENTRIES,
+};
 pub use desired::{
     DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
 };

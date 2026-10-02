@@ -3435,3 +3435,34 @@ pjunod@192.168.4.7 under /tmp/plurx-cq-cd9bb38ad/, without .git or credentials.
 That resolves the earlier destination-authorization rejection. The next Linux
 qualification build uses this committed tree; older runtime receipts remain
 failed or unqualified and are not reused as current evidence.
+
+
+### 10.112 Current main catalog integration preserves both continuous recipes
+
+Main advanced to 15e36f7f4 with canonical catalog, scoped worker revalidation,
+startup allowance and planning-generation changes. The batch now carries those
+changes. Published replicated planning schema v69 precedes quality cancellation
+v70 and dependencies v71; published SQLite planning v91 precedes cancellation
+v92 and dependencies v93. Earlier ledger migration numbers describe their
+then-current unpublished base and are superseded by this sequence.
+
+Continuous starts reuse the canonical catalog and startup allowance. The exact
+companion recipe is carried inside the negotiated continuous-media envelope and
+revalidated alongside the primary against one retained source/settings snapshot
+and decoder capability set. Each validation scopes to its selected recipe; the
+worker does not enumerate another complete catalog. The local companion context
+remains omitted from wire. Incomplete or non-dispatchable workers are not
+advertised as a continuous family. Authored source assertions cover those rows
+and the companion descriptor's identity, strict parsing and wire retention.
+
+Rust 1.97.1 workspace and all test-source targets compile. The compile loop
+identified context boxing, retained-snapshot API, fixture and derive mismatches;
+these were repaired locally before commit. No unit tests ran. Android production
+and test sources compile at versionCode 144; iOS build-for-testing and tvOS
+production build pass at Apple build 206, above current main's 143 and 205.
+
+The approved Linux build of 9565c98c1 succeeded in 121 seconds. It predates this
+main integration and is not qualification evidence for the integrated branch.
+The next source archive refreshes that isolated build before playback probes.
+Native Safari's UI action again reported a locked Mac; its local fixture server
+was closed. Physical Android, Apple display and audio evidence remain pending.

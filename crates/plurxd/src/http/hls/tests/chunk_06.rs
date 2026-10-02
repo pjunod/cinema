@@ -370,6 +370,7 @@
         };
         resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state,
                 user_id: 7,
                 file_id: source.id,
@@ -471,6 +472,7 @@
             };
             let resolved = resolve_plan(
                 PlanInputs {
+            snapshot: None,
                     state: &state,
                     user_id: 7,
                     file_id: source.id,
@@ -513,6 +515,7 @@
             ..bare_create()
         };
         let inputs = || PlanInputs {
+            snapshot: None,
             state: &state,
             user_id: 7,
             file_id: source.id,
@@ -577,6 +580,7 @@
         let expected = review.notes.clone();
         let resolved = resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state: &state,
                 user_id: 7,
                 file_id: source.id,
@@ -1461,6 +1465,7 @@
         use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
         let candidate = |node: &str, seed: u8, target, width, height| crate::media_pool::WorkerQualityCandidate {
             node_id: node.into(),
+            binding: None, dispatch_supported: true, partial: false,
             candidate: QualityCandidate {
                 id: CandidateId::for_recipe_digest([seed;32]), recipe_digest: [seed;32],
                 route: CandidateRoute::Encode, normalized_geometry: true, width, height,
@@ -1479,6 +1484,12 @@
         assert_eq!(pair.companion_candidate_id,companion.candidate.id);
         let mut unsupported = companion;
         unsupported.candidate.normalized_geometry = false;
+        assert!(continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()]).pairs.is_empty());
+        unsupported.candidate.normalized_geometry = true;
+        unsupported.dispatch_supported = false;
+        assert!(continuous_candidates_from_workers(&[primary.clone(), unsupported.clone()]).pairs.is_empty());
+        unsupported.dispatch_supported = true;
+        unsupported.partial = true;
         assert!(continuous_candidates_from_workers(&[primary, unsupported]).pairs.is_empty());
     }
 
@@ -2748,6 +2759,7 @@
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -2779,6 +2791,7 @@
                 session_id: session_id.clone(),
                 route: route.clone(),
                 recipe: RemoteStartRequest {
+                    candidate_catalog: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,
@@ -3153,4 +3166,98 @@
             StatusCode::SERVICE_UNAVAILABLE,
             "the unreachable remote owner is tried after the point, and the release deferred"
         );
+    }
+
+    #[test]
+    fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
+        let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+            file: staged_source_file(), probe_json: Some("{\"streams\":[]}".to_owned()),
+            settings: Default::default(), generation: 1,
+        };
+        let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+        snapshot.probe_json = Some("{\"streams\":[{\"codec_name\":\"hevc\"}]}".to_owned());
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        snapshot.probe_json = Some("{\"streams\":[]}".to_owned());
+        snapshot.generation += 1;
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+    }
+
+    #[tokio::test]
+    async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
+        let state = resolver_state();
+        let request = crate::media_pool::QualityCatalogRequest {
+            file_id: -1, source_size: -1, source_mtime: -1,
+            caps: Default::default(), copy_contract: None, audio_index: None,
+            audio_offset_ms: 0, subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        let outcome = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now(), None,
+        ).await;
+        assert!(!outcome.complete);
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(outcome.causes, vec![crate::media_pool::CatalogCause::LocalDeadline]);
+        let invalid = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now() + Duration::from_secs(1), None,
+        ).await;
+        assert!(matches!(invalid.causes.as_slice(), [crate::media_pool::CatalogCause::RequestInvalid(_)]));
+    }
+
+    #[tokio::test]
+    async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_survive() {
+        let state = resolver_state();
+        state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("enable saved choice");
+        let source = staged_source_file();
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec":"h264", "present":["sdr"]})).collect::<Vec<_>>(),
+            "audio":["aac"], "containers":["mp4"], "transports":["hls"]
+        })).expect("legacy caps");
+        for (auto, copy, height, expected) in [
+            (true, false, None, StatusCode::BAD_REQUEST),
+            (false, false, Some(1440), StatusCode::BAD_REQUEST),
+            (false, false, Some(720), StatusCode::OK),
+            (true, true, None, StatusCode::OK),
+        ] {
+            let body = CreateSession { playback_id: "legacy-catalog-contract".into(), caps: Some(caps.clone()), quality_auto: Some(auto), copy: Some(copy), height, ..bare_create() };
+            let result = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: source.id, source: Some(&source), network_prior: None }, None, body).await;
+            assert_eq!(result.map(|_| StatusCode::OK).unwrap_or_else(|error| error.into_response().status()), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_worker_preserves_request_accounting_and_remaining_budget() {
+        let state = resolver_state();
+        let counts = plurx_core::store::HttpStoreOperationCounts::default();
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let parent_deadline = crate::media_pool::create_stage_deadline(Duration::from_secs(10));
+        plurx_core::store::scope_http_store_operations(counts.clone(), budget.scope(async {
+            let store = Arc::clone(&state.store);
+            crate::media_pool::spawn_create_worker(async move {
+                store.watch_state(1, 1).await.expect("worker read");
+                assert!(crate::media_pool::create_stage_deadline(Duration::from_secs(50)) < parent_deadline);
+            }).await.expect("owned worker");
+            let store = Arc::clone(&state.store);
+            tokio::spawn(async move { store.watch_state(1, 1).await.expect("unrelated background read"); }).await.expect("background task");
+        })).await;
+        assert_eq!(counts.watch_reads(), 1, "only the owned critical-path read belongs to the request");
+    }
+
+    #[tokio::test]
+    async fn manual_and_copy_preparation_retain_a_request_local_catalog() {
+        let state = resolver_state();
+        let source = staged_source_file();
+        let route = crate::media_sessions::takeover_eligible_route("old", "00000000-0000-4000-8000-0000000000a1");
+        let mut predecessor = staged_predecessor_recipe(&route);
+        let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["eac3"],"containers":["mkv","mp4"],"transports":["hls"]}"#);
+        predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder evidence"));
+        for quality in [crate::playback_control::QualitySelection::Original, crate::playback_control::QualitySelection::Manual { height: 720 }] {
+            let selection = crate::playback_control::ClientSelection { quality, audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None },
+                audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+            let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 1080).await.expect("ordinary successor plan");
+            assert!(request.candidate_context.is_none());
+            let catalog = request.quality_catalog.as_ref().expect("optional canonical ladder is retained independently");
+            assert!(!catalog.complete, "missing source is incomplete, not proof of an empty ladder");
+        }
     }

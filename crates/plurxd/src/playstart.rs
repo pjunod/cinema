@@ -160,12 +160,13 @@ pub(crate) const PLAY_FORGET: Duration = Duration::from_secs(24 * 60 * 60);
 /// the web answers for `vod_index_pending` by falling back to a progressive
 /// remux. Such a refusal does not end the attempt: it keeps it pending, so
 /// the retry or the fallback that follows joins it (#559 review, finding 1).
-pub(crate) const START_NOT_YET_CODES: [&str; 5] = [
+pub(crate) const START_NOT_YET_CODES: [&str; 6] = [
     "startup_timeout",
     "media_owner_transition",
     "vod_index_pending",
     "vod_engine_unattested",
     "transcode_capacity_pending",
+    "quality_catalog_unavailable",
 ];
 
 /// The `reason`s a `ttff` beacon gives for a player that was just opened, as
@@ -955,14 +956,12 @@ mod tests {
     fn a_not_yet_refusal_keeps_the_start_open_for_the_retry_that_plays() {
         let ledger = StartAttempts::new();
         let t0 = Instant::now();
-        for at in [0, 1, 3] {
-            ledger.refused(
-                1,
-                10,
-                None,
-                Some("transcode_capacity_pending"),
-                t0 + Duration::from_secs(at),
-            );
+        for (at, code) in [
+            (0, "transcode_capacity_pending"),
+            (1, "quality_catalog_unavailable"),
+            (3, "transcode_capacity_pending"),
+        ] {
+            ledger.refused(1, 10, None, Some(code), t0 + Duration::from_secs(at));
             assert!(matches!(
                 ledger.phase(1, 10),
                 Some(StartPhase::Pending { not_yet: true, .. })

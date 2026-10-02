@@ -310,6 +310,7 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     parent_request.continuous_media = Some(Box::new(crate::transcode::ContinuousMediaRequest {
             controlled: false,
             autonomous_companion: None,
+            companion_catalog: None,
             family_descriptor: None,
             companion_context: None,
         version: 1, family_generation: uuid::Uuid::new_v4().to_string(), role: crate::transcode::ContinuousMediaRole::Video,
@@ -373,15 +374,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     let companion_id = plurx_core::playback::candidate::CandidateId([9; 16]);
     let mut companion_request = parent_request.clone();
     companion_request.kind = SessionKind::Transcode { height: 72 };
-    companion_request.candidate_context = Some(crate::transcode::CandidateExecutionContext {
-        owner_node_id: None, candidate_id: companion_id, recipe_digest: [10; 32],
-        normalized_geometry: true, grade: plurx_core::transcode::OutputGrade::Sdr, profile: None,
-    });
-    parent_request.candidate_context = Some(crate::transcode::CandidateExecutionContext {
-        owner_node_id: None, candidate_id: plurx_core::playback::candidate::CandidateId([7; 16]),
-        recipe_digest: [8; 32], normalized_geometry: true,
-        grade: plurx_core::transcode::OutputGrade::Sdr, profile: None,
-    });
+    companion_request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72)));
+    parent_request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(plurx_core::playback::candidate::CandidateId([7; 16]), [8; 32], 72)));
     let media = parent_request.continuous_media.as_mut().expect("role");
     media.autonomous_companion = Some(companion_id);
     let family_budget = budget + companion.resources().cpu_threads;

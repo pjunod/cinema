@@ -1189,9 +1189,11 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::PREPARATION_INDEX_SCHEMA,
     // v90: distinguish explicit conversion attempts from automatic discovery.
     super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
-    // v91: independent quality cancellation, without ending the incumbent.
+    // v91: transactional playback planning settings generation.
+    super::PLAYBACK_INPUT_SCHEMA,
+    // v92: independent quality cancellation, without ending the incumbent.
     super::quality_cancellation::QUALITY_CANCELLATION_SCHEMA,
-    // v92: parent-fenced continuous media facts and dependency reservations.
+    // v93: parent-fenced continuous media facts and dependency reservations.
     super::quality_ledger::SCHEMA,
 ];
 
@@ -2948,9 +2950,9 @@ mod tests {
         // expiring viewer interests through analysis and artifacts; v88 adds the
         // unconditional result-key/target/force index for bounded cleanup.
         // v89 indexes preparation history; v90 records explicit DV requests.
-        // v91 adds exact quality cancellation; v92 adds continuous dependencies.
+        // v91 adds planning generation; v92 cancellation; v93 continuous dependencies.
         assert_eq!(
-            version, 92,
+            version, 93,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

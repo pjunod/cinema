@@ -1956,6 +1956,7 @@
         ));
         let req = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -2025,6 +2026,7 @@
         );
         let mut req = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -3099,6 +3101,7 @@
     fn the_grade_is_part_of_a_request_identity() {
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 5,
@@ -3119,6 +3122,7 @@
         };
         let hdr10 = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             hdr10: true,
             ..request.clone()

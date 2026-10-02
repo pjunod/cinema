@@ -1,0 +1,269 @@
+# TCL catalog repair — implementation and evidence
+
+**Status:** validated; combined passing receipt approved for merge · **Updated:** 2026-10-02
+
+Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
+This page records implementation, decisions and evidence separately from physical
+playback acceptance. Work uses an isolated clone and the current Forgejo main
+(`4f55ae17e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+
+## 1. Delivery — commits batched for one main review
+
+The user superseded per-task test runs: build with compile, Clippy and formatting
+checks; obtain one adversarial agent review when the main PR is ready; address
+findings, then run the fast lane once. Rerun failed checks only, unless a code
+change invalidates a prior passing result. No deployment or saved-switch change
+is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
+
+| Milestone | State | Evidence |
+|---|---|---|
+| Preserve RCA and source replay | done | Copied only this effort's three untracked files |
+| Pinned Rust loop | done | Rust 1.97.1; current-main all-target compile passed |
+| Typed diagnostics and accounting | done | Diagnostic commit retained before bound repair |
+| One catalog per create | done | Canonical caps and recipe/worker identities retained |
+| Android compaction and shared contract | done | No legacy blanket 400 |
+| Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
+| Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
+| Review and fast lane | targeted validation complete; CI policy choice pending | Five review findings fixed; all reported unit failures corrected; CI policy choice pending |
+| Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
+
+## 2. Decisions — evidence required before dependent changes
+
+Bound, negotiated contract, startup/reserve numbers and generation scope are
+being resolved from current code and fixtures. No placeholder is acceptance.
+RF1 consistent-read latency remains a separate investigation.
+
+## 3. Acceptance — planner evidence does not close device playback
+
+Retain the diagnostic commit for a gated diagnostic deployment. Confirm actual
+TCL and Streamer wire counts on unchanged clients; a TCL count at or below 16
+falsifies B1 attribution. Deployment, cold/warm Auto first-frame and sustained
+playback, Safari fallback and settled-cluster p95/p99 remain outstanding until
+measured against recorded client/server revisions.
+
+Diagnostic milestone: `3bc3567a8`, compiled and Clippy-clean with Rust 1.97.1.
+Its 16-entry gate remains unchanged for the physical confirmation run.
+
+Concrete implementation decisions, 2026-10-02:
+
+1. Shared client bound is 64 rows; node capability limits remain 16. The review
+   registry fixture models 60 components/profile rows and compacts to 20. Sixty-four
+   permits additional crossing envelopes without assuming every registry compacts
+   to 20. Parsing retains the internal 64 KiB bound and never truncates rows.
+2. `compact-v1` is an additive capability contract advertised by server identity.
+   Android advertises it only after observing that server support and fitting the
+   bound. Existing v2 alone is legacy. Old servers ignore additive DeviceCaps
+   fields; control and worker envelope parsers are separately strict.
+3. Server create allowance is 10,000 ms from handler entry through response.
+   Catalog retains its 2,000 ms maximum within that allowance. Worker budgets
+   reserve 250 ms for outbound transit and 250 ms for return/serialization.
+   These are conservative engineering allocations, not measured p95 claims.
+   Apple has a 30 s request/resource limit; Android/web create retry owners have
+   a 60 s total sequence. Android's 30 s presentation stall clock starts at its
+   first attached-player observation; web's 40 s cold HLS episode starts at attach.
+   Neither is an enclosing create clock. Existing owners retain retries and
+   first-frame handling. A shorter incoming remaining-duration allowance wins.
+4. Settings generation covers all `playback.*` and `transcode.*` setting writes,
+   including insert/update/delete through import and migration SQL, using database
+   triggers in the same transaction. Job/history settings do not invalidate plans.
+   File/probe/source facts and generation/settings are read in one statement.
+   Rate-control evidence and engine/source bindings remain required at dispatch.
+5. Initial Auto may select fully validated local partial rows. Explicit identity
+   cannot become absent on incomplete discovery; no remote partial substitution.
+   The existing sustainable-quality owner handles later upgrades.
+
+Snapshot enumeration compiles with Rust 1.97.1. Android app and JVM test sources
+compile successfully; focused results are recorded below. Database triggers cover raw SQL
+import writes and same-timestamp updates. Final dispatch binds generation and source/probe identity, and revalidates the
+selected descriptor without another ladder enumeration. Protocol 8 carries this
+strict worker contract; older ingress and sessions need draining on rollout.
+Successor responses retain their selection catalog.
+
+Compiler checks pass on the current implementation, including both Apple
+platforms. Boundary, legacy, binding and expired-budget regressions await the
+main fast Rust lane. Physical acceptance remains outstanding.
+
+Main integration, 2026-10-02: preserve main's SQLite v90 and replicated v68 DV
+request provenance migrations, then append planning generation as SQLite v91
+and replicated v69. The combined source compiled before review. Android app
+and test sources and both Apple platforms compiled without running tests.
+
+The work is one batched repair PR. The local effort branch retains the original
+integration base; no independently merged task PRs are being created. Main's
+fast lane includes its fast Rust unit/SQLite lane. It runs only after the
+adversarial review, alongside focused feature-enabled generation evidence.
+Full cluster qualification and device deployment remain separate acceptance.
+
+Review candidate: `56e52c50e` integrates typed outcomes and deadlines;
+`853487d70` integrates current main and the retained-source regression. All
+commits ran the tracked lint/format/Clippy/JavaScript hook. The decoder snapshot
+regression now tests overflow at 65, matching the negotiated shared bound.
+
+Batched review: [Forgejo PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718),
+reviewed head `30369ca0c`; post-review head `182f7f5a7`. The PR is ready after
+addressing the adversarial review. The desktop attachment tool does not accept this Forgejo URL, so the
+PR and status links remain explicit here. No changes to the original checkout.
+
+## 4. Adversarial review — candidate `30369ca0c`
+
+The final agent review requested changes. Five actionable findings were fixed:
+
+- Apple: add the new code to the actual retry owner, preserving its existing
+  identity, backoff and deadline. Its existing fixture-driven retry test applies.
+- Admission: move planning-binding validation before the shared VOD/live split,
+  after request replay recovery, so local copy and encoded VOD both revalidate.
+- Legacy required discovery: Auto and 1440 retain typed validation. Oversized
+  legacy direct/copy/manual paths keep their ordinary admission.
+- Preparation: keep the one request-local catalog on SessionRequest, independent
+  of selected recipe context, so manual/copy successors replace stale ladders.
+- Accounting: propagate the Store counter and remaining allowance into the
+  owned local worker task; unrelated background reads remain unscoped.
+
+Regressions cover the legacy required/optional distinction, owned worker versus
+background accounting, manual/copy catalog retention, generation invalidation
+through the common producer entry, and audio-dependent follow-up identities.
+These compiled successfully; individual test results follow.
+
+Review findings commit: `3b13d6acf`, tracked hook passed. Main advanced only with
+schema expectation fixes; the combined assertions now deliberately cover
+SQLite 91 and replicated 69 before the final test pass.
+
+## 5. Post-review validation — preserve passing results
+
+- Android: `:app:testDebugUnitTest --tests tv.plurx.app.data.CapsPolicyTest`
+  ran 16 tests: 15 passed, including the 60-row compaction and crossing-envelope
+  fixtures. One existing transfer-curve assertion compared order; its correction
+  compares the unchanged set. Only
+  `CapsPolicyTest.capsDocumentKeepsDisplayPresentationAndDecoderClaimsSeparate`
+  was rerun, and passed. An earlier rerun before the edit still failed.
+- Apple: `xcodebuild ... -only-testing:plurx-iOSTests/AppleClientTests/testOnlyTheContractsNotYetCodesAreRetried test`
+  passed one test, zero failures. The temporary simulator was deleted.
+- Generation: Rust 1.97.1 `cargo test --locked -p plurx-core --features hiqlite-store --lib store::hiqlite::tests::playback_generation_covers_tied_updates_deletes_import_and_rollback -- --exact`
+  passed one test. An earlier unqualified exact filter ran zero tests and is not evidence.
+- Main fast lane at `182f7f5a7`: scope and mobile versions passed; preflight
+  stopped at corrective-history audit because three client commits needed
+  source-to-regression anchors. Those rows are added. Compiler/test jobs were
+  skipped, so the fast Rust unit lane has not yet run.
+
+Corrective-history audit passed after the anchor fix. Main subsequently added
+only the HLS request-cleanup timing regression adjustment; it is integrated
+before the next fast-lane push. Previously passing focused tests are unaffected.
+
+Before the next push, regenerated the surface embed and documentation from
+the shared fixture (`node scripts/player-contract-table --embed` and `--write`).
+The web values are unchanged; the generated formatting and documented retry
+code now match the fixture. Current-base all-target Clippy passed.
+
+At `1142de82b`, history and regression-field audits passed. Validation ran 253
+tests: 252 passed; the module-wide ownership census test failed three count
+subtests. Reviewed the exact source delta: the production worker spawn moves
+into an accounting wrapper, a joined background-read fixture adds one task,
+awaited deadline bounds account for the net two timer sites, and the legacy
+admission fixture adds Response::status(), not a process. The inventory records
+those owners. Reran only that failing test; it passed. Rust and platform jobs
+were skipped, not executed. Static preflight may rerun; the user clarified that unit evidence is retained.
+
+2026-10-02 continuation: user clarified that unit tests need to pass once on
+the merged code. Automatic static preflight may run again; retain unit passes
+and rerun failed units only. Main advanced with test stability changes in
+cleanup and concurrent pretranscode claims. The combined ownership totals
+retain both explanations: 684 task sites, 1128 timer sites, 411 method sites.
+The prior unit lane never started. PR is draft during this integration.
+
+At `9dc76758b`, all 253 validation tests passed. Operations ran 584 tests,
+579 passed and five failed: two API route inventory assertions lacked the
+new v2 route/count, and three release claim assertions found Android README
+still at 142. Added the actual v2 request/outcome contract, route total 243,
+and Android build 143 status. Production code is unchanged. Only those five
+failed cases are rerun locally before the next candidate.
+
+The five failed operations cases all passed in the targeted rerun (5 tests,
+zero failures). Previously passing unit and focused client evidence is retained.
+
+
+Run 3845: preflight, Windows, web, Apple and Android passed. Rust compilation
+and Clippy passed; the first unit allocation found the Store method inventory
+omitted the new snapshot (451 versus 452), then aborted core and daemon
+binaries on stack overflow. The Store inventory and a backend-neutral frozen
+snapshot contract now pass (two focused cases). LLDB identified the actual
+overflow frames: the replicated migration dispatcher and nested task-local
+create-worker scope polling. The v69 migration now owns a separate boxed state
+machine; task-local scopes retain boxed payloads without changing ownership or
+cancellation. Both formerly aborting tests pass on the default thread stack.
+Eight focused playback cases pass, including the corrected legacy fixture's
+valid playback identity and the real catalog fixture. Passing unit results are
+retained; cases that never executed are being run separately. A source contract
+for recovery-epoch ordering is updated to recognize the owned-worker wrapper.
+
+Main advanced to `dd304bf99` with native readiness/reserve changes during this
+validation; integration and exact-candidate compile checks remain required.
+The existing main workflow unconditionally reruns the whole unit suite on a
+push; the user has been asked to reconcile that concrete conflict with the
+failed-only unit policy. No green aggregate gate or merged PR is claimed.
+
+
+Continuation results: remaining daemon cases ran once with prior passes
+excluded: 2,581 passed, five failed, 16 ignored. The scratch lane failure
+passed in isolation. The four remaining failures were addressed: recovery
+epoch ordering recognizes the owned worker; protocol fixture carries the
+full candidate context; the pending-start ledger includes catalog-unavailable;
+and four new diagnostic events retain the parent HLS log target. Those four
+failed cases now pass. The extended retry-ledger scenario passes and demonstrates
+that catalog-unavailable and a later successful retry remain one attempt.
+
+Remaining core cases: 1,066 passed, six failed, one ignored. Only the six
+failed cases were rerun; all six pass. Corrections record the single authority
+snapshot read without raising the unannotated ceiling, keep SQLite bindings
+in the same expression for static arity validation, remove a redundant
+outer timeout around the already timed client, and drop the v91 generation
+objects in both historical downgrade fixtures. These are contract and
+architecture corrections, not timeout increases or watchdogs.
+
+Integrated main `dd304bf99` in `794e3d815`. All eight new native readiness /
+reserve regressions pass on the combined candidate, including the exact-init
+six-second wait. Both serial FFmpeg restart checks pass (2 cases). Combined
+ownership census passes at 685 task, 1129 timer and 413 method sites.
+Local verification uses pinned Rust 1.97.1; local FFmpeg is newer than the
+CI-pinned FFmpeg 6, so the evidence does not claim a green current-head CI run.
+The previous seven non-unit gates remain recorded at `8ff4d6997`. The original
+checkout remains untouched. No physical playback acceptance or deployment is
+claimed. The main workflow policy conflict is the remaining merge decision.
+
+
+Final code commit: `5a4ce349d`; tracked pinned-Rust formatting, all-target
+workspace Clippy and served-JavaScript syntax passed. History and all 15
+Regression-Test fields resolve. Current-source preflight initially hit host
+sandbox restrictions on process inspection and loopback fixtures. Only those
+failed cases were rerun with the necessary permissions: 13 passed; the Linux
+janitor case still failed on macOS because GNU `timeout` is absent there. Its
+unchanged committed script/test were then tested in a temporary Linux container
+with no credentials or .git: the one case passed in 2.03 seconds. The container,
+source extraction and newly pulled image are removed after verification.
+This preserves the passing Linux CI janitor evidence without changing unrelated
+production code. Current validation/operations evidence is complete across
+those targeted reruns; one Linux-only validation case remains represented by
+the prior Linux CI pass rather than a macOS run.
+
+All fixes and this page are published in PR #718. The PR is held as draft
+solely to avoid allocating the unconditional full unit rerun before the user
+resolves the conflict between that workflow and failed-only reruns. No merge
+or green current-head aggregate CI gate is claimed.
+
+
+Main subsequently advanced to `4f55ae17e` with the two-file scratch-hold
+capacity correction. It merged cleanly in `145e41a1e`. Only its changed
+regression was executed on the combined source:
+`transcode::tests::scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold`
+passed (1 case, 0.02 s; Rust 1.97.1). Every unaffected passing result remains
+retained. The PR's final code is integrated with that main revision; the
+remaining hold is the explicit CI-policy decision above.
+
+
+Merge decision settled, 2026-10-02: the user explicitly authorized merging
+with the combined passing receipt. This supersedes the aggregate workflow
+requirement for this PR; no CI status is fabricated and no whole unit suite
+is repeated. Forgejo main was rechecked at `4f55ae17e`, with the integrated
+code and all reported failed regressions passing. The landing retains all
+15 Regression-Test trailers. The final merge result and landing commit are
+recorded in [PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718), which is
+the authoritative completion record. Physical acceptance remains outstanding.

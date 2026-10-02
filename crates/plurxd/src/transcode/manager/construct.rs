@@ -170,10 +170,22 @@ impl TranscodeManager {
     /// here: this is the ceiling a plain PQ source can reach, and a node that
     /// proved only the Dolby half still cannot encode one.
     pub async fn hdr10_ceiling(&self) -> i64 {
+        self.hdr10_ceiling_with_preference(
+            &self
+                .store
+                .get_setting(keys::HWACCEL)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn hdr10_ceiling_with_preference(&self, preference: &str) -> i64 {
         if !self.hdr10_passthrough {
             return 0;
         }
-        match self.encoder().await {
+        match self.caps.choose(preference) {
             Encoder::Qsv if self.hdr10_passthrough_qsv => HDR10_4K_HEIGHT,
             Encoder::Qsv | Encoder::Software => HDR10_HEIGHT,
             // No measured Main10 route on this family, and dropping to

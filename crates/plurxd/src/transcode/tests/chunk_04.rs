@@ -1066,6 +1066,7 @@
     ) -> SessionRequest {
         SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id,

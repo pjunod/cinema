@@ -43,6 +43,7 @@
         ));
         let request = crate::transcode::SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -192,6 +193,7 @@
         let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
         let request = crate::transcode::SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,

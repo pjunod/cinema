@@ -42,6 +42,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     );
     let req = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
@@ -54,6 +55,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     };
     let missing = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
@@ -224,6 +226,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         );
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: None,
             previous_session_id: None,
@@ -361,6 +364,7 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     );
     let request = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: None,
         previous_session_id: None,
@@ -454,6 +458,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     );
     let req = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
@@ -495,6 +500,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         .prepare_vod_encoding(
             &SessionRequest {
                 continuous_media: None,
+quality_catalog: None,
                 candidate_context: None,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
@@ -529,6 +535,7 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         .prepare_vod_encoding(
             &SessionRequest {
                 continuous_media: None,
+quality_catalog: None,
                 candidate_context: None,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
@@ -633,6 +640,7 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
     );
     let req = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
@@ -717,6 +725,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     .with_dovi_reshape(true);
     let req = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
@@ -809,6 +818,7 @@ async fn encoding_shipped_shape() {
     );
     let req = SessionRequest {
         continuous_media: None,
+quality_catalog: None,
         candidate_context: None,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
@@ -855,6 +865,7 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         continuous_media: Some(Box::new(ContinuousMediaRequest {
             controlled: false,
             autonomous_companion: None,
+            companion_catalog: None,
             family_descriptor: None,
             companion_context: None,
             version: 1,
@@ -870,14 +881,16 @@ async fn continuous_worker_roles_resolve_video_only_and_one_cpu_soundtrack() {
         kind: SessionKind::Transcode { height: 240 },
         ..reopen_request(file_id, "continuous-worker", "unused", "unused")
     };
-    let catalog = manager.quality_candidates_with_copy_contract(&file,
+    let planning = manager.store.playback_planning_snapshot(file.id,
+        &crate::transcode::QUALITY_PLANNING_KEYS).await.expect("planning snapshot").expect("source");
+    let catalog = manager.quality_candidates_from_snapshot_progress(&planning,
         &plurx_core::playback::DeviceCaps { v: 2, ..Default::default() },
-        None, 0, None, Presentation::Vod, None).await;
+        None, 0, None, Presentation::Vod, None, None, None).await;
     let candidate = catalog.iter().find(|candidate| candidate.normalized_geometry
         && candidate.grade == OutputGrade::Sdr
         && candidate.route == plurx_core::playback::candidate::CandidateRoute::Encode).expect("normalized SDR catalog candidate");
     request.kind = SessionKind::Transcode { height: i64::from(candidate.target_height) };
-    request.candidate_context = Some(TranscodeManager::candidate_context(candidate));
+    request.candidate_context = Some(Box::new(TranscodeManager::candidate_context(candidate)));
     let video = manager.prepare_vod_encoding(&request, &file).await.expect("video planning from catalog").expect("video recipe");
     assert!(video.candidate_recipe.is_none(), "video-only work is not a muxed candidate speed proof");
     assert!(!video.plan.options().input_has_audio);

@@ -25,6 +25,7 @@ data class DeviceCaps(
     // Required on the wire: kotlinx.serialization otherwise omits a property
     // whose value equals its default, which would make this look like v1.
     val v: Int,
+    val decoder_compaction: String? = null,
     val client: ClientInfo,
     val video: List<VideoEntry>,
     val audio: List<String>,
@@ -159,9 +160,40 @@ internal data class VideoCodecCaps(
                 // Unknown profile enumeration never becomes a guessed profile.
                 dv_profiles = dvProfiles.takeIf { limit.codec == "hevc" && it.isNotEmpty() },
             )
-        }
+        }.let(::compactVideoEntries)
 
 }
+
+/** Unknown limits are not evidence of dominance; compare whole envelopes. */
+internal fun compactVideoEntries(rows: List<VideoEntry>): List<VideoEntry> {
+    fun normalized(row: VideoEntry): VideoEntry {
+        val rate = row.max_frame_rate?.let {
+            fun gcd(a: Int, b: Int): Int = if (b == 0) a else gcd(b, a % b)
+            if (it.numerator > 0 && it.denominator > 0) {
+                val divisor = gcd(it.numerator, it.denominator)
+                DecoderFrameRate(it.numerator / divisor, it.denominator / divisor)
+            } else it
+        }
+        return row.copy(profiles = row.profiles.distinct().sorted(), present = row.present.distinct().sorted(),
+            dv_profiles = row.dv_profiles?.distinct()?.sorted(), max_frame_rate = rate)
+    }
+    fun axis(covers: Int?, covered: Int?): Boolean =
+        covers == covered || (covers != null && covered != null && covers >= covered)
+    fun cadence(covers: DecoderFrameRate?, covered: DecoderFrameRate?): Boolean =
+        covers == covered || (covers != null && covered != null &&
+            covers.numerator > 0 && covers.denominator > 0 && covered.numerator > 0 && covered.denominator > 0 &&
+            covers.numerator.toLong() * covered.denominator >= covered.numerator.toLong() * covers.denominator)
+    val unique = rows.map(::normalized).distinct()
+    return unique.filter { row ->
+        unique.none { other -> other != row && other.codec == row.codec && other.profiles == row.profiles &&
+            other.present == row.present && other.dv_profiles == row.dv_profiles &&
+            axis(other.max_width, row.max_width) && axis(other.max_height, row.max_height) &&
+            cadence(other.max_frame_rate, row.max_frame_rate) }
+    }
+}
+
+internal const val DECODER_COMPACTION_CONTRACT = "compact-v1"
+internal const val MAX_CLIENT_DECODER_ENTRIES = 64
 
 /**
  * `Display.HdrCapabilities.HDR_TYPE_*`, restated so policy stays free of the

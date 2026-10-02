@@ -2478,6 +2478,7 @@
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let predecessor_request = crate::transcode::SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: fixture.file_id(),
@@ -2501,6 +2502,7 @@
             transport: None,
         };
         let predecessor_recipe = RemoteStartRequest {
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2514,6 +2516,7 @@
             request: predecessor_request.clone(),
         };
         let predecessor_start = StartResponse {
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,

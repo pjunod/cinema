@@ -17,6 +17,7 @@
         );
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -40,6 +41,7 @@
         // field silently leave the real key while the test stays green.
         let shifted = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             audio_offset_ms: 250,
             ..request.clone()
@@ -59,6 +61,7 @@
         );
         let other_player = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             playback_id: "pb-2".into(),
             ..request.clone()
@@ -116,6 +119,7 @@
         // not a quiet second stream.
         let different = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             start_seconds: 600.0,
             ..request.clone()
@@ -129,6 +133,7 @@
         // A fresh key from the same player supersedes, as any restart does.
         let next = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: Some("req-2".into()),
             start_seconds: 600.0,
@@ -169,6 +174,7 @@
         );
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -245,6 +251,7 @@
         );
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 999_999, // nothing has this id, so the create fails
@@ -267,6 +274,7 @@
 
         let retry = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             file_id,
             ..request.clone()
@@ -301,6 +309,7 @@
         );
         let original = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id,
@@ -342,6 +351,7 @@
         // allowed to create a conflict or become a second ladder step.
         let replay = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen
@@ -457,6 +467,7 @@
 
         let lower = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen_request(
@@ -796,6 +807,7 @@
 
         let foreign = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: Some("renamed-foreign".into()),
             ..request
@@ -1210,6 +1222,7 @@
 
         let request = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             audio_index: Some(2),
             subtitle_burn: Some(5),
@@ -1229,6 +1242,7 @@
 
         let track_change = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: Some("user-track-change".into()),
             previous_session_id: None,
@@ -1453,6 +1467,7 @@
 
         let device_b = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: Some("device-b-reopen".into()),
             previous_session_id: Some("device-b-session".into()),
@@ -1474,6 +1489,7 @@
 
         let foreign_user = SessionRequest {
             continuous_media: None,
+quality_catalog: None,
             candidate_context: None,
             request_id: Some("foreign-user-reopen".into()),
             ..request
@@ -2654,6 +2670,7 @@ scope = "test"
     #[test]
     fn continuous_media_roles_have_strict_wire_and_distinct_request_identity() {
         let mut request = SessionRequest {
+            quality_catalog: None,
             continuous_media: None,
             candidate_context: None,
             file_id: 1,
@@ -2679,6 +2696,7 @@ scope = "test"
         request.continuous_media = Some(Box::new(ContinuousMediaRequest {
             controlled: false,
             autonomous_companion: None,
+            companion_catalog: None,
             family_descriptor: None,
             companion_context: None,
             version: 1,
@@ -2687,14 +2705,7 @@ scope = "test"
         }));
         assert!(request.continuous_media.as_ref().expect("continuous media role").valid_for(&request));
         assert!(crate::media_sessions::worker_session_request_is_valid(&request));
-        request.candidate_context = Some(CandidateExecutionContext {
-            owner_node_id: None,
-            candidate_id: plurx_core::playback::candidate::CandidateId([7; 16]),
-            recipe_digest: [8; 32],
-            normalized_geometry: true,
-            grade: OutputGrade::Sdr,
-            profile: None,
-        });
+        request.candidate_context = Some(Box::new(crate::transcode::continuous_test_candidate_context(plurx_core::playback::candidate::CandidateId([7; 16]), [8; 32], 72)));
         assert!(crate::media_sessions::worker_session_request_is_valid(&request));
         let trusted_wire = serde_json::to_value(&request).expect("trusted context stays local");
         assert!(trusted_wire.get("candidate_context").is_none());
@@ -2721,10 +2732,7 @@ scope = "test"
         media.autonomous_companion = Some(companion_id);
         media.companion_context = Some(Box::new(ContinuousCompanionContext {
             height: 720,
-            candidate: CandidateExecutionContext {
-                owner_node_id: None, candidate_id: companion_id, recipe_digest: [10; 32],
-                normalized_geometry: true, grade: OutputGrade::Sdr, profile: None,
-            },
+            candidate: crate::transcode::continuous_test_candidate_context(companion_id, [10; 32], 72),
         }));
         assert!(crate::media_sessions::worker_session_request_is_valid(&request));
         assert_ne!(request.intent_fingerprint("viewer"), video_identity);
@@ -2733,6 +2741,25 @@ scope = "test"
         let decoded: SessionRequest = serde_json::from_value(companion_wire).expect("companion worker wire");
         assert_eq!(decoded.continuous_media.as_ref().expect("role").autonomous_companion, Some(companion_id));
         assert!(decoded.continuous_media.as_ref().expect("role").companion_context.is_none());
+        let mut canonical = crate::transcode::continuous_test_candidate_context(companion_id, [10;32], 72).selected_candidate;
+        canonical.id = plurx_core::playback::candidate::CandidateId::for_recipe_digest(canonical.recipe_digest);
+        let media = request.continuous_media.as_mut().expect("role");
+        media.autonomous_companion = Some(canonical.id);
+        media.companion_context = None;
+        media.companion_catalog = Some(Box::new(canonical));
+        assert!(crate::media_sessions::worker_session_request_is_valid(&request));
+        let wire = serde_json::to_value(&request).expect("canonical companion wire");
+        let decoded: SessionRequest = serde_json::from_value(wire).expect("canonical companion parse");
+        assert!(decoded.continuous_media.as_ref().expect("role").companion_catalog.is_some());
+        request.continuous_media.as_mut().expect("role").companion_catalog.as_mut().expect("catalog").recipe_digest = [11;32];
+        assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
+        let media = request.continuous_media.as_mut().expect("role");
+        media.companion_catalog = None;
+        media.autonomous_companion = Some(companion_id);
+        media.companion_context = Some(Box::new(ContinuousCompanionContext {
+            height: 72,
+            candidate: crate::transcode::continuous_test_candidate_context(companion_id, [10;32], 72),
+        }));
         request.continuous_media.as_mut().expect("role").role = ContinuousMediaRole::SharedAudio;
         assert!(!crate::media_sessions::worker_session_request_is_valid(&request));
         let media = request.continuous_media.as_mut().expect("role");
