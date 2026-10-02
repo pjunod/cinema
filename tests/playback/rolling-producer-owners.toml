@@ -1264,7 +1264,10 @@ pattern = "publication_ready_at_ms"
 # S11 #690: +2 in feature-only tests/rolling_grid_campaign.rs: the owned
 # MemoryStore activation starts blocked, then the existing Confirm settlement
 # publishes it at zero. No shipped activation/publication policy changes.
-expected_occurrences = 102
+# A05 unknown-original actual prepared consumer: +1 blocked activation fixture
+# in http/hls/tests/chunk_06.rs; existing activation owns the write. No new
+# shipped publication path or observational authority is introduced.
+expected_occurrences = 103
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1306,7 +1309,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # one blocked activation fixture. Existing publication ownership is unchanged.
 # S11 #690: +1 for that same feature-only MemoryStore blocked activation in
 # tests/rolling_grid_campaign.rs, settled by the existing activation API.
-expected_occurrences = 34
+# Same A05 consumer fixture; test-only blocked initial activation, not a new
+# writer/settlement/producer lifecycle owner.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"

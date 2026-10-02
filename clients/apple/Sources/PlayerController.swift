@@ -3,6 +3,22 @@ import Combine
 import Foundation
 import MediaPlayer
 
+/// One viewer transaction's optional portion; refusal leaves the same original
+/// deadline and its healthy-route reserve, never a freshly started fallback.
+struct AutoViewerBoundaryBudget {
+    let deadlineMs: Int
+    let optionalDeadlineMs: Int
+
+    init?(enteredAtMs: Int, originalDeadlineMs: Int, nowMs: Int) {
+        guard enteredAtMs >= 0, nowMs >= enteredAtMs,
+              enteredAtMs <= Int.max - 8_000 else { return nil }
+        let deadline = min(originalDeadlineMs, enteredAtMs + 8_000)
+        guard deadline > nowMs, deadline - nowMs > 2_000 else { return nil }
+        deadlineMs = deadline
+        optionalDeadlineMs = deadline - 2_000
+    }
+}
+
 /// Observational upgrade windows for one installed item and playback attempt.
 /// Re-reading a completed cliff sample never renews its original timestamp.
 struct AutoUpgradeEvidenceWindow {
@@ -63,6 +79,100 @@ func autoCompletedTransferBps(_ sample: PlayerController.AutoCompletedTransfer, 
           let duration = sample.bodyDurationSeconds, duration.isFinite, duration > 0 else { return nil }
     let bps = Double(sample.bodyBytes) * 8 / duration
     return bps.isFinite && bps > 0 ? bps : nil
+}
+
+/// Catalog exposure permits a bounded observation, not a positive cost verdict.
+func autoUnknownOriginalTrial(_ candidate: QualityCandidate, outputs: [MeasuredCandidateOutput]?) -> Bool {
+    candidate.hasValidIdentity && candidate.decoderCompatible && candidate.route == "remux" &&
+        candidate.peakBps == nil && (outputs?.count ?? 0) <= 64 &&
+        !(outputs ?? []).contains { $0.candidateId == candidate.id &&
+            $0.recipeDigest == candidate.recipeDigest && $0.route == candidate.route }
+}
+
+/// Advertised immutable-plan intervals, not packet timing or a full-title peak.
+struct AutoVODAdvertisedInterval {
+    let startSeconds: Double
+    let durationSeconds: Double
+}
+
+private final class AutoVODPlaylistRedirectRefusal: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+}
+
+func autoVODEmpiricalMargin(_ samples: [PlayerController.AutoCompletedTransfer],
+                           intervals: [String: AutoVODAdvertisedInterval], scope: UUID,
+                           sessionId: String, candidateId: String, nowMs: Int, deadlineMs: Int) -> Bool {
+    guard nowMs >= 0, nowMs < deadlineMs else { return false }
+    var seenNames = Set<String>()
+    var seenReceipts = Set<String>()
+    var seenETags = Set<String>()
+    var used: [AutoVODAdvertisedInterval] = []
+    var duration = 0.0
+    var minimumLink = Double.infinity
+    var maximumObservedCost = 0.0
+    for sample in samples {
+        guard sample.stageScope == scope, sample.installedSessionId == sessionId,
+              sample.installedCandidateId == candidateId, sample.statusCode == 200,
+              let url = URL(string: sample.segmentId), url.pathComponents.contains(sessionId),
+              let interval = intervals[url.lastPathComponent],
+              let advertisedMs = sample.observedMediaDurationMs,
+              Double(advertisedMs) >= interval.durationSeconds * 1000 - 0.001,
+              Double(advertisedMs) <= interval.durationSeconds * 1000 + 1.001,
+              let receipt = sample.receipt, UUID(uuidString: receipt)?.uuidString.lowercased() == receipt,
+              let etag = sample.etag, !etag.isEmpty,
+              let link = autoCompletedTransferBps(sample, nowMs: nowMs, maximumAgeMs: 15_000),
+              !seenNames.contains(url.lastPathComponent), !seenReceipts.contains(receipt), !seenETags.contains(etag),
+              used.allSatisfy({ $0.startSeconds + $0.durationSeconds <= interval.startSeconds ||
+                  interval.startSeconds + interval.durationSeconds <= $0.startSeconds }) else { continue }
+        seenNames.insert(url.lastPathComponent)
+        seenReceipts.insert(receipt)
+        seenETags.insert(etag)
+        used.append(interval)
+        duration += interval.durationSeconds
+        minimumLink = min(minimumLink, link)
+        maximumObservedCost = max(maximumObservedCost, Double(sample.bodyBytes) * 8 / interval.durationSeconds)
+    }
+    return used.count >= 2 && duration >= 2 && maximumObservedCost > 0 &&
+        maximumObservedCost.isFinite && minimumLink >= maximumObservedCost * 1.8
+}
+
+func autoVODAdvertisedIntervals(_ data: Data) -> [String: AutoVODAdvertisedInterval]? {
+    guard !data.isEmpty, data.count <= 1_048_576,
+          let text = String(data: data, encoding: .utf8) else { return nil }
+    let lines = text.components(separatedBy: .newlines).filter { !$0.isEmpty }
+    guard lines.first == "#EXTM3U", lines.last == "#EXT-X-ENDLIST",
+          lines.contains("#EXT-X-PLAYLIST-TYPE:VOD") else { return nil }
+    var intervals: [String: AutoVODAdvertisedInterval] = [:]
+    var pending: Double?
+    var elapsed = 0.0
+    for line in lines.dropFirst() {
+        if line.hasPrefix("#EXTINF:") {
+            guard pending == nil, line.hasSuffix(","),
+                  let duration = Double(line.dropFirst(8).dropLast()),
+                  duration.isFinite, duration > 0, duration <= 120 else { return nil }
+            pending = duration
+        } else if line.hasPrefix("#") {
+            guard pending == nil,
+                  line == "#EXT-X-ENDLIST" || line == "#EXT-X-PLAYLIST-TYPE:VOD" ||
+                  line == "#EXT-X-MEDIA-SEQUENCE:0" || line == "#EXT-X-MAP:URI=\"init.mp4\"" ||
+                  line.hasPrefix("#EXT-X-VERSION:") || line.hasPrefix("#EXT-X-TARGETDURATION:")
+            else { return nil }
+        } else {
+            guard let duration = pending, intervals.count < 8192,
+                  line.hasPrefix("seg"), line.hasSuffix(".m4s"),
+                  let index = UInt32(line.dropFirst(3).dropLast(4)),
+                  line == String(format: "seg%05u.m4s", index), intervals[line] == nil,
+                  elapsed + duration > elapsed, (elapsed + duration).isFinite else { return nil }
+            intervals[line] = AutoVODAdvertisedInterval(startSeconds: elapsed, durationSeconds: duration)
+            elapsed += duration
+            pending = nil
+        }
+    }
+    return pending == nil && !intervals.isEmpty ? intervals : nil
 }
 
 func autoOriginalTransferMarginProven(_ samples: [PlayerController.AutoCompletedTransfer], sessionId: String, nowMs: Int) -> Bool {
@@ -2134,6 +2244,7 @@ final class PlayerController: ObservableObject {
     private var autoUpgradeSinceMs: Int?
     private var autoUpgradeEvidence = AutoUpgradeEvidenceWindow()
     private var autoLastSwitchMs: Int?
+    private var autoLastEvaluation: (item: ObjectIdentifier, attempt: String, atMs: Int)?
     private var autoSwitchTimes: [Int] = []
     private var autoBlockedUntil: [String: Int] = [:]
     private var autoPreparing = false
@@ -2144,6 +2255,44 @@ final class PlayerController: ObservableObject {
     private var autoDecoderRejected: Set<String> = []
     private var autoPreparedTargetRevision: UInt64?
     private var autoPreparedViewerEpoch: Int?
+    /// A viewer boundary borrows its original transaction, never a new create.
+    @MainActor private final class AutoBoundaryAttempt {
+        let attempt: Attempt
+        let resumeIdentity: AutoResumeIdentity?
+        let generation: Int?
+        let lifecycle: Int
+        let attachment: Int
+        let viewer: Int
+        let item: ObjectIdentifier
+        let sessionId: String
+        let targetMs: Int
+        let enteredAtMs: Int
+        let deadlineMs: Int
+        let optionalDeadlineMs: Int
+        let candidateId: String
+        var committed: Bool?
+        var selectionOutcome: Bool?
+        var selectionScope: UUID?
+
+        init(attempt: Attempt, resumeIdentity: AutoResumeIdentity?, generation: Int?, lifecycle: Int, attachment: Int, viewer: Int, item: ObjectIdentifier,
+             sessionId: String, targetMs: Int, enteredAtMs: Int, deadlineMs: Int, candidateId: String) {
+            self.attempt = attempt
+            self.resumeIdentity = resumeIdentity
+            self.generation = generation
+            self.lifecycle = lifecycle
+            self.attachment = attachment
+            self.viewer = viewer
+            self.item = item
+            self.sessionId = sessionId
+            self.targetMs = targetMs
+            self.enteredAtMs = enteredAtMs
+            self.deadlineMs = deadlineMs
+            self.optionalDeadlineMs = deadlineMs - min(2_000, max(0, deadlineMs - enteredAtMs))
+            self.candidateId = candidateId
+        }
+    }
+    private var autoBoundaryAttempt: AutoBoundaryAttempt?
+    private var autoBoundaryLastConsumedEntry: Int?
     private var autoTransportRevision: UInt64 = 1
     private var autoDestinationRevision: UInt64 = 1
     private var autoRecipeRevision: UInt64 = 1
@@ -2365,6 +2514,32 @@ final class PlayerController: ObservableObject {
     /// it is never collapsed into the timer-only same-delivery route.
     private var resumePendingFailedItem: AVPlayerItem?
     private var pauseBeganAt: TimeInterval?
+    private var explicitViewerPause: (item: ObjectIdentifier, session: String?, attachment: Int, lifecycle: Int)?
+    /// Foreign resume-record identity is not a global epoch scope. It binds
+    /// the actual record's creation, item and owner tuple; mutable observations
+    /// are deliberately excluded. Global epochs use the captured Attempt.
+    private struct AutoResumeIdentity: Equatable {
+        let lifecycle: Int
+        let attachment: Int
+        let viewer: Int
+        let item: ObjectIdentifier
+        let startedAt: TimeInterval
+
+        init(_ resume: PlaybackResumeAttempt) {
+            lifecycle = resume.lifecycleGeneration
+            attachment = resume.attachmentGeneration
+            viewer = resume.viewerActionEpoch
+            item = resume.itemIdentity
+            startedAt = resume.startedAt
+        }
+    }
+    private struct AutoBoundaryResumeOwner {
+        let attempt: Attempt
+        let identity: AutoResumeIdentity
+        let enteredAtMs: Int
+        var viewer: Int { attempt.viewerAction }
+    }
+    private var autoBoundaryResumeOwner: AutoBoundaryResumeOwner?
     /// The server retired this presentation while the viewer was paused.
     ///
     /// A rolling session ends 180 s after an accepted Hold
@@ -2461,12 +2636,29 @@ final class PlayerController: ObservableObject {
         var installedSessionId: String? = nil
         var installedCandidateId: String? = nil
         var observedMediaDurationMs: Int? = nil
+        var stageScope: UUID? = nil
         func ageMs(nowMs: Int) -> Int { nowMs >= completedAtMs ? nowMs - completedAtMs : Int.max }
     }
     private(set) var latestAutoCompletedTransfer: AutoCompletedTransfer?
     private var autoTransferMetricTask: Task<Void, Never>?
     private var autoStagedTransferMetricTask: Task<Void, Never>?
     private var autoStagedTransfers: [AutoCompletedTransfer] = []
+    private struct AutoStagedObservation {
+        let scope: UUID
+        let item: ObjectIdentifier
+        let pipeline: ObjectIdentifier
+        let sessionId: String
+        let candidateId: String
+        let recipeDigest: [UInt8]
+        let credentialOrigin: String
+        let credentialToken: String?
+        let startedAtMs: Int
+        let deadlineMs: Int
+        var playlistURL: URL?
+        var intervals: [String: AutoVODAdvertisedInterval]?
+    }
+    private var autoStagedObservation: AutoStagedObservation?
+    private var autoStagedPlaylistTask: Task<Void, Never>?
     private var autoLinkClaims: [String: (completedAtMs: Int, negative: Bool)] = [:]
 
     private func autoTransferOriginCurrent(_ sample: AutoCompletedTransfer) -> Bool {
@@ -2502,7 +2694,8 @@ final class PlayerController: ObservableObject {
         autoLinkClaims.removeAll()
     }
 
-    private func installAutoTransferMetrics(for item: AVPlayerItem, staged: Bool = false) {
+    private func installAutoTransferMetrics(for item: AVPlayerItem, staged: Bool = false,
+                                           stagedAction: PreparedReplacementAction? = nil) {
         if staged {
             autoStagedTransferMetricTask?.cancel()
             autoStagedTransfers.removeAll()
@@ -2510,13 +2703,18 @@ final class PlayerController: ObservableObject {
         guard #available(iOS 18, tvOS 18, *) else { return }
         let installedSessionId = sessionId
         let installedCandidateId = autoActiveCandidateId
+        let stagedObservation = staged ? autoStagedObservation : nil
         let task = Task { @MainActor [weak self, weak item] in
             guard let item else { return }
             do {
                 for try await event in item.metrics(forType: AVMetricHLSMediaSegmentRequestEvent.self) {
                     guard let self, !Task.isCancelled, (staged ? self.preparedItem === item : self.player.currentItem === item) else { return }
                     guard !event.isMapSegment, let resource = event.mediaResourceRequestEvent,
-                          resource.errorEvent == nil else { continue }
+                          resource.errorEvent == nil,
+                          !staged || (event.byteRange.location == 0 && event.byteRange.length == 0) else { continue }
+                    if staged, let observation = stagedObservation {
+                        self.beginAutoStagedPlaylistLookup(event.indexFileURL, observation: observation, item: item)
+                    }
                     // Only an actual completed transaction supplies a body span.
                     // Missing metrics, caches, errors and unknown pacing never
                     // become an unpaced-link sample by observing a stationary clock.
@@ -2529,6 +2727,7 @@ final class PlayerController: ObservableObject {
                         let duration = transfer.responseStartDate.map { end.timeIntervalSince($0) }
                             .flatMap { $0.isFinite && $0 > 0 && $0 <= 120 ? $0 : nil }
                         let response = transfer.response as? HTTPURLResponse
+                        if staged && response?.expectedContentLength != transfer.countOfResponseBodyBytesReceived { continue }
                         let paced = response?.value(forHTTPHeaderField: "X-Plurx-Producer-Paced")
                         let observedMediaDuration = response?.value(forHTTPHeaderField: "X-Plurx-Link-Media-Duration-Ms")
                             .flatMap { Int($0) }.flatMap { (1...Int(UInt32.max)).contains($0) ? $0 : nil }
@@ -2549,17 +2748,22 @@ final class PlayerController: ObservableObject {
                             fromLocalCache: resource.wasReadFromCache || transfer.resourceFetchType == .localCache,
                             producerPaced: paced == "0" ? false : (paced == "1" ? true : nil),
                             statusCode: response?.statusCode,
-                            segmentId: event.url?.absoluteString ?? url?.absoluteString ?? "",
+                            segmentId: url?.absoluteString ?? "",
                             mediaDurationSeconds: event.segmentDuration.isFinite && event.segmentDuration > 0
                                 ? event.segmentDuration : nil,
                             receipt: response?.value(forHTTPHeaderField: "X-Plurx-Link-Receipt"),
                             etag: response?.value(forHTTPHeaderField: "ETag"),
-                            installedSessionId: staged ? nil : installedSessionId,
-                            installedCandidateId: staged ? nil : installedCandidateId,
-                            observedMediaDurationMs: observedMediaDuration
+                            installedSessionId: staged ? stagedObservation?.sessionId : installedSessionId,
+                            installedCandidateId: staged ? stagedObservation?.candidateId : installedCandidateId,
+                            observedMediaDurationMs: observedMediaDuration,
+                            stageScope: stagedObservation?.scope
                         )
                         if staged {
-                            if let action = self.preparedReplacement.activeAction {
+                            guard let observation = stagedObservation,
+                                  self.autoStagedObservation?.scope == observation.scope,
+                                  self.autoStagedObservationCurrent(observation),
+                                  let action = stagedAction else { continue }
+                            if self.preparedReplacement.activeAction?.sessionId == action.sessionId {
                                 self.reportStagedLinkSample(sample, action: action, item: item)
                             }
                             self.autoStagedTransfers.removeAll { $0.segmentId == sample.segmentId }
@@ -2576,6 +2780,59 @@ final class PlayerController: ObservableObject {
             }
         }
         if staged { autoStagedTransferMetricTask = task } else { autoTransferMetricTask = task }
+    }
+
+    private func autoStagedObservationCurrent(_ observation: AutoStagedObservation) -> Bool {
+        let now = PlaybackControlSession.monotonicMs()
+        let credentials = Session.shared.credentials
+        return now >= observation.startedAtMs && now < observation.deadlineMs &&
+            credentials.origin == observation.credentialOrigin && credentials.token == observation.credentialToken &&
+            preparedItem.map(ObjectIdentifier.init) == observation.item &&
+            preparedPlayer.map(ObjectIdentifier.init) == observation.pipeline &&
+            autoDesiredCandidate?.id == observation.candidateId &&
+            autoDesiredCandidate?.recipeDigest == observation.recipeDigest &&
+            preparedReplacement.activeAction?.sessionId == observation.sessionId &&
+            preparedReplacement.activeAction?.effectiveSelection.candidateId == observation.candidateId
+    }
+
+    /// One actual media-playlist lookup per stage, never a cadence or a renewed trial.
+    private func beginAutoStagedPlaylistLookup(_ url: URL, observation: AutoStagedObservation, item: AVPlayerItem) {
+        guard autoStagedObservation?.scope == observation.scope,
+              autoStagedObservation?.playlistURL == nil, autoStagedObservationCurrent(observation),
+              Session.canonicalOrigin(url.absoluteString) == Session.shared.canonicalPrimaryOrigin,
+              url.pathComponents.contains(observation.sessionId), url.lastPathComponent.hasSuffix(".m3u8") else { return }
+        autoStagedObservation?.playlistURL = url
+        let remaining = observation.deadlineMs - PlaybackControlSession.monotonicMs()
+        guard remaining > 0 else { return }
+        var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData,
+                                 timeoutInterval: Double(remaining) / 1000)
+        if let token = observation.credentialToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        autoStagedPlaylistTask = Task { @MainActor [weak self, weak item] in
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForResource = Double(remaining) / 1000
+            configuration.urlCache = nil
+            let loader = URLSession(configuration: configuration, delegate: AutoVODPlaylistRedirectRefusal(), delegateQueue: nil)
+            defer { loader.invalidateAndCancel() }
+            do {
+                let (bytes, response) = try await loader.bytes(for: request)
+                guard let response = response as? HTTPURLResponse, response.statusCode == 200,
+                      response.url == url, response.expectedContentLength <= 1_048_576 else { return }
+                var body = Data()
+                for try await byte in bytes {
+                    guard !Task.isCancelled, body.count < 1_048_576,
+                          PlaybackControlSession.monotonicMs() < observation.deadlineMs else { return }
+                    body.append(byte)
+                }
+                guard response.expectedContentLength < 0 || response.expectedContentLength == body.count,
+                      let self, let item, self.preparedItem === item,
+                      self.autoStagedObservation?.scope == observation.scope,
+                      self.autoStagedObservationCurrent(observation),
+                      let intervals = autoVODAdvertisedIntervals(body) else { return }
+                self.autoStagedObservation?.intervals = intervals
+            } catch { /* Missing optional proof keeps the healthy incumbent. */ }
+        }
     }
 
     private func reportCandidateLinkSample(negative: Bool) {
@@ -3396,6 +3653,7 @@ final class PlayerController: ObservableObject {
 
     @discardableResult
     private func beginViewerAction() -> Int {
+        autoBoundaryResumeOwner = nil
         invalidateResumeAttempt(outcome: "viewer-action")
         let superseded = viewerActionEpoch
         viewerActionEpoch &+= 1
@@ -3426,10 +3684,16 @@ final class PlayerController: ObservableObject {
     /// The retained intent changes before AVPlayer can call back, and the
     /// latest task alone may retain a publication floor or resume a target.
     func setPlaybackRequested(_ requested: Bool) {
+        setPlaybackRequested(requested, viewerOrigin: true)
+    }
+
+    private func setPlaybackRequested(_ requested: Bool, viewerOrigin: Bool) {
         guard requested != wantsPlayback else { return }
         let requestedAt = resumeNow()
+        let enteredAtMs = PlaybackControlSession.monotonicMs()
         let actionEpoch = beginViewerAction()
         resumeIntentTask?.cancel()
+        var attemptBoundaryResume = false
 
         // A buffering player reports `.waitingToPlayAtSpecifiedRate` and rate
         // zero even though Play is still the viewer's intent. Keying this
@@ -3443,6 +3707,9 @@ final class PlayerController: ObservableObject {
             player.pause()
             isPlaying = false
             pauseBeganAt = requestedAt
+            explicitViewerPause = viewerOrigin ? player.currentItem.map {
+                (ObjectIdentifier($0), sessionId, openGeneration, lifecycleGeneration)
+            } : nil
         } else if let retired = currentPausedRetirement, !isChangingStream {
             // The presentation this pause was holding no longer exists on the
             // server, so there is nothing to resume in place: the buffered
@@ -3453,6 +3720,7 @@ final class PlayerController: ObservableObject {
             // the dead item comes back and the next Play must reopen again.
             wantsPlayback = true
             pauseBeganAt = nil
+            explicitViewerPause = nil
             isPlaying = false
             let position = Self.pausedRetirementReopenPositionMs(
                 pendingSeekMs: seekState.pendingMs,
@@ -3477,7 +3745,12 @@ final class PlayerController: ObservableObject {
             let pauseDurationMs = pauseBeganAt.map {
                 max(0, Int(((requestedAt - $0) * 1_000).rounded()))
             } ?? 0
+            let longViewerPause = viewerOrigin && pauseDurationMs >= 60_000 && explicitViewerPause.map {
+                player.currentItem.map(ObjectIdentifier.init) == $0.item && sessionId == $0.session &&
+                    openGeneration == $0.attachment && lifecycleGeneration == $0.lifecycle
+            } == true
             pauseBeganAt = nil
+            explicitViewerPause = nil
 
             let hasPendingDestination = seekState.pendingMs != nil
             let externalPresentation = player.isExternalPlaybackActive
@@ -3508,12 +3781,15 @@ final class PlayerController: ObservableObject {
                     path: "buffered-immediate",
                     fastPath: established
                 )
-                Self.applyPlaybackCommand(
-                    to: player,
-                    preferredRate: preferredRate,
-                    immediately: true
-                )
-                isPlaying = true
+                attemptBoundaryResume = longViewerPause && autoOriginalBoundaryCandidate(now: enteredAtMs) != nil
+                if attemptBoundaryResume, let resume = resumeAttempt {
+                    autoBoundaryResumeOwner = AutoBoundaryResumeOwner(attempt: snapshotAttempt(),
+                        identity: AutoResumeIdentity(resume), enteredAtMs: enteredAtMs)
+                    isPlaying = false
+                } else {
+                    Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: true)
+                    isPlaying = true
+                }
             } else if established {
                 // Empty, unknown, disjoint, unready, or insufficient retained
                 // media pays no ordinary 12-second stall wait. Publication
@@ -3548,6 +3824,8 @@ final class PlayerController: ObservableObject {
         let repairAfterPublication = requested
             && resumeAttempt?.viewerActionEpoch == actionEpoch
             && resumeAttempt?.fastPathDeadline == nil
+        let boundaryResume = attemptBoundaryResume
+        let resumeIntentAttempt = snapshotAttempt()
         resumeIntentTask = Task { [weak self] in
             guard let self,
                   self.lifecycleGeneration == lifecycle,
@@ -3571,6 +3849,24 @@ final class PlayerController: ObservableObject {
                attempt.viewerActionEpoch == actionEpoch {
                 attempt.markPublicationCompleted()
                 self.resumeAttempt = attempt
+            }
+            if boundaryResume, let attempt = self.resumeAttempt,
+               let owner = self.autoBoundaryResumeOwner,
+               AutoResumeIdentity(attempt) == owner.identity {
+                let committed = await self.attemptAutoOriginalBoundary(targetMs: attempt.targetMs, generation: nil,
+                    enteredAtMs: enteredAtMs,
+                    originalDeadlineMs: enteredAtMs + max(0, Int((attempt.expiresAt - requestedAt) * 1_000)))
+                if self.autoBoundaryResumeOwner?.viewer == actionEpoch { self.autoBoundaryResumeOwner = nil }
+                if committed || self.preparedReplacement.phase == .switching {
+                    if self.attemptStillCurrent(resumeIntentAttempt, fence: .autoResumeCompletedViewerCurrent) { self.resumeIntentTask = nil }
+                    return
+                }
+                guard !Task.isCancelled,
+                      self.attemptStillCurrent(resumeIntentAttempt, fence: .autoResumeFallbackCurrent),
+                      self.player.currentItem.map(ObjectIdentifier.init) == itemIdentity,
+                      self.sessionId == currentSession, self.wantsPlayback else { return }
+                Self.applyPlaybackCommand(to: self.player, preferredRate: self.preferredRate, immediately: true)
+                self.isPlaying = true
             }
             if let target,
                self.seekState.pendingMs == target,
@@ -3725,6 +4021,7 @@ final class PlayerController: ObservableObject {
 
                 if let current = self.resumeAttempt,
                    !current.repairAdmitted,
+                   !self.autoBoundaryResumeIsLive(),
                    current.fastPathExpired(at: now) {
                     self.admitResumeRepair(at: now, reason: "fast-path-no-presentation")
                 }
@@ -3964,7 +4261,7 @@ final class PlayerController: ObservableObject {
         )
         abandonSeekMeasurement()
         requestedSeekGeneration = request.generation
-        issueSeek(to: request.target, generation: request.generation)
+        issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)
     }
 
     func skipActiveMarker() {
@@ -3980,7 +4277,7 @@ final class PlayerController: ObservableObject {
             message: "skip destination was not prewarmed"
         )
         lastMarkerSkipEndMs = marker.endMs
-        seek(toMs: marker.endMs)
+        beginSeek(toMs: marker.endMs, viewerOrigin: false)
     }
 
     /// The automatic half of the marker button — the web client's
@@ -4011,7 +4308,7 @@ final class PlayerController: ObservableObject {
             message: "skip destination was not prewarmed"
         )
         lastMarkerSkipEndMs = marker.endMs
-        seek(toMs: marker.endMs)
+        beginSeek(toMs: marker.endMs, viewerOrigin: false)
     }
 
     func reportMarkerOffer(_ marker: Marker) {
@@ -4027,6 +4324,10 @@ final class PlayerController: ObservableObject {
     }
 
     func seek(toMs requested: Int) {
+        beginSeek(toMs: requested, viewerOrigin: true)
+    }
+
+    private func beginSeek(toMs requested: Int, viewerOrigin: Bool) {
         autoDestinationRevision = min(autoDestinationRevision + 1, 9_007_199_254_740_991)
         resetAutoQualityBudgetForViewer()
         if let markerEnd = lastMarkerSkipEndMs,
@@ -4042,15 +4343,17 @@ final class PlayerController: ObservableObject {
         let request = seekState.absolute(requested, durationMs: knownDurationMs)
         abandonSeekMeasurement()
         requestedSeekGeneration = request.generation
-        issueSeek(to: request.target, generation: request.generation)
+        issueSeek(to: request.target, generation: request.generation, viewerBoundary: viewerOrigin)
     }
 
     private func issueSeek(
         to target: Int,
         generation: Int,
         owningActionEpoch: Int? = nil,
-        intentAlreadyPublished: Bool = false
+        intentAlreadyPublished: Bool = false,
+        viewerBoundary: Bool = false
     ) {
+        let enteredAtMs = PlaybackControlSession.monotonicMs()
         let actionEpoch = owningActionEpoch ?? beginViewerAction()
         // Move the visible timeline immediately. The old implementation left
         // it on the paused predecessor for the whole server round trip, which
@@ -4079,6 +4382,13 @@ final class PlayerController: ObservableObject {
             guard !Task.isCancelled,
                   attemptStillCurrent(seekAttempt, fence: .seekIntentAfterControl)
             else { return }
+            if viewerBoundary {
+                let committed = await attemptAutoOriginalBoundary(targetMs: target, generation: generation,
+                    enteredAtMs: enteredAtMs, originalDeadlineMs: enteredAtMs + 8_000)
+                if committed { return }
+                if preparedReplacement.phase == .switching { return }
+                guard !Task.isCancelled, attemptStillCurrent(seekAttempt, fence: .seekIntentAfterOptionalBoundary) else { return }
+            }
             if requestedSeekGeneration == generation {
                 #if os(iOS)
                 let reportsSeek = offlineId == nil
@@ -4109,7 +4419,14 @@ final class PlayerController: ObservableObject {
                 let nativeAttempt = snapshotAttempt()
                 let outcome = await PlayerSeekCompletion.run(
                     operation: { [player, nativeSeek] in await nativeSeek(player, itemMs) },
-                    waitForDeadline: waitNativeSeekDeadline
+                    waitForDeadline: { [self] in
+                        if viewerBoundary, autoBoundaryLastConsumedEntry == enteredAtMs {
+                            let remaining = max(0, enteredAtMs + 8_000 - PlaybackControlSession.monotonicMs())
+                            try await Task.sleep(nanoseconds: UInt64(remaining) * 1_000_000)
+                        } else {
+                            try await waitNativeSeekDeadline()
+                        }
+                    }
                 )
                 // Only the newest seek may publish or escalate; an older
                 // completion arriving after AVPlayer cancelled it must not.
@@ -4512,7 +4829,7 @@ final class PlayerController: ObservableObject {
     /// which is why every quality change reopened. This waits across
     /// exchanges, and it is affordable for a reason the stall ask's is not:
     /// the incumbent is still playing the whole time.
-    private func offerPreparedQualityChange() async -> Bool {
+    private func offerPreparedQualityChange(boundary: AutoBoundaryAttempt? = nil) async -> Bool {
         guard Caps.controlCapabilities().dualPlayerPreparation,
               preparedReplacement.shouldAskForPreparation,
               // A paused viewer's change cannot be committed — no rate means
@@ -4539,10 +4856,12 @@ final class PlayerController: ObservableObject {
         sampleThePreparedSwitch()
         let actionEpoch = viewerActionEpoch
         let step = await playbackControl.awaitPreparedOffer(
-            tappedAt: PlaybackControlSession.monotonicMs(),
+            tappedAt: boundary?.enteredAtMs ?? PlaybackControlSession.monotonicMs(),
             isSuperseded: { [weak self] in
                 guard let self else { return true }
-                return self.viewerActionEpoch != actionEpoch
+                return Task.isCancelled || self.viewerActionEpoch != actionEpoch ||
+                    boundary.map { !self.autoBoundaryIsCurrent($0) ||
+                        PlaybackControlSession.monotonicMs() >= $0.optionalDeadlineMs } == true
             },
             publish: { [weak self] in self?.playbackControl.reportEvidence() }
         )
@@ -4677,12 +4996,13 @@ final class PlayerController: ObservableObject {
             wantsPlayback = false
             isPlaying = false
             pauseBeganAt = resumeNow()
+            explicitViewerPause = nil
             player.pause()
         case .routeChange(let revokesIntent):
             guard revokesIntent else { return }
             systemPaused = false
             present(.systemPaused(false))
-            setPlaybackRequested(false)
+            setPlaybackRequested(false, viewerOrigin: false)
         }
     }
 
@@ -4731,6 +5051,8 @@ final class PlayerController: ObservableObject {
         resumeIntentTask = nil
         invalidateResumeAttempt(outcome: "stopped")
         pauseBeganAt = nil
+        explicitViewerPause = nil
+        autoBoundaryResumeOwner = nil
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
         seekPresentationLifecycle.removeAll()
@@ -10235,6 +10557,161 @@ extension PlayerController {
         }
     }
 
+    private func autoBoundaryIsCurrent(_ boundary: AutoBoundaryAttempt) -> Bool {
+        guard autoBoundaryAttempt === boundary, boundary.committed == nil,
+              attemptStillCurrent(boundary.attempt, fence: .autoBoundaryOwnerCurrent),
+              sessionId == boundary.sessionId,
+              player.currentItem.map(ObjectIdentifier.init) == boundary.item,
+              wantsPlayback, started, selectedHeight == nil, !selectedQualityIsOriginal,
+              autoDesiredCandidate?.id == boundary.candidateId else { return false }
+        if let generation = boundary.generation {
+            return generation == boundary.attempt.seek &&
+                attemptStillCurrent(boundary.attempt, fence: .autoBoundarySeekCurrent) &&
+                seekState.pendingMs == boundary.targetMs
+        }
+        return resumeAttempt.map(AutoResumeIdentity.init) == boundary.resumeIdentity && boundary.resumeIdentity != nil
+    }
+
+    private func autoBoundaryResumeIsLive() -> Bool {
+        guard let owner = autoBoundaryResumeOwner,
+              attemptStillCurrent(owner.attempt, fence: .autoBoundaryResumeCurrent),
+              player.currentItem.map(ObjectIdentifier.init) == owner.identity.item,
+              resumeAttempt.map(AutoResumeIdentity.init) == owner.identity else { return false }
+        let now = PlaybackControlSession.monotonicMs()
+        return now >= owner.enteredAtMs && (now < owner.enteredAtMs + 6_000 ||
+            (autoBoundaryAttempt != nil && preparedReplacement.phase == .switching))
+    }
+
+    /// Resolve selection before the unabortable exposure. A late metadata
+    /// result may touch neither a superseded stage nor the incumbent.
+    private func prepareAutoBoundarySelections(_ boundary: AutoBoundaryAttempt, item: AVPlayerItem) async -> Bool {
+        guard let scope = autoStagedObservation?.scope else { return false }
+        boundary.selectionOutcome = nil
+        boundary.selectionScope = nil
+        let fields = Self.sessionSubtitleFields(selected: selectedSubtitle, tracks: subtitles)
+        let nativeSubtitle = pgsOverlayIsActive || activeBurnedSubtitle != nil ? nil : fields.native
+        let tracks = subtitles
+        let language = audioLanguage
+        let chooseAudio = audioOverride == nil && prePlaySelection.audioIndex == nil
+        let task = Task { @MainActor [weak self, weak item] in
+            guard let self, let item else { return }
+            let selection = await self.mediaSelectionPreparation.native(nativeSubtitle, tracks, item)
+            let audio = chooseAudio ? await self.mediaSelectionPreparation.audio(language, item) : nil
+            guard !Task.isCancelled, self.autoBoundaryIsCurrent(boundary),
+                  self.preparedItem === item,
+                  self.autoStagedObservation?.scope == scope,
+                  PlaybackControlSession.monotonicMs() < boundary.optionalDeadlineMs else { return }
+            guard selection.apply() else { boundary.selectionOutcome = false; return }
+            audio?()
+            boundary.selectionScope = scope
+            boundary.selectionOutcome = true
+        }
+        defer { task.cancel() }
+        let remaining = max(0, boundary.optionalDeadlineMs - PlaybackControlSession.monotonicMs())
+        guard remaining > 0 else { return false }
+        let outcome = await awaitBoundedValue(boundMs: remaining, pollMs: 25,
+            now: PlaybackControlSession.monotonicMs,
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { Task.isCancelled ? false : boundary.selectionOutcome })
+        return outcome == true && autoBoundaryIsCurrent(boundary)
+    }
+
+    private func autoOriginalBoundaryCandidate(now: Int) -> QualityCandidate? {
+        guard autoBoundaryAttempt == nil, !autoPreparing,
+              model?.displayAwareAuto == true, model?.autoAbr == true,
+              autoRouteProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1",
+              selectedHeight == nil, !selectedQualityIsOriginal, wantsPlayback,
+              preparedReplacement.shouldAskForPreparation, Caps.controlCapabilities().dualPlayerPreparation,
+              player.currentItem?.status == .readyToPlay, (bufferedRunwaySeconds() ?? 0) >= 10,
+              let sessionId, currentLinkReceipt() != nil,
+              let sample = latestAutoCompletedTransfer,
+              let link = autoCompletedTransferBps(sample, nowMs: now, maximumAgeMs: 15_000),
+              let offered = decision?.qualityCandidates,
+              let current = measuredCostCatalog(offered).first(where: { $0.id == autoActiveCandidateId })
+        else { return nil }
+        // Only a fresh body's actual negative can veto a boundary. The old
+        // ninety-second mid-play cliff window is intentionally not consulted.
+        if let cost = autoDownsideCostBps(current, sample: sample, sessionId: sessionId, nowMs: now), link < cost {
+            return nil
+        }
+        let originals = offered.filter {
+            $0.id != current.id && $0.hasValidIdentity && $0.decoderCompatible && $0.route == "remux" &&
+                !autoDecoderRejected.contains($0.id) &&
+                (measuredCandidatePeak($0, outputs: decision?.measuredCandidateOutputs).map { link >= Double($0) * 1.8 }
+                    ?? autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs))
+        }
+        return originals.max(by: { Int64($0.width) * Int64($0.height) < Int64($1.width) * Int64($1.height) })
+    }
+
+    /// Attempt original first inside the final viewer transaction. A refusal
+    /// consumes only this optional remainder and returns to the same seek.
+    private func attemptAutoOriginalBoundary(targetMs: Int, generation: Int?,
+                                             enteredAtMs: Int, originalDeadlineMs: Int) async -> Bool {
+        let now = PlaybackControlSession.monotonicMs()
+        guard let budget = AutoViewerBoundaryBudget(enteredAtMs: enteredAtMs,
+                  originalDeadlineMs: originalDeadlineMs, nowMs: now),
+              let chosen = autoOriginalBoundaryCandidate(now: now),
+              let item = player.currentItem, let sessionId,
+              let target = presentationTarget else { return false }
+        let previous = autoDesiredCandidate
+        let boundary = AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity: resumeAttempt.map(AutoResumeIdentity.init),
+            generation: generation, lifecycle: lifecycleGeneration,
+            attachment: openGeneration, viewer: viewerActionEpoch, item: ObjectIdentifier(item),
+            sessionId: sessionId, targetMs: targetMs, enteredAtMs: enteredAtMs,
+            deadlineMs: budget.deadlineMs, candidateId: chosen.id)
+        autoBoundaryAttempt = boundary
+        autoBoundaryLastConsumedEntry = enteredAtMs
+        autoDesiredCandidate = chosen
+        autoPreparing = true
+        autoVoluntary = true
+        autoPreparedTargetRevision = target.revision
+        autoPreparedViewerEpoch = viewerActionEpoch
+        // Do not dirty recipeRevision: a refused optional stage must not turn
+        // the healthy fallback seek into an ordinary create.
+        let offeredStage = await withTaskGroup(of: Bool.self) { group in
+            group.addTask { @MainActor [weak self] in
+                await self?.offerPreparedQualityChange(boundary: boundary) ?? false
+            }
+            group.addTask { @MainActor in
+                let remaining = max(0, boundary.optionalDeadlineMs - PlaybackControlSession.monotonicMs())
+                try? await Task.sleep(nanoseconds: UInt64(remaining) * 1_000_000)
+                return false
+            }
+            defer { group.cancelAll() }
+            return await group.next() ?? false
+        }
+        if offeredStage {
+            while !Task.isCancelled, boundary.committed == nil,
+                  autoBoundaryIsCurrent(boundary), PlaybackControlSession.monotonicMs() < boundary.optionalDeadlineMs {
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+        }
+        // A commit owns its outcome until its bounded alignment/frame work
+        // settles. Never start a second fallback while it is switching.
+        while boundary.committed == nil, preparedReplacement.phase == .switching,
+              PlaybackControlSession.monotonicMs() < boundary.deadlineMs {
+            // Cancellation makes Task.sleep return immediately. A superseded
+            // seek must leave the bounded commit to its owner, not spin on
+            // the main actor or start an old fallback while it settles.
+            if Task.isCancelled { return false }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        if preparedReplacement.phase == .switching { return false }
+        let committed = boundary.committed == true
+        if autoBoundaryAttempt === boundary {
+            if !committed {
+                preparedReplacement.abandonWithoutFallback(.aborted)
+                if autoDesiredCandidate?.id == chosen.id {
+                    autoDesiredCandidate = previous
+                    autoPreparing = false
+                    playbackControl.reportEvidence()
+                }
+            }
+            autoBoundaryAttempt = nil
+        }
+        return committed
+    }
+
     private func selectAutoStallRecoveryCandidate() {
         guard model?.displayAwareAuto == true, model?.autoAbr == true,
               model?.displayAwareAutoProtocol == "route-v1", decision?.displayAwareAutoProtocol == "route-v1", autoRouteProtocol == "route-v1",
@@ -10317,15 +10794,25 @@ extension PlayerController {
 
     private func autoStagedOriginalAllowsCommit(_ action: PreparedReplacementAction) -> Bool {
         guard autoPreparing, autoVoluntary, let desired = autoDesiredCandidate else { return true }
-        guard let peak = measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs) else { return false }
+        guard let observation = autoStagedObservation, autoStagedObservationCurrent(observation) else { return false }
         let now = PlaybackControlSession.monotonicMs()
         let samples = autoStagedTransfers.filter { sample in
-            sample.segmentId.contains("/\(action.sessionId)/") && sample.receipt != nil && sample.etag != nil
+            sample.stageScope == observation.scope && sample.installedSessionId == observation.sessionId &&
+                sample.installedCandidateId == observation.candidateId &&
+                sample.segmentId.contains("/\(action.sessionId)/") && sample.receipt != nil && sample.etag != nil
                 && autoTransferOriginCurrent(sample)
                 && sample.statusCode == 200 && sample.networkLoad && !sample.fromLocalCache
                 && sample.producerPaced == false && sample.ageMs(nowMs: now) <= 15_000
                 && (sample.bodyDurationSeconds ?? 0) > 0 && sample.bodyBytes > 0
         }
+        if let offered = decision?.qualityCandidates?.first(where: { $0.id == desired.id && $0.recipeDigest == desired.recipeDigest }),
+           autoUnknownOriginalTrial(offered, outputs: decision?.measuredCandidateOutputs) {
+            guard let intervals = observation.intervals else { return false }
+            return autoVODEmpiricalMargin(samples, intervals: intervals, scope: observation.scope,
+                sessionId: observation.sessionId, candidateId: observation.candidateId,
+                nowMs: now, deadlineMs: observation.deadlineMs)
+        }
+        guard let peak = measuredCandidatePeak(desired, outputs: decision?.measuredCandidateOutputs) else { return false }
         return samples.contains { Double($0.bodyBytes) * 8 / ($0.bodyDurationSeconds ?? 1) >= Double(peak) * 1.8 }
     }
 
@@ -10344,7 +10831,9 @@ extension PlayerController {
                 requestedTargetRevision: autoPreparedTargetRevision, targetRevision: presentationTarget?.revision,
                 requestedViewerEpoch: autoPreparedViewerEpoch, viewerEpoch: viewerActionEpoch,
                 automatic: selectedHeight == nil && !selectedQualityIsOriginal,
-                presenting: wantsPlayback && surface.presenting && player.rate > 0, seeking: seekState.pendingMs != nil) &&
+                presenting: wantsPlayback && ((surface.presenting && player.rate > 0) ||
+                    (autoBoundaryAttempt.map(autoBoundaryIsCurrent) == true && attachmentRecovery.establishedPlayback)),
+                seeking: seekState.pendingMs != nil && autoBoundaryAttempt.map(autoBoundaryIsCurrent) != true) &&
             autoStagedProductionAllowsCommit(action) && autoStagedOriginalAllowsCommit(action)
     }
 
@@ -10410,7 +10899,11 @@ extension PlayerController {
             autoUpgradeSinceMs = nil
         } else {
             let fitting = eligible.filter { candidate in
-                link.map { bps in candidate.peakBps.map { bps >= Double($0) * 1.8 } ?? false } == true
+                link.map { bps in
+                    candidate.peakBps.map { bps >= Double($0) * 1.8 } ??
+                        offered.first(where: { $0.id == candidate.id && $0.recipeDigest == candidate.recipeDigest })
+                            .map { autoUnknownOriginalTrial($0, outputs: decision?.measuredCandidateOutputs) && bps > 0 } ?? false
+                } == true
             }
             chosen = autoPreferredDisplayCandidate(fitting, neededWidth: neededWidth, neededHeight: neededHeight)
             guard let chosen,
@@ -10422,10 +10915,17 @@ extension PlayerController {
             else { autoUpgradeSinceMs = nil; return }
             if autoUpgradeSinceMs == nil { autoUpgradeSinceMs = now }
             guard autoUpgradeEvidence.allowsProposal(nowMs: now, headroomStartedAtMs: autoUpgradeSinceMs) else { return }
+            if let evaluation = autoLastEvaluation,
+               player.currentItem.map(ObjectIdentifier.init) == evaluation.item,
+               playbackAttemptId == evaluation.attempt,
+               now < evaluation.atMs || now - evaluation.atMs < 60_000 { return }
         }
         guard let chosen else { return }
         guard severe || ((autoLastSwitchMs.map { now - $0 >= 60_000 } ?? true) && autoSwitchTimes.count < 6) else { return }
         autoDesiredCandidate = chosen
+        if !pressure, let item = player.currentItem {
+            autoLastEvaluation = (ObjectIdentifier(item), playbackAttemptId, now)
+        }
         autoVoluntary = !pressure
         autoPreparing = true
         autoExposed = false
@@ -10554,7 +11054,17 @@ extension PlayerController: PreparedSuccessorHost {
         successor.appliesMediaSelectionCriteriaAutomatically = false
         preparedPlayer = successor
         preparedItem = item
-        installAutoTransferMetrics(for: item, staged: true)
+        if autoPreparing, let desired = autoDesiredCandidate, desired.recipeDigest.count == 32,
+           action.effectiveSelection.candidateId == desired.id {
+            let now = PlaybackControlSession.monotonicMs()
+            let credentials = Session.shared.credentials
+            autoStagedObservation = AutoStagedObservation(scope: UUID(), item: ObjectIdentifier(item),
+                pipeline: ObjectIdentifier(successor), sessionId: action.sessionId, candidateId: desired.id,
+                recipeDigest: desired.recipeDigest, credentialOrigin: credentials.origin,
+                credentialToken: credentials.token, startedAtMs: now,
+                deadlineMs: min(now + 15_000, autoBoundaryAttempt?.optionalDeadlineMs ?? (now + 15_000)))
+        }
+        installAutoTransferMetrics(for: item, staged: true, stagedAction: action)
         preparedFilmPositionMs = max(0, filmPositionMs)
         // The successor's session-relative zero is not the film's. This is the
         // same arithmetic a created session gets, over a raw origin — and it
@@ -10605,6 +11115,10 @@ extension PlayerController: PreparedSuccessorHost {
     }
 
     func discardPreparedSuccessor() {
+        if preparedReplacement.phase != .switching { autoBoundaryAttempt?.committed = false }
+        autoStagedPlaylistTask?.cancel()
+        autoStagedPlaylistTask = nil
+        autoStagedObservation = nil
         autoStagedTransferMetricTask?.cancel()
         autoStagedTransferMetricTask = nil
         autoStagedTransfers.removeAll()
@@ -10659,6 +11173,32 @@ extension PlayerController: PreparedSuccessorHost {
             while !Task.isCancelled {
                 guard self.preparedItem === item,
                       self.preparedPlayer === successor else { return }
+                if self.autoPreparing && self.autoVoluntary {
+                    let now = PlaybackControlSession.monotonicMs()
+                    let current = self.measuredCostCatalog(self.decision?.qualityCandidates ?? [])
+                        .first { $0.id == self.autoActiveCandidateId }
+                    let pressure = current.map { autoActiveProductionPressure(status: self.sessionStatus,
+                        observedAtMs: self.sessionStatusAgeMs.map { now - $0 }, nowMs: now,
+                        sessionId: self.sessionId, candidateId: $0.id,
+                        runwaySeconds: self.bufferedRunwaySeconds()) } ?? true
+                    var linkPressure = false
+                    if let current, let sample = self.latestAutoCompletedTransfer,
+                       sample.installedSessionId == self.sessionId, sample.installedCandidateId == current.id,
+                       sample.statusCode == 200, sample.receipt != nil, sample.etag != nil,
+                       self.autoTransferOriginCurrent(sample),
+                       let link = autoCompletedTransferBps(sample, nowMs: now, maximumAgeMs: 15_000),
+                       let cost = autoDownsideCostBps(current, sample: sample, sessionId: self.sessionId, nowMs: now) {
+                        linkPressure = link < cost * (current.peakBps == nil ? 1.0 : 1.3)
+                        if link < cost * 0.7 { self.autoUpgradeEvidence.cliff(completedAtMs: sample.completedAtMs, nowMs: now) }
+                    }
+                    if self.autoStagedObservation.map({ !self.autoStagedObservationCurrent($0) }) ?? true ||
+                        (self.bufferedRunwaySeconds() ?? 0) < 10 || pressure || linkPressure ||
+                        (self.autoBoundaryAttempt.map(self.autoBoundaryIsCurrent) != true &&
+                            !self.autoUpgradeEvidence.allowsUpgrade(nowMs: now)) {
+                        self.preparedReplacement.abandonWithoutFallback(.aborted)
+                        return
+                    }
+                }
                 if item.status == .failed {
                     self.preparedReplacement.abandon(.failed)
                     return
@@ -10671,6 +11211,13 @@ extension PlayerController: PreparedSuccessorHost {
                 // and its tracks and duration are known — the whole of what
                 // `metadata_ready` claims.
                 if item.status == .readyToPlay {
+                    if let boundary = self.autoBoundaryAttempt,
+                       boundary.selectionOutcome != true || boundary.selectionScope != self.autoStagedObservation?.scope {
+                        guard await self.prepareAutoBoundarySelections(boundary, item: item) else {
+                            self.preparedReplacement.abandonWithoutFallback(.aborted)
+                            return
+                        }
+                    }
                     self.preparedReplacement.successorIsMetadataReady()
                     // The seek the successor owes, issued exactly once and
                     // only now that the item can honour it. Runway measured
@@ -10685,11 +11232,25 @@ extension PlayerController: PreparedSuccessorHost {
                         // choosing, and asserting main-actor isolation inside
                         // one is what killed every play on build 90.
                         self.preparedSeekMs = nil
-                        _ = await item.seek(
-                            to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
-                            toleranceBefore: .zero,
-                            toleranceAfter: .zero
-                        )
+                        if let boundary = self.autoBoundaryAttempt {
+                            let outcome = await PlayerSeekCompletion.run(operation: {
+                                await item.seek(to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
+                                    toleranceBefore: .zero, toleranceAfter: .zero)
+                            }, waitForDeadline: {
+                                let remaining = max(0, boundary.optionalDeadlineMs - PlaybackControlSession.monotonicMs())
+                                try await Task.sleep(nanoseconds: UInt64(remaining) * 1_000_000)
+                            })
+                            guard outcome == .finished(true), self.autoBoundaryIsCurrent(boundary) else {
+                                self.preparedReplacement.abandonWithoutFallback(.aborted)
+                                return
+                            }
+                        } else {
+                            _ = await item.seek(
+                                to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
+                                toleranceBefore: .zero,
+                                toleranceAfter: .zero
+                            )
+                        }
                         continue
                     } else if let throughMs = self.preparedBufferedThroughMs(item),
                               throughMs >= self.preparedFilmPositionMs
@@ -10746,6 +11307,23 @@ extension PlayerController: PreparedSuccessorHost {
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
         let automaticTrial = autoPreparing
+        let boundary = autoBoundaryAttempt
+        defer {
+            if boundary?.committed == nil { boundary?.committed = false }
+            if let boundary, autoBoundaryAttempt === boundary,
+               !attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitViewerCurrent) {
+                autoBoundaryAttempt = nil
+            }
+        }
+        if let boundary {
+            guard autoBoundaryIsCurrent(boundary), boundary.selectionOutcome == true,
+                  boundary.selectionScope == autoStagedObservation?.scope else { return .failedWithoutReopen }
+        }
+        // Playlist type proves delivery, not the film origin. Only the
+        // current stage's explicit zero origin permits film-local mapping.
+        let stagedFilmLocalVOD = autoStagedObservation.map {
+            autoStagedObservationCurrent($0) && $0.intervals != nil && action.mediaOriginMs == 0
+        } ?? false
         if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
@@ -10789,8 +11367,8 @@ extension PlayerController: PreparedSuccessorHost {
         // all. The seek is issued while the item is still attached to its own
         // player, which is where AVFoundation will honour one.
         let rendezvous = PreparedCommitRendezvous.plan(
-            stagedFilmPositionMs: preparedFilmPositionMs,
-            incumbentFilmPositionMs: realPositionMs(),
+            stagedFilmPositionMs: boundary?.targetMs ?? preparedFilmPositionMs,
+            incumbentFilmPositionMs: boundary?.targetMs ?? realPositionMs(),
             mediaOriginMs: action.mediaOriginMs
         )
         // Bounded, because an unbounded one does not degrade the way it looks
@@ -10803,7 +11381,8 @@ extension PlayerController: PreparedSuccessorHost {
         // deadline because no acknowledgement is queued in `.switching`; and
         // the viewer's tap produces nothing at all, because the prepared path
         // already claimed it and suppressed the in-place reopen.
-        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
+        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs,
+                                           deadlineMs: boundary?.optionalDeadlineMs) else {
             discardPreparedSuccessor()
             return automaticTrial ? .failedWithoutReopen : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
@@ -10849,6 +11428,7 @@ extension PlayerController: PreparedSuccessorHost {
         let incumbent = player.currentItem
         let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
+            vod: isVOD, directTimeline: usesDirectTimeline,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
         let exposureAttempt = snapshotAttempt()
         stopStatusPolling()
@@ -10875,6 +11455,8 @@ extension PlayerController: PreparedSuccessorHost {
         if autoPreparing { autoExposed = true }
         sessionId = action.sessionId
         baseMs = action.mediaOriginMs
+        isVOD = stagedFilmLocalVOD
+        usesDirectTimeline = stagedFilmLocalVOD
         activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
         activeMediaAuthenticated = false
         if action.effectiveSelection.height > 0 {
@@ -10895,7 +11477,7 @@ extension PlayerController: PreparedSuccessorHost {
         // landed during the commit owns the selection, and this must not put
         // the pre-commit choice back on top of it.
         let reconcileGeneration = lifecycleGeneration
-        if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
+        if boundary == nil, isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
             await reconcileNativeMediaSelections(to: item)
         }
         applyDisplayCriteria(for: item, generation: openGeneration)
@@ -10906,7 +11488,8 @@ extension PlayerController: PreparedSuccessorHost {
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
-        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)
+        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs,
+                                                           deadlineMs: boundary?.optionalDeadlineMs)
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
         // starts the predecessor's bounded drain. Ending it first removes the
@@ -10928,6 +11511,8 @@ extension PlayerController: PreparedSuccessorHost {
                 activeMediaAuthenticated = incumbentState.authenticated
                 sessionHeight = incumbentState.height
                 isDirectPlayback = incumbentState.direct
+                isVOD = incumbentState.vod
+                usesDirectTimeline = incumbentState.directTimeline
                 sessionStatus = incumbentState.status
                 diagnosticSessionStatus = incumbentState.diagnostic
                 diagnosticSessionStatusObservedAt = incumbentState.observedAt
@@ -10955,6 +11540,13 @@ extension PlayerController: PreparedSuccessorHost {
             autoUpgradeSinceMs = nil
             autoExposed = false
         }
+        if let boundary {
+            boundary.committed = attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitOwnerCurrent) &&
+                (boundary.generation == nil || attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitSeekCurrent))
+            if boundary.committed == true, let generation = boundary.generation {
+                _ = seekState.markExecuted(generation: generation, targetMs: boundary.targetMs)
+            }
+        }
         Caps.PreparedHandoffTelemetry.shared.note(
             outcome: "committed \(max(0, firstFrameUnixMs - exposedAtUnixMs)) ms"
         )
@@ -10976,7 +11568,10 @@ extension PlayerController: PreparedSuccessorHost {
     /// otherwise own this work was dropped before the commit began. The
     /// abandoned seek is left to resolve or not; the generation check is what
     /// stops it reporting into a commit that has moved on.
-    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int) async -> Bool {
+    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int, deadlineMs: Int? = nil) async -> Bool {
+        let boundMs = min(PreparedReplacementBounds.alignmentMs,
+            deadlineMs.map { max(0, $0 - PlaybackControlSession.monotonicMs()) } ?? PreparedReplacementBounds.alignmentMs)
+        guard boundMs > 0 else { return false }
         preparedAlignmentGeneration &+= 1
         let generation = preparedAlignmentGeneration
         preparedAlignmentOutcome = nil
@@ -10990,7 +11585,7 @@ extension PlayerController: PreparedSuccessorHost {
             self.preparedAlignmentOutcome = landed
         }
         let landed = await awaitBoundedValue(
-            boundMs: PreparedReplacementBounds.alignmentMs,
+            boundMs: boundMs,
             pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
@@ -11010,10 +11605,10 @@ extension PlayerController: PreparedSuccessorHost {
     /// changed. `AVPlayerItemVideoOutput` does not acknowledge physical
     /// display by `AVPlayerLayer` — the same caveat the seek monitor carries —
     /// so device qualification still has to verify the final boundary.
-    private func awaitPreparedFirstFrame(boundaryMs: Int) async -> Int? {
+    private func awaitPreparedFirstFrame(boundaryMs: Int, deadlineMs: Int? = nil) async -> Int? {
         guard let output = preparedSeekVideoOutput() else { return nil }
-        let deadline = ProcessInfo.processInfo.systemUptime
-            + Double(PreparedReplacementBounds.firstFrameMs) / 1_000
+        let deadline = min(ProcessInfo.processInfo.systemUptime + Double(PreparedReplacementBounds.firstFrameMs) / 1_000,
+                           deadlineMs.map { Double($0) / 1_000 } ?? .infinity)
         while ProcessInfo.processInfo.systemUptime < deadline {
             if Task.isCancelled { return nil }
             let itemTime = output.itemTime(forHostTime: ProcessInfo.processInfo.systemUptime)
