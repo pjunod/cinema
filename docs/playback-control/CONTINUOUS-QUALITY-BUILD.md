@@ -1398,9 +1398,9 @@ This corrects a recipe admission bound before family creation uses it.
 
 At final qualification, each fast-lane test needs one passing result for the
 code being merged. Record individual results and rerun failures individually.
-A repair invalidates prior passing evidence only for tests affected by that
-repair; it does not trigger an unconditional full-lane rerun. No unit tests
-run during implementation.
+Keep passing results while repairing failures; rerun only the failed tests,
+never the complete lane because one test failed. This is Paul's explicit
+October 1 clarification. No unit tests run during implementation.
 
 ### 10.16 Versioned worker media roles
 
