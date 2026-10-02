@@ -18,6 +18,7 @@ pub mod dvconvert;
 mod encoder;
 pub mod health;
 pub mod hevc_census;
+pub mod low_latency;
 pub mod manifest;
 mod pipeline;
 pub mod progress;
