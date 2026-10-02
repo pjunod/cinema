@@ -15,6 +15,56 @@ ACQUIRE = importlib.machinery.SourceFileLoader("rolling_acquire", str(ROOT / "sc
 
 
 class RollingAcquireOwnershipTests(unittest.TestCase):
+    def test_frame_cadence_waits_after_response_without_hiding_real_refusal(self):
+        # Synthetic execution of the actual reviewed page, not browser/media
+        # acceptance. Model a delayed response crossing the next interval tick.
+        harness = r'''
+const assert=require('node:assert/strict'),vm=require('node:vm');
+let input='';process.stdin.on('data',x=>input+=x);
+process.stdin.on('end',async()=>{
+ try {
+  const page=JSON.parse(input).page;
+  const ready={nonce:'fixture',session:'session',generation:'generation',producer_attempt:1};
+  const script=page.split('<script>')[1].split('</script>')[0].replace('READY',JSON.stringify(ready));
+  let clock=1000,callback,tick,pending,requests=[];
+  const video={paused:false,seeking:false,playbackRate:1,currentTime:1,
+   buffered:{length:1,start:()=>0,end:()=>20},
+   requestVideoFrameCallback:f=>callback=f,play:()=>Promise.resolve()};
+  class Hls {static Events={ERROR:'error',MANIFEST_PARSED:'manifest'};
+   on(){} attachMedia(v){this.media=v} loadSource(){} }
+  const context={Hls,document:{querySelector:()=>video},performance:{now:()=>clock},
+   setInterval:f=>tick=f,window:{},fetch:(_url,options)=>{
+    requests.push(JSON.parse(options.body));
+    return new Promise(resolve=>pending=resolve);
+   }};
+  vm.runInNewContext(script,context);
+  const frame=(media,frames)=>{video.currentTime=media;callback(clock,{mediaTime:media,presentedFrames:frames})};
+  frame(1,1);let exchange=tick();assert.equal(requests.length,1);
+  clock=1120;pending({ok:true,status:200});await exchange;
+  assert.equal(context.window.labStatus().accepted_frames,1);
+  clock=1500;frame(2,2);await tick();
+  assert.equal(requests.length,1,'next interval must not enter the bridge only380ms after acceptance');
+  clock=1620;frame(3,3);exchange=tick();assert.equal(requests.length,2);
+  clock=2200;frame(4,4);await tick();assert.equal(requests.length,2,'one in-flight exchange');
+  pending({ok:true,status:200});await exchange;
+  clock=2500;frame(5,5);await tick();assert.equal(requests.length,2,'slow response renews only reporting cadence');
+  clock=2700;video.paused=true;await tick();assert.equal(requests.length,2,'paused frame is not evidence');
+  video.paused=false;frame(6,6);exchange=tick();assert.equal(requests.length,3);
+  pending({ok:false,status:409});await exchange;
+  assert.equal(context.window.labStatus().failed,'control_refused_409','real refusal remains a terminal failure');
+  clock=5000;frame(7,7);await tick();assert.equal(requests.length,3,'do not retry or manufacture acceptance after refusal');
+  assert.equal(context.window.labStatus().accepted_frames,3);
+  assert.equal(requests[0].producer_attempt,1);
+  assert.equal(requests[0].media_time,1);
+  console.log('actual-page synthetic cadence PASS');
+ } catch(error) {console.error(error);process.exitCode=1;}
+});
+'''
+        result = subprocess.run(["node", "-e", harness], input=json.dumps({"page": ACQUIRE.PAGE}),
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("actual-page synthetic cadence PASS", result.stdout)
+
     def test_explicit_test_stack_crosses_both_owned_child_boundaries_without_inherited_environment(self):
         class CapturedLaunch(Exception):
             pass
