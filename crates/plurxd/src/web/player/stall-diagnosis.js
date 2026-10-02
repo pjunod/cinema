@@ -666,11 +666,24 @@ function candidatePositiveMargin(p,candidate,transfer){
     &&transfer.session_id===p.sessionId&&transfer.candidate_id===p.qualityCandidateId
     &&link>0&&link>=output.peak_bps*1.8);
 }
+function unknownStageableOriginal(p,candidate){
+  if(!candidate||candidate.route!=='remux'||candidate.decoder_compatible!==true
+    ||!(candidate.width>0&&candidate.height>0)||candidate.peak_bps!=null
+    ||!/^[0-9a-f]{32}$/.test(candidate.id)||!Array.isArray(candidate.recipe_digest)
+    ||candidate.recipe_digest.length!==32
+    ||!candidate.recipe_digest.every(byte=>Number.isInteger(byte)&&byte>=0&&byte<=255)) return false;
+  const outputs=p.measuredCandidateOutputs;
+  return outputs==null||Array.isArray(outputs)&&outputs.length<=64&&!outputs.some(row=>row
+    &&row.candidate_id===candidate.id&&row.route===candidate.route
+    &&Array.isArray(row.recipe_digest)&&row.recipe_digest.length===32
+    &&row.recipe_digest.every((byte,index)=>byte===candidate.recipe_digest[index]));
+}
 function candidateAdmissionCatalog(p,candidates,current,transfer){
+  const trials=new Set((candidates||[]).filter(candidate=>unknownStageableOriginal(p,candidate)).map(row=>row.id));
   return measuredCandidateCatalog(p,candidates).filter(candidate=>candidate.id===current.id
     ||candidate.width*candidate.height<=current.width*current.height
       &&!(current.route==='encode'&&candidate.route!=='encode')
-    ||candidatePositiveMargin(p,candidate,transfer));
+    ||candidatePositiveMargin(p,candidate,transfer)||trials.has(candidate.id));
 }
 async function naturalBoundaryQualityCandidate(p,seekIntent){
   if(!p.abr||qualityForce()!=='auto'||!SERVER||!SERVER.playback_display_aware_auto

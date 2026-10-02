@@ -3171,6 +3171,75 @@
     }
 
     #[tokio::test]
+    async fn a05_unknown_original_prepared_branch_requires_authenticated_incumbent_and_own_stage_body() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        use super::link_receipts::{ClientLinkSample, SessionBinding};
+        let dir = crate::test_tempdir().expect("source");
+        let playback = unique_playback_id("a05-unknown-original");
+        let (fixture, session, route) = staging_fixture_for_playback(dir.path(), &playback).await;
+        fixture.store.put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1").await.expect("setting");
+        let control = preparing_control_request(&route);
+        accepted_exchange(&fixture, &route, &control).await;
+        let user = fixture.store.get_user(route.user_id).await.expect("user query").expect("user");
+        let token = "a05-unknown-original-owned-token";
+        fixture.store.create_token(&plurx_core::auth::hash_token(token), user.id, None).await.expect("token");
+        let remote = Some("192.0.2.8:12345".parse().expect("peer"));
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {token}").parse().expect("auth"));
+        headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
+        let mut network = crate::http::network::identity(&headers, remote).expect("network");
+        network.user_id = Some(user.id);
+        network.credential_generation = Some(plurx_core::domain::CredentialGeneration::derive(user.id, user.created_at, &user.password_hash));
+        let file = fixture.store.get_file(fixture.file_id()).await.expect("file query").expect("file");
+        let source = super::link_receipts::binding(&network, &file, [7;32], CandidateRoute::Encode).await.expect("source identity");
+        fixture.state.link_receipts.register(SessionBinding {source, session:session.clone(), incarnation:route.incarnation_id.clone(), owner_epoch:route.owner_epoch});
+        let (nonce, eof) = fixture.state.link_receipts.mint(&session, "seg00001.m4s", "incumbent-etag", 4_000_000, Some(4000), true).expect("body");
+        let sample = ClientLinkSample {receipt:nonce.clone(), object_name:"seg00001.m4s".into(), etag:"incumbent-etag".into(), body_bytes:4_000_000,
+            body_duration_ms:1000, age_ms:0, network_load:Some(true), from_cache:Some(false), producer_paced:Some(false),
+            cause:plurx_core::domain::NetworkPriorCause::Link, negative:false, media_duration_ms:Some(4000), presenting:true, stalled:false, runway_ms:12000};
+        headers.insert("X-Plurx-Link-Receipt", nonce.parse().expect("nonce"));
+        let http = super::prepared_link::authenticate(&fixture.state, &headers, remote,
+            std::time::Instant::now()+Duration::from_millis(100)).await.expect("ordinary auth");
+        let observation = super::prepared_link::capture(&fixture.state, &route, &control,
+            crate::playback_control::ControlDisposition::Accepted, Some(http)).await.expect("accepted actor");
+        let digest = [12;32];
+        let candidate = QualityCandidate {id:CandidateId::for_recipe_digest(digest), recipe_digest:digest, route:CandidateRoute::Remux,
+            normalized_geometry:true, width:3840, height:2160, target_height:2160, average_bps:Some(90_000_000), peak_bps:None,
+            grade:plurx_core::transcode::OutputGrade::Sdr, decoder_compatible:true, complete_cache:false, sustainable:true};
+        let mut request = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json).expect("recipe").request;
+        request.candidate_context = Some(crate::transcode::CandidateExecutionContext {retained_output:None, owner_node_id:Some(fixture.state.node_id.clone()),
+            candidate_id:candidate.id, recipe_digest:digest, normalized_geometry:true, grade:candidate.grade, profile:None});
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &candidate).await.is_none(), "header without EOF cannot start a trial");
+        eof(std::time::Instant::now(), unix_ms());
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&session), &sample).await.is_some());
+        let proof = observation.proposed_proof(&fixture.state, &file, &mut request, &candidate).await.expect("authenticated unknown-cost copy trial");
+        assert!(request.candidate_context.as_ref().expect("context").retained_output.is_none(), "trial never invents retained full output");
+        let mut known = candidate.clone(); known.peak_bps = Some(90_000_000);
+        assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &known).await.is_none(), "known cost cannot become unknown trial");
+        let staged = uuid::Uuid::new_v4().to_string();
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let deadline = unix_ms()+15000;
+        assert!(observation.gate.stage_preparation_for_owner(incarnation.clone(), control.generation.clone(), deadline,
+            i64::try_from(control.control_epoch).expect("epoch"), Some(control.selection.desired().digest())).await);
+        let activation = plurx_core::domain::MediaSessionActivation {incarnation_id:incarnation.clone(), session_id:staged.clone(), user_id:user.id,
+            playback_id:playback, recovery_epoch:String::new(), expected_predecessor_incarnation_id:None, fence_predecessor:false,
+            request_id:None, request_fingerprint:"a".repeat(64), owner_node_id:fixture.state.node_id.clone(), recipe_json:"{}".into(), response_json:"{}".into(),
+            publication_ready_at_ms:plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED, media_origin_ms:0, now_ms:unix_ms(), lease_expires_at_ms:deadline, expected_desired_revision:None};
+        assert!(fixture.store.activate_media_session(&activation).await.expect("stage activation").is_some());
+        proof.register(&fixture.state, &staged, &incarnation, deadline, tokio_util::sync::CancellationToken::new()).await;
+        let (own_nonce, own_eof) = fixture.state.link_receipts.mint(&staged, "seg00002.m4s", "own-etag", 4096, Some(2000), true).expect("registered trial body");
+        let own = ClientLinkSample {receipt:own_nonce, object_name:"seg00002.m4s".into(), etag:"own-etag".into(), body_bytes:4096, media_duration_ms:Some(2000), ..sample};
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &own).await.is_none());
+        own_eof(std::time::Instant::now(), unix_ms());
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &own).await.is_some(), "trial acquires its own authenticated body");
+        let (late_nonce, late_eof) = fixture.state.link_receipts.mint(&staged, "seg00003.m4s", "late-etag", 4096, Some(2000), true).expect("late body");
+        late_eof(std::time::Instant::now(), unix_ms());
+        let late = ClientLinkSample {receipt:late_nonce, object_name:"seg00003.m4s".into(), etag:"late-etag".into(), ..own};
+        assert!(observation.gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(control.control_epoch).expect("epoch")).await);
+        assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &late).await.is_none(), "aborted trial cannot claim a late completed body");
+    }
+
+    #[tokio::test]
     async fn a05_staged_intake_uses_own_eof_and_refuses_aborted_actor_without_claim() {
         a05_staged_intake_fixture(0).await;
     }
@@ -3228,6 +3297,7 @@
             stage: gate.staged_observation_is_current(fence.clone(), incarnation.clone(), deadline).await.expect("A05 prepared fixture"),
             gate: Arc::clone(&gate), fence, incarnation: incarnation.clone(), owner_epoch: 1,
             deadline_unix_ms: deadline, cancelled: tokio_util::sync::CancellationToken::new(),
+            trial_deadline: None,
         });
         let (nonce, eof) = fixture.state.link_receipts.mint(&staged, "seg00001.m4s", "etag", 4096, Some(4000), true).expect("A05 prepared fixture");
         let mut sample = ClientLinkSample { receipt: nonce, object_name: "seg00001.m4s".into(), etag: "etag".into(),

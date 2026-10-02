@@ -1442,3 +1442,73 @@ pressure. Missing active timing is Unknown. Successor production, Link cost,
 decoder and continuity qualification remain independent. This source task
 does not close unknown-cost original trials, natural-boundary integration,
 typed recovery disposition or physical A-05 acceptance.
+
+### 9.13 A-05 unknown whole-output source-copy trial (2026-10-01)
+
+The server/web continuation separates private `QualifiedOutput` authority from
+`UnknownOriginalTrial`. A trial requires the exact compatible source-copy
+recipe, local serving owner, independently authenticated fresh incumbent
+receipt and live accepted actor. The current HLS stage resolver implements
+that original-video route as `Remux`/`Copy`; unstaged `Original` file delivery
+and arbitrary encodes do not acquire this exception. A known peak or known
+qualified complete-output cost cannot fall through to the unknown branch.
+Exact retained Link negatives still exclude a candidate. Compatible catalog
+exposure is distinct from a warm recommendation; a trial never populates
+`retained_output` or claims complete-full-mux qualification.
+
+The browser's staged loader binds each completed unpaced network response to
+its item, pipeline, stage object, session, candidate and full recipe digest.
+Its original trial requires distinct nonce/ETag-bearing segment objects with
+server-issued immutable-plan advertised durations, nonoverlapping media intervals, at least two
+segments and two seconds of media within the 15-second deadline. Conservative
+actual transfer must exceed 1.8 times their largest observed wire cost. That
+maximum remains empirical segment evidence, never a whole-title peak or
+reusable output sidecar. The qualified complete-output branch keeps its 1.8
+margin. Existing incumbent runway/pressure, preparation cancellation,
+five-minute failure backoff, presentation continuity and exposure rollback
+remain owned by the current controller.
+
+The old `aa0d6382b` browser source rejects the new focused trial regression;
+the changed browser source passes it once. The independent captured item/digest
+regression and both new authenticated-stage/catalog Rust regressions each pass
+once. Pinned Rust 1.97.1 all-target source checking passes. Final committed-tree
+checks, native composition, one formal review and the current effort gate
+remain pending at this author checkpoint.
+This records source work, not physical restoration, D3 or A-05 completion.
+
+**Native interval checkpoint:** Apple cannot infer segment starts from metric
+event `mediaTime`. Its stage captures the exact item, player, session and full
+recipe, and makes one bounded lookup of that item's actual media-playlist URL.
+Only a complete same-origin immutable VOD playlist with canonical unique
+`seg%05d.m4s` objects supplies advertised `EXTINF` intervals. The lookup refuses
+redirects, ranges, discontinuities, aliases, partial bodies, more than 1 MiB or
+8192 entries, and completion after the original observation deadline. Header
+duration agrees within outward-millisecond/six-decimal rounding; neither value
+claims packet-exact duration. Android retains actual completed-load start/end
+intervals and the exact staged pipeline. Duplicate objects, receipts, ETags,
+overlap and stale attachment evidence cannot qualify the empirical margin.
+Missing proof retains the healthy incumbent without reopening or renewing a
+deadline. The same task's native boundary implementation uses the existing
+accepted preparation at the final coalesced viewer seek target, including a
+backward target, or a resume after an attachment-bound explicit viewer pause
+of at least 60 seconds. It never calls ordinary optional create: predecessor
+activation can retire the healthy session before the response is returned.
+The optional part borrows the original transaction's remaining budget, capped
+at eight seconds from its first entry, and reserves two seconds for that same
+healthy seek/resume. Refusal, missing proof or supersession cannot create a
+second quality operation or renew the fallback deadline. Apple prepares the
+exact staged item's native/audio selection before switching. Android intercepts
+current MediaSession transport before delegate mutation through a private
+forwarding wrapper; a second explicit Pause still revokes an optional resume
+while the delegate is held paused, and its SDK consequence is not a new viewer
+edge. Stale wrappers cannot issue transport intent for a new attachment.
+
+Boundary admission still requires current authenticated completed-body proof,
+decoder/recipe/selection ownership, incumbent runway, exact staged body proof
+and presentation continuity. Only ordinary mid-play quiet/cliff eligibility is
+not used to pin the viewer boundary after a cliff expires. Ordinary mid-play
+45-second headroom, 60-second quiet, 90-second original-EOF cliff, 60-second
+evaluation cadence and five-minute failure backoff remain unchanged. Current
+native source/test compilation and the two new focused boundary cases are being
+qualified before the single coherent review. This remains source work, not
+device startup-cost acceptance, shaped-network restoration or A-05 completion.
