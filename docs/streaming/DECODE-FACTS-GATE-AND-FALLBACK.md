@@ -1,6 +1,6 @@
 # Decode-fact gate and fallback — measure the lane, then classify what falls out of it
 
-**Status:** M0–M2 merged (PR #424) · M0 and M1 owned-lab evidence recorded
+**Status:** open · M0–M2 merged (PR #424) · M0 and M1 owned-lab evidence recorded
 2026-10-02 on lab3 (§5.7) · M3 not opened, on a denominator decision for
 Paul (§5.4) · M4 closed with M3 · media1 reading still owed · **Executes:** C13 (§3.3.2) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md),

@@ -1,6 +1,6 @@
 # FFmpeg spawn unification — one producer spawn path, one progress classifier
 
-**Status:** M1/M2 merged (PR #415) · M3 PASS in the owned lab on lab3,
+**Status:** open · M1/M2 merged (PR #415) · M3 PASS in the owned lab on lab3,
 2026-10-02, for VOD encode, VOD burn, VOD copy and progressive remux
 (§5.3.1); rolling HLS not measurable from library files on this build; the
 media1 reading is still owed ·
