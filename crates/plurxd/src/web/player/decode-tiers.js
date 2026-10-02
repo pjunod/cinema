@@ -176,6 +176,31 @@ async function hevcTiersMediaCapabilities(){
   }
   return answered?{passed, pqPassed}:null;
 }
+// Channels this browser's audio output reaches. The destination of an
+// AudioContext is the only public answer; the context is closed again at once
+// so a page that never plays sound keeps no audio device open. Unknown is
+// stereo, never a guessed surround claim.
+function browserOutputChannels(){
+  try{
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) return 2;
+    const context=new Ctx();
+    const channels=Number(context.destination&&context.destination.maxChannelCount);
+    try{ const closing=context.close(); if(closing&&closing.catch) closing.catch(()=>{}); }catch(e){}
+    return Number.isFinite(channels)&&channels>0?channels:2;
+  }catch(e){ return 2; }
+}
+// The route claim the server negotiates audio from (AUDIO-RESOLVED-
+// INDEPENDENTLY.md §3.1). A browser decodes every codec it lists itself and
+// never passes a bitstream through, so each decoded codec reaches exactly the
+// output's channel count, and the browser resamples anything it decodes. Only
+// codecs the server's negotiation understands are claimed.
+function browserAudioSinks(acodec, outputChannels){
+  const raw=Math.floor(Number(outputChannels));
+  const channels=Number.isFinite(raw)?Math.min(8,Math.max(2,raw)):2;
+  return String(acodec||"").split(",").filter(codec=>["aac","mp3","flac","ac3","eac3"].includes(codec))
+    .map(codec=>({codec, max_channels:channels, passthrough:false, sample_rates_hz:[44100,48000]}));
+}
 function buildPlayCaps(hevc){
   let v=null; try{ v=document.createElement("video"); }catch(e){}
   const can=t=>{ try{ return !!v && v.canPlayType(t)!==""; }catch(e){ return false; } };
@@ -229,7 +254,8 @@ function buildPlayCaps(hevc){
     // H.264 and AV1 too. Absent is today's behaviour and stays the answer for
     // every browser that was never going to be sent HEVC anyway.
     maxheight:hevc.maxheight||null,
-    hdr10t:(hevc.pq10&&hdrDisplay)?1:0};
+    hdr10t:(hevc.pq10&&hdrDisplay)?1:0,
+    audioSinks:browserAudioSinks(ac.join(","), browserOutputChannels())};
 }
 // The boot-time answer, from the synchronous ladder so that CAPS_Q exists
 // before anything can ask for it. MediaCapabilities refines it below.
@@ -345,6 +371,8 @@ function capsDocument(c, limits){
     // Only when this browser has one; absent is not a claim.
     ...(c.dv?{dv_transport:"progressive"}:{}),
     display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
+    // Absent is the legacy audio contract, so an empty claim is not sent.
+    ...(Array.isArray(c.audioSinks)&&c.audioSinks.length?{audio_sinks:c.audioSinks.slice(0,16)}:{}),
     ...(c.maxheight?{max_height:c.maxheight}:{}),
     // The identity is the MAP KEY in localStorage, so the entries have to be
     // rebuilt with it inlined — the obvious `Object.values()` would send a
