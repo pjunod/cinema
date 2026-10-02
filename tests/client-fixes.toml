@@ -3616,7 +3616,7 @@ test_anchor = "fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachm
 [[fixes]]
 id = "android.successor-audio-focus-owner"
 commits = ["32053528"]
-source = "clients/android/app/src/main/java/tv/plurx/app/player/PlurxPlayerBuilder.kt"
-source_anchor = "internal fun handlesAudioFocus(role: PlayerRole): Boolean = role != PlayerRole.Successor"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
-test_anchor = "aPreparedSuccessorNeverHoldsAudioFocusBeforeItsSwitch"
+test_anchor = "everySwapSiteMovesFocusToTheAudiblePlayer"
