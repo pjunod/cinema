@@ -66,7 +66,7 @@ pub struct GlobalSchedule {
 /// from a backup taken on another machine — would otherwise park the job for as
 /// long as the jump was large. Treating it as due costs one extra scan and
 /// unsticks the schedule, which is the better failure.
-fn due(now: i64, last: Option<i64>, interval_mins: i64) -> bool {
+pub(crate) fn due(now: i64, last: Option<i64>, interval_mins: i64) -> bool {
     if interval_mins <= 0 {
         return false;
     }
@@ -129,6 +129,19 @@ pub fn due_jobs(now: i64, libraries: &[Library], global: GlobalSchedule) -> Vec<
 mod tests {
     use super::*;
     use plurx_core::domain::LibraryKind;
+
+    #[test]
+    fn cleanup_interval_does_not_require_discovery_progress() {
+        let success = 10_000;
+        for minute in 0..15 {
+            assert!(!due(success + minute * 60, Some(success), 15));
+            assert!(
+                due(success + minute * 60, None, 15),
+                "busy discovery stays due"
+            );
+        }
+        assert!(due(success + 15 * 60, Some(success), 15));
+    }
 
     fn lib(
         id: i64,

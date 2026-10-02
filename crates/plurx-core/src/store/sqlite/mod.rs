@@ -1183,6 +1183,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
+    // v88: bounded fragment retention probes, including empty result keys.
+    super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2910,9 +2912,10 @@ mod tests {
         // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
         // resource claims, subtitle reconciliation and bounded job history;
         // v86 compacts settled receipts under waiter pressure; v87 adds
-        // expiring viewer interests through analysis and artifacts.
+        // expiring viewer interests through analysis and artifacts; v88 adds the
+        // unconditional result-key/target/force index for bounded cleanup.
         assert_eq!(
-            version, 87,
+            version, 88,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

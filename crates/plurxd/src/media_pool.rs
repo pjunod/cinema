@@ -215,6 +215,12 @@ pub(crate) struct WorkerQualityCandidate {
     pub candidate: plurx_core::playback::candidate::QualityCandidate,
 }
 
+/// Evidence from the existing catalogue boundary, never a decoder verdict.
+pub(crate) struct QualityCatalogResult {
+    pub candidates: Vec<WorkerQualityCandidate>,
+    pub authority_refused: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct MediaOfferRequest {
     pub protocol_version: i64,
@@ -876,8 +882,19 @@ impl MediaPool {
         state: &AppState,
         request: QualityCatalogRequest,
     ) -> Vec<WorkerQualityCandidate> {
+        self.quality_catalog(state, request).await.candidates
+    }
+
+    pub(crate) async fn quality_catalog(
+        &self,
+        state: &AppState,
+        request: QualityCatalogRequest,
+    ) -> QualityCatalogResult {
         if !request.is_valid() {
-            return Vec::new();
+            return QualityCatalogResult {
+                candidates: Vec::new(),
+                authority_refused: false,
+            };
         }
         let deadline = deadline_after(QUALITY_CATALOG_DEADLINE);
         let local = tokio::time::timeout_at(deadline, local_quality_candidates(state, &request));
@@ -888,12 +905,12 @@ impl MediaPool {
                 .and_then(Result::ok)
                 .unwrap_or_default();
             let Ok(body) = serde_json::to_vec(&request) else {
-                return Vec::new();
+                return (Vec::new(), false);
             };
             if body.len() > MAX_REQUEST_BYTES {
-                return Vec::new();
+                return (Vec::new(), false);
             }
-            stream::iter(
+            let results = stream::iter(
                 peers
                     .into_iter()
                     .filter(|peer| {
@@ -919,7 +936,14 @@ impl MediaPool {
                                 .await
                                 .ok()?;
                             if !response.status.is_success() {
-                                return None;
+                                let authority =
+                                    serde_json::from_slice::<serde_json::Value>(&response.body)
+                                        .ok()
+                                        .is_some_and(|body| {
+                                            body.get("code").and_then(|code| code.as_str())
+                                                == Some("serving_fenced")
+                                        });
+                                return Some((Vec::new(), authority));
                             }
                             let candidates: Vec<WorkerQualityCandidate> =
                                 serde_json::from_slice(&response.body).ok()?;
@@ -930,22 +954,32 @@ impl MediaPool {
                                         && (1..=16_384).contains(&entry.candidate.width)
                                         && (1..=16_384).contains(&entry.candidate.height)
                                 }))
-                            .then_some(candidates)
+                            .then_some((candidates, false))
                         }
                     }),
             )
             .buffer_unordered(8)
             .filter_map(|result| async move { result })
             .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
+            .await;
+            let authority_refused = results.iter().any(|(_, refused)| *refused);
+            (
+                results
+                    .into_iter()
+                    .flat_map(|(rows, _)| rows)
+                    .collect::<Vec<_>>(),
+                authority_refused,
+            )
         };
         let (local, remote) = tokio::join!(local, remote);
         let mut candidates = local.unwrap_or_default();
-        candidates.extend(remote);
-        candidates
+        let authority_refused =
+            remote.1 || (candidates.is_empty() && !state.serving.accepting_new_media().await);
+        candidates.extend(remote.0);
+        QualityCatalogResult {
+            candidates,
+            authority_refused,
+        }
     }
 
     pub(crate) async fn offers(

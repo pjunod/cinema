@@ -496,7 +496,10 @@ function startPlaybackControl(v,p,bootstrap){
         // executed; this is where it is armed. It outlives the reporter and a
         // same-title session replacement, but not the lease.
         if(response&&response.action&&response.action.type==="terminal"){
-          p.sessionTerminal={sessionId:p.sessionId,attachment,reason:response.action.code||null};
+          const previous=p.sessionTerminal;
+          const authority=previous&&previous.sessionId===p.sessionId&&previous.attachment===attachment
+            &&['serving_fenced','authority_fenced'].includes(previous.reason);
+          p.sessionTerminal=authority?previous:{sessionId:p.sessionId,attachment,reason:response.action.code||null};
           p.controlVerdict=response.action;
           p.controlVerdictExpiresAt=performance.now()+bootstrap.lease_timeout_ms;
         }
@@ -516,7 +519,10 @@ function startPlaybackControl(v,p,bootstrap){
           const now=Date.now(), message=String(error.message||error);
           p.controlLastError={at:now,message};
           if(Number(error.status)===410){
-            p.sessionTerminal={sessionId:p.sessionId,attachment,reason:error.terminalReason||null};
+            const previous=p.sessionTerminal;
+            const authority=previous&&previous.sessionId===p.sessionId&&previous.attachment===attachment
+              &&['serving_fenced','authority_fenced'].includes(previous.reason);
+            p.sessionTerminal=authority?previous:{sessionId:p.sessionId,attachment,reason:error.terminalReason||null};
           }
           // The paused presentation was retired: Play must open the one
           // replacement rather than resume a loader into a dead playlist.

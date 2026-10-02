@@ -89,7 +89,7 @@
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
- * @property {{sessionId:string|null,attachment:any,reason:string|null}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
+ * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
  * @property {any} [transportCommand] original transport command awaiting an actual element transition
  * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
@@ -220,6 +220,7 @@
  * @property {number|null} _seekPreview    seek-bar hover position, seconds
  * @property {number|null} _seekPending    keyboard seek target, seconds
  * @property {boolean} [_seekDragging]
+ * @property {number} [_streamProbeOrdinal] sequence of same-attachment diagnostic probes
  * @property {number} [_seekToken]         generation of the latest seek
  * @property {string} _lastFocusedControl  the control focus returns to
  * @property {any} _opener                 the element that opened the player
@@ -372,7 +373,16 @@ function noteStreamFailure(status, body, evidence){
     &&previous.resource===owned.resource
     &&previous.request_ordinal!=null&&owned.request_ordinal!=null
     &&Number(previous.request_ordinal||0)>Number(owned.request_ordinal||0)) return previous;
+  // Retirement is an attachment fact, not a retryable probe opinion. Later
+  // generic refusals cannot rename its cause while the same session is bound.
+  if(previous&&previous.code==='serving_fenced'&&previous.attachment
+    &&previous.attachment===owned.attachment) return previous;
   Object.assign(parsed,{at:Date.now()},owned);
+  if(parsed.code==='serving_fenced'&&owned.attachment&&typeof PLAYER!=='undefined'
+    &&PLAYER&&PLAYER.mediaAttachment===owned.attachment){
+    PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:owned.attachment,
+      reason:'serving_fenced',message:parsed.message};
+  }
   STREAM_FAILURE=parsed;
   return parsed;
 }
@@ -388,6 +398,13 @@ function clearStreamFailureFor(hls){
     clearStreamFailure();
 }
 function currentStreamFailureOverlay(){
+  const terminal=PLAYER&&PLAYER.sessionTerminal;
+  if(terminal&&terminal.attachment===PLAYER.mediaAttachment
+    &&terminal.sessionId===PLAYER.sessionId
+    &&['serving_fenced','authority_fenced'].includes(terminal.reason)) return {
+      title:'The server retired this stream.',
+      detail:terminal.message||'Playback authority was lost. Your place is saved; reopen the stream to continue.',
+      retryable:false};
   if(STREAM_FAILURE&&STREAM_FAILURE.attachment&&PLAYER
     &&STREAM_FAILURE.attachment!==PLAYER.mediaAttachment) return null;
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());

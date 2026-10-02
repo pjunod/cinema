@@ -2459,35 +2459,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 params![older_than_ms, limit],
             )?;
             let candidates = {
-                let mut statement = transaction.prepare(
-                    "SELECT j.cache_key
-                       FROM cluster_fragment_index_jobs j
-                      WHERE (j.state IN ('ready', 'cancelled') OR (
-                        j.state = 'failed' AND (
-                          NOT EXISTS (SELECT 1 FROM files current_file
-                            WHERE current_file.id = j.file_id
-                              AND current_file.size = j.source_size
-                              AND current_file.mtime = j.source_mtime)
-                          OR EXISTS (SELECT 1 FROM analysis_requests request
-                            WHERE request.result_cache_key = j.cache_key
-                              AND request.target_node_id = j.target_node_id
-                              AND request.force_rebuild = 1))))
-                        AND j.updated_at_ms < ?1
-                        AND NOT EXISTS (
-                          SELECT 1 FROM cluster_fragment_index_jobs active_job
-                           WHERE active_job.cache_key = j.cache_key
-                             AND (active_job.state IN ('queued', 'running')
-                               OR active_job.updated_at_ms >= ?1))
-                        AND NOT EXISTS (
-                          SELECT 1 FROM analysis_requests active_request
-                           WHERE active_request.result_cache_key = j.cache_key
-                             AND active_request.state IN ('queued', 'running', 'submitted'))
-                        AND NOT EXISTS (
-                          SELECT 1 FROM cluster_fragment_index_locations l
-                           WHERE l.cache_key = j.cache_key)
-                      GROUP BY j.cache_key
-                      ORDER BY MIN(j.updated_at_ms), j.cache_key LIMIT ?2",
-                )?;
+                let mut statement = transaction
+                    .prepare(crate::store::fragment_index_cluster::FRAGMENT_PRUNE_CANDIDATES)?;
                 let rows = statement.query_map(params![older_than_ms, limit], |row| row.get(0))?;
                 rows.collect::<Result<Vec<String>, _>>()?
             };
@@ -2532,38 +2505,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 }
             }
             transaction.execute(
-                "DELETE FROM cluster_fragment_index_jobs
-                  WHERE (cache_key, target_node_id) IN (
-                    SELECT terminal_job.cache_key, terminal_job.target_node_id
-                      FROM cluster_fragment_index_jobs terminal_job
-                     WHERE (terminal_job.state IN ('ready', 'cancelled') OR (
-                       terminal_job.state = 'failed' AND (
-                         NOT EXISTS (SELECT 1 FROM files current_file
-                           WHERE current_file.id = terminal_job.file_id
-                             AND current_file.size = terminal_job.source_size
-                             AND current_file.mtime = terminal_job.source_mtime)
-                         OR EXISTS (SELECT 1 FROM analysis_requests request
-                           WHERE request.result_cache_key = terminal_job.cache_key
-                             AND request.target_node_id = terminal_job.target_node_id
-                             AND request.force_rebuild = 1))))
-                       AND terminal_job.updated_at_ms < ?1
-                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
-                         WHERE artifact.cache_key = terminal_job.cache_key)
-                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
-                         WHERE head.generation_cache_key = terminal_job.cache_key)
-                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations location
-                         WHERE location.cache_key = terminal_job.cache_key)
-                       AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs active_job
-                         WHERE active_job.cache_key = terminal_job.cache_key
-                           AND (active_job.state IN ('queued', 'running')
-                             OR active_job.updated_at_ms >= ?1))
-                       AND NOT EXISTS (SELECT 1 FROM analysis_requests active_request
-                         WHERE active_request.result_cache_key = terminal_job.cache_key
-                           AND active_request.state IN ('queued', 'running', 'submitted'))
-                     ORDER BY terminal_job.updated_at_ms, terminal_job.cache_key,
-                              terminal_job.target_node_id
-                     LIMIT ?2
-                  )",
+                crate::store::fragment_index_cluster::FRAGMENT_PRUNE_TERMINAL_JOBS,
                 params![older_than_ms, limit],
             )?;
             transaction.commit()?;
@@ -2606,6 +2548,26 @@ mod tests {
         analysis_backoff_ms, cluster_fragment_index_generation_key,
     };
     use crate::store::SettingsStore;
+
+    #[test]
+    fn full_migration_chain_bounds_both_fragment_prune_statements() {
+        // Prefixes cross both analysis_requests rebuilds and the pre-index
+        // upgrade. Never substitute a hand-written table fixture here.
+        for prefix in [0, 40, 61, super::super::MIGRATIONS.len() - 1] {
+            let conn = Connection::open_in_memory().expect("migration fixture");
+            for migration in super::super::MIGRATIONS.iter().take(prefix) {
+                conn.execute_batch(migration).expect("historical schema");
+            }
+            for migration in super::super::MIGRATIONS.iter().skip(prefix) {
+                conn.execute_batch(migration).expect("remaining migration");
+            }
+            crate::store::fragment_prune_tests::assert_plans_and_work(
+                &conn,
+                crate::store::FRAGMENT_PRUNE_CANDIDATES,
+                crate::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+            );
+        }
+    }
 
     async fn seed_files(store: &SqliteStore) {
         store
@@ -2658,7 +2620,10 @@ mod tests {
             .await;
             assert!(
                 details.iter().any(|detail| {
-                    detail.contains("analysis_requests_result_history")
+                    // The cleanup index is also a covering result-key/target probe.
+                    // Either index bounds this lookup after the append-only upgrade.
+                    (detail.contains("analysis_requests_result_history")
+                        || detail.contains("analysis_requests_result_target_force"))
                         && detail.contains("result_cache_key=?")
                 }),
                 "{name} must probe standalone jobs by result cache key: {details:?}"

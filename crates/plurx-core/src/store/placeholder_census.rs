@@ -895,7 +895,12 @@ fn is_sqlite_candidate(text: &str) -> bool {
 // Common queue execution removes three legacy prepared/bound SQL sites.
 // The new bridge uses one JSON argument rather than per-field binding lists.
 // E2 retires the old separately prepared manifest-candidate query.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 92;
+// 92 -> 91: the separately prepared fragment-prune candidate SELECT moved
+// unchanged to the shared FRAGMENT_PRUNE_CANDIDATES constant. Its two values
+// remain bound by query_map; full-schema contracts execute that exact constant
+// on both backends. The terminal DELETE previously bound inline and contributed
+// no unchecked site, so it does not change this count.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
