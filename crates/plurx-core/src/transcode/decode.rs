@@ -2695,9 +2695,13 @@ impl ResolvedTranscode {
                     feed("audio_sample_rate", b"source");
                 }
             }
-            // No concrete pan was emitted: the measurement requirement is
-            // advisory metadata, not invented byte-changing filter semantics.
-            feed("audio_downmix", b"default");
+            // The incumbent fold (no filter) keeps its historical spelling so
+            // no existing key moves; a measured fold feeds its exact filter
+            // chain, so any change to its gains or limiter is a new key.
+            match audio.downmix_filter() {
+                Some(filter) => feed("audio_downmix", filter.as_bytes()),
+                None => feed("audio_downmix", b"default"),
+            }
         }
         feed(
             "audio_offset_ms",
