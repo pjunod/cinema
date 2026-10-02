@@ -153,6 +153,26 @@ impl AcceptedObservation {
         {
             return None;
         }
+        if request.automatic {
+            let bound = super::candidate_recovery::incumbent(
+                state,
+                &self.http.network,
+                file,
+                &self.playback,
+                Some(&self.session),
+            )
+            .await?;
+            let memory = tokio::time::timeout(
+                Duration::from_millis(100),
+                state.store.candidate_recovery_memory(&bound.scope),
+            )
+            .await
+            .ok()?
+            .ok()?;
+            if memory.rejected_recipes.contains(&candidate.recipe_digest) {
+                return None;
+            }
+        }
         let cost = state
             .transcode
             .measured_candidate_cost(candidate, request, None)
