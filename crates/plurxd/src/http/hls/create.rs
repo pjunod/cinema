@@ -205,6 +205,7 @@ impl CreateSession {
             .transport
             .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             file_id,
             playback_id: self.playback_id,
@@ -1190,8 +1191,6 @@ pub(crate) async fn resolve_plan(
             return Err(ApiError::BadRequest("candidate_route_disabled".to_owned()));
         }
         if enabled
-            && (caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
-                || requested.is_some())
             && (requested.is_some()
                 || body.height == Some(1440)
                 || (body.quality_auto == Some(true) && body.copy != Some(true)))
@@ -1341,7 +1340,6 @@ pub(crate) async fn resolve_plan(
                         && context.owner_node_id.as_deref() == Some(entry.node_id.as_str())
                 })
                 .and_then(|entry| entry.binding.clone());
-            context.quality_catalog = Some(catalogue_result.clone());
             candidate_context = Some(Box::new(context));
             retained_catalog = Some(catalogue_result);
         }
@@ -1374,6 +1372,9 @@ pub(crate) async fn resolve_plan(
     }
     let mut request = body.into_request(file_id, height);
     request.candidate_context = candidate_context;
+    request.quality_catalog = retained_catalog
+        .as_ref()
+        .map(|catalog| Arc::new(catalog.clone()));
     if request
         .request_id
         .as_ref()
@@ -1786,7 +1787,7 @@ async fn create_with_purpose_inner(
     )
     .await?;
     let mut quality_catalog = resolved.quality_catalog;
-    let request = resolved.request;
+    let mut request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
@@ -2045,6 +2046,9 @@ async fn create_with_purpose_inner(
             );
         }
     }
+    request.quality_catalog = quality_catalog
+        .as_ref()
+        .map(|catalog| Arc::new(catalog.clone()));
     let quality_owners: std::collections::HashSet<_> = if candidate_decoder_caps.is_some() {
         quality_catalog
             .as_ref()
@@ -2316,7 +2320,7 @@ async fn create_with_purpose_inner(
                 recovery_epoch: recovery_epoch.clone(),
             };
             let worker_serving_authority = ingress_serving_authority.clone();
-            let mut start_task = tokio::spawn(async move {
+            let mut start_task = crate::media_pool::spawn_create_worker(async move {
                 let started = transcode
                     .create_cluster_session(
                         &worker_request,

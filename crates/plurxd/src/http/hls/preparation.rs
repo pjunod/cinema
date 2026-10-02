@@ -1065,6 +1065,29 @@ pub(super) async fn plan_preparation_candidate(
     // the incumbent use rolling has not changed merely because its quality or
     // tracks did. VOD stays VOD and rolling stays rolling.
     resolved.presentation = predecessor.request.presentation;
+    if resolved.quality_catalog.is_none()
+        && predecessor.decoder_caps.is_some()
+        && caps.video.len() <= plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
+    {
+        let catalog = state
+            .media_pool
+            .quality_catalog(
+                state,
+                crate::media_pool::QualityCatalogRequest {
+                    file_id: source.id,
+                    source_size: source.size,
+                    source_mtime: source.mtime,
+                    caps: caps.clone(),
+                    copy_contract: resolved.kind.copy_contract(),
+                    audio_index: resolved.audio_index,
+                    audio_offset_ms: resolved.audio_offset_ms,
+                    subtitle_burn: resolved.subtitle_burn,
+                    presentation: resolved.presentation,
+                },
+            )
+            .await;
+        resolved.quality_catalog = Some(Arc::new(catalog));
+    }
     Ok(resolved)
 }
 
@@ -1565,22 +1588,26 @@ pub(super) async fn stage_prepared_successor_with_prime(
     // on the bootstrap being present, so a row without it answers 404
     // `session_gone` on the successor's first exchange after commit.
     let response = StartResponse {
-        quality_catalog_status: candidate.candidate_context.as_ref()
-            .and_then(|context| context.quality_catalog.as_ref())
-            .map(|catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes})),
+        quality_catalog_status: candidate.quality_catalog.as_ref().map(
+            |catalog| serde_json::json!({"complete": catalog.complete, "causes": catalog.causes}),
+        ),
         display_aware_auto_protocol: predecessor
             .decoder_caps
             .as_ref()
+            .filter(|_| candidate.quality_catalog.is_some())
             .map(|_| "route-v1".to_owned()),
         quality_candidate_id: candidate
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        quality_candidates: candidate.candidate_context.as_ref()
-            .and_then(|context| context.quality_catalog.as_ref())
-            .map(|catalog| catalog.candidates.iter()
+        quality_candidates: candidate.quality_catalog.as_ref().map(|catalog| {
+            catalog
+                .candidates
+                .iter()
                 .filter(|entry| entry.dispatch_supported && !entry.partial)
-                .map(|entry| entry.candidate.clone()).collect()),
+                .map(|entry| entry.candidate.clone())
+                .collect()
+        }),
         session_id: staged_session_id.clone(),
         playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
         duration_ms: source.duration_ms,

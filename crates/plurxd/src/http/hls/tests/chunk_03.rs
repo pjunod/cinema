@@ -1942,6 +1942,7 @@
         // explicit clear the successor would stage claiming to be a reopen of
         // a session that is still playing.
         let candidate = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             previous_session_id: Some(uuid::Uuid::new_v4().to_string()),
             reopen_reason: Some(crate::transcode::ReopenReason::Stall),

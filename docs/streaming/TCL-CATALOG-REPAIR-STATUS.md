@@ -24,7 +24,7 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 | Android compaction and shared contract | done | No legacy blanket 400 |
 | Snapshot, generation and budgets | implemented | Coherent statement, transactional generation, enclosing deadline |
 | Partial selection through existing owners | implemented | Validated local Auto rows; typed incomplete discovery |
-| Review and fast lane | ready for review | Complete batched diff; no tests claimed yet |
+| Review and fast lane | findings addressed; compiling | Five findings fixed; tests not yet run |
 | Physical TCL/Streamer and cluster timing | outstanding | Exact TCL body/count not captured |
 
 ## 2. Decisions — evidence required before dependent changes
@@ -99,3 +99,28 @@ Review candidate: `56e52c50e` integrates typed outcomes and deadlines;
 `853487d70` integrates current main and the retained-source regression. All
 commits ran the tracked lint/format/Clippy/JavaScript hook. The decoder snapshot
 regression now tests overflow at 65, matching the negotiated shared bound.
+
+Batched review: [Forgejo PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718),
+head `30369ca0c`. Draft defers test allocation until the adversarial review is
+addressed. The desktop attachment tool does not accept this Forgejo URL, so the
+PR and status links remain explicit here. No changes to the original checkout.
+
+## 4. Adversarial review — candidate `30369ca0c`
+
+The final agent review requested changes. Five actionable findings were fixed:
+
+- Apple: add the new code to the actual retry owner, preserving its existing
+  identity, backoff and deadline. Its existing fixture-driven retry test applies.
+- Admission: move planning-binding validation before the shared VOD/live split,
+  after request replay recovery, so local copy and encoded VOD both revalidate.
+- Legacy required discovery: Auto and 1440 retain typed validation. Oversized
+  legacy direct/copy/manual paths keep their ordinary admission.
+- Preparation: keep the one request-local catalog on SessionRequest, independent
+  of selected recipe context, so manual/copy successors replace stale ladders.
+- Accounting: propagate the Store counter and remaining allowance into the
+  owned local worker task; unrelated background reads remain unscoped.
+
+Regressions cover the legacy required/optional distinction, owned worker versus
+background accounting, manual/copy catalog retention, generation invalidation
+through the common producer entry, and audio-dependent follow-up identities.
+These are being compiled; no passing test result is claimed yet.

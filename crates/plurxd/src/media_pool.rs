@@ -330,6 +330,23 @@ impl CreateStartupBudget {
         CREATE_STARTUP_BUDGET.scope(self.clone(), future).await
     }
 }
+/// A local worker is owned past HTTP cancellation, but its critical-path
+/// Store reads and remaining startup allowance still belong to the create.
+pub(crate) fn spawn_create_worker<T: Send + 'static>(
+    future: impl std::future::Future<Output = T> + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    tokio::spawn(async move {
+        let work = plurx_core::store::scope_http_store_operations(counts, future);
+        if let Some(budget) = budget {
+            budget.scope(work).await
+        } else {
+            work.await
+        }
+    })
+}
+
 pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
     let deadline = deadline_after(maximum);
     CREATE_STARTUP_BUDGET
@@ -1129,8 +1146,11 @@ impl MediaPool {
                                     PeerAuthMode::ExactRequest,
                                 )
                                 .await;
-                            let Ok(mut response) = response else {
-                                return QualityCatalogResult::unavailable(CatalogCause::Transport);
+                            let mut response = match response {
+                                Ok(response) => response,
+                                Err(crate::http::peer_transport::PeerTransportError::TimedOut) => return QualityCatalogResult::unavailable(CatalogCause::PeerDeadline),
+                                Err(crate::http::peer_transport::PeerTransportError::InvalidResponse) => return QualityCatalogResult::unavailable(CatalogCause::PeerProtocol),
+                                Err(crate::http::peer_transport::PeerTransportError::Unreachable) => return QualityCatalogResult::unavailable(CatalogCause::Transport),
                             };
                             let legacy = response.status == reqwest::StatusCode::NOT_FOUND;
                             if legacy {

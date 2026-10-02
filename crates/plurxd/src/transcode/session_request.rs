@@ -480,7 +480,6 @@ pub struct SessionRecoveryIdentity {
 /// Never emitted inside the strict legacy request envelope.
 #[derive(Debug, Clone)]
 pub struct CandidateExecutionContext {
-    pub(crate) quality_catalog: Option<crate::media_pool::QualityCatalogResult>,
     pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
     pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
     pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
@@ -496,6 +495,8 @@ pub struct CandidateExecutionContext {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
+    #[serde(skip)]
+    pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
     #[serde(skip)]
     pub candidate_context: Option<Box<CandidateExecutionContext>>,
     pub file_id: i64,

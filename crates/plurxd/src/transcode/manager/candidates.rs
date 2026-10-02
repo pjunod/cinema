@@ -520,7 +520,6 @@ impl TranscodeManager {
 
     pub(crate) fn candidate_context(candidate: &QualityCandidate) -> CandidateExecutionContext {
         CandidateExecutionContext {
-            quality_catalog: None,
             canonical_caps: None,
             selected_candidate: candidate.clone(),
             planning_binding: None,
@@ -677,6 +676,35 @@ mod snapshot_catalog_regression {
                 None,
             )
             .await;
+        let mut context =
+            TranscodeManager::candidate_context(rows.first().expect("healthy catalog control"));
+        context.canonical_caps = Some(caps.clone());
+        context.planning_binding =
+            Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        let mut request = SessionRequest {
+            quality_catalog: None,
+            candidate_context: Some(Box::new(context)),
+            file_id: id,
+            playback_id: "binding-regression".to_owned(),
+            request_id: None,
+            control_sequence: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: Some(1),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            hdr10: false,
+            presentation: Presentation::Vod,
+            block_budget_secs: None,
+            transport: None,
+        };
+        manager
+            .validate_candidate_planning_binding(&request, None)
+            .await
+            .expect("unchanged snapshot is admissible");
         // A later settings revision must not leak into this enumeration.
         store
             .put_setting(keys::HWACCEL, "software")
@@ -686,6 +714,25 @@ mod snapshot_catalog_regression {
             .put_setting(keys::TRANSCODE_RATE_MODE, "quality")
             .await
             .expect("incident fixture operation");
+        for presentation in [Presentation::Vod, Presentation::Live] {
+            for kind in [
+                SessionKind::Transcode { height: 720 },
+                SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: false,
+                    convert_dolby_vision: false,
+                },
+            ] {
+                request.presentation = presentation;
+                request.kind = kind;
+                let error = manager
+                    .create_session(&request, "binding-regression")
+                    .await
+                    .err()
+                    .expect("changed generation must fail before either producer starts");
+                assert!(crate::transcode::is_catalog_input_error(&error), "{error}");
+            }
+        }
         let repeated = manager
             .quality_candidates_from_snapshot_progress(
                 &planning,
@@ -710,6 +757,25 @@ mod snapshot_catalog_regression {
                 "missing incident rung {height}: {heights:?}"
             );
         }
+        let different_audio = manager
+            .quality_candidates_from_snapshot_progress(
+                &planning,
+                &caps,
+                Some(0),
+                0,
+                None,
+                Presentation::Vod,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert!(!different_audio.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| different_audio.iter().all(|other| row.id != other.id)),
+            "an audio change must replace recipe identities"
+        );
         for selected in &rows {
             let followup = manager
                 .quality_candidates_from_snapshot_progress(

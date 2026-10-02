@@ -388,6 +388,37 @@ impl TranscodeManager {
         Ok(Some((successor, permit)))
     }
 
+    pub(crate) async fn validate_candidate_planning_binding(
+        &self,
+        request: &SessionRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), String> {
+        let Some(binding) = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.planning_binding.as_ref())
+        else {
+            return Ok(());
+        };
+        let deadline = deadline
+            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
+        let snapshot = tokio::time::timeout_at(
+            deadline,
+            self.store
+                .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS),
+        )
+        .await
+        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
+        .map_err(|error| catalog_input_error(error.to_string()))?
+        .ok_or_else(|| catalog_input_error("candidate source missing"))?;
+        if *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot) {
+            return Err(catalog_input_error(
+                "candidate source or settings changed before admission",
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_session_inner(
         &self,
@@ -442,6 +473,9 @@ impl TranscodeManager {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
+
+        self.validate_candidate_planning_binding(req, replacement_deadline)
+            .await?;
 
         let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
