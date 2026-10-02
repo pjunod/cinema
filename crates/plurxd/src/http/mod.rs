@@ -42,6 +42,7 @@ pub(crate) mod peer_transport;
 mod pgs_overlay;
 mod photos;
 mod plex;
+pub(crate) mod plex_census;
 pub(crate) mod publication;
 mod reading;
 mod scan;
@@ -608,14 +609,24 @@ const PLEX_OUTCOMES: [&str; 4] = ["ok", "not_found", "unauthorized", "error"];
 /// in the binary that sends façade traffic, on libtest's parallel threads, and
 /// the adversarial review of PR #462 measured that race failing 34 runs in
 /// 400.
+///
+/// `cells` are this process's counts and keep the in-process meaning of
+/// `plurx_plex_requests_total`. `ledger` is the durable census (C-07 §8.5,
+/// [`plex_census`]): restored once at startup from the node's data directory,
+/// it adds what earlier processes counted, so one read of
+/// `plurx_plex_requests_since_census_total` covers every restart since the
+/// census began. A router built without a restore (every test router) has no
+/// ledger and exposes the process counter alone.
 pub(crate) struct PlexCensus {
-    cells: [AtomicU64; PLEX_HANDLERS.len() * PLEX_OUTCOMES.len()],
+    cells: [AtomicU64; plex_census::CELLS],
+    ledger: std::sync::OnceLock<plex_census::CensusLedger>,
 }
 
 impl Default for PlexCensus {
     fn default() -> Self {
         Self {
             cells: std::array::from_fn(|_| AtomicU64::new(0)),
+            ledger: std::sync::OnceLock::new(),
         }
     }
 }
@@ -676,7 +687,55 @@ impl PlexCensus {
                 ));
             }
         }
+        if let Some(ledger) = self.ledger.get() {
+            out.push_str(&ledger.prometheus(&self.cells));
+        }
         out
+    }
+
+    /// Restore the durable census from `data_dir` and write it back at once,
+    /// marked as running, so a crash before the first periodic write still
+    /// leaves a bounded gap. Never fails: an unusable file starts a new census
+    /// with the reason logged. Called once, before the listener accepts; the
+    /// returned start is what was logged, for a caller that wants to assert it.
+    pub(crate) async fn restore_durable(
+        &self,
+        data_dir: &std::path::Path,
+        now_unix_s: u64,
+    ) -> plex_census::CensusStart {
+        let (ledger, start) = plex_census::CensusLedger::restore(data_dir, now_unix_s).await;
+        ledger.log_start(&start);
+        if self.ledger.set(ledger).is_err() {
+            tracing::warn!("the Plex façade census was already restored in this process");
+            return start;
+        }
+        if let Err(error) = self.flush_durable(now_unix_s, false).await {
+            tracing::warn!(
+                %error,
+                "could not write the Plex façade census at startup; the periodic write retries"
+            );
+        }
+        start
+    }
+
+    /// Write the durable census; `stopping` records a clean stop and is final.
+    /// `Ok(false)` when there is no ledger or the clean stop already landed.
+    pub(crate) async fn flush_durable(
+        &self,
+        now_unix_s: u64,
+        stopping: bool,
+    ) -> std::io::Result<bool> {
+        match self.ledger.get() {
+            Some(ledger) => ledger.flush(&self.cells, now_unix_s, stopping).await,
+            None => Ok(false),
+        }
+    }
+
+    #[cfg(test)]
+    fn since_census(&self) -> Option<[u64; plex_census::CELLS]> {
+        self.ledger
+            .get()
+            .map(|ledger| ledger.since_census(&self.cells))
     }
 }
 

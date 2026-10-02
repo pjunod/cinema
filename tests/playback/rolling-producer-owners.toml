@@ -2491,7 +2491,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # `tokio::task::spawn_blocking` for the root's canonicalise-and-list read, the
 # same blocking-I/O shape the scanner's own root fingerprint uses. Awaited by
 # the frame luminance backfill inside its lease; no producer, timer or child.
-expected_occurrences = 717
+# +1 C-07 durable census: `spawn_background_loops` starts
+# `http::plex_census::flush_loop`, a daemon-lifetime loop that writes the
+# node-local census file every 60 s and returns on the existing
+# background_shutdown token. It owns an Arc of the census and nothing else; no
+# producer, process or recovery authority.
+expected_occurrences = 718
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3697,7 +3702,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one preceding timeout, retaining the SAME original two-second deadline.
 # Review64 R4: +7 bounded real-handler/test waits, preserving original receipt
 # deadlines and test-owned cleanup. No production timer or renewed clock age.
-expected_occurrences = 1199
+# +1 C-07 durable census: `plex_census::flush_loop`'s one
+# `tokio::time::interval_at` paces the census file write (60 s, first tick one
+# period after start). It bounds no wait, renews no playback or producer
+# budget, and stops on the background_shutdown token.
+expected_occurrences = 1200
 
 [[module_structures]]
 id = "bare-time-constructor"
