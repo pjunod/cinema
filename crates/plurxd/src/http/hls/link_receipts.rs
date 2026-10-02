@@ -1006,15 +1006,20 @@ mod tests {
 
     #[tokio::test]
     async fn a05_client_log_ack_header_is_exact_negative_only_and_never_batch_authority() {
-        client_log_ack_controls(false).await;
+        client_log_ack_controls(false, false).await;
     }
 
     #[tokio::test]
     async fn a05_client_log_ack_refuses_conflicting_durable_fold() {
-        client_log_ack_controls(true).await;
+        client_log_ack_controls(true, false).await;
     }
 
-    async fn client_log_ack_controls(conflicting_fold: bool) {
+    #[tokio::test]
+    async fn a05_client_log_ack_requires_exact_durable_completion_and_refuses_older_sample() {
+        client_log_ack_controls(false, true).await;
+    }
+
+    async fn client_log_ack_controls(conflicting_fold: bool, exact_fold: bool) {
         use axum::{extract::State, http::HeaderMap, Json};
         use plurx_core::domain::{MediaSessionActivation, MediaSessionActivationSettlement};
         let (state, user, file, _root) = actual_intake_state().await;
@@ -1184,9 +1189,48 @@ mod tests {
                 .expect("nonce"),
             nonce
         );
-        let duplicate = send(&state, &user, &headers, peer, body).await;
+        let duplicate = send(&state, &user, &headers, peer, body.clone()).await;
         assert_eq!(duplicate.status(), 204);
         assert!(!duplicate.headers().contains_key("x-plurx-link-accepted"));
+        if exact_fold {
+            let saved = state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("durable readback")
+                .expect("accepted completion");
+            assert!(saved.binding == session.source);
+            assert_eq!(saved.body_bytes, 4096);
+            assert_eq!(saved.body_duration_ms, 5000);
+            assert_eq!(saved.completed_at_ms, now);
+            assert_eq!(saved.negative_at_ms, Some(now));
+            let (older_nonce, older_eof) = state
+                .link_receipts
+                .mint(
+                    &session.session,
+                    "seg00001.m4s",
+                    "etag",
+                    4096,
+                    Some(4000),
+                    true,
+                )
+                .expect("distinct older completion");
+            older_eof(Instant::now(), now - 1);
+            body["link_sample"]["receipt"] = older_nonce.into();
+            let refused = send(&state, &user, &headers, peer, body).await;
+            assert_eq!(refused.status(), 204);
+            assert!(!refused.headers().contains_key("x-plurx-link-accepted"));
+            let unchanged = state
+                .store
+                .candidate_link_prior(&session.source)
+                .await
+                .expect("durable readback")
+                .expect("original completion remains");
+            assert_eq!(unchanged.completed_at_ms, saved.completed_at_ms);
+            assert_eq!(unchanged.negative_at_ms, saved.negative_at_ms);
+            assert_eq!(unchanged.body_bytes, saved.body_bytes);
+            assert_eq!(unchanged.body_duration_ms, saved.body_duration_ms);
+        }
     }
 
     #[tokio::test]

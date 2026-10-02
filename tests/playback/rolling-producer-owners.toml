@@ -4459,7 +4459,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1 same58: the NEW durable-conflict ClientLog fixture reads Response.status()
 # to verify ordinary204 without an acceptance header. This is an in-process
 # response assertion, not a child launch, task or lifecycle owner.
-expected_occurrences = 423
+# +1 same58 final exact-readback control: another in-process Response.status()
+# verifies older-completion refusal without ACK. No child or new owner.
+expected_occurrences = 424
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
