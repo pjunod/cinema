@@ -3668,3 +3668,28 @@ remain in place. Authored regression
 actual cached read leaves no materialization owner or producer wake.
 Pinned all-target compilation passed; no unit test executed. The change
 and the repeated Firefox failure still require runtime qualification.
+
+
+### 10.122 Interrupted encoded-source qualification
+
+The exact `655b4e884` Chrome MPEG-4/AAC run entered the production manual
+cycle and recorded nine completed target presentations before its log
+WriteStream failed with `ENOSPC`. Revision 11 was appended but had no first
+presentation in the last observation. The process exited without a final
+case verdict and never entered the real Auto phase. This is an interrupted
+run, not a successful twenty-change qualification. Its last ledger snapshot,
+compressed log tail and producer census were preserved in ignored reports.
+
+The census began after startup and sampled 277 times at approximately two
+seconds. It saw one video plus one shared audio producer in 273 samples and
+two video plus one audio in four samples. Sampling does not prove shorter
+handoff overlap, initial admission or five-second terminal retirement. The
+owned daemon was terminated after the probe exited; that forced teardown is
+not application End evidence.
+
+The failed probe's daemon logging is now a bounded two-MiB memory tail rather
+than an unbounded live disk stream. The receipt will declare how many log
+bytes were omitted. A fresh exact-source run has started; all qualification
+rows remain open. No unit tests, final adversarial review or merge occurred.
+The human will be notified when the final adversarial review is finished and
+the handoff is ready for Fable, as requested in §10.118.
