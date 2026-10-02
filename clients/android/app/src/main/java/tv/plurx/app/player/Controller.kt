@@ -348,6 +348,14 @@ class Controller internal constructor(
                     continuousQualityPresented(row)
                 }
             } },
+            observationUnknown = { row -> scope.launch {
+                if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive() &&
+                    (playbackIntent.desiredQuality == PlaybackQuality.Auto || playbackIntent.desiredQuality.rungHeight?.toLong() == row.number("height"))) {
+                    raiseDegradedNotice("Target quality presentation has not been observed. Playback continues while it is checked.")
+                    playbackTelemetry.report(event = "continuous_quality_observation_unknown", level = "warn",
+                        message = "Committed target media has no observed hardware presentation.")
+                }
+            } },
             failed = { error -> Log.w("PlurxPlayback", "continuous ownership ${redactedFailureDetail("continuous", error)}") })
         try {
             val position = ((body.start ?: 0.0) * 1000).toLong().coerceAtLeast(0)
@@ -3423,6 +3431,8 @@ class Controller internal constructor(
         playbackTelemetry.supersedeForIntent(playbackIntent.pendingSeek?.sequence)
         settleVideoPlaybackIntentIfPresented()
         val now = monotonicNowMs()
+        continuousAttachment?.takeIf { player === continuousPlayer }?.playback(realPosition(),
+            player.playbackParameters.speed.toDouble(), player.playWhenReady && presentationForeground && player.playbackState != Player.STATE_ENDED, now)
         samplePreparedCommitFrameBudget()
         val event = targetPresentationDeadline.sample(
             pending = playbackIntent.pendingSeek,

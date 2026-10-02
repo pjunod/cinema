@@ -26,6 +26,7 @@ internal class ContinuousAttachment(
     private val output: ContinuousOutputEvidence,
     private val transfers: AutoTransferEvidence,
     private val presented: (JsonObject, Long) -> Unit,
+    private val observationUnknown: (JsonObject) -> Unit,
     private val failed: (Exception) -> Unit,
 ) {
     private val owner = Any()
@@ -57,6 +58,8 @@ internal class ContinuousAttachment(
     private val audioDecoderOwned = AtomicBoolean()
     private val frame = AtomicReference<ContinuousOutputEvidence.Event.Frame?>()
     private val audioHead = AtomicReference<Long?>(null)
+    private val playbackClock = AtomicReference<ContinuousObservationDeadline.Clock?>()
+    private val observationDeadline = ContinuousObservationDeadline()
     private val wake = Channel<Unit>(Channel.CONFLATED)
     private val pending = Channel<ContinuousQueueOwnership.Appended>(128)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -108,6 +111,13 @@ internal class ContinuousAttachment(
             automatic, selection.supportedRenditions())
         wake.trySend(Unit)
         return changed
+    }
+
+    fun playback(positionMs: Long, rate: Double, active: Boolean, nowMs: Long) {
+        if (closed.get() || positionMs < 0) return
+        val position = try { Math.multiplyExact(positionMs, 1000) } catch (_: ArithmeticException) { return }
+        playbackClock.set(ContinuousObservationDeadline.Clock(nowMs, position, rate, active))
+        wake.trySend(Unit)
     }
 
     private fun observe(event: ContinuousOutputEvidence.Event) {
@@ -171,13 +181,13 @@ internal class ContinuousAttachment(
                 for (id in currentOwners(load)) {
                     val tx = transaction(id) ?: continue
                     if (tx.getValue("appended").jsonArray.none { it.jsonObject == load.authorized.interval }) continue
-                    if (tx["first_presented_tick"] == JsonNull) protocol.transition(id, buildJsonObject {
+                    if (tx.number("first_presented_tick") == null) protocol.transition(id, buildJsonObject {
                         put("kind", "presented"); put("artifact_id", load.authorized.interval.getValue("artifact_id"))
                         put("film_tick", tick); put("observed_at_ms", observed.observedAtMs)
                     })
                     val accepted = transaction(id) ?: continue
                     if (accepted.number("intent_revision") == protocol.ledger?.number("latest_intent_revision") &&
-                        accepted["first_presented_tick"] != JsonNull && accepted["intent_superseded"]?.wireBoolean() == false) {
+                        accepted.number("first_presented_tick") != null && accepted["intent_superseded"]?.wireBoolean() == false) {
                         val revision = requireNotNull(accepted.number("intent_revision"))
                         if (revision > deliveredRevision) {
                             presented(load.resource.row, revision)
@@ -188,6 +198,24 @@ internal class ContinuousAttachment(
             }
         }
         retirePassedMedia()
+        checkObservation()
+    }
+
+    private fun checkObservation() {
+        val clock = playbackClock.get() ?: return
+        val revision = protocol.ledger?.number("latest_intent_revision") ?: return
+        val target = transactions().lastOrNull { it.number("intent_revision") == revision } ?: return
+        val rendition = rows.singleOrNull { it.text("rendition_id") == target.text("target_rendition_id") } ?: return
+        val interval = if (target.number("first_presented_tick") == null) queues.queuedArtifacts().filter { load ->
+            load.resource.role == "video" && load.resource.rendition == target.text("target_rendition_id") &&
+                queues.wasAppended(load.resource.rendition, requireNotNull(load.authorized.interval.text("artifact_id"))) &&
+                requireNotNull(target.text("transaction_id")) in currentOwners(load)
+        }.map { it.authorized.interval }.minByOrNull { requireNotNull(it.number("from_tick")) } else null
+        val boundary = interval?.let { pin ->
+            try { Math.multiplyExact(requireNotNull(pin.number("from_tick")), 1_000_000) / requireNotNull(pin.number("timescale")) }
+            catch (_: ArithmeticException) { null }
+        }
+        if (observationDeadline.sample(revision, boundary, clock)) observationUnknown(rendition)
     }
 
     private suspend fun retirePassedMedia() {

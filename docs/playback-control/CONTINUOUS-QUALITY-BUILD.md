@@ -3174,3 +3174,28 @@ outputs, and retain an empty codec's creating owner. Production and test
 sources compile in 11 seconds. Unit execution remains deferred to the final
 main-ready adversarial review and fast lane. Physical seek/disposal evidence,
 optional observation deadlines and restart races remain unqualified.
+
+
+### 10.101 Android preserves committed observation uncertainty
+
+The existing playback sampler now supplies the continuous attachment's clock,
+rate and active state. Only committed target intervals with actual accepted
+queue samples can start an observation deadline. A future buffered boundary
+cannot consume the grace period. Once the observed clock reaches that
+boundary, two seconds of active wall time without the target hardware frame
+reports observation unknown once for that intent. Pause and background time
+are excluded; rate changes and an independent seek update the boundary clock.
+
+That outcome keeps the committed media and pending preference, continues
+observing late hardware frames and does not silently restage, reopen or claim
+retained current. The notice cannot repeat for every later artifact in the
+same unresolved intent. Quality settlement requires an actual numeric
+presented tick in the durable receipt; an omitted optional field is not
+presentation proof.
+
+Authored regressions cover a forty-second future boundary, a long pause,
+changed playback rates, seek clock reset, new revisions and one notice per
+intent. Production and test sources compile. Unit execution and formal agent
+review remain deferred to the final main-ready candidate. Optional target
+load failure before exposure, control-phase cancellation and their runtime
+race/pressure evidence remain to be completed.
