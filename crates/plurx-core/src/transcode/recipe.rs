@@ -783,4 +783,52 @@ mod tests {
         );
         assert_ne!(first_hash, Recipe::new(&d, &copy, false).hash());
     }
+
+    /// The incumbent fold keeps its historical identity, so no stereo or
+    /// unfolded key moves; each measured fold is its own key, and so is any
+    /// later change to its gains or limiter.
+    #[test]
+    fn a_measured_fold_is_its_own_identity_and_the_incumbent_fold_is_not_moved() {
+        use crate::playback::audio::{AudioAction, AudioDelivery, DownmixMatrix};
+        let (d, mut f) = (digest(), media());
+        f.audio_streams = vec![crate::domain::AudioStream {
+            codec: "dts".into(),
+            channels: Some(6),
+            channel_layout: Some("5.1(side)".into()),
+            sample_rate: Some(48_000),
+            ..Default::default()
+        }];
+        let hash_for = |downmix: Option<DownmixMatrix>| {
+            let mut o = TranscodeOptions::default();
+            o.set_audio_delivery(AudioDelivery {
+                action: AudioAction::Encode {
+                    codec: "aac".into(),
+                    channels: 2,
+                    layout: None,
+                    bitrate_kbps: 160,
+                    sample_rate: 48_000,
+                },
+                downmix,
+                reason: "fold".into(),
+            });
+            Recipe::new(
+                &d,
+                &plan_with_decoder(&f, &o, Encoder::Software, "hevc"),
+                false,
+            )
+            .hash()
+        };
+        let unfolded = hash_for(None);
+        let incumbent = hash_for(Some(DownmixMatrix::RequiresLayoutMeasurement {
+            source_channels: 6,
+        }));
+        assert_eq!(unfolded, incumbent, "the incumbent fold's key is unchanged");
+        let side = hash_for(Some(DownmixMatrix::LoRo51));
+        let back = hash_for(Some(DownmixMatrix::LoRo71));
+        let limited = hash_for(Some(DownmixMatrix::LimitedDefault { source_channels: 6 }));
+        assert_ne!(side, incumbent);
+        assert_ne!(side, back);
+        assert_ne!(side, limited);
+        assert_ne!(limited, incumbent);
+    }
 }

@@ -432,6 +432,7 @@ const CAPS_DOCUMENT_PRELUDE = [
   "function decodeLimits(){return {};}",
   `function capsDocument(){return ${JSON.stringify(USABLE_CAPS_DOCUMENT)};}`,
   "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+  "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
   shippedSource("capsDocumentIsUsable"),
 ].join("\n");
@@ -462,6 +463,7 @@ function buildOpenSession(overrides) {
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;} function qualityForce(){return 'auto';}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -570,6 +572,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("askDecision"),
@@ -616,6 +619,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
     [
       'const PLAYBACK_ID="playback-1";',
       "const SERVER={playback_display_aware_auto:false}; function measuredPresentationTarget(){return null;}",
+      "function browserOutputChannelsCached(){return 2;} function browserAudioSinks(){return [];}",
       shippedSource("currentCapsDocument"),
       shippedSource("capsDocumentIsUsable"),
       shippedSource("openSession"),
@@ -6987,4 +6991,49 @@ test("peer VOD Activity cell preserves measured control and producer facts",()=>
     assert.ok(html.includes(fact),`peer VOD cell omits ${fact}`);
   }
   assert.ok(!html.includes("Live scratch"));
+});
+
+test("the browser claims its output's channels for the codecs it decodes, never passthrough", () => {
+  const helpers = new Function(
+    "window",
+    [
+      shippedSource("browserOutputChannels"),
+      shippedSource("browserAudioSinks"),
+      "return {browserOutputChannels, browserAudioSinks};",
+    ].join("\n"),
+  );
+  let closed = 0;
+  const surround = helpers({
+    AudioContext: function () {
+      this.destination = { maxChannelCount: 6 };
+      this.close = () => { closed += 1; return Promise.resolve(); };
+    },
+  });
+  assert.equal(surround.browserOutputChannels(), 6);
+  assert.equal(closed, 1, "the probe context is closed again");
+  assert.equal(helpers({}).browserOutputChannels(), 2, "no AudioContext is stereo");
+  assert.equal(
+    helpers({ AudioContext: function () { throw new Error("blocked"); } }).browserOutputChannels(),
+    2,
+  );
+  const sinks = surround.browserAudioSinks("aac,mp3,opus,flac,eac3", 6);
+  assert.deepEqual(sinks.map((sink) => sink.codec), ["aac", "mp3", "flac", "eac3"]);
+  for (const sink of sinks) {
+    assert.equal(sink.max_channels, 6);
+    assert.equal(sink.passthrough, false);
+    assert.deepEqual(sink.sample_rates_hz, [44100, 48000]);
+  }
+  assert.equal(surround.browserAudioSinks("aac", 1)[0].max_channels, 2);
+  assert.equal(surround.browserAudioSinks("aac", 32)[0].max_channels, 8);
+  assert.equal(surround.browserAudioSinks("aac", NaN)[0].max_channels, 2);
+
+  const capsDocument = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\nreturn capsDocument;`,
+  )({ build: "test" }, { userAgent: "test" });
+  const claimed = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: sinks }, {});
+  assert.deepEqual(claimed.audio_sinks, sinks);
+  const legacy = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: [] }, {});
+  assert.equal("audio_sinks" in legacy, false, "an empty claim stays the legacy contract");
 });
