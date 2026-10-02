@@ -3610,3 +3610,21 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetr
 source_anchor = "internal fun autoDecoderAcknowledgementCurrent(accepted: Boolean"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
 test_anchor = "fun a05DecoderAcknowledgementRequiresExactEventAndOriginalAttachmentBudget()"
+
+# S-09 route sink claims (claude-opus-5-5). Device-route acceptance (M3/M5)
+# remains separate physical evidence.
+[[fixes]]
+id = "apple.audio-route-sink-claim"
+commits = ["1926c2f4"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "static func audioSinks(route: AudioRouteFacts) -> [AudioSinkClaim]"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver"
+
+[[fixes]]
+id = "android.audio-route-sink-claim"
+commits = ["b7b59329", "172e3043"]
+source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
+source_anchor = "internal fun audioSinkClaims("
+test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
+test_anchor = "theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink"
