@@ -1006,6 +1006,56 @@
     }
 
     #[tokio::test]
+    async fn private_media_response_fences_rebinding_and_preserves_parent_frontier() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let root = synthetic_rendition(&base.path().join("root")).await;
+        let mut child = synthetic_rendition(&base.path().join("child")).await;
+        Arc::get_mut(&mut child).expect("exclusive child fixture").key = "private-rendition".into();
+        let parent = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let private_id = uuid::Uuid::new_v4().to_string();
+        insert_control_session(&serve, &parent, Arc::clone(&root), Instant::now()).await;
+        insert_control_session(&serve, &other, Arc::clone(&root), Instant::now()).await;
+        child.attach_reader(&private_id, 0).await;
+        serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
+            ParentMediaReader { reader_id: private_id.clone(), rendition: Arc::clone(&child), _reservation: None },
+        );
+        let publication = serve.session_media_rendition(&parent, Some(&child.key)).await.expect("parent lookup");
+        assert!(publication.result.expect("live lookup").is_some());
+        let owner = publication.owner;
+        assert!(serve.response_owner_is_live(&parent, &owner).await);
+        assert!(serve.commit_resolved_media(&parent, &owner, Some(2)).await);
+        assert_eq!(child.readers.lock().await[&private_id].last_served, Some(2));
+        assert_eq!(root.readers.lock().await[&parent].last_served, None);
+        assert!(serve.session_media_rendition(&other, Some(&child.key)).await
+            .expect("other parent").result.expect("lookup").is_none(), "a shared cache key grants no read access");
+        let old_children = std::mem::take(&mut serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children);
+        for old in old_children { old.detach(&serve.shared.pool).await; }
+        let next_id = uuid::Uuid::new_v4().to_string();
+        child.attach_reader(&next_id, 0).await;
+        let touched = {
+            let mut sessions = serve.shared.sessions.lock().await;
+            let session = sessions.get_mut(&parent).expect("parent");
+            session.children.push(ParentMediaReader { reader_id: next_id.clone(), rendition: Arc::clone(&child), _reservation: None });
+            let touched = *session.last_touch.lock().expect("touch");
+            touched
+        };
+        assert!(!serve.response_owner_is_live(&parent, &owner).await);
+        assert!(!serve.response_status_owner_is_current(&parent, &owner).await);
+        assert!(!serve.commit_resolved_media(&parent, &owner, Some(3)).await);
+        assert_eq!(*serve.shared.sessions.lock().await[&parent].last_touch.lock().expect("touch"), touched);
+        assert_eq!(child.readers.lock().await[&next_id].last_served, None);
+        let current = serve.session_media_rendition(&parent, Some(&child.key)).await.expect("rebound reader");
+        assert!(serve.response_owner_is_live(&parent, &current.owner).await);
+        assert!(serve.commit_resolved_media(&parent, &current.owner, Some(4)).await);
+        assert_eq!(child.readers.lock().await[&next_id].last_served, Some(4));
+        assert_eq!(root.readers.lock().await[&parent].last_served, None);
+        assert!(serve.end(&parent, Terminal::Deleted).await);
+        assert!(serve.end(&other, Terminal::Deleted).await);
+    }
+
+    #[tokio::test]
     async fn ending_a_parent_retires_its_private_media_readers_only() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());

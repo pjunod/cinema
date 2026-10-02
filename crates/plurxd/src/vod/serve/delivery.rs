@@ -254,27 +254,47 @@ impl VodServe {
         if !Arc::ptr_eq(session_rendition, owner_rendition) {
             return false;
         }
+        if !session.owns_response_media(owner) {
+            return false;
+        }
+        let (owner_rendition, reader_id) = owner
+            .media_child
+            .as_ref()
+            .map(|child| (&child.rendition, child.reader_id.as_str()))
+            .unwrap_or((owner_rendition, session_id));
         let mut readers = if segment_index.is_some() {
             Some(owner_rendition.readers.lock().await)
         } else {
             None
         };
 
+        if owner.media_child.is_some()
+            && readers
+                .as_ref()
+                .is_some_and(|readers| !readers.contains_key(reader_id))
+        {
+            return false;
+        }
+
         // Every await is above this line. Touch and frontier advance are one
         // cancellation-safe commit: EOF can never renew a session without
         // also recording the exact served frontier (or vice versa).
         *session.last_touch.lock().expect("touch lock") = Instant::now();
         if let (Some(index), Some(readers)) = (segment_index, readers.as_mut()) {
-            if let Some(reader) = readers.get_mut(session_id) {
+            if let Some(reader) = readers.get_mut(reader_id) {
                 reader.served(index);
             }
         }
-        let marker_ledger = segment_index.and_then(|_| {
-            readers
-                .as_ref()?
-                .get(session_id)
-                .map(|reader| Arc::clone(&reader.marker_prewarm))
-        });
+        // Child downloads describe supply only. They cannot settle the
+        // public parent's marker/presentation observations.
+        let marker_ledger = segment_index
+            .filter(|_| owner.media_child.is_none())
+            .and_then(|_| {
+                readers
+                    .as_ref()?
+                    .get(session_id)
+                    .map(|reader| Arc::clone(&reader.marker_prewarm))
+            });
         let marker_identity = (session.file.id, session.kind);
         drop(readers);
         drop(sessions);
@@ -311,6 +331,7 @@ impl VodServe {
             && owner.tombstone.is_none()
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+            && session.owns_response_media(owner)
             && session.rendition.as_ref().is_some_and(|rendition| {
                 owner
                     .rendition
@@ -342,6 +363,7 @@ impl VodServe {
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
             && session.rendition_key == owner.rendition_key
+            && session.owns_response_media(owner)
             && (session.tombstone.is_some()
                 || session.rendition.as_ref().is_some_and(|rendition| {
                     owner

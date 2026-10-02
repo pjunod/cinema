@@ -602,20 +602,64 @@ impl VodServe {
         &self,
         session_id: &str,
     ) -> Option<VodPublication<(Arc<Rendition>, Duration, Arc<crate::meter::Meter>)>> {
+        let publication = self.session_media_rendition(session_id, None).await?;
+        let result = match publication.result {
+            Ok(Some(reader)) => Ok((reader.rendition, reader.block_budget, reader.delivery)),
+            Ok(None) => return None,
+            Err(error) => Err(error),
+        };
+        Some(VodPublication {
+            result,
+            owner: publication.owner,
+        })
+    }
+
+    /// Child lookup uses only the exact parent's owned graph. A cache key is
+    /// never an authorization capability, including after a detach/rebind.
+    pub(super) async fn session_media_rendition(
+        &self,
+        session_id: &str,
+        child_rendition_id: Option<&str>,
+    ) -> Option<VodPublication<Option<ResolvedMediaReader>>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
-        let owner = session.response_owner();
-        Some(VodPublication {
-            result: match session.tombstone {
-                Some(cause) => Err(VodError::Gone(cause)),
-                None => Ok((
-                    session.live_rendition().map(Arc::clone)?,
-                    session.block_budget,
-                    Arc::clone(&session.delivery),
-                )),
-            },
-            owner,
-        })
+        let mut owner = session.response_owner();
+        let result = if let Some(cause) = session.tombstone {
+            Err(VodError::Gone(cause))
+        } else {
+            let selected = match child_rendition_id {
+                None => session.live_rendition().map(Arc::clone),
+                Some(id) => session
+                    .children
+                    .iter()
+                    .find(|child| {
+                        child.rendition.key == id
+                            && child.rendition.recipe.file.id == session.file.id
+                            && child
+                                .rendition
+                                .source
+                                .as_ref()
+                                .map(|source| source.object_version())
+                                == session
+                                    .live_rendition()
+                                    .and_then(|root| root.source.as_ref())
+                                    .map(|source| source.object_version())
+                    })
+                    .map(|child| {
+                        owner.media_child = Some(MediaReaderResponseOwner {
+                            reader_id: child.reader_id.clone(),
+                            rendition: Arc::clone(&child.rendition),
+                        });
+                        Arc::clone(&child.rendition)
+                    }),
+            };
+            Ok(selected.map(|rendition| ResolvedMediaReader {
+                rendition,
+                block_budget: session.block_budget,
+                delivery: Arc::clone(&session.delivery),
+            }))
+        };
+        Some(VodPublication { result, owner })
     }
 
     pub(super) async fn serve_init(

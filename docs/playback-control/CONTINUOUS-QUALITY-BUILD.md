@@ -1711,3 +1711,16 @@ The authored regression covers duplicate admission, shared parent ownership,
 a cold restart, adoption during reap and expiry. This connects capacity to
 the real driver; family group allocation and parent attachment still need
 their caller. Pinned compiler and normal hooks apply; no unit execution.
+
+### 10.38 Private-reader response ownership
+
+Media lookup can now resolve a child only through its exact public parent's
+owned reader graph and matching source object. Cache keys alone cannot read
+another parent's media. A child response captures the private reader identity
+as well as the parent incarnation; detach/rebind of the same cached rendition
+invalidates the old header, status and EOF owner. Completed child delivery
+advances its own reader frontier, while parent marker/presentation observations
+remain independent. The authored regression exercises cross-parent refusal,
+frontier isolation and stale responses after rebinding. Pinned compiler checks
+apply; unit execution remains deferred. This is serving ownership integration;
+the family constructor and HTTP/peer child routes remain to be connected.

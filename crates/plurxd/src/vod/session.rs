@@ -584,6 +584,12 @@ pub(super) fn terminal_reason(cause: Terminal) -> &'static str {
     }
 }
 
+pub(super) struct ResolvedMediaReader {
+    pub(super) rendition: Arc<Rendition>,
+    pub(super) block_budget: Duration,
+    pub(super) delivery: Arc<crate::meter::Meter>,
+}
+
 /// One private media reader owned by a public parent's incarnation. Its
 /// opaque reader id is independent of the public capability, so delayed old
 /// cleanup cannot remove a replacement parent's demand on shared media.
@@ -720,11 +726,21 @@ impl Session {
         self.rendition.as_ref().filter(|_| self.tombstone.is_none())
     }
 
+    pub(super) fn owns_response_media(&self, owner: &ResponseOwner) -> bool {
+        owner.media_child.as_ref().is_none_or(|target| {
+            self.children.iter().any(|child| {
+                child.reader_id == target.reader_id
+                    && Arc::ptr_eq(&child.rendition, &target.rendition)
+            })
+        })
+    }
+
     pub(super) fn response_owner(&self) -> ResponseOwner {
         ResponseOwner {
             lifecycle: Arc::clone(&self.lifecycle),
             incarnation: Arc::clone(&self.incarnation),
             rendition: self.rendition.as_ref().map(Arc::clone),
+            media_child: None,
             rendition_key: self.rendition_key.clone(),
             file: Arc::clone(&self.file),
             tombstone: self.tombstone,

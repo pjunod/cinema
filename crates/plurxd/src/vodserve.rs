@@ -321,12 +321,22 @@ pub(crate) struct ResponseOwner {
     /// not keep the heavyweight rendition graph alive after reader/commit
     /// cleanup has finished.
     rendition: Option<Arc<Rendition>>,
+    /// Exact private-reader ownership beneath the public parent, when a
+    /// response serves child media. Rebinding the same cached rendition must
+    /// not let an old body commit to its replacement reader.
+    media_child: Option<MediaReaderResponseOwner>,
     rendition_key: String,
     file: Arc<MediaFile>,
     /// Terminal snapshot at resolution. Status publication compares this
     /// exact value so a live error cannot be admitted after tombstoning and a
     /// tombstone from one incarnation cannot describe its replacement.
     tombstone: Option<Terminal>,
+}
+
+#[derive(Clone)]
+struct MediaReaderResponseOwner {
+    reader_id: String,
+    rendition: Arc<Rendition>,
 }
 
 impl std::fmt::Debug for ResponseOwner {
