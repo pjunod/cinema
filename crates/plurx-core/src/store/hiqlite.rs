@@ -7225,9 +7225,18 @@ mod tests {
             "v64 advances to the viewer-analysis schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 62,
+            PREPARATION_INDEX_SCHEMA_VERSION, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+            "request provenance starts from the preparation-index schema"
+        );
+        assert_eq!(
+            DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_REQUEST_PROVENANCE_SCHEMA_VERSION,
+            "v67 advances exactly one step to request provenance"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 63,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v67 step"
+            "this implementation contains every additive v5→v68 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
