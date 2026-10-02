@@ -13,7 +13,7 @@ use std::io::Write;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, KeyInit};
@@ -34,7 +34,7 @@ use crate::store::{
 
 use super::clock::{
     ClockAcquisitionTicket, ClockDecision, ClockMembershipIdentity, ClockMembershipSource,
-    ClockRefusal, ClusterClockGuard, OwnedClockAcquisitionTicket,
+    ClockRefusal, ClockRemovalCapture, ClusterClockGuard, OwnedClockAcquisitionTicket,
 };
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
@@ -1952,6 +1952,9 @@ pub struct StartupMembershipAdmission {
     source: Arc<StartupClockMembershipSource>,
     clock: Arc<ClusterClockGuard>,
     startup_deadline: Option<tokio::time::Instant>,
+    /// Bound exactly once after construction; never retains the manager/client
+    /// cycle or borrows another installed node's removal authority.
+    removal_owner: OnceLock<Weak<ReplicatedMembership>>,
 }
 
 #[derive(Default)]
@@ -1970,6 +1973,7 @@ impl Default for StartupMembershipAdmission {
             clock: Arc::new(ClusterClockGuard::with_membership_source(source.clone())),
             source,
             startup_deadline: None,
+            removal_owner: OnceLock::new(),
         }
     }
 }
@@ -1999,6 +2003,65 @@ struct PreparedStartupMembershipAdmission<'guard> {
     original: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
 }
 
+struct PreparedReductionAdmission<'guard> {
+    policy: &'guard StartupMembershipAdmission,
+    reference: hiqlite::ReductionFenceReference,
+    original: Result<ClockRemovalCapture<'guard>, ClockRefusal>,
+    proof: Option<AppliedRemovalFence>,
+}
+
+impl hiqlite::membership_admission::PreparedMembershipAdmission for PreparedReductionAdmission<'_> {
+    fn prepare_proof(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), hiqlite::Error>> + Send + '_>> {
+        Box::pin(async move {
+            if !self.reference.has_valid_shape() {
+                return Err(hiqlite::Error::Error(
+                    "invalid exact reduction reference".into(),
+                ));
+            }
+            let captured = self.original.as_ref().map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })?;
+            let inner = self
+                .policy
+                .removal_owner
+                .get()
+                .and_then(Weak::upgrade)
+                .ok_or_else(|| {
+                    hiqlite::Error::Error("installed removal owner is unavailable".into())
+                })?;
+            let manager = MembershipManager {
+                inner: Some(inner),
+                clock: Arc::clone(&self.policy.clock),
+            };
+            // No new capture, clock query or deadline is created after await.
+            self.proof = Some(
+                manager
+                    .wait_for_reduction_reference(&self.reference, captured)
+                    .await
+                    .map_err(|error| hiqlite::Error::Error(error.to_string().into()))?,
+            );
+            Ok(())
+        })
+    }
+
+    fn redeem(&self) -> Result<(), hiqlite::Error> {
+        let captured = self.original.as_ref().map_err(|error| {
+            hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+        })?;
+        let proof = self.proof.as_ref().ok_or_else(|| {
+            hiqlite::Error::Error("exact reduction proof was not prepared".into())
+        })?;
+        self.policy
+            .clock
+            .admit_fenced_removal(captured, proof)
+            .map_err(|error| {
+                hiqlite::Error::Error(format!("cluster_clock_unbounded: {error}").into())
+            })
+    }
+}
+
 impl hiqlite::membership_admission::PreparedMembershipAdmission
     for PreparedStartupMembershipAdmission<'_>
 {
@@ -2018,8 +2081,27 @@ impl hiqlite::membership_admission::MembershipAdmission for StartupMembershipAdm
     }
     fn prepare(
         &self,
-        _operation: hiqlite::membership_admission::MembershipAcquisition,
+        operation: hiqlite::membership_admission::MembershipAcquisition,
     ) -> Box<dyn hiqlite::membership_admission::PreparedMembershipAdmission + '_> {
+        if let hiqlite::membership_admission::MembershipAcquisition::Reduction {
+            reference,
+            retain_as_learner,
+        } = operation
+        {
+            // Retained learners are survivors, so this exception cannot excuse
+            // their clock. This closed removal transport always removes target.
+            let original = if retain_as_learner || !reference.has_valid_shape() {
+                Err(ClockRefusal::Unknown)
+            } else {
+                self.clock.capture_removal_raft(reference.target_raft_id)
+            };
+            return Box::new(PreparedReductionAdmission {
+                policy: self,
+                reference,
+                original,
+                proof: None,
+            });
+        }
         Box::new(PreparedStartupMembershipAdmission {
             clock: &self.clock,
             original: self.clock.acquire(),
@@ -2258,10 +2340,51 @@ const NODE_MAINTENANCE_COUNT_SQL: &str =
 const NODE_PROMOTION_COUNT_SQL: &str =
     "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1";
 
-/// The attempt a resumed removal adopts: the least attempt reference, or none.
-/// The first attempt of `lifecycle::Removal::InProgress` is its projection.
+/// Historical lifecycle agreement fixture: least reference projection. New
+/// production invocations own a distinct exact reference instead of borrowing.
+#[cfg(test)]
 const EXISTING_REMOVAL_ATTEMPT_SQL: &str = "SELECT attempt_id FROM cluster_node_removal_attempts \
                  WHERE node_id = $1 ORDER BY attempt_id LIMIT 1";
+
+const MAX_FROZEN_REDUCTION_REFERENCES: i64 = 256;
+
+const FREEZE_REDUCTION_REFERENCE_SQL: &str = "INSERT INTO settings (key, value, updated_at) \
+    SELECT $1, $2, $3 WHERE EXISTS (SELECT 1 FROM cluster_node_removals AS fence \
+      JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = fence.node_id \
+      JOIN cluster_nodes AS node ON node.node_id = fence.node_id \
+      WHERE fence.node_id = $4 AND attempt.attempt_id = $5 \
+        AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $6 AND owner.value = '1') \
+        AND node.raft_id = $7 AND node.removed_at IS NULL AND $8 > 0) \
+    AND ((SELECT COUNT(*) FROM settings WHERE key LIKE 'internal.cluster_reduction.v1.%') < $9 \
+      OR EXISTS (SELECT 1 FROM settings WHERE key = $1)) \
+    ON CONFLICT(key) DO NOTHING";
+
+const EXACT_REDUCTION_FENCE_SQL: &str = "SELECT COUNT(*) AS count \
+    FROM cluster_nodes AS node \
+    JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
+    JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
+    WHERE node.node_id = $1 AND node.raft_id = $2 \
+      AND attempt.attempt_id = $3 AND node.removed_at IS NULL \
+      AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
+
+const READ_REDUCTION_REFERENCE_SQL: &str = "SELECT frozen.value AS reference_json, \
+    node.raft_id, node.last_seen_at, node.last_applied_index \
+    FROM settings AS frozen JOIN cluster_nodes AS node ON frozen.key = $1 AND node.node_id = $2 \
+    JOIN cluster_node_removals AS fence ON fence.node_id = node.node_id \
+    JOIN cluster_node_removal_attempts AS attempt ON attempt.node_id = node.node_id \
+    WHERE attempt.attempt_id = $3 AND node.removed_at IS NULL \
+    AND EXISTS (SELECT 1 FROM settings AS owner WHERE owner.key = $4 AND owner.value = '1')";
+
+const RETIRE_OWNED_REDUCTION_REFERENCE_SQL: &str = "DELETE FROM settings \
+    WHERE key = $1 AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
+      WHERE node_id = $2 AND attempt_id = $3)";
+
+fn reduction_reference_key(reference: &hiqlite::ReductionFenceReference) -> String {
+    format!(
+        "internal.cluster_reduction.v1.{}.{}",
+        reference.target_node_id, reference.attempt_id
+    )
+}
 
 /// The committed voter ids `MembershipManager::local_node_is_committed_voter`
 /// decides on, read from a Raft metrics `membership_config`
@@ -3460,6 +3583,20 @@ impl MembershipManager {
             && unix_ms()?.abs_diff(auth.timestamp_ms) <= ACTIVITY_AUTH_WINDOW_MS as u64)
     }
 
+    /// The initial exact request authorization already consumed the nonce.
+    /// Recheck its applied identity/removal fence after a demanded round,
+    /// without a second replay admission or inbound-authority metric event.
+    pub async fn revalidate_authenticated_clock_request(
+        &self,
+        auth: &InternalPeerAuth,
+    ) -> Result<bool, MembershipError> {
+        Ok(self.authenticated_clock_request_still_fresh(auth)?
+            && self
+                .verify_committed_clock_peer_authority(&auth.node_id, false)
+                .await?
+            && self.authenticated_clock_request_still_fresh(auth)?)
+    }
+
     #[must_use]
     pub fn is_replicated(&self) -> bool {
         self.inner.is_some()
@@ -3755,6 +3892,20 @@ impl MembershipManager {
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
+        // Both normal construction and pending observation share this exact
+        // Arc. finish_clock_observation keeps it; no second guard or binding.
+        let inner = manager.inner.as_ref().ok_or(MembershipError::Unavailable)?;
+        let installed = inner.client.local_membership_admission()?;
+        let policy = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .ok_or_else(|| MembershipError::Internal("installed removal policy changed".into()))?;
+        policy
+            .removal_owner
+            .set(Arc::downgrade(inner))
+            .map_err(|_| {
+                MembershipError::Internal("installed removal owner was already bound".into())
+            })?;
         Ok(manager)
     }
 
@@ -8408,6 +8559,7 @@ impl MembershipManager {
         if node_id == inner.identity.node_id {
             return Err(MembershipError::SelfRemovalRequiresLeave);
         }
+        let captured = self.clock.capture_removal_node(node_id);
         let metrics = inner.client.metrics_db().await?;
         let target = inner
             .client
@@ -8425,14 +8577,14 @@ impl MembershipManager {
             .voter_ids()
             .any(|raft_id| raft_id == target_raft_id)
         {
-            self.remove_voter(node_id).await
+            self.remove_voter_captured(node_id, captured).await
         } else if metrics
             .membership_config
             .nodes()
             .any(|(raft_id, _)| *raft_id == target_raft_id)
             && ClusterRole::from_stored(target.admitted_role.as_deref())? == ClusterRole::Learner
         {
-            self.remove_learner_impl(node_id).await?;
+            self.remove_learner_captured(node_id, captured).await?;
             self.status().await
         } else if self.node_is_tombstoned(node_id).await? {
             self.fence_removed_job_owner(node_id).await?;
@@ -8443,7 +8595,11 @@ impl MembershipManager {
         }
     }
 
-    async fn remove_learner_impl(&self, node_id: &str) -> Result<(), MembershipError> {
+    async fn remove_learner_captured(
+        &self,
+        node_id: &str,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         self.require_learner_lifecycle_capability().await?;
         self.require_removal_capability().await?;
@@ -8488,36 +8644,47 @@ impl MembershipManager {
         // Learner removal is the draining variant: the reference-counted
         // fence first ejects placement, supersedes active media ownership,
         // expires job ownership, and blocks every later route admission.
-        let (removal_attempt, new_attempt) = if target.removal_pending {
-            (self.existing_removal_attempt(node_id).await?, false)
-        } else {
-            (self.begin_node_removal(node_id, true).await?, true)
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
+        // Every invocation owns its own ref; a pending prior invocation is not
+        // borrowed and cannot be rolled back by this one.
+        let removal_attempt = self.begin_node_removal(node_id, true).await?;
+        let (reference, proof) = match self
+            .prepare_reduction_reference(node_id, target_raft_id, &removal_attempt, &captured)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await)
+            }
         };
-        let fence_barrier = inner.client.db_quorum_watermark().await?.committed_index;
-        self.wait_for_removal_fence(node_id, fence_barrier).await?;
         match self.settle_offline_work(node_id).await {
             Ok(report) => {
                 resolved.requeued += report.requeued;
                 resolved.failed += report.failed;
             }
             Err(error) => {
-                if new_attempt {
-                    return Err(self
-                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                        .await);
-                }
-                return Err(MembershipError::RemovalPending(error.to_string()));
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await);
             }
         }
-        match request_learner_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
+                )
+                .await);
+        }
+        match request_learner_removal(&leader.addr_api, &inner.secrets.api, &reference).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(error)) => {
-                if new_attempt {
-                    return Err(self
-                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
-                        .await);
-                }
-                return Err(MembershipError::RemovalPending(error.to_string()));
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await);
             }
             Err(MembershipChangeFailure::Ambiguous(error)) => {
                 match reconcile_member_removal(
@@ -8548,53 +8715,251 @@ impl MembershipManager {
         Ok(())
     }
 
-    async fn existing_removal_attempt(&self, node_id: &str) -> Result<String, MembershipError> {
-        let inner = self.replicated_inner()?;
-        inner
-            .client
-            .query_consistent_map::<RemovalAttemptRow, _>(
-                EXISTING_REMOVAL_ATTEMPT_SQL,
-                params!(node_id),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| row.attempt_id)
-            .ok_or_else(|| {
-                MembershipError::RemovalPending(format!(
-                    "{node_id} has a removal fence without an attempt reference"
-                ))
-            })
-    }
-
-    async fn wait_for_removal_fence(
+    /// Freeze the first actual post-fence quorum barrier for this exact owned
+    /// attempt. This record transports no clock time or admission authority.
+    async fn freeze_reduction_reference(
         &self,
         node_id: &str,
-        barrier: u64,
-    ) -> Result<(), MembershipError> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        raft_id: u64,
+        attempt_id: &str,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<hiqlite::ReductionFenceReference, MembershipError> {
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let inner = self.replicated_inner()?;
+        let stored_raft_id = i64::try_from(raft_id).map_err(|_| {
+            MembershipError::RemovalPending(
+                "target Raft identity is outside durable representation".into(),
+            )
+        })?;
+        // Establish that this exact committed fence precedes the quorum read.
+        // The barrier is obtained from Raft commit authority, never the request.
+        let fences = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                EXACT_REDUCTION_FENCE_SQL,
+                params!(
+                    node_id,
+                    stored_raft_id,
+                    attempt_id,
+                    removed_job_owner_key(node_id)
+                ),
+            )
+            .await?;
+        if !fences.first().is_some_and(|row| row.count == 1) {
+            return Err(MembershipError::RemovalPending(
+                "exact owned reduction fence is absent".into(),
+            ));
+        }
+        let reference = hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node_id.to_owned(),
+            target_raft_id: raft_id,
+            attempt_id: attempt_id.to_owned(),
+            barrier_index: inner.client.db_quorum_watermark().await?.committed_index,
+        };
+        if !reference.has_valid_shape() {
+            return Err(MembershipError::RemovalPending(
+                "invalid exact reduction reference".into(),
+            ));
+        }
+        let stored_barrier = i64::try_from(reference.barrier_index).map_err(|_| {
+            MembershipError::RemovalPending(
+                "quorum barrier is outside durable representation".into(),
+            )
+        })?;
+        let key = reduction_reference_key(&reference);
+        let value = serde_json::to_string(&reference)
+            .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        inner
+            .client
+            .execute(
+                FREEZE_REDUCTION_REFERENCE_SQL,
+                params!(
+                    key.as_str(),
+                    value,
+                    captured.now_ms() / 1_000,
+                    node_id,
+                    attempt_id,
+                    removed_job_owner_key(node_id),
+                    stored_raft_id,
+                    stored_barrier,
+                    MAX_FROZEN_REDUCTION_REFERENCES
+                ),
+            )
+            .await?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ReductionReferenceRow, _>(
+                READ_REDUCTION_REFERENCE_SQL,
+                params!(key, node_id, attempt_id, removed_job_owner_key(node_id)),
+            )
+            .await?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MembershipError::RemovalPending("durable reduction fence is absent".into())
+        })?;
+        let frozen: hiqlite::ReductionFenceReference = serde_json::from_str(&row.reference_json)
+            .map_err(|_| {
+                MembershipError::RemovalPending("invalid frozen reduction reference".into())
+            })?;
+        // A replay uses the immutable original barrier, never today's value.
+        if !frozen.has_valid_shape()
+            || frozen.target_node_id != node_id
+            || frozen.target_raft_id != raft_id
+            || frozen.attempt_id != attempt_id
+            || u64::try_from(row.raft_id).ok() != Some(raft_id)
+        {
+            return Err(MembershipError::RemovalPending(
+                "reduction reference identity changed".into(),
+            ));
+        }
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        Ok(frozen)
+    }
+
+    /// Authenticate the reference through actual current rows. Missing clock
+    /// observations never count as target reachability evidence.
+    pub(super) async fn prove_reduction_reference(
+        &self,
+        reference: &hiqlite::ReductionFenceReference,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<Option<AppliedRemovalFence>, MembershipError> {
+        if !reference.has_valid_shape() {
+            return Err(MembershipError::RemovalPending(
+                "invalid reduction reference".into(),
+            ));
+        }
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<ReductionReferenceRow, _>(
+                READ_REDUCTION_REFERENCE_SQL,
+                params!(
+                    reduction_reference_key(reference),
+                    reference.target_node_id.as_str(),
+                    reference.attempt_id.as_str(),
+                    removed_job_owner_key(&reference.target_node_id)
+                ),
+            )
+            .await?;
+        self.clock
+            .revalidate_removal_capture(captured)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let row = rows.into_iter().next().ok_or_else(|| {
+            MembershipError::RemovalPending("durable reduction reference was released".into())
+        })?;
+        let frozen: hiqlite::ReductionFenceReference = serde_json::from_str(&row.reference_json)
+            .map_err(|_| {
+                MembershipError::RemovalPending("invalid frozen reduction reference".into())
+            })?;
+        if !exact_reduction_binding_matches(&row, reference) {
+            return Err(MembershipError::RemovalPending(
+                "stale or foreign reduction reference".into(),
+            ));
+        }
+        // Re-read the complete actual directory after the durable await. The
+        // receiver's original capture, not this lookup, supplies clock time.
+        let roster = self.clock_peers().await?;
+        self.clock
+            .revalidate_removal_directory(
+                captured,
+                &roster,
+                &reference.target_node_id,
+                reference.target_raft_id,
+                &inner.identity.node_id,
+            )
+            .map_err(MembershipError::ClockUnbounded)?;
+        let evidence = if row
+            .last_applied_index
+            .and_then(|index| u64::try_from(index).ok())
+            .is_some_and(|index| index >= reference.barrier_index)
+        {
+            RemovalFenceEvidence::TargetApplied
+        } else if captured.permits_wall_reachability()
+            && !node_is_reachable(captured.now_ms(), row.last_seen_at)
+        {
+            RemovalFenceEvidence::AuthoritativeUnreachable
+        } else {
+            return Ok(None);
+        };
+        Ok(Some(AppliedRemovalFence {
+            reference: frozen,
+            evidence,
+        }))
+    }
+
+    async fn wait_for_reduction_reference(
+        &self,
+        reference: &hiqlite::ReductionFenceReference,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<AppliedRemovalFence, MembershipError> {
         loop {
-            let target = self.promotion_target(node_id).await?;
-            if !node_is_reachable(unix_ms()?, target.last_seen_at) {
-                return Ok(());
-            }
-            if target
-                .last_applied_index
-                .and_then(|index| u64::try_from(index).ok())
-                .is_some_and(|index| index >= barrier)
+            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
+                MembershipError::RemovalPending("original removal proof deadline expired".into())
+            })?;
+            match tokio::time::timeout(
+                remaining,
+                self.prove_reduction_reference(reference, captured),
+            )
+            .await
             {
-                return Ok(());
+                Ok(Ok(Some(proof))) => return Ok(proof),
+                Ok(Ok(None)) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_) => {
+                    return Err(MembershipError::RemovalPending(
+                        "original removal proof deadline expired".into(),
+                    ))
+                }
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(MembershipError::RemovalPending(format!(
-                    "{node_id} has not applied its durable route fence"
-                )));
-            }
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            let remaining = captured.remaining_removal_budget().ok_or_else(|| {
+                MembershipError::RemovalPending("original removal proof deadline expired".into())
+            })?;
+            tokio::time::sleep(remaining.min(Duration::from_millis(250))).await;
         }
     }
 
+    async fn prepare_reduction_reference(
+        &self,
+        node_id: &str,
+        raft_id: u64,
+        attempt_id: &str,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(hiqlite::ReductionFenceReference, AppliedRemovalFence), MembershipError> {
+        let remaining = captured.remaining_removal_budget().ok_or_else(|| {
+            MembershipError::RemovalPending("original removal proof deadline expired".into())
+        })?;
+        tokio::time::timeout(remaining, async {
+            let reference = self
+                .freeze_reduction_reference(node_id, raft_id, attempt_id, captured)
+                .await?;
+            let proof = self
+                .wait_for_reduction_reference(&reference, captured)
+                .await?;
+            Ok((reference, proof))
+        })
+        .await
+        .map_err(|_| {
+            MembershipError::RemovalPending("original removal proof deadline expired".into())
+        })?
+    }
+
     pub async fn remove_voter(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
+        let captured = self.clock.capture_removal_node(node_id);
+        self.remove_voter_captured(node_id, captured).await
+    }
+
+    async fn remove_voter_captured(
+        &self,
+        node_id: &str,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
         if node_id == inner.identity.node_id {
             return Err(MembershipError::SelfRemovalRequiresLeave);
@@ -8663,6 +9028,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
         let removal_attempt = self.begin_node_removal(node_id, false).await?;
         // Close the final admission race only after the durable removal fence
         // exists. Package creation checks that fence atomically, so this is the
@@ -8681,10 +9047,30 @@ impl MembershipManager {
                     .await);
             }
         }
+        let (reference, proof) = match self
+            .prepare_reduction_reference(node_id, target_raft_id, &removal_attempt, &captured)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                    .await)
+            }
+        };
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
+                )
+                .await);
+        }
         dispatch_voter_removal_outcome(
             node_id,
             &removal_attempt,
-            request_voter_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await,
+            request_voter_removal(&leader.addr_api, &inner.secrets.api, &reference).await,
             |rollback_node, rollback_attempt, error| {
                 self.rollback_node_removal_after_failure(rollback_node, rollback_attempt, error)
             },
@@ -8706,19 +9092,21 @@ impl MembershipManager {
     /// committed role. A learner leave never changes quorum arithmetic.
     pub async fn leave_node(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let captured = self.clock.capture_removal_node(&inner.identity.node_id);
         let metrics = inner.client.metrics_db().await?;
         if metrics
             .membership_config
             .voter_ids()
             .any(|raft_id| raft_id == inner.identity.raft_id)
         {
-            self.leave_voter().await
+            self.leave_voter_captured(captured).await
         } else if metrics
             .membership_config
             .nodes()
             .any(|(raft_id, _)| *raft_id == inner.identity.raft_id)
         {
-            self.remove_learner_impl(&inner.identity.node_id).await
+            self.remove_learner_captured(&inner.identity.node_id, captured)
+                .await
         } else if self.node_is_tombstoned(&inner.identity.node_id).await? {
             self.finalize_node_removal(&inner.identity.node_id).await;
             Ok(())
@@ -8736,6 +9124,15 @@ impl MembershipManager {
     /// leader before committing; an even voter set commits directly so the new
     /// odd quorum can elect after OpenRaft steps this leader down.
     pub async fn leave_voter(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let captured = self.clock.capture_removal_node(&inner.identity.node_id);
+        self.leave_voter_captured(captured).await
+    }
+
+    async fn leave_voter_captured(
+        &self,
+        captured: Result<ClockRemovalCapture<'_>, ClockRefusal>,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         let node_id = inner.identity.node_id.clone();
         let metrics = inner.client.metrics_db().await?;
@@ -8833,6 +9230,7 @@ impl MembershipManager {
         // Fence while this voter is still inside the old quorum. The separate
         // pending row survives a crash and keeps the operation retryable while
         // OpenRaft is in a joint or otherwise indeterminate configuration.
+        let captured = captured.map_err(MembershipError::ClockUnbounded)?;
         let removal_attempt = self.begin_node_removal(&node_id, false).await?;
         // The fence prevents any later local ownership admission. Settle work
         // that raced with the earlier pass before proposing removal, preserving
@@ -8850,13 +9248,32 @@ impl MembershipManager {
                     .await);
             }
         }
-        match request_voter_removal(
-            &commit_leader_api,
-            &inner.secrets.api,
-            inner.identity.raft_id,
-        )
-        .await
+        let (reference, proof) = match self
+            .prepare_reduction_reference(
+                &node_id,
+                inner.identity.raft_id,
+                &removal_attempt,
+                &captured,
+            )
+            .await
         {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Err(self
+                    .rollback_node_removal_after_failure(&node_id, &removal_attempt, error)
+                    .await)
+            }
+        };
+        if let Err(cause) = self.clock.admit_fenced_removal(&captured, &proof) {
+            return Err(self
+                .rollback_node_removal_after_failure(
+                    &node_id,
+                    &removal_attempt,
+                    MembershipError::ClockUnbounded(cause),
+                )
+                .await);
+        }
+        match request_voter_removal(&commit_leader_api, &inner.secrets.api, &reference).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(removal_error)) => {
                 return Err(self
@@ -9625,6 +10042,14 @@ impl MembershipManager {
                     params!(owner_fence_key, node_id),
                 ),
                 (ROLLBACK_REMOVAL_FENCE_SQL.to_owned(), params!(node_id)),
+                (
+                    RETIRE_OWNED_REDUCTION_REFERENCE_SQL.to_owned(),
+                    params!(
+                        format!("internal.cluster_reduction.v1.{node_id}.{attempt_id}"),
+                        node_id,
+                        attempt_id
+                    ),
+                ),
             ])
             .await?
             .into_iter()
@@ -9664,12 +10089,25 @@ impl MembershipManager {
         inner.internal_read_authority.lock().await.remove(node_id);
         if let Err(error) = inner
             .client
-            .execute(
-                "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
-                 WHERE node_id = $2",
-                params!(unix_ms().unwrap_or(i64::MAX), node_id),
-            )
+            .txn(vec![
+                (
+                    "UPDATE cluster_nodes SET removed_at = COALESCE(removed_at, $1) \
+                     WHERE node_id = $2"
+                        .to_owned(),
+                    params!(unix_ms().unwrap_or(i64::MAX), node_id),
+                ),
+                (
+                    "DELETE FROM settings WHERE key IN \
+                     (SELECT 'internal.cluster_reduction.v1.' || node_id || '.' || attempt_id \
+                       FROM cluster_node_removal_attempts WHERE node_id = $1) \
+                     AND EXISTS (SELECT 1 FROM cluster_nodes \
+                       WHERE node_id = $1 AND removed_at IS NOT NULL)"
+                        .to_owned(),
+                    params!(node_id),
+                ),
+            ])
             .await
+            .and_then(|results| results.into_iter().collect::<Result<Vec<_>, _>>())
         {
             // The pending-removal row remains the authoritative durable fence.
             tracing::error!(%error, %node_id, "could not materialize final node tombstone");
@@ -10288,6 +10726,7 @@ where
     }
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 struct RemoveVoterRequest {
     remove_voter: u64,
@@ -10301,9 +10740,13 @@ struct PromoteLearnerRequest<'a> {
 }
 
 #[derive(Serialize)]
-struct RemoveLearnerRequest {
-    node_id: u64,
-    stay_as_learner: bool,
+struct FencedVoterRemovalRequest<'a> {
+    fenced_remove_voter: &'a hiqlite::ReductionFenceReference,
+}
+
+#[derive(Serialize)]
+struct FencedLearnerRemovalRequest<'a> {
+    fenced_leave: &'a hiqlite::ReductionFenceReference,
 }
 
 /// Resolve an ambiguous membership HTTP result from independent survivor
@@ -10520,7 +10963,7 @@ fn quorum_confirms_member_removal(removed: u64, observations: &[MemberSetObserva
 async fn request_voter_removal(
     leader_api: &str,
     api_secret: &str,
-    remove_voter: u64,
+    reference: &hiqlite::ReductionFenceReference,
 ) -> Result<(), MembershipChangeFailure> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -10534,7 +10977,9 @@ async fn request_voter_removal(
         .post(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&RemoveVoterRequest { remove_voter })
+        .json(&FencedVoterRemovalRequest {
+            fenced_remove_voter: reference,
+        })
         .send()
         .await
         .map_err(|error| {
@@ -10582,7 +11027,7 @@ async fn request_learner_promotion(
 async fn request_learner_removal(
     leader_api: &str,
     api_secret: &str,
-    node_id: u64,
+    reference: &hiqlite::ReductionFenceReference,
 ) -> Result<(), MembershipChangeFailure> {
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true)
@@ -10596,9 +11041,8 @@ async fn request_learner_removal(
         .delete(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .json(&RemoveLearnerRequest {
-            node_id,
-            stay_as_learner: false,
+        .json(&FencedLearnerRemovalRequest {
+            fenced_leave: reference,
         })
         .send()
         .await
@@ -10841,8 +11285,46 @@ struct PromotionTargetRow {
     observed_at: Option<i64>,
 }
 
-struct RemovalAttemptRow {
-    attempt_id: String,
+struct ReductionReferenceRow {
+    reference_json: String,
+    raft_id: i64,
+    last_seen_at: i64,
+    last_applied_index: Option<i64>,
+}
+
+fn exact_reduction_binding_matches(
+    row: &ReductionReferenceRow,
+    expected: &hiqlite::ReductionFenceReference,
+) -> bool {
+    expected.has_valid_shape()
+        && u64::try_from(row.raft_id).ok() == Some(expected.target_raft_id)
+        && serde_json::from_str::<hiqlite::ReductionFenceReference>(&row.reference_json)
+            .is_ok_and(|stored| &stored == expected)
+}
+
+/// Only this module's actual durable-row consumer constructs a target fence.
+/// Transport references and scalar target flags cannot construct this proof.
+pub(super) struct AppliedRemovalFence {
+    reference: hiqlite::ReductionFenceReference,
+    evidence: RemovalFenceEvidence,
+}
+
+enum RemovalFenceEvidence {
+    TargetApplied,
+    AuthoritativeUnreachable,
+}
+
+impl AppliedRemovalFence {
+    pub(super) fn reference(&self) -> &hiqlite::ReductionFenceReference {
+        &self.reference
+    }
+
+    pub(super) fn relies_on_wall_reachability(&self) -> bool {
+        matches!(
+            self.evidence,
+            RemovalFenceEvidence::AuthoritativeUnreachable
+        )
+    }
 }
 
 struct PromotionAttemptRow {
@@ -11253,10 +11735,13 @@ impl From<&mut Row<'_>> for PromotionTargetRow {
     }
 }
 
-impl From<&mut Row<'_>> for RemovalAttemptRow {
+impl From<&mut Row<'_>> for ReductionReferenceRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
-            attempt_id: row.get("attempt_id"),
+            reference_json: row.get("reference_json"),
+            raft_id: row.get("raft_id"),
+            last_seen_at: row.get("last_seen_at"),
+            last_applied_index: row.get("last_applied_index"),
         }
     }
 }
@@ -11548,6 +12033,166 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn k06_reduction_binding_refuses_zero_stale_and_foreign_identity_without_borrowing() {
+        use super::{
+            exact_reduction_binding_matches, reduction_reference_key, removed_job_owner_key,
+            ReductionReferenceRow, FREEZE_REDUCTION_REFERENCE_SQL, MAX_FROZEN_REDUCTION_REFERENCES,
+            READ_REDUCTION_REFERENCE_SQL, RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+        };
+        let node = "00000000-0000-0000-0000-000000000002";
+        let attempt = "00000000-0000-0000-0000-000000000010";
+        let other = "00000000-0000-0000-0000-000000000011";
+        let db = rusqlite::Connection::open_in_memory().expect("sqlite");
+        db.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER);
+            CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER, last_seen_at INTEGER,
+                last_applied_index INTEGER, removed_at INTEGER);
+            CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY);
+            CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT,
+                PRIMARY KEY(node_id, attempt_id));").expect("fixture tables");
+        db.execute(
+            "INSERT INTO cluster_nodes VALUES (?1, 2, 100, 42, NULL)",
+            [node],
+        )
+        .expect("target");
+        db.execute("INSERT INTO cluster_node_removals VALUES (?1)", [node])
+            .expect("route fence");
+        db.execute(
+            "INSERT INTO settings VALUES (?1, '1', 100)",
+            [removed_job_owner_key(node)],
+        )
+        .expect("owner fence");
+        for id in [attempt, other] {
+            db.execute(
+                "INSERT INTO cluster_node_removal_attempts VALUES (?1, ?2)",
+                rusqlite::params![node, id],
+            )
+            .expect("owned refs");
+        }
+        let reference = |id: &str, barrier| hiqlite::ReductionFenceReference {
+            version: 1,
+            target_node_id: node.into(),
+            target_raft_id: 2,
+            attempt_id: id.into(),
+            barrier_index: barrier,
+        };
+        let freeze = |value: &hiqlite::ReductionFenceReference| {
+            db.execute(
+                FREEZE_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![
+                    reduction_reference_key(value),
+                    serde_json::to_string(value).expect("json"),
+                    100,
+                    node,
+                    value.attempt_id,
+                    removed_job_owner_key(node),
+                    i64::try_from(value.target_raft_id).expect("fixture Raft identity"),
+                    i64::try_from(value.barrier_index).expect("fixture barrier"),
+                    MAX_FROZEN_REDUCTION_REFERENCES
+                ],
+            )
+            .expect("actual guarded insert")
+        };
+        let original = reference(attempt, 42);
+        assert_eq!(
+            freeze(&reference(attempt, 0)),
+            0,
+            "zero cannot create a binding"
+        );
+        assert_eq!(freeze(&original), 1);
+        assert_eq!(
+            freeze(&reference(attempt, 99)),
+            0,
+            "replay cannot refresh the original barrier"
+        );
+        let read = |value: &hiqlite::ReductionFenceReference| {
+            use rusqlite::OptionalExtension;
+            db.query_row(
+                READ_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![
+                    reduction_reference_key(value),
+                    node,
+                    value.attempt_id,
+                    removed_job_owner_key(node)
+                ],
+                |row| {
+                    Ok(ReductionReferenceRow {
+                        reference_json: row.get("reference_json")?,
+                        raft_id: row.get("raft_id")?,
+                        last_seen_at: row.get("last_seen_at")?,
+                        last_applied_index: row.get("last_applied_index")?,
+                    })
+                },
+            )
+            .optional()
+            .expect("actual bound read")
+        };
+        assert!(exact_reduction_binding_matches(
+            &read(&original).expect("bound original"),
+            &original
+        ));
+        assert!(
+            !exact_reduction_binding_matches(
+                &read(&original).expect("unchanged original"),
+                &reference(attempt, 99)
+            ),
+            "a different barrier cannot borrow the frozen original"
+        );
+        let concurrent = reference(other, 43);
+        assert_eq!(freeze(&concurrent), 1);
+        db.execute(
+            "UPDATE cluster_nodes SET raft_id = 3 WHERE node_id = ?1",
+            [node],
+        )
+        .expect("replace Raft identity");
+        assert_eq!(
+            freeze(&reference(attempt, 44)),
+            0,
+            "changed identity cannot mint"
+        );
+        assert!(
+            !exact_reduction_binding_matches(
+                &read(&original).expect("stored foreign identity"),
+                &original
+            ),
+            "actual receiver binding check rejects changed Raft identity"
+        );
+        db.execute(
+            "UPDATE cluster_nodes SET raft_id = 2 WHERE node_id = ?1",
+            [node],
+        )
+        .expect("restore fixture identity");
+        assert_eq!(
+            db.execute(
+                RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![reduction_reference_key(&original), node, attempt]
+            )
+            .expect("live retirement refusal"),
+            0
+        );
+        db.execute(
+            "DELETE FROM cluster_node_removal_attempts WHERE node_id = ?1 AND attempt_id = ?2",
+            rusqlite::params![node, attempt],
+        )
+        .expect("release only owned ref");
+        assert!(
+            read(&original).is_none(),
+            "rolled-back ref cannot borrow the surviving attempt"
+        );
+        assert_eq!(
+            db.execute(
+                RETIRE_OWNED_REDUCTION_REFERENCE_SQL,
+                rusqlite::params![reduction_reference_key(&original), node, attempt]
+            )
+            .expect("owned cleanup"),
+            1
+        );
+        assert!(
+            read(&concurrent).is_some(),
+            "another invocation stays fenced and bound"
+        );
+    }
+
     #[tokio::test]
     async fn finalization_preserves_clock_ticket_and_completed_retry() {
         use std::cell::Cell;

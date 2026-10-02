@@ -392,8 +392,12 @@ async fn observation_round(
         filters.clear();
         return None;
     };
-    let roster = directory.keys().cloned().collect::<Vec<_>>();
-    let ticket = match guard.roster_for_membership(&roster, peer_roster.membership.as_ref()) {
+    let roster_ticket = if membership_manager.is_replicated() {
+        guard.roster_for_peer_directory(&peer_roster)
+    } else {
+        guard.roster_for_membership(&[], None)
+    };
+    let ticket = match roster_ticket {
         Ok(ticket) => ticket,
         Err(_) => {
             filters.clear();
