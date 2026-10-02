@@ -2531,6 +2531,8 @@ mod tests {
 
     use super::*;
 
+    mod public_copy_wire;
+
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
