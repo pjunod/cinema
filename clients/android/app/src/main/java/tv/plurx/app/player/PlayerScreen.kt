@@ -1632,6 +1632,8 @@ private fun PlayerContent(
             PlayerPanel.Settings -> PlayerSettings(
                 vm = vm,
                 qualityOptions = qualityOptions(plan.ladder),
+                retainedQuality = controller.retainedQualityRequest,
+                onApplyWithRestart = controller::applyRetainedQualityWithRestart,
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
                 currentPosition = controller::positionForPlaybackIntent,
@@ -2093,6 +2095,8 @@ private fun TransportButtons(
 private fun PlayerSettings(
     vm: AppViewModel,
     qualityOptions: List<QualityOption>,
+    retainedQuality: PlaybackQuality?,
+    onApplyWithRestart: () -> Unit,
     audioOffsetMs: Long,
     declaredOffsetMs: Long?,
     currentPosition: () -> Long,
@@ -2107,6 +2111,11 @@ private fun PlayerSettings(
     RequestInitialFocus(initialFocusRequester, enabled = qualityOptions.isNotEmpty())
     PlayerPanelSurface("Playback settings", onDismiss) {
         Text("Quality", color = Muted, style = MaterialTheme.typography.labelMedium)
+        retainedQuality?.let { quality ->
+            Text("The requested quality did not arrive. Current playback continues.", color = Muted)
+            PanelRow("Retry ${quality.label}", false) { onReload(currentPosition(), "quality", quality) }
+            PanelRow("Apply ${quality.label} with restart", false) { onApplyWithRestart() }
+        }
         // The rungs are the server's, filtered to what this source can feed —
         // a 1080p file never offers to upscale itself to 4K.
         qualityOptions.forEachIndexed { index, option ->

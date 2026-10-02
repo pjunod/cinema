@@ -13,6 +13,34 @@ import tv.plurx.app.data.PlaybackQuality
 
 class PlaybackIntentTest {
     @Test
+    fun failedQualityRetainsWireAndMediaWithoutLosingSavedPreferenceOrPause() {
+        val intent = PlaybackIntent(initialQuality = PlaybackQuality.Auto)
+        val first = intent.beginQualityChange(PlaybackQuality.Q1080)
+        intent.setPlaybackRequested(false)
+        val wire = QualitySelection.AutoCandidate(720, "a".repeat(32))
+        assertTrue(intent.retainFailedQuality(first, wire))
+        assertEquals(PlaybackQuality.Q1080, intent.desiredQuality)
+        assertEquals(PlaybackQuality.Auto, intent.qualityForMedia())
+        assertEquals(wire, intent.retainedControlQuality)
+        assertFalse(intent.playbackRequested)
+        var replans = 0
+        val replacement = PlaybackPlanReplacement(PlaybackQuality.Auto)
+        replacement.retain { _, _ -> replans++ }
+        intent.beginSeek(90_000, 10_000)
+        assertFalse(replacement.route(intent))
+        assertEquals("a later seek must not implicitly apply the failed saved choice", 0, replans)
+        val retry = intent.beginQualityChange(PlaybackQuality.Q1080)
+        assertNull(intent.retainedControlQuality)
+        assertFalse(intent.retainFailedQuality(first, QualitySelection.Original))
+        assertSame(retry, intent.pendingQualityChange)
+        assertTrue(intent.retainFailedQuality(retry, wire))
+        assertEquals(PlaybackQuality.Auto, intent.qualityForMedia())
+        intent.adoptQuality(PlaybackQuality.Q1080)
+        assertNull(intent.retainedControlQuality)
+        assertEquals(PlaybackQuality.Q1080, intent.qualityForMedia())
+    }
+
+    @Test
     fun rapidSeeksRetainOnlyTheNewestDestination() {
         val intent = PlaybackIntent("11111111-1111-4111-8111-111111111111", PlaybackQuality.Auto)
         val first = intent.beginSeek(30_000, 10_000)

@@ -1831,3 +1831,23 @@ AAC, refuses the new video/audio group, and asserts that the incumbent still
 serves its playlist. Synthetic fixture facts also declare their known square
 pixel ratio for normalized AVC planning. Pinned compilation and normal hooks
 apply; unit execution remains deferred.
+
+### 10.46 Android manual failure retains playback
+
+A failed manual offer or prepared successor now settles once as retained
+current when the incumbent has established playback, is ready, and has no
+player error. It preserves the saved preference while restoring the exact
+incumbent wire selection and media recipe; a later seek cannot implicitly
+apply the failed saved choice. The viewer can Retry the choice or explicitly
+Apply with restart in Playback settings. The latter publishes its current
+intent before routing and respects newer commands. Genuine incumbent failure
+keeps the existing recovery path.
+
+A failed exposed successor restores its predecessor without scheduling a
+reopen when that player is healthy; recovery otherwise uses the latest viewer
+destination, rather than the old exposure position. Existing latest transport,
+volume and speed restoration remains intact. Pure regressions cover replay
+settlement, stale epochs, standing-wire versus saved-preference separation,
+Pause retention, later seeks, retry and stale failure receipts. Android
+production and unit-test sources are compiled without unit execution. Native
+warm-surface exposure and device qualification remain unfinished.

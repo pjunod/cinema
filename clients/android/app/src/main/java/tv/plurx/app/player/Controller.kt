@@ -366,7 +366,7 @@ class Controller internal constructor(
 
     private fun currentRecipe(): PlaybackRecipeOwnership.Claim = recipeOwnership.request(
         PlaybackMediaRecipe(
-            quality = playbackIntent.desiredQuality,
+            quality = playbackIntent.qualityForMedia(),
             mode = planMode,
             requiresHls = attachedRequiresHlsOverride ?: plan.requiresHls,
             audioIndex = selectedAudio,
@@ -1519,10 +1519,12 @@ class Controller internal constructor(
         quality: PlaybackQuality,
         onPrepared: (Long, PlaybackQuality) -> Unit,
     ) {
+        if (!playbackControlBootstrapFence.isActive()) return
+        val incumbentSelection = playbackControlSelection().quality
+        retainedQualityRequest = null
         resetAutoQualityBudgetForViewer()
         autoDesiredCandidate = null
         playbackIntent.requestAutomaticCandidate(null, null)
-        if (!playbackControlBootstrapFence.isActive()) return
         planReplacement.retain(onPrepared)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
@@ -1535,12 +1537,13 @@ class Controller internal constructor(
         scope.launch {
             val current = publishQualityChange(pending, publicationEpoch)
             if (!current) return@launch
-            // One owner from here to either a commit or exactly one reopen.
+            // One owner from here to commit, retention, or one recovery reopen.
             // A rung the viewer already left is not worth routing to, so the
             // previous change is told it has been replaced rather than left to
             // fire later.
             directedChange?.superseded()
-            val change = DirectedChange(epoch = publicationEpoch, quality = quality)
+            val change = DirectedChange(epoch = publicationEpoch, quality = quality,
+                pending = pending, incumbentSelection = incumbentSelection)
             directedChange = change
             when (val step = playbackControl.awaitPreparedOffer(tappedAtMs)) {
                 // The same entry point the reporter's push uses, and idempotent
@@ -1564,6 +1567,26 @@ class Controller internal constructor(
      */
     private var directedChange: DirectedChange? = null
 
+    var retainedQualityRequest by mutableStateOf<PlaybackQuality?>(null)
+        private set
+
+    fun applyRetainedQualityWithRestart() {
+        val quality = retainedQualityRequest ?: return
+        if (!playbackControlBootstrapFence.isActive()) return
+        retainedQualityRequest = null
+        directedChange?.superseded()
+        playbackIntent.adoptQuality(quality)
+        val observed = realPosition()
+        val pending = playbackIntent.beginSeek(playbackIntent.positionForPlaybackIntent(observed), observed, quality)
+        sampleTargetPresentationDeadline()
+        val publicationEpoch = mediaMutationEpoch
+        scope.launch {
+            if (publishIntent(pending, quality, publicationEpoch)) {
+                planReplacement.route(playbackIntent, force = true)
+            }
+        }
+    }
+
     /** When the directed change was published, for the committed-in row. */
     private var directedChangeTappedAtMs: Long? = null
 
@@ -1583,7 +1606,8 @@ class Controller internal constructor(
     }
 
     /**
-     * The prepared path did not deliver. Take the ordinary reopen, once.
+     * Settle a failed optional change once. Healthy playback retains its
+     * standing recipe; only an unhealthy incumbent takes the recovery reopen.
      *
      * The position is sampled *here* rather than at the tap, which is the whole
      * reason a rung change no longer records itself as a seek: whatever played
@@ -1592,22 +1616,30 @@ class Controller internal constructor(
      * over the playhead.
      */
     private fun fallBackDirectedChange(change: DirectedChange, reason: String): Boolean {
-        val routed = change.fallBackOnce(reason, mediaMutationEpoch) {
+        if (directedChange !== change) return false
+        val pending = change.pending
+        if (pending != null && !playbackIntent.retainQualityChange(pending, null)) return false
+        val incumbentHealthy = establishedPlayback && player.playerError == null &&
+            player.playbackState == Player.STATE_READY && pending != null && change.incumbentSelection != null
+        val routed = change.settleFailureOnce(mediaMutationEpoch, incumbentHealthy, retain = {
+            if (playbackIntent.retainFailedQuality(pending!!, change.incumbentSelection!!)) {
+                retainedQualityRequest = change.quality
+                preparedRollbackReopen = null
+                raiseDegradedNotice("Quality change did not complete. Playback continues. Retry or apply with restart in Playback settings.")
+                playbackControl.reportEvidence()
+            }
+        }, reopen = {
             val observed = realPosition()
             playbackIntent.beginSeek(
-                playbackIntent.positionForPlaybackIntent(observed),
-                observed,
-                change.quality,
+                playbackIntent.positionForPlaybackIntent(observed), observed, change.quality,
             )
             sampleTargetPresentationDeadline()
             planReplacement.route(playbackIntent, force = true)
-        }
-        // Only a word the server actually said keeps its own name. Anything
-        // else — no reporter, a preparation that failed after it was offered —
-        // is the ordinary fallback, and claiming a decline for it would put a
-        // sentence about the server on a fact about this client.
+        })
+        // Retention is a client outcome. Preserve a server refusal label only
+        // when recovery really routes the requested quality through a reopen.
         val via = if (reason == "declined" || reason == "timed_out") reason else "fallback"
-        if (routed) logQualitySwitch(via, change.quality)
+        if (routed) logQualitySwitch(if (incumbentHealthy) "retained_current" else via, change.quality)
         return routed
     }
 
@@ -1650,10 +1682,8 @@ class Controller internal constructor(
     /**
      * How a rung change was delivered, as a client-log event.
      *
-     * `via=prepared` is the handoff; everything else is an ordinary reopen and
-     * says which kind, because "the server declined" and "the server never
-     * answered" are different facts about a server and only one of them is
-     * about this client.
+     * A prepared outcome names a proved handoff; retained current names no
+     * delivery change. Other outcomes describe the actual recovery route.
      */
     private fun logQualitySwitch(via: String, quality: PlaybackQuality) {
         val elapsedMs = directedChangeTappedAtMs?.let {
@@ -1668,7 +1698,7 @@ class Controller internal constructor(
         playbackTelemetry.report(
             event = "quality_switch",
             level = if (via == "prepared") "info" else "warn",
-            message = "viewer quality change delivered via $via",
+            message = "viewer quality change outcome: $via",
             detail = buildString {
                 append("via=").append(via)
                 append(" quality=").append(quality.rungHeight?.toString() ?: quality.toString())
@@ -2948,7 +2978,7 @@ class Controller internal constructor(
             else -> SubtitleMode.NATIVE
         }
         return ClientSelection(
-            quality = when (val requested = playbackIntent.desiredQuality) {
+            quality = playbackIntent.retainedControlQuality ?: when (val requested = playbackIntent.desiredQuality) {
                 PlaybackQuality.Auto -> if (tv.plurx.app.data.Session.displayAwareAuto &&
                     autoRouteProtocol == "route-v1" &&
                     tv.plurx.app.data.Session.displayAwareAutoProtocol == "route-v1") {
@@ -3987,9 +4017,8 @@ class Controller internal constructor(
         awaitingCommitFrameSinceMs?.let {
             if (samplePreparedCommitFrameBudget() != false) {
                 val restored = rollbackSwitchedReplacement()
-                // The directed change takes its one reopen here, and it carries
-                // the viewer's rung. The deferred rollback reopen would only
-                // repeat it at the rung they changed away from.
+                // The directed owner settles retention or recovery exactly
+                // once; a deferred rollback must not repeat either outcome.
                 val routed = failSwitchedReplacement()
                 if (routed) preparedRollbackReopen = null
                 if (!restored && !routed) {
@@ -4327,16 +4356,15 @@ class Controller internal constructor(
     /**
      * Put the last proven player back before publishing failure.
      *
-     * The ordinary reopen is deferred until [collectRetiredPlayer] observes
-     * the surface move. Starting it here would replace the predecessor's item
-     * while the view was still attached to the black successor, losing the
-     * exact frame this rollback exists to preserve.
+     * A healthy predecessor remains the playback authority. If it also needs
+     * recovery, defer its reopen until [collectRetiredPlayer] observes the
+     * surface move; preserve the latest viewer destination through that wait.
      */
     private fun rollbackSwitchedReplacement(): Boolean {
         val predecessor = preparedPredecessor ?: return false
         if (retiredPlayer !== predecessor.player) return false
         val failedSuccessor = player
-        val reopenAt = predecessor.filmPositionMs
+        val reopenAt = playbackIntent.positionForPlaybackIntent(predecessor.baseMs + predecessor.player.currentPosition)
 
         failedSuccessor.removeListener(this.listener)
         externalListeners.forEach { failedSuccessor.removeListener(it) }
@@ -4366,7 +4394,9 @@ class Controller internal constructor(
         predecessor.player.playWhenReady = effectivePlayWhenReady()
 
         preparedPredecessor = null
-        preparedRollbackReopen = reopenAt to "prepared successor rendered no frame"
+        preparedRollbackReopen = if (predecessor.establishedPlayback && predecessor.player.playerError == null &&
+            predecessor.player.playbackState == Player.STATE_READY) null
+        else reopenAt to "prepared successor rendered no frame"
         retiredPlayer = failedSuccessor
         retiredParkedAtMs = monotonicNowMs()
         player = predecessor.player

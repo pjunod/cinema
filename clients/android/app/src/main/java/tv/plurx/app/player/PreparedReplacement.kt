@@ -177,7 +177,12 @@ internal class PreparedOfferWait(
  *
  * Not thread-safe: [Controller] owns it and touches it from the player's scope.
  */
-internal class DirectedChange(val epoch: Long, val quality: PlaybackQuality) {
+internal class DirectedChange(
+    val epoch: Long,
+    val quality: PlaybackQuality,
+    val pending: PlaybackIntent.PendingQualityChange? = null,
+    val incumbentSelection: QualitySelection? = null,
+) {
     private var settled = false
 
     /** True once this change can no longer produce a reopen. */
@@ -194,16 +199,20 @@ internal class DirectedChange(val epoch: Long, val quality: PlaybackQuality) {
      * still the viewer's current intent. Returns whether it routed.
      */
     fun fallBackOnce(reason: String, currentEpoch: Long, route: () -> Unit): Boolean {
+        return settleFailureOnce(currentEpoch, false, {}, route)
+    }
+
+    /** Healthy optional failure retains once; stale/replayed failures do nothing. */
+    fun settleFailureOnce(
+        currentEpoch: Long,
+        incumbentHealthy: Boolean,
+        retain: () -> Unit,
+        reopen: () -> Unit,
+    ): Boolean {
         if (settled) return false
-        // The media moved on under this change — another quality tap, a title
-        // change, a reopen someone else already took. Routing now would drag
-        // the viewer back to a rung they have since left.
-        if (currentEpoch != epoch) {
-            settled = true
-            return false
-        }
         settled = true
-        route()
+        if (currentEpoch != epoch) return false
+        if (incumbentHealthy) retain() else reopen()
         return true
     }
 
@@ -388,7 +397,7 @@ internal class RendezvousHold(
  */
 internal object PreparedReplacementAdvisory {
     data class Advice(
-        /** `committed <ms>`, `declined`, `timed out`, `fell back`, or null. */
+        /** Actual outcome: committed, retained current, refusal, or recovery fallback. */
         val outcome: String? = null,
         /** The last `delivery.preparation` the server sent, verbatim. */
         val preparation: String? = null,
@@ -420,6 +429,7 @@ internal object PreparedReplacementAdvisory {
 
     /** How a `via=` tag becomes the sentence the row shows. */
     fun outcomeLabel(via: String, elapsedMs: Long?): String = when (via) {
+        "retained_current" -> "retained current"
         "prepared" -> "committed" + (elapsedMs?.let { " ${it}ms" } ?: "")
         "declined" -> "declined"
         "timed_out" -> "timed out"
