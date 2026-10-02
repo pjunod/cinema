@@ -390,3 +390,13 @@ nynuc's pinned 8.1.3, and a remuxed excerpt whose start is the original resume
 point. It does not reproduce full-file seeking costs or qualify fleet-wide
 latency. The fresh lab initially refused unverified HEVC until its settings
 were matched; that refusal is excluded from the successful baseline.
+
+The test-only 32-second candidate was then enabled in a temporary local
+binary for native transport; the shipping source binding was restored before
+validation and commit. Its real daemon first snapshot ended at 32.283
+seconds and arrived 505 ms after gated inventory. Safari reported **3,093 ms
+to first frame** and reached 3:00 of 3:00. A 764 ms presentation wait ended at
+the first frame, with 9.8 seconds buffered; no later stall/error was reported.
+That single paired run saved 487 ms on this Mac. It neither establishes a
+production speedup nor covers long-form, remote-transfer, resume/rate or
+physical-client qualification, so the production policy remains conservative.
