@@ -310,10 +310,10 @@ pub(crate) async fn post_membership(
     validate_secret(&state, &headers)?;
 
     let payload = get_payload::<MembershipChangeReq>(&headers, body)?;
-    if let MembershipChangeReq::FencedRemoveVoter(request) = &payload {
-        if !request.fenced_remove_voter.has_valid_shape() {
-            return Err(Error::Error("invalid exact reduction reference".into()));
-        }
+    if let MembershipChangeReq::FencedRemoveVoter(request) = &payload
+        && !request.fenced_remove_voter.has_valid_shape()
+    {
+        return Err(Error::Error("invalid exact reduction reference".into()));
     }
     // Capture this receiver's original installed clock before FIRST await.
     let mut admission = match &payload {
