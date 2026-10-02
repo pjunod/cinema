@@ -500,12 +500,24 @@ The deciding denominator is the **fresh-encode warm start**. That is the case
 where identity validation sits on a path the user actually waits on and
 where removing it could change what they see; against it, 30 ms is 3.5 %,
 below 10 %, so M3 does not open. The cached-segment figure is recorded but
-does not decide: a 118 ms start is already well inside any start bar, and
-the only way to take the 30 ms out of it is to trust cached facts without
-validating the probe's identity on that lookup — which is the trade §3.3
-would make, and which is not worth making for a start that is already fast.
-If Paul prefers the cached-segment denominator, M3 opens on the same
-evidence; nothing else in this plan changes.
+does not decide: a 118 ms start is already well inside any start bar, so
+taking 30 ms out of it changes nothing a viewer sees.
+
+What M3 would cost is stated here as §3.3 defines it. It does **not** trust
+facts without validation: every lookup still checks the snapshot's seals and
+compares the seven-field `fstat` tuple of the held descriptor and the path,
+any tuple change forces a full content hash before the verdict, and a full
+hash runs at least once per `PROBE_REVALIDATION_INTERVAL` (30 s) regardless.
+Its cost is **refusal latency** — after an operator replaces ffprobe in a way
+the tuple does not show, bound facts can be used for up to one interval
+before `probe_changed` refuses them — plus a second validation regime to
+build and keep tested. Re-evaluated on that basis, the decision stands: the
+cost is modest, but the gain on the start a viewer waits on is 3.5 %, below
+the bar, and this plan opens M3 on the measured share, not on the cost being
+low. If Paul prefers the cached-segment denominator, M3 opens on the same
+evidence; nothing else in this plan changes. (Restated 2026-10-02 after
+review 76, P2-2: the first text called the trade "trusting cached facts
+without validating the probe's identity", which misstates §3.3.)
 
 ### 5.5 M4 — warm-hit admission (conditional on M0 and M3)
 
