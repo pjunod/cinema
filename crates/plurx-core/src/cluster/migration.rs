@@ -3186,6 +3186,35 @@ struct PendingStartupClient {
     owned: Option<(Client, File)>,
 }
 
+// Cancellation, panic and runtime teardown are not terminal drain evidence.
+// Deliberately retain the actual resources if their cleanup owner disappears.
+#[cfg(feature = "hiqlite-store")]
+struct RetainedStartupResources {
+    owned: Option<(Client, File)>,
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl RetainedStartupResources {
+    async fn drain(mut self) {
+        let client = &self.owned.as_ref().expect("owned startup resources").0;
+        if let Err(error) = client.shutdown_retained_startup().await {
+            tracing::error!(%error, "startup cleanup is not terminal; retaining Client and daemon lock");
+            return;
+        }
+        // Only confirmed terminal drainage permits dropping the actual pair.
+        self.owned.take();
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl Drop for RetainedStartupResources {
+    fn drop(&mut self) {
+        if let Some(owned) = self.owned.take() {
+            std::mem::forget(owned);
+        }
+    }
+}
+
 #[cfg(feature = "hiqlite-store")]
 impl PendingStartupClient {
     fn new(client: Client, daemon_lock: File) -> Self {
@@ -3202,17 +3231,12 @@ impl PendingStartupClient {
 #[cfg(feature = "hiqlite-store")]
 impl Drop for PendingStartupClient {
     fn drop(&mut self) {
-        if let Some((client, daemon_lock)) = self.owned.take() {
-            tokio::spawn(async move {
-                if let Err(error) = client.shutdown_retained_startup().await {
-                    tracing::error!(%error, "startup cleanup is not terminal; retaining Client and daemon lock");
-                    // An uncertain drain is not permission to reuse storage.
-                    // No membership proposal or blind repeated shutdown occurs.
-                    std::future::pending::<()>().await;
-                }
-                drop(client);
-                drop(daemon_lock);
-            });
+        if let Some(owned) = self.owned.take() {
+            let retained = RetainedStartupResources { owned: Some(owned) };
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(retained.drain());
+            }
+            // No entered runtime: retained drops here and preserves the pair.
         }
     }
 }
@@ -6429,6 +6453,92 @@ mod tests {
             .expect("spawn owned cleanup control thread")
             .join()
             .expect("cleanup control thread completes");
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn k06_post_client_uncertain_cleanup_keeps_actual_lock_without_runtime_or_after_abort() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("build actual Client runtime");
+                let root = tempfile::tempdir().expect("owned uncertain-cleanup root");
+                let config = membership_test_config(root.path());
+                let identity = super::super::initialize_identity(
+                    root.path(),
+                    &uuid::Uuid::now_v7().to_string(),
+                )
+                .expect("actual identity");
+                let secrets = load_or_create_secrets(root.path()).expect("actual secrets");
+                let target = root.path().join(HIQLITE_ACTIVE_DIRNAME);
+                std::fs::create_dir(&target).expect("active directory");
+                let (client, _, _) = runtime
+                    .block_on(Box::pin(start_voter(
+                        &config, &target, &secrets, &identity, None, true, None, true, true,
+                    )))
+                    .expect("actual staged Client");
+                let make_owned = |name: &str| {
+                    let path = root.path().join(name);
+                    let lock = File::create(&path).expect("create owned lock");
+                    lock.lock().expect("lock actual file");
+                    let cloned = lock.try_clone().expect("clone actual file lock");
+                    drop(lock);
+                    let probe = File::open(path).expect("independent lock probe");
+                    ((client.clone(), cloned), probe)
+                };
+
+                // No entered runtime: Drop must not panic or release the pair.
+                assert!(tokio::runtime::Handle::try_current().is_err());
+                let (owned, probe) = make_owned("outside-runtime.lock");
+                drop(PendingStartupClient { owned: Some(owned) });
+                assert!(probe.try_lock().is_err(), "missing runtime is not terminal");
+
+                // This real cleanup future is cancelled before its first poll.
+                // The auxiliary runtime is current-thread, so scheduling is exact.
+                let auxiliary = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("unpolled cleanup runtime");
+                let (owned, probe) = make_owned("aborted-drain.lock");
+                let task = auxiliary.spawn(RetainedStartupResources { owned: Some(owned) }.drain());
+                task.abort();
+                assert!(auxiliary
+                    .block_on(task)
+                    .expect_err("aborted cleanup")
+                    .is_cancelled());
+                assert!(
+                    probe.try_lock().is_err(),
+                    "aborted drain retains actual lock"
+                );
+
+                let (owned, probe) = make_owned("runtime-teardown.lock");
+                let _task =
+                    auxiliary.spawn(RetainedStartupResources { owned: Some(owned) }.drain());
+                drop(auxiliary);
+                assert!(
+                    probe.try_lock().is_err(),
+                    "runtime teardown is not terminal"
+                );
+
+                let (owned, probe) = make_owned("successful-handoff.lock");
+                let mut pending = PendingStartupClient { owned: Some(owned) };
+                pending.handoff();
+                drop(pending);
+                probe
+                    .try_lock()
+                    .expect("successful handoff disarms failure guard");
+                runtime
+                    .block_on(client.shutdown_retained_startup())
+                    .expect("actual fixture Client terminal drainage");
+            })
+            .expect("spawn owned uncertain-cleanup control")
+            .join()
+            .expect("uncertain-cleanup control completes");
     }
 
     #[cfg(feature = "hiqlite-store")]
