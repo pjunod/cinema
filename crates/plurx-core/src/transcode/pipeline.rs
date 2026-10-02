@@ -40,6 +40,10 @@ pub enum Pipeline {
     VppQsv,
     /// The VA-API equivalent — Intel, and AMD where the driver implements it.
     TonemapVaapi,
+    /// VA-API decode and encode around Vulkan tone mapping. Hardware frames
+    /// are imported by libplacebo and mapped back to VA-API without a CPU
+    /// download. Probed separately because not every driver supports mapping.
+    LibplaceboVaapi,
     /// Vulkan, vendor-neutral. The likely answer for the AMD boxes, whose VCN
     /// has no tone-map block of its own. Already reachable as
     /// `PLURX_TONEMAP=libplacebo`; the probe is what turns a blind preference
@@ -108,6 +112,7 @@ pub enum Pipeline {
 pub const CANDIDATES: &[Pipeline] = &[
     Pipeline::VppQsv,
     Pipeline::TonemapVaapi,
+    Pipeline::LibplaceboVaapi,
     Pipeline::Libplacebo,
     Pipeline::TonemapOpencl,
     Pipeline::Cpu,
@@ -120,6 +125,7 @@ impl Pipeline {
             Pipeline::VppQsv => "vpp_qsv",
             Pipeline::TonemapVaapi => "tonemap_vaapi",
             Pipeline::Libplacebo => "libplacebo",
+            Pipeline::LibplaceboVaapi => "libplacebo_vaapi",
             Pipeline::TonemapOpencl => "tonemap_opencl",
             Pipeline::DoviTonemapx => "dovi_tonemapx",
             Pipeline::DoviPassthrough => "dovi_passthrough",
@@ -146,6 +152,7 @@ impl Pipeline {
             Pipeline::VppQsv => "GPU tone-map (QSV)",
             Pipeline::TonemapVaapi => "GPU tone-map (VA-API)",
             Pipeline::Libplacebo => "GPU tone-map (Vulkan)",
+            Pipeline::LibplaceboVaapi => "GPU tone-map (Vulkan / VA-API)",
             Pipeline::TonemapOpencl => "GPU tone-map (OpenCL)",
             Pipeline::DoviTonemapx => "Dolby Vision reshape (tonemapx)",
             Pipeline::DoviPassthrough => "Dolby Vision → HDR10 (tonemapx passthrough)",
@@ -154,7 +161,7 @@ impl Pipeline {
         }
     }
 
-    /// True when frames stay on the GPU from decode to encode.
+    /// True when tone mapping runs on the GPU (frame transfers may still occur).
     pub fn on_gpu(self) -> bool {
         !matches!(
             self,
@@ -176,7 +183,7 @@ impl Pipeline {
     pub fn pairs_with(self, encoder: Encoder) -> bool {
         match self {
             Pipeline::VppQsv => encoder == Encoder::Qsv,
-            Pipeline::TonemapVaapi => encoder == Encoder::Vaapi,
+            Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => encoder == Encoder::Vaapi,
             Pipeline::Libplacebo | Pipeline::TonemapOpencl => encoder != Encoder::Software,
             // Software DECODE is non-negotiable and stays so: the HEVC
             // decoder is what attaches the DOVI frame side data that
@@ -251,7 +258,7 @@ impl Pipeline {
                 a("-hwaccel_output_format"),
                 a("qsv"),
             ],
-            Pipeline::TonemapVaapi => vec![
+            Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi => vec![
                 a("-hwaccel"),
                 a("vaapi"),
                 a("-hwaccel_output_format"),
@@ -278,7 +285,7 @@ impl Pipeline {
             // libplacebo wants a Vulkan device; ffmpeg derives one from the
             // existing hardware context where it can, but naming it is what
             // makes the graph work on a box whose encoder is VA-API.
-            Pipeline::Libplacebo => vec![
+            Pipeline::Libplacebo | Pipeline::LibplaceboVaapi => vec![
                 a("-init_hw_device"),
                 a("vulkan=vk"),
                 a("-filter_hw_device"),
@@ -298,7 +305,9 @@ impl Pipeline {
     /// global filter device, so its VA-API encoder must be an ancestor that
     /// the final upload can recover with `derive_device=vaapi`.
     pub fn device_args(self, encoder: Encoder) -> Vec<String> {
-        if self == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+        if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
+            && encoder == Encoder::Vaapi
+        {
             return vec![
                 "-init_hw_device".into(),
                 format!("vaapi=hw:{}", super::encoder::vaapi_device()),
@@ -317,7 +326,9 @@ impl Pipeline {
     /// A bare upload would use Vulkan again and hand the VA-API encoder the
     /// wrong hardware surface; recover its device from the derived context.
     pub fn encoder_upload(self, encoder: Encoder) -> Option<&'static str> {
-        if self == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+        if matches!(self, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
+            && encoder == Encoder::Vaapi
+        {
             Some("format=nv12,hwupload=derive_device=vaapi")
         } else {
             encoder.filter_suffix_for(self.output_grade())
@@ -374,15 +385,18 @@ impl Pipeline {
             // libplacebo scales and maps together and outputs to whatever the
             // next filter needs; `hwupload`/`hwdownload` around it are what let
             // it sit between decoders and encoders of different families.
-            Pipeline::Libplacebo => {
+            Pipeline::Libplacebo | Pipeline::LibplaceboVaapi => {
                 let tm = if hdr {
                     ":tonemapping=bt.2390:colorspace=bt709:color_primaries=bt709:color_trc=bt709"
                 } else {
                     ""
                 };
-                format!(
-                    "hwupload,libplacebo=w={w}:h={height}{tm}:format=nv12,hwdownload,format=nv12"
-                )
+                let renderer = format!("libplacebo=w={w}:h={height}{tm}:format=nv12");
+                if self == Pipeline::LibplaceboVaapi {
+                    format!("{renderer},hwmap=derive_device=vaapi,format=vaapi")
+                } else {
+                    format!("hwupload,{renderer},hwdownload,format=nv12")
+                }
             }
             // tonemap_opencl maps only, so the scale stays on the CPU side of
             // it. Its output is an OpenCL surface no H.264 encoder takes, hence
@@ -444,14 +458,10 @@ impl Pipeline {
         })
     }
 
-    /// Whether the renderer requires software-decoded frames. Dolby Vision
-    /// metadata is parsed onto AVFrames by the HEVC decoder; an inherited
-    /// hardware decode/download path is not allowed to drop it silently.
     /// Whether every frame stays in vendor surfaces from decode to encode.
     ///
-    /// Only two graphs manage it: `vpp_qsv` and `scale_vaapi`+`tonemap_vaapi`
-    /// both scale and tone-map on the video-processing block and hand the
-    /// encoder surfaces it reads directly. Everything else touches the CPU on
+    /// The vendor VPP graphs and the VA-API/Vulkan interop graph hand the
+    /// encoder hardware surfaces directly. Everything else touches the CPU on
     /// every frame, and the amounts are not small — the CPU float tone-map is
     /// the 0.71x measurement this module's header records, `libplacebo` ends
     /// with `hwdownload` into system memory, and `tonemap_opencl` leaves the
@@ -460,9 +470,15 @@ impl Pipeline {
     /// Admission reads this, because "the encoder is hardware" says nothing
     /// about whether the pipeline feeding it is.
     pub fn keeps_frames_off_the_cpu(self) -> bool {
-        matches!(self, Pipeline::VppQsv | Pipeline::TonemapVaapi)
+        matches!(
+            self,
+            Pipeline::VppQsv | Pipeline::TonemapVaapi | Pipeline::LibplaceboVaapi
+        )
     }
 
+    /// Whether the renderer requires software-decoded frames. Dolby Vision
+    /// metadata is parsed onto AVFrames by the HEVC decoder; an inherited
+    /// hardware decode/download path is not allowed to drop it silently.
     pub fn requires_software_decode(self) -> bool {
         matches!(self, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough)
     }
@@ -480,6 +496,7 @@ impl Pipeline {
             Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
+            | Pipeline::LibplaceboVaapi
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
             | Pipeline::Cpu => OutputGrade::Sdr,
@@ -610,6 +627,7 @@ impl Pipeline {
                 Pipeline::VppQsv
                     | Pipeline::TonemapVaapi
                     | Pipeline::Libplacebo
+                    | Pipeline::LibplaceboVaapi
                     | Pipeline::TonemapOpencl
             )
         {
@@ -661,7 +679,9 @@ mod tests {
                 Encoder::Nvenc,
                 Encoder::VideoToolbox,
             ] {
-                if pipeline == Pipeline::Libplacebo && encoder == Encoder::Vaapi {
+                if matches!(pipeline, Pipeline::Libplacebo | Pipeline::LibplaceboVaapi)
+                    && encoder == Encoder::Vaapi
+                {
                     continue;
                 }
                 let mut expected = encoder.init_args();

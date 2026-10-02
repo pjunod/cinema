@@ -6,6 +6,7 @@
         metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
         metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
         metrics.record_pipeline(Pipeline::DoviPassthrough);
+        metrics.record_pipeline(Pipeline::LibplaceboVaapi);
         let rendered = metrics.prometheus(&EncoderCaps {
             qsv: true,
             vaapi: true,
@@ -33,6 +34,7 @@
                 .count(),
             QUALIFICATION_PIPELINES.len()
         );
+        assert!(rendered.contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"libplacebo_vaapi\"} 1\n"));
         assert!(rendered.contains("plurx_encoder_available{family=\"software\"} 1\n"));
         assert!(rendered.contains("plurx_encoder_available{family=\"qsv\"} 1\n"));
         assert!(rendered.contains("plurx_encoder_available{family=\"nvenc\"} 0\n"));
