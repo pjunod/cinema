@@ -259,7 +259,7 @@ impl TranscodeManager {
                         None => {
                             return Err(replacement_wait_error(
                                 "it has not finished releasing this player",
-                            ))
+                            ));
                         }
                     },
                 };
@@ -439,7 +439,7 @@ impl TranscodeManager {
             _ => {
                 return Err(invalid_reopen_error(
                     "previous_session_id and reopen_reason must be sent together",
-                ))
+                ));
             }
         }
         if req.reopen_reason.is_some() && req.request_id.is_none() {
@@ -629,7 +629,7 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
-        match req.kind {
+        let started = match req.kind {
             SessionKind::Transcode { height } => {
                 self.start_with_audio_offset(
                     req.file_id,
@@ -676,7 +676,16 @@ impl TranscodeManager {
                 )
                 .await
             }
+        }?;
+        let session = self.sessions.lock().await.get(&started.session_id).cloned();
+        if let Some(session) = session {
+            session
+                .publication
+                .lock()
+                .await
+                .bind_startup_transport(req.transport.as_deref());
         }
+        Ok(started)
     }
 
     /// Whether the subtitle-source store holds this track as a real track
@@ -752,7 +761,7 @@ impl TranscodeManager {
                 return Err(vod_refusal_error(
                     "vod_invalid_height",
                     "the requested height must be positive",
-                ))
+                ));
             }
         }
         .max(2)

@@ -1,0 +1,468 @@
+{
+  "status": "review findings addressed; conservative production admission verified; preparing exact-head fast lane",
+  "build_base": "c63859963bcdba67fba695f18d2a741de16bbf30",
+  "target_ms": 16000,
+  "writer_gate_ms": 12000,
+  "candidate_1x_ms": 32000,
+  "candidate_minimum_ms": 32000,
+  "ceiling_ms": 124000,
+  "design_receipt_sha256": "9902ff2fed90f7a550f8fdd2977b101321714d49f4cf862d9f83724deba8edf4",
+  "design_receipt_path": "/private/tmp/plurx-fast-start-design-replay-20261002.json",
+  "design_assumptions": {
+    "source_segment_ms": [
+      8000,
+      16000
+    ],
+    "production_to_consumption": 1.05,
+    "server_cadence_ms": 16000,
+    "transfer_append_ms": 2500,
+    "source_pause_ms": [
+      0,
+      2000
+    ],
+    "lead_ms": [
+      0,
+      675,
+      7965
+    ],
+    "rates": [
+      0.25,
+      0.5,
+      1,
+      2,
+      4
+    ],
+    "first_reload_ms": [
+      0,
+      7999,
+      15999
+    ],
+    "bounded_initial_endpoint": "Round up unless it exceeds position + 124s first-snapshot limit; then use the largest complete eligible endpoint. Producer allowance and complete-cut envelope remain unchanged (140s at 4x)."
+  },
+  "model_summary": {
+    "12000:12000": {
+      "rows": 180,
+      "buffer_deficits": 130,
+      "illegal_update_spacing": 54
+    },
+    "16000:12000": {
+      "rows": 180,
+      "buffer_deficits": 114,
+      "illegal_update_spacing": 54
+    },
+    "16000:16000": {
+      "rows": 180,
+      "buffer_deficits": 102,
+      "illegal_update_spacing": 54
+    },
+    "24000:12000": {
+      "rows": 180,
+      "buffer_deficits": 68,
+      "illegal_update_spacing": 54
+    },
+    "24000:24000": {
+      "rows": 180,
+      "buffer_deficits": 44,
+      "illegal_update_spacing": 54
+    },
+    "32000:12000": {
+      "rows": 180,
+      "buffer_deficits": 18,
+      "illegal_update_spacing": 54
+    },
+    "32000:32000": {
+      "rows": 180,
+      "buffer_deficits": 0,
+      "illegal_update_spacing": 54
+    },
+    "48000:12000": {
+      "rows": 180,
+      "buffer_deficits": 12,
+      "illegal_update_spacing": 54
+    },
+    "48000:48000": {
+      "rows": 180,
+      "buffer_deficits": 0,
+      "illegal_update_spacing": 54
+    }
+  },
+  "protocol_limit": "54/180 rows per candidate cannot emit a new complete segment within 24s at low absolute production; the same issue exists for the old policy. Zero buffer deficits is not all-rate qualification.",
+  "hlsjs_generated_sweep": [
+    {
+      "threshold_media_s": 12,
+      "first_frame_ms": 4459,
+      "last_position_s": 40.449313,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 16,
+      "first_frame_ms": 4428,
+      "last_position_s": 40.472851,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 24,
+      "first_frame_ms": 6548,
+      "last_position_s": 38.341186,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 32,
+      "first_frame_ms": 8639,
+      "last_position_s": 36.233352,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 48,
+      "first_frame_ms": 12868,
+      "last_position_s": 31.995324,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    }
+  ],
+  "hlsjs_sweep_receipt_sha256": "ad457f5957ab54a09df9868188b9cc9927bfdcc35de7ae79f7b09dc3d423b083",
+  "native_status": "generated AVC/AAC 30-minute continuity passed; physical/live source qualification not claimed",
+  "physical_apple_android_status": "not qualified for shorter buffering; all production classes retain conservative policy",
+  "limits": [
+    "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
+    "Browser fixture exercises shipped startup/load policy, parser, authority helper and HLS engine with explicit UI/session-open shims; it does not execute the daemon actor/flow/scratch. Focused publication regressions passed.",
+    "The 32-second experiment is inactive in production. Conservative 48-second Safari smoke starts at 12.858s; the strict couple-second requirement remains unmet.",
+    "No deployment, queue reset, digest migration or live reference-film acceptance."
+  ],
+  "regressions": "Post-review focused checks passed: 13 distinct native cases across targeted runs; legacy playback-control integration and 3 media-recovery cases; 5 rolling cases across the initial run and 2-case retry; 1 master/init case after its fixture correction; 2 previously failed ownership-census methods. Required fast lane is not claimed green. Do not repeat passing cases. After production-admission correction, all seven affected rolling cases passed (five fixtures moved to explicit test-only candidate plus two conservative admission cases). Integration reran only the two affected inventory methods: both passed in 10.085s.",
+  "integrated_main": "c63859963bcdba67fba695f18d2a741de16bbf30",
+  "compiled_source_head": null,
+  "compiler": "Pinned rustc 1.97.1 macOS; workspace/all-target check passed in 14.74s after c6385996 integration and conservative admission correction",
+  "hlsjs_generated_continuity": {
+    "transport": "Chrome / shipped hls.js",
+    "threshold_media_s": 32,
+    "fixed_target_s": 16,
+    "post_bootstrap_production_ratio": 1.05,
+    "first_frame_ms": 8683,
+    "observed_playback_s": 1869.208218,
+    "elapsed_ms": 1877952,
+    "post_first_frame_waits": 0,
+    "native_errors": 0,
+    "fatal_hls_errors": 0,
+    "receipt_sha256": "58b7a6a0e5c6676cb43df1cdd03ea3f9b7cb1e6fa8f17f61167a27929ef23448",
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/plurx-fast-start-hlsjs-continuity-20261002.json",
+    "passes_generated_30min_check": true,
+    "served_script_hashes": "not captured for this completed run; actual shipped HLS loader/config was executed, daemon actor/scratch were not",
+    "qualification_limit": "generated AVC/AAC, local transfer, 1x playback; not live HEVC/DV or fleet qualification"
+  },
+  "pull_request": {
+    "number": 711,
+    "url": "http://192.168.4.7:3000/noirr/plurx/pulls/711",
+    "draft": true
+  },
+  "native_measurement_note": "Record both first composited frame and advancing playback: Safari may render an initial frame while waiting for more media.",
+  "native_generated_sweep": [
+    {
+      "threshold_media_s": 12,
+      "first_composited_frame_ms": 4467,
+      "first_playing_ms": 20438,
+      "last_position_s": 24.080182750008674,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 16,
+      "first_composited_frame_ms": 4439,
+      "first_playing_ms": 20424,
+      "last_position_s": 24.262190458653947,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 24,
+      "first_composited_frame_ms": 6538,
+      "first_playing_ms": 22520,
+      "last_position_s": 22.335781541339774,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 32,
+      "first_composited_frame_ms": 8642,
+      "first_playing_ms": 8645,
+      "last_position_s": 35.383391625020636,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 48,
+      "first_composited_frame_ms": 12888,
+      "first_playing_ms": 12881,
+      "last_position_s": 31.319192666345618,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    }
+  ],
+  "native_sweep_receipt_sha256": "89e32beb22ec573fed16d73f3453a0d6d2ebb60209a0276c5d0562a19b599b29",
+  "native_continuity_source_hashes": {
+    "crates/plurxd/src/web/player/player.js": "ea9e153b37b299f4da90fa51b580500e4c04ad71266a1a5ce2489f7abc343191",
+    "crates/plurxd/src/web/playback-policy.js": "725dc45d48c7b216e94b199d60e7a1abe48c6f314d9cfaeb67ad70a2ca1ee7aa",
+    "crates/plurxd/src/web/hls.min.js": "442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0",
+    "tests/playback/native-hls-browser-fixture.py": "be790bf5124f4d83e0e7dccb3f94e3449eed7350da7d45d178db6602d3a89126"
+  },
+  "native_continuity_source_hash_note": "Observed file hashes while run 6 is active; executable tree unchanged since e3cffab4. Receipt does not independently contain hashes sent by the browser.",
+  "production_ratio_design_replay": {
+    "ratios": {
+      "0.95": {
+        "rows": 180,
+        "buffer_deficits": 180,
+        "illegal_update_spacing": 90
+      },
+      "1.05": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 54
+      },
+      "1.2": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 54
+      },
+      "2": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 36
+      }
+    },
+    "sha256": "d59a1403c06190ac97fa0c9c544b22c22b5321f01c443302bd4f276d032e0387",
+    "limits": "Arithmetic only; unconstrained inventory and assumed 2.5s transfer/append. Below-consumption is a negative control, not an admitted production class."
+  },
+  "physical_device_discovery_20261002": {
+    "apple_tv": "Bedroom physical AppleTV14,1 connected via CoreDevice; playback not measured for this candidate",
+    "android": "adb devices -l reports no connected device; enabled wireless-debugging address requested",
+    "discovery_is_qualification": false
+  },
+  "regression_scope_note": "The 30-minute publication fixture supplies established presentation through the existing cfg(test) actor marker after checking AwaitingPresentation, then checks ActiveLowReserve and a reachable Steady phase. It does not claim to test HTTP response commit or the actor presentation-progress proof.",
+  "compiler_evidence": [
+    {
+      "source": "e3cffab449d7db31a77b985667f1097badf1c34c",
+      "command": "cargo check --workspace --all-targets --locked",
+      "result": "passed"
+    },
+    {
+      "source": "1fac261a86e272ef41758b862d56aaa3f8db0a51",
+      "command": "cargo check -p plurxd --all-targets --locked; normal-hook workspace Clippy -D warnings",
+      "result": "passed; later phase assertions also compile"
+    },
+    {
+      "source": "cc9099a29033db02950a4d12e1ec982fc757a113",
+      "command": "cargo check --workspace --all-targets --locked",
+      "result": "passed; current main 955e1551 integrated"
+    },
+    {
+      "source": "current main 7f738563 plus native authority/auth review fixes",
+      "command": "cargo check --workspace --all-targets",
+      "result": "passed in 23.01s"
+    },
+    {
+      "source": "current main 7f738563 plus steady phase fix; checked source hashes retained",
+      "command": "cargo check -p plurxd --all-targets",
+      "result": "passed in 53.42s; later strengthening of fixture assertion remains covered by test rebuild and normal hook"
+    },
+    {
+      "source": "post-review checked tree; source hashes retained",
+      "command": "cargo check -p plurxd --all-targets",
+      "result": "passed in 17.14s after HTTP fixture correction"
+    },
+    {
+      "source": "main c6385996 plus conservative production admission; current source hashes retained",
+      "command": "cargo check --workspace --all-targets",
+      "result": "passed in 14.74s"
+    }
+  ],
+  "premature_ci_run": {
+    "run_api_id": 3807,
+    "display_run": 3786,
+    "source": "50ef272bf88bd6bd73ef743ddb15c287c1a691e7",
+    "cause": "Forgejo ignored creation draft field; corrected to actual draft with WIP title; later runs are skipped",
+    "result": "scope passed, preflight ownership inventory failed in four subtests; Rust/web jobs skipped",
+    "passed_policy_tests": 249,
+    "failed_policy_tests": 4,
+    "fix": "Four owner inventory counts updated with explicit deadline/task/timer/status-read provenance. Only the two methods containing failed subtests were rerun: 2 passed in 10.146s; prior 249 passing policy cases were not repeated."
+  },
+  "native_generated_continuity": {
+    "transport": "Safari native HLS / shipped native readiness",
+    "threshold_media_s": 32,
+    "fixed_target_s": 16,
+    "post_bootstrap_production_ratio": 1.05,
+    "first_composited_frame_ms": 8665,
+    "first_playing_ms": 8664,
+    "first_advancing_sample_ms": 9242,
+    "observed_playback_s": 1800.7420423330236,
+    "elapsed_ms": 1809414,
+    "waiting_after_first_frame": 1,
+    "waiting_after_advancing_half_second": 0,
+    "native_errors": 0,
+    "classification_errors": 0,
+    "receipt_sha256": "893fd4967cbf5c494511504281c66235de4e142b2b30f3d9c1113a1c257b5aa4",
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-qualification-20261002.json",
+    "passes_generated_30min_continuity": true,
+    "captured_at_utc": "2026-10-02T07:09:19.532790+00:00",
+    "limits": "Generated AVC/AAC at local transfer and 1x; daemon actor/flow/scratch, live HEVC/DV, source resume and physical TV classes are not qualified. One waiting bounce occurs before 0.5s advancing progress and is retained separately.",
+    "full_capture_last_position_s": 1895.912615518059,
+    "full_capture_elapsed_ms": 1908809,
+    "post_window_events": [
+      {
+        "run": "6",
+        "event": "waiting",
+        "detail": "",
+        "elapsed_ms": 1904588,
+        "position": 1895.912615518059
+      }
+    ],
+    "post_window_limit": "After the 30-minute acceptance window, Safari waits at 1895.913s: the fixture caps its complete prefix at 237 x 8s = 1896s and does not emit ENDLIST. This harness exhaustion is retained and is not a daemon EOF qualification."
+  },
+  "implementation_review": {
+    "reviewed_head": "6835957c5c6b69b27e10b740ef0acaaa7dee5806",
+    "reviewed_base": "955e1551e3d72eb237501d0a652e3cced61cd024",
+    "count": 1,
+    "verdict": "findings addressed; conservative alternative selected",
+    "findings": [
+      {
+        "priority": "P1",
+        "finding": "Native classification bypassed attachment authority recovery.",
+        "disposition": "fixed: shipped media-error handler gives authority precedence; readiness/classification recheck attachment, execution and authority after awaits. Shipped parser/owner regressions cover known retirement, retirement during playlists/init, typed refusal, supersession and pause/resume."
+      },
+      {
+        "priority": "P2",
+        "finding": "Native 401/403 lost Sign in actions through startup exhaustion.",
+        "disposition": "fixed: cancel current startup work and hand the typed refusal to existing auth_401_403 surface. Actual parser and surface regressions cover master, child and native classification at 401/403."
+      },
+      {
+        "priority": "promotion blocker",
+        "finding": "Transport-only WebFixedHlsV1 admission is broader than qualified evidence.",
+        "disposition": "Resolved by conservative production admission before first response. Every transport label freezes Conservative; WebFixedHlsV1 and its explicit selector are compiled only under cfg(test). No unfinished runtime mode or new setting ships. Missing source/device/daemon qualification remains required before any future shorter production gate."
+      }
+    ]
+  },
+  "focused_checks": [
+    {
+      "command": "node --test tests/playback/native-hls-startup.test.js",
+      "result": "10 passed, auth assertion failed on misspelled expected action; corrected to shipped sign_in and reran only failed auth case (passed). Shipped harness initially lacked pbTick; added inert UI seam before these results."
+    },
+    {
+      "command": "node --test --test-name-pattern='native master and child authentication' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; 401/403 x master/child/classification covered"
+    },
+    {
+      "command": "node --test --test-name-pattern='late native authority or auth refusal' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; 401 and 503 late predecessor replies cannot act"
+    },
+    {
+      "command": "node --test --test-name-pattern='native classification paused during readiness' tests/playback/native-hls-startup.test.js",
+      "result": "1 passed; pending native error rejoins original clock after pause"
+    },
+    {
+      "command": "node --test --test-name-pattern='^$' tests/playback/web-control.test.js",
+      "result": "passed; legacy main dispatches child scripts that run appended cases despite the top-level name filter: 18 named cases plus legacy integration assertions. No repeat requested; retained this single complete passing invocation. Do not repeat it."
+    },
+    {
+      "command": "node --test tests/playback/web-media-recovery.test.js",
+      "result": "3 passed"
+    },
+    {
+      "command": "python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_task_timer_and_process_shapes_have_reviewed_counts",
+      "result": "2 passed; only failed methods rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd -- --exact transcode::tests::rolling_web_bootstrap_refuses_known_insufficient_production transcode::tests::rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes",
+      "result": "2 passed, 3125 filtered out, in 0.09s; only failed Rust tests rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd native_master_preparation_can_wait_six_seconds_for_exact_init -- --exact http::hls::tests::native_master_preparation_can_wait_six_seconds_for_exact_init --nocapture",
+      "result": "1 passed, 3126 filtered out, in 6.37s; only failed HTTP case rerun"
+    },
+    {
+      "command": "cargo test -p plurxd --bin plurxd -- rolling_web_ rolling_transport_does_not_admit_unqualified_short_bootstrap rolling_unqualified_web_waits_for_conservative_first_snapshot",
+      "result": "7 passed, 3122 filtered, 0.09s; only materially changed candidate/admission cases"
+    },
+    {
+      "command": "python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_legacy_and_deadline_sentinels_have_reviewed_counts tests.validation.test_rolling_producer_ownership_inventory.RollingProducerOwnershipInventoryTest.test_module_wide_task_timer_and_process_shapes_have_reviewed_counts",
+      "result": "2 passed in 10.085s after merging c6385996; combined main cleanup removal and native fixture addition counts verified"
+    }
+  ],
+  "browser_evidence_after_review_fixes": "New bounded Safari 48-second conservative smoke uses current shipped client/parser/authority helper: first playing 12858ms, maximum advancing position 88.732s, no waits/errors after advancing progress. This is not a second 30-minute qualification; old 32-second candidate captures retain their original source/scope limits.",
+  "checked_tree_anchor": "72af3c9747c0145b102a877c760cc426fa790283",
+  "post_review_source_sha256": {
+    "crates/plurxd/src/web/player/player.js": "848a0f046f40ff6a29d7dc2f69fe33a582f2cfcfd9763e6b4d63037a25b30183",
+    "crates/plurxd/src/web/player/transport.js": "1dd7cf8678d7d4c3dd62a3d7b1a7e986d427510a1b877116a6a9b118a76517e3",
+    "crates/plurxd/src/transcode/rolling/session.rs": "933e5e86b7fb236ec38b7997efc1ac79e67a3a426fde8841dd21fa2f8594f88b",
+    "crates/plurxd/src/transcode/tests/chunk_03.rs": "5663f7dd9088fa592e6a0c058fa460d14a79a3e24c39d32eb99e295ea78ab3d8",
+    "crates/plurxd/src/http/hls/tests/chunk_06.rs": "2e2a240fc1e9ee3a771f1620368c0e8b30fabee58cff4eef9300504073c93580",
+    "tests/playback/native-hls-startup.test.js": "15bcaabd41c13afd36e505d59f7c2a6a5f2c72d0598b3a0911d892fe30707ab4",
+    "tests/playback/web-control.test.js": "f094f54cae05e21f3a093ca448ab149e31518e1b812dad1818af7b6013059acb",
+    "crates/plurxd/src/transcode/rolling/publication.rs": "ca040bcc8091e7282787a3fb5f004140bc6b567df39af9b69254fc4bb7109e53",
+    "tests/playback/native-hls-browser-fixture.py": "42d48babcd121256daf82d4c0521a248e4e3ba834ceed40b1b257521bc536471"
+  },
+  "post_review_rust_initial_run": {
+    "command": "cargo test -p plurxd --bin plurxd rolling_web_ -- --nocapture",
+    "tests": 5,
+    "passed": 3,
+    "failed": 2,
+    "failures": {
+      "rolling_web_bootstrap_refuses_known_insufficient_production": "Fixture used 0.95x at the existing 0.05x permitted measurement boundary; corrected fixture to 0.90x, capacity policy unchanged.",
+      "rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes": "Actual defect: phase was computed from previous served prefix before publication and never refreshed using the committed prefix. Added post-commit phase update against unchanged steady frontier, plus explicit steady assertions from 320s onward."
+    },
+    "retry": "Only the two failed cases rerun: 2 passed, 3125 filtered out, in 0.09s. Three initial passing Rust cases retained."
+  },
+  "http_fixture_initial_failure": {
+    "command": "target/debug/deps/plurxd-fc1273ae08306728 --exact http::hls::tests::native_master_preparation_can_wait_six_seconds_for_exact_init --nocapture",
+    "result": "1 failed: response_state_changed after 12.51s",
+    "cause": "Copy response admission also validates the first fragment. The fixture delayed init but never supplied seg00000.m4s, so final admission waited for a missing object.",
+    "fix": "Seed the matching AVC first fragment from the existing valid media feed before delaying init six seconds; no owner/deadline/validation rule changed.",
+    "retry": "Only this failed HTTP case rerun: 1 passed, 3126 filtered out, in 6.37s."
+  },
+  "production_admission": {
+    "policy": "Conservative for all production classes",
+    "candidate": "WebFixedHlsV1 is test-only",
+    "first_snapshot_at_1x_ms": 48000,
+    "unchanged_producer_allowance": true,
+    "few_seconds_target_met": false
+  },
+  "native_conservative_post_review_smoke": {
+    "kind": "bounded post-review generated-media smoke; not 30-minute continuity or daemon/source qualification",
+    "transport": "Safari native HLS",
+    "conservative_runway_s": 48,
+    "first_playing_ms": 12858,
+    "first_frame_ms": 12861,
+    "observed_playback_s": 88.73158249999767,
+    "elapsed_ms": 102252,
+    "waits_after_progress": [],
+    "errors": [],
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/native-conservative-post-review-smoke.json",
+    "scope_limit": "The page initially labels continuity-start as a 30-minute observation; this run was deliberately ended earlier and is only a bounded smoke. Server models availability; daemon actor/flow/scratch and physical/live source are not exercised.",
+    "last_advancing_sample_s": 88.73158249999767,
+    "raw_receipt_sha256": "0ace4610e127b87e230cd9c954176f963201e5cbcc22e0100d08bb02c80e155c"
+  },
+  "qualification_disposition": [
+    {
+      "class": "production native/hlsjs/unknown at all accepted rates",
+      "action": "retain existing conservative admission",
+      "proof": "two new focused regressions; bounded generated Safari smoke"
+    },
+    {
+      "class": "32-second generated AVC/AAC 1x candidate",
+      "action": "test-only experiment",
+      "proof": "retained 30-minute Chrome/Safari receipts at their original source hashes"
+    },
+    {
+      "class": "daemon actor/flow/scratch, HEVC/DV, resume/GOP, rate/remote-transfer, physical Apple/Android",
+      "action": "no shorter production admission",
+      "proof": "missing; requires future isolated qualification before activation"
+    }
+  ]
+}

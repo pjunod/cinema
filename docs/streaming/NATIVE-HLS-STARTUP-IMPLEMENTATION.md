@@ -1,6 +1,6 @@
 # reference film G startup repair — an implementation contract for native HLS and source preparation
 
-**Status:** ready for implementation; no product patch or deployment claimed.
+**Status:** Track N candidate built; review/qualification pending; Track S open. No deployment claimed.
 **Written:** 2026-09-17. **Executes:** Fable's “approve with changes” review
 of the [reference film G RCA](NATIVE-HLS-STARTUP-RCA.md).
 **Verified source base:** `363a22e28aa53094d899a9ad3c812241a6243548`.
@@ -16,6 +16,13 @@ This is an execution contract, not a request for another plan. Read the
 existing preparation, startup, control and fallback owners. If a required
 behavior cannot fit those owners, identify the concrete conflict before
 inventing another controller.
+
+> **Authorized amendment, 2026-10-02 EDT:** the user authorized the revised
+> incident packet with “ok build it”. The appended contract is folded into
+> this repository against build base `dea1a403e`. Track N and the publication
+> candidate are in progress; measured qualification and deployment remain
+> separate. See [the incident evidence](PLAYBACK-STARTUP-LATENCY-M0-20261002.md)
+> and [the current build status](PLAYBACK-STARTUP-LATENCY-STATUS.html).
 
 ## 1. Outcome — repair two independent failures
 
@@ -557,3 +564,82 @@ This handoff selects contracts for implementation; it is not evidence that
 they have been built. The original source delay and NAS mechanism remain
 unproved. The independent source-job design requires implementation review
 of ownership, cleanup and resource bounds in addition to the native repair.
+
+## 10. Authorized amendment — reuse Track N and preflight the compatible route
+
+**Disposition:** authorized for implementation after the 2026-10-02 incident;
+[review B1](PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) confirms the same
+failure signature as reference film G. Track N remains the client startup
+owner. Track S's source-preparation work and its acceptance remain separate.
+
+### 10.1 Track N absorbs preparation failure before native attachment
+
+Execute §4's master and selected-child readiness before `video.src`.
+Temporary server publication failure remains readiness, with no native
+reload or compatible-fallback credit consumed before source assignment.
+The existing limits remain: 20 s creation, then 40 s cold / 20 s seek
+attachment, 16 combined application playlist dispatches and 1/2/4 s bounded
+backoff. A successful master alone cannot establish media readiness.
+
+Do not replace Track N with an after-error probe. The deployed
+`probePlaybackSource` inspects sample media only when its caller enables
+`inspectMedia`; the current caller enables it for transcode. Its parser
+looks for `.ts`/`.m4s` and does not traverse a master to its child and init.
+It cannot supply the evidence assumed by the superseded incident proposal.
+Track N already owns bounded master/child parsing and post-readiness init
+classification in §4.4.
+
+Preserve one same-session native reload before the one compatible fallback,
+explicit generations, pause/seek cancellation, fixed clocks, override
+clearing and truthful code-4 attribution. A persistent ambiguous code 4
+may still use the existing fallback after the reload; do not strengthen
+that rule to require proved decoder failure. It remains non-learning.
+
+### 10.2 Add route preflight immediately before compatible fallback
+
+Before spending the compatible fallback, verify an admitted compatible
+encode route for the current file, recipe and attachment using the existing
+authoritative routing/candidate contract. Reverify that contract against
+the implementation base. No new route API or response shape is approved
+by this amendment. If the current client evidence is insufficient, identify
+the smallest contract change for review rather than guessing availability.
+
+This preflight must not create an encode session or scan the source. Bind
+its result to the episode, execution, attachment and user intent; permit
+at most one in-flight fallback decision. Use the current recovery owner,
+its remaining deadline and bounded network work. Pause, replacement, seek
+or authority loss cannot cause a late result to open a rescue.
+
+| Current route evidence | Result |
+|---|---|
+| Compatible candidate admitted | Spend the existing single fallback through its owner; session creation still revalidates admission |
+| No compatible encode candidate | Stop with the factual route refusal, preserved position and existing Retry/Close controls; issue no encode-create request |
+| Evidence pending, stale or unavailable | Report that limit and follow the existing bounded recovery/terminal owner; do not claim codec incompatibility or guess an available route |
+
+The preflight prevents the predictable `candidate_encode_route_unavailable`
+rescue seen here. It does not guarantee creation after a route changes;
+a race must still surface the actual typed refusal without another rescue.
+Do not add a second reload or fallback credit.
+
+### 10.3 Focused acceptance extends S03 and S07
+
+- Delayed master or selected child returns typed publication 503, then
+  succeeds: no source assignment or encode request before readiness; the
+  same copy/DV recipe presents within the original episode deadline.
+- Post-readiness error 4: exactly one same-session reload; persistent
+  rejection with an admitted candidate spends at most the existing fallback,
+  including the ambiguous no-decoder-signal branch with truthful attribution.
+- No admitted encode candidate: no encode-create request; preserved resume
+  position and factual refusal, without learned decoder limits.
+- Stale, paused, replaced and abort-ignoring preflight: bounded completion,
+  no late source mutation or rescue, and no renewed deadlines.
+
+Select only new/affected or failed regressions and verify nonzero selection.
+Retain applicable passing receipts rather than rerunning unrelated suites.
+Actual Safari evidence remains required by §7.3. Track N prevents this
+failure chain; it does not by itself deliver few-seconds startup latency.
+
+**Server deadline alignment:** outside this client amendment. The existing
+five-second server-deadline non-goal remains until the separate decision in
+[the startup-latency amendment §11.5](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md#115-master-preparation-alignment-remains-a-separate-decision)
+is approved. No independently authorized prepared-init reader is proposed.

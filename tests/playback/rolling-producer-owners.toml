@@ -777,7 +777,10 @@ id = "m4-response-publication-subdeadline"
 pattern = "response_publication_deadline_before"
 # 23 -> 24: the init-inspection read derives its deadline from the request's
 # publication owner before touching the VOD facade.
-expected_occurrences = 24
+# +1 native startup: the legacy-native VOD bridge derives the final
+# response-admission subdeadline after preparation, clipped to its original
+# request deadline. It neither renews that deadline nor adds a producer owner.
+expected_occurrences = 25
 
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
@@ -2369,8 +2372,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # 684 -> 683 with #722: the cleanup-gate regression polls and awaits its
 # replacement waiter in the test task instead of spawning a joined task.
 # This removes a test-only owner; production cleanup ownership is unchanged.
-# Combined current main and TCL source: measured total 684.
-expected_occurrences = 684
+# Combined native-init fixture and TCL source: measured total 685.
+# +1 native-startup delayed-init fixture: one tokio::spawn writes the exact
+# generated init after six seconds. The test awaits its JoinHandle before
+# teardown; it adds no production task or child process.
+# 684 -> 683 with #722: the cleanup-gate regression polls and awaits its
+# replacement waiter in the test task instead of spawning a joined task.
+# This removes a test-only owner; production cleanup ownership is unchanged.
+# Combined native fixture addition and main cleanup fixture removal.
+expected_occurrences = 685
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3521,8 +3531,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 1127 -> 1126 with #722: the same regression removes its one-second timeout
 # wrapper and directly checks Pending before releasing cleanup. The real
 # gate future retains its production deadline; no production timer changed.
-# Combined current main and TCL source: measured total 1128.
-expected_occurrences = 1128
+# Combined native-init fixture and TCL source: measured total 1129.
+expected_occurrences = 1129
+# +1 native-startup delayed-init fixture: its joined writer owns one bounded
+# six-second sleep, under the test request's unchanged twelve-second deadline.
+# No production timer or recovery clock is added.
+# 1127 -> 1126 with #722: the same regression removes its one-second timeout
+# wrapper and directly checks Pending before releasing cleanup. The real
+# gate future retains its production deadline; no production timer changed.
+# Combined native fixture addition and main cleanup fixture removal.
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4314,7 +4331,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Combined current-main 409 plus the queued-publication test child = 410.
 # +1 TCL legacy admission fixture: Response::status() asserts typed Auto/1440
 # overflow versus ordinary copy/manual admission. This does not launch a child.
-expected_occurrences = 411
+expected_occurrences = 413
+# +2 native-startup delayed-init fixture: Axum Response::status() reads
+# assert the master and legacy bridge responses. Neither launches a process.
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
