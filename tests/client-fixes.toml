@@ -56,7 +56,8 @@ test_anchor = "a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeInterval
 
 [[fixes]]
 id = "apple.auto-exact-negative-recovery-ack"
-commits = ["5ab82771b"]
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
 source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func receiptForRequest(previous: String?, candidate: String?, cause: String?)"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
@@ -65,7 +66,7 @@ test_anchor = "testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOrigina
 [[fixes]]
 id = "android.auto-exact-negative-recovery-ack"
 commits = []
-supplements = "apple.auto-exact-negative-recovery-ack"
+supplements = "apple.auto-typed-candidate-recovery-pressure"
 source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "fun receiptForRequest(previous: String?, candidate: String?, cause:"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
