@@ -2761,7 +2761,19 @@ async fn open_active_store_with_key(
                 activation_admission
                     .revalidate()
                     .map_err(|error| StoreError::Database(error.to_string()))?;
-                drop(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?);
+                let admit_next = || {
+                    activation_admission
+                        .revalidate()
+                        .map_err(|error| StoreError::Database(error.to_string()))
+                };
+                drop(
+                    HiqliteAuthStore::open_or_migrate_admitted(
+                        client.clone(),
+                        &telemetry,
+                        &admit_next,
+                    )
+                    .await?,
+                );
             }
             activation_admission
                 .revalidate()

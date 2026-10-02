@@ -235,6 +235,15 @@ and successful activation. The new bounded phase/clock control passed once.
 Actual delayed-write/runtime and other causal acceptance remain owed, as do
 review64's R1 selector harness and R2 post-handoff ownership repairs.
 
+The SAME-review follow-up also rechecks expiry after serialized clock
+validation and carries a synchronous admission callback into post-promotion
+store migration. All64 version-step transaction submissions revalidate the
+original admission immediately before submission, including steps with
+awaited preparatory schema reads. Ordinary `open_or_migrate` is unchanged;
+already-submitted transaction settlement never calls the admission callback.
+Static source checks and a new callback control do not replace the owed
+actual delayed-transaction proof.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances

@@ -1962,7 +1962,15 @@ impl StartupActivationAdmission {
         }
         self.clock
             .revalidate()
-            .map_err(MembershipError::ClockUnbounded)
+            .map_err(MembershipError::ClockUnbounded)?;
+        // The clock guard may wait for a serialized publisher. Do not let
+        // that contention carry an otherwise fresh proof past this phase.
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(MembershipError::Internal(
+                "startup activation exceeded original deadline".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
