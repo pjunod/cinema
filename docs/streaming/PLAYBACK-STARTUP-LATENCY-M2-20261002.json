@@ -6,7 +6,7 @@
   "candidate_1x_ms": 32000,
   "candidate_minimum_ms": 32000,
   "ceiling_ms": 124000,
-  "design_receipt_sha256": "1c9881302f38281e4f3f641b0c563e7b85df48c591949d5919ee8d660b628702",
+  "design_receipt_sha256": "9902ff2fed90f7a550f8fdd2977b101321714d49f4cf862d9f83724deba8edf4",
   "design_receipt_path": "/private/tmp/plurx-fast-start-design-replay-20261002.json",
   "design_assumptions": {
     "source_segment_ms": [
@@ -36,7 +36,8 @@
       0,
       7999,
       15999
-    ]
+    ],
+    "bounded_initial_endpoint": "Round up unless it exceeds position + 124s; then use the largest complete endpoint in the grant."
   },
   "model_summary": {
     "12000:12000": {

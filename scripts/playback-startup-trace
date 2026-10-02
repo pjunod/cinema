@@ -13,7 +13,7 @@ RATES = (0.249, 0.25, 0.5, 1.0, 1.5, 2.0, 4.0, 4.001)
 
 
 def continuity_model(runway_ms, rate, ratio, lead_ms, reload_phase_ms, pause_ms,
-                     segment_ms=TARGET_MS, cadence_ms=8000):
+                     segment_ms=TARGET_MS, cadence_ms=8000, cap_end_ms=None):
     """One-hour transport model; excludes actor/flow and physical presentation.
 
     Complete 16-second objects become visible on 8-second server ticks.
@@ -23,6 +23,8 @@ def continuity_model(runway_ms, rate, ratio, lead_ms, reload_phase_ms, pause_ms,
     the daemon's flow budget, so a failure is useful; a pass is not admission.
     """
     initial = math.ceil((lead_ms + runway_ms) / segment_ms)
+    if cap_end_ms is not None and initial * segment_ms > cap_end_ms:
+        initial = math.floor(cap_end_ms / segment_ms)
     known = initial
     buffered_end_ms = initial * segment_ms
     producer_rate = rate * ratio
@@ -129,7 +131,7 @@ def replay():
                             for segment in (8000, 16000):
                                 runway = max(minimum, min(124000, math.ceil(candidate * rate)))
                                 model = continuity_model(runway, rate, 1.05, lead, phase, pause,
-                                                         segment_ms=segment, cadence_ms=16000)
+                                                         segment_ms=segment, cadence_ms=16000, cap_end_ms=lead + 124000)
                                 model.update(candidate_1x_ms=candidate, candidate_minimum_ms=minimum)
                                 amendment_models.append(model)
     return {"kind": "deterministic_design_replay", "physical_client_evidence": False,

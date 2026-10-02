@@ -590,6 +590,44 @@
     }
 
     #[tokio::test]
+    async fn rolling_web_bootstrap_ceiling_selects_the_largest_bounded_cut() {
+        let directory = crate::test_tempdir().expect("ceiling bootstrap");
+        let session = test_session(directory.path().to_path_buf());
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            0,
+            4.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Starting,
+        )
+        .await;
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[8.0; 16], false),
+        )
+        .await
+        .expect("writer inventory");
+        session
+            .publication_cycle("ceiling-web-bootstrap")
+            .await
+            .expect("bounded first cut");
+        let clock = session.publication.lock().await;
+        let served = clock.served.as_ref().expect("first snapshot");
+        assert_eq!(served.end_ms, 120_000);
+        assert!(served.end_ms >= 124_000 - ROLLING_SEGMENT_MAX_MS);
+        assert!(
+            served.end_ms <= 124_000,
+            "whole cuts do not exceed the grant"
+        );
+    }
+
+    #[tokio::test]
     async fn rolling_web_bootstrap_refuses_known_insufficient_production() {
         let directory = crate::test_tempdir().expect("slow web bootstrap");
         let session = test_session(directory.path().to_path_buf());

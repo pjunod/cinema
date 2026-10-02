@@ -1039,6 +1039,16 @@ impl Session {
             };
             let floor = earned.or_else(|| {
                 budget.demand_sequence.and_then(|_| {
+                    if previous_served.is_none() {
+                        // At the 124s ceiling the next complete cut may fall
+                        // outside the grant. Round down by at most one bounded
+                        // segment, never fall through to the first tiny object.
+                        return index.segs.iter().rev().find(|segment| {
+                            segment.end_ms <= budget.allowed_end_ms
+                                && segment.end_ms
+                                    >= budget.desired_end_ms.saturating_sub(ROLLING_SEGMENT_MAX_MS)
+                        });
+                    }
                     // While reserve grows, include every completed eligible
                     // object. One segment per 16 s cycle can lose to 1x even
                     // when sustained production is 1.05x.
