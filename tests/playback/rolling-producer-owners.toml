@@ -1269,7 +1269,10 @@ pattern = "publication_ready_at_ms"
 # A05 unknown-original actual prepared consumer: +1 blocked activation fixture
 # in http/hls/tests/chunk_06.rs; existing activation owns the write. No new
 # shipped publication path or observational authority is introduced.
-expected_occurrences = 103
+# S11 durable-claim harness: +1 test-only route read asserts that the existing
+# Confirm settlement arms publication at zero. The extracted setup retains
+# its two prior references; no shipped publication writer or owner is added.
+expected_occurrences = 104
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
