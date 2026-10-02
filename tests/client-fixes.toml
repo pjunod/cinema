@@ -31,9 +31,45 @@ test_anchor = "a05 positive margin refuses bare metrics and retired candidate at
 id = "apple.a05-per-call-incumbent-receipt"
 commits = ["14c5b75eea72b14d26f79daa09d16b44f585c6c4"]
 source = "clients/apple/Sources/PlayerController.swift"
-source_anchor = "PlaybackLinkRequestContext.$receipt.withValue(currentLinkReceipt())"
+source_anchor = "PlaybackLinkRequestContext.$receipt.withValue(receipt)"
 test = "tests/playback/current-main-effort-quality.test.js"
 test_anchor = "a05 request header uses only this installed incumbent nonce"
+
+# Current native recovery bridges cover the new typed-pressure and accepted
+# negative acknowledgement adapters; earlier web executions remain historical.
+[[fixes]]
+id = "apple.auto-typed-candidate-recovery-pressure"
+commits = ["d9d7c04522f27d7f47368c1369fbfc2b0d753a4b"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "struct AutoDecodePressureWindow"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "android.auto-typed-candidate-recovery-pressure"
+commits = []
+supplements = "apple.auto-typed-candidate-recovery-pressure"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal class AutoDecodePressureWindow"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05TypedRecoveryKeepsCandidateAttachmentAndSuppliedDecodeIntervals"
+
+[[fixes]]
+id = "apple.auto-exact-negative-recovery-ack"
+commits = ["d9d7c04522f27d7f47368c1369fbfc2b0d753a4b"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func receiptForRequest(previous: String?, candidate: String?, cause: String?)"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "testA05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
+
+[[fixes]]
+id = "android.auto-exact-negative-recovery-ack"
+commits = []
+supplements = "apple.auto-exact-negative-recovery-ack"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "fun receiptForRequest(previous: String?, candidate: String?, cause:"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "a05NegativeAcknowledgementKeepsExactNonceAttachmentAndOriginalDeadline"
 
 # Original A05 height controller was removed before landing because PR669 owns
 # the combined route-v1 controller. This anchors its historical client commit
