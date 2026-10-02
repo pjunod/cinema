@@ -3523,3 +3523,29 @@ retained-current result instead of waiting another ninety seconds for a frame
 that the failed optional request cannot produce. This remains a failed series;
 healthy playback continuing does not qualify the requested change. JavaScript
 syntax is checked without executing the unit suite.
+
+
+### 10.115 Current-code refusal and native Safari measurement
+
+Exact Linux build bc572ca2d passed compilation in 283 seconds. Its fresh full
+Chrome series again presented 720p but retained current on the next 1080p
+request. The failed receipt remains continuous-chrome-full-linux-bc572ca2d.json.
+The isolated target cache stopped at segment 30 while preparation requested
+segment 36. Admission's boundary could be overwritten by an ordinary control
+heartbeat before the private segment wait registered; speculative production
+then started behind the requested future boundary. A separate preparation
+frontier now drives optional ahead-fill while ordinary control retains its
+playback anchor. Settlement clears the preparation frontier on scheduling,
+cancellation or refusal. Dependency pins and ordinary playback windows retain
+their existing authority. Pending diagnostics recognize the actual structured
+VodError variant. The authored regression covers a heartbeat arriving between
+boundary admission and wait registration; test execution remains deferred.
+
+The Mac accepted native Safari actions after unlocking. A fresh isolated
+synthetic master recorded 426 frame callbacks through 20.01 seconds at
+1920 by 1080, one selected VideoTrack, and no exact-height control API.
+The receipt is safari-ui.json under the ignored continuous-quality evidence
+folder, with fixture and probe digests. This measures autonomous native fixture
+playback only: no requested 720p switch, production transaction enrollment,
+physical display capture or audio output is qualified. The experiment's tab
+and local server were closed; production Safari pages were not changed.

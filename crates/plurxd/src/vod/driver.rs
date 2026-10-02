@@ -811,7 +811,7 @@ pub(super) fn playback_demands(
         readers
             .values()
             .filter(|reader| !reader.authority_only)
-            .map(|reader| Demand::idle_at(reader.frontier)),
+            .map(|reader| Demand::idle_at(reader.preparation_frontier.unwrap_or(reader.frontier))),
     );
     demands
 }

@@ -1317,6 +1317,27 @@
     }
 
     #[tokio::test]
+    async fn controlled_preparation_frontier_survives_incumbent_control_before_wait_registration() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("target", 3).await;
+        let mut readers = rendition.readers.lock().await;
+        let target = readers.get_mut("target").expect("target");
+        target.preparation_frontier = Some(36);
+        target.accept_control(7, 11);
+        let manifest = rendition.manifest.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert!(demands.iter().any(|demand| demand.frontier == 36 && demand.blocked_on.is_none()));
+        assert_eq!(readers["target"].frontier, 11, "ordinary control still owns playback position");
+        assert_eq!(readers["target"].control_sequence, Some(7));
+        readers.get_mut("target").expect("target").preparation_frontier = None;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert!(demands.iter().any(|demand| demand.frontier == 11));
+        assert!(!demands.iter().any(|demand| demand.frontier == 36));
+    }
+
+    #[tokio::test]
     async fn legacy_and_controlled_readers_both_receive_fair_current_demand() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());

@@ -208,7 +208,10 @@ impl VodServe {
                 .zip(permits)
                 .find_map(|(rendition, permit)| (rendition.key == rendition_id).then_some(permit))
                 .ok_or("controlled credit missing")?;
-            reader.frontier = media_entry_containing_ms(&child.rendition.plan, frontier_ms);
+            reader.preparation_frontier = Some(media_entry_containing_ms(
+                &child.rendition.plan,
+                frontier_ms,
+            ));
             reader.authority_only = false;
             child._reservation = Some(permit);
             child.rendition.kick();
@@ -305,7 +308,7 @@ impl VodServe {
         let mut media = session
             .children
             .iter()
-            .filter(|child| child.controlled && !keep.contains(child.rendition.key.as_str()))
+            .filter(|child| child.controlled)
             .map(|child| (Arc::clone(&child.rendition), child.reader_id.clone()))
             .collect::<Vec<_>>();
         media.sort_unstable_by(|left, right| left.0.key.cmp(&right.0.key));
@@ -322,10 +325,21 @@ impl VodServe {
         }
         let mut released = Vec::new();
         for ((rendition, id), readers) in media.iter().zip(readers.iter_mut()) {
-            readers
-                .get_mut(id)
-                .expect("validated controlled reader")
-                .authority_only = true;
+            let reader = readers.get_mut(id).expect("validated controlled reader");
+            let preparing = ledger.transactions.iter().any(|tx| {
+                tx.intent_revision == ledger.latest_intent_revision
+                    && tx.target_rendition_id == rendition.key
+                    && !tx.cancel_requested
+                    && !tx.intent_superseded
+                    && matches!(tx.state, QualityState::Preparing | QualityState::Ready)
+            });
+            if !preparing {
+                reader.preparation_frontier = None;
+            }
+            if keep.contains(rendition.key.as_str()) {
+                continue;
+            }
+            reader.authority_only = true;
             let child = session
                 .children
                 .iter_mut()
@@ -593,7 +607,7 @@ impl VodServe {
                                 .ready(&transition.transaction_id, intervals.clone())
                                 .map_err(|error| error.to_string())?,
                             Err(error) => {
-                                let reason = if error == "Pending" {
+                                let reason = if error.starts_with("Pending {") {
                                     "media_wait_pending"
                                 } else if error.contains("deadline") {
                                     "preparation_deadline"
