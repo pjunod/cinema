@@ -401,7 +401,13 @@ async fn complete_startup_observation(
     identity: &super::ClusterIdentity,
     role: ClusterRole,
     observer: Option<&dyn StartupClockObserver>,
-) -> Result<(MembershipManager, super::clock::OwnedClockAcquisitionTicket), StoreError> {
+) -> Result<
+    (
+        MembershipManager,
+        super::membership::StartupActivationAdmission,
+    ),
+    StoreError,
+> {
     let observer = observer.ok_or_else(|| {
         StoreError::Database(
             "this startup consumer has no authenticated clock-observation transport; \
@@ -436,6 +442,11 @@ async fn complete_startup_observation(
             .await
             .map_err(|error| StoreError::Database(format!("startup promotion: {error}")))?;
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::Database(
+                    "startup promotion is not applied before original deadline".into(),
+                ));
+            }
             let snapshot = client
                 .local_db_raft_metrics()
                 .map_err(|error| StoreError::Database(error.to_string()))?
@@ -444,11 +455,6 @@ async fn complete_startup_observation(
             {
                 break;
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(StoreError::Database(
-                    "startup promotion is not applied before original deadline".into(),
-                ));
-            }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         // Promotion changes the authoritative roster generation. It must be
@@ -456,7 +462,7 @@ async fn complete_startup_observation(
         wait_startup_clock_readiness(&guard, deadline).await?;
     }
     membership
-        .finish_clock_observation()
+        .finish_clock_observation(deadline)
         .await
         .map_err(|error| StoreError::Database(error.to_string()))
 }
@@ -467,14 +473,14 @@ async fn wait_startup_clock_readiness(
     deadline: tokio::time::Instant,
 ) -> Result<(), StoreError> {
     loop {
-        if guard.acquire().is_ok() {
-            return Ok(());
-        }
         if tokio::time::Instant::now() >= deadline {
             return Err(StoreError::Database(
                 "authenticated startup clock evidence is unavailable before original deadline"
                     .into(),
             ));
+        }
+        if guard.acquire().is_ok() && tokio::time::Instant::now() < deadline {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -3501,6 +3507,29 @@ fn log_startup_transport_wait(
 mod startup_wait_logging_tests {
     use super::*;
 
+    /// Pure original-deadline ordering, not replicated or fleet evidence.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn k06_readiness_checks_original_deadline_before_standalone_clock_success() {
+        let guard = crate::cluster::clock::ClusterClockGuard::new(false);
+        assert_eq!(
+            guard.snapshot().state,
+            crate::cluster::clock::ClusterClockState::NoPeers
+        );
+        assert!(
+            guard.acquire().is_ok(),
+            "actual standalone guard needs no remote sample"
+        );
+        let expired = tokio::time::Instant::now() - Duration::from_secs(1);
+        let refusal = wait_startup_clock_readiness(&guard, expired)
+            .await
+            .expect_err("safe clock state cannot replenish an expired startup budget");
+        assert!(refusal.to_string().contains("original deadline"));
+        wait_startup_clock_readiness(&guard, tokio::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("within-deadline standalone readiness");
+    }
+
     #[tokio::test(start_paused = true)]
     async fn immediate_watermark_errors_cannot_starve_due_startup_log() {
         let mut next_wait_log = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -4784,6 +4813,15 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "hiqlite-store")]
+    use crate as observer_core;
+    #[cfg(feature = "hiqlite-store")]
+    mod startup_observer {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/startup_observer.rs"
+        ));
+    }
     use super::*;
 
     #[cfg(feature = "hiqlite-store")]
@@ -5193,7 +5231,7 @@ mod tests {
             SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME))
                 .expect("legacy source store"),
         );
-        let source = select_daemon_store(&source_config)
+        let source = startup_observer::select_applied_singleton(&source_config)
             .await
             .expect("source voter");
         let client = source.local_client().expect("source local client");
@@ -5246,7 +5284,7 @@ mod tests {
         let report = restore_cluster_backup_archive(&artifact, &target_config, &[], None)
             .await
             .expect("restore real snapshot");
-        let restored = select_daemon_store(&target_config)
+        let restored = startup_observer::select_applied_singleton(&target_config)
             .await
             .expect("restored target starts");
         let status = restored
@@ -6282,6 +6320,7 @@ mod tests {
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+        let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -6294,7 +6333,7 @@ mod tests {
         source_config.server.bind = coordinator_addr;
         source_config.cluster.join_url = format!("http://{coordinator_addr}");
         drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let source = select_daemon_store(&source_config)
+        let source = startup_observer::select_applied_singleton(&source_config)
             .await
             .expect("activate source voter");
         let cluster_id = source.identity.cluster_id.clone();
@@ -6333,7 +6372,8 @@ mod tests {
             .parse()
             .expect("readdressed cluster API bind");
         source_config.cluster.advertise_host = "localhost".to_owned();
-        let source = select_daemon_store(&source_config)
+        let source = observed
+            .select(&source_config, false)
             .await
             .expect("readdress existing source voter");
         assert_eq!(source.identity.cluster_id, cluster_id);
@@ -6387,7 +6427,8 @@ mod tests {
                 "/api/v1/cluster/learner/join/finalize",
                 post(finalize_learner_join_for_test),
             )
-            .with_state(coordinator.clone());
+            .with_state(coordinator.clone())
+            .merge(startup_observer::MeasuredPeers::route(coordinator.clone()));
         let http_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -6450,6 +6491,9 @@ mod tests {
         let token_path = joining_dir.path().join("join.token");
         std::fs::write(&token_path, format!("{}\n", issued.token)).expect("joining token file");
         let mut joining_config = membership_test_config(joining_dir.path());
+        joining_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+            .parse()
+            .expect("joining clock bind");
         joining_config.cluster.join_token_file = token_path.clone();
         let staged_identity = crate::cluster::initialize_join_identity(
             joining_dir.path(),
@@ -6496,7 +6540,8 @@ mod tests {
             .redeem(&redeem_request)
             .await
             .expect("repeat the expired identity-bound redemption");
-        let joined = select_daemon_store(&joining_config)
+        let joined = observed
+            .select(&joining_config, true)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");
         assert_eq!(joined.identity.cluster_id, cluster_id);
@@ -6778,7 +6823,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("protocol activation data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster on this binary");
         let membership = selected.membership_manager();
@@ -7413,6 +7458,7 @@ mod tests {
     #[cfg(feature = "hiqlite-store")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+        let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -7424,7 +7470,8 @@ mod tests {
         source_config.server.bind = coordinator_addr;
         source_config.cluster.join_url = format!("http://{coordinator_addr}");
         drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let source = select_daemon_store(&source_config)
+        let source = observed
+            .select(&source_config, false)
             .await
             .expect("activate the source voter");
         let coordinator = source.membership_manager();
@@ -7443,7 +7490,8 @@ mod tests {
                 "/api/v1/cluster/learner/join/finalize",
                 post(finalize_learner_join_for_test),
             )
-            .with_state(coordinator.clone());
+            .with_state(coordinator.clone())
+            .merge(startup_observer::MeasuredPeers::route(coordinator.clone()));
         let http_task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
@@ -7508,8 +7556,12 @@ mod tests {
         std::fs::write(&token_path, format!("{}\n", learner_token.token))
             .expect("learner token file");
         let mut learner_config = membership_test_config(learner_dir.path());
+        learner_config.server.bind = format!("127.0.0.1:{}", free_test_port())
+            .parse()
+            .expect("learner clock bind");
         learner_config.cluster.join_token_file = token_path.clone();
-        let learner = select_daemon_store(&learner_config)
+        let learner = observed
+            .select(&learner_config, true)
             .await
             .expect("admit the learner");
         assert_eq!(learner.identity.raft_id, learner_token.raft_id);
@@ -7731,7 +7783,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("schema role data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster");
         let client = selected
@@ -7832,7 +7884,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("unproven voter data dir");
         let config = membership_test_config(dir.path());
         drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
-        let selected = select_daemon_store(&config)
+        let selected = startup_observer::select_applied_singleton(&config)
             .await
             .expect("activate a one-voter cluster");
         let membership = selected.membership_manager();

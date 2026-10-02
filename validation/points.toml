@@ -461,6 +461,7 @@ paths = [
   "crates/plurx-core/tests/store_contract.rs",
   "crates/plurx-core/tests/store_contract/background_jobs.rs",
   "crates/plurx-core/tests/support/queue_fixture.rs",
+  "crates/plurx-core/tests/fixtures/startup_observer.rs",
   "crates/plurx-core/tests/support/subtitle_jobs.rs",
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",

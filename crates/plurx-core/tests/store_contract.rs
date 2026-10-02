@@ -41,7 +41,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hiqlite::tls::ServerTlsConfig;
 #[cfg(feature = "hiqlite-contract-tests")]
 use hiqlite::{Client, Node, NodeConfig, Row};
+#[cfg(feature = "hiqlite-contract-tests")]
+use plurx_core as observer_core;
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
+#[cfg(feature = "hiqlite-contract-tests")]
+#[path = "fixtures/startup_observer.rs"]
+pub mod startup_observer;
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::cluster::migration::{
     connect_activated_store, prepare_sqlite_import, select_daemon_store, ActivationMarker,
@@ -8997,6 +9002,11 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             2,
             "{backend}: one maintenance reader per independent source domain"
         );
+        // The join results are in worker order, not claim order. Keep the
+        // primary-domain job first so completing the second claim releases
+        // the secondary domain needed by the remaining queued job.
+        claimed.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(claimed[0].id, jobs[0].id, "{backend}: primary-domain claim");
         for job in &claimed {
             let staging = store
                 .pretranscode_staging_jobs(&job.owner_node_id)
@@ -9114,7 +9124,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(successor.fence, renewed_a.fence + 1, "{backend}");
         assert!(
             !store
-                .pretranscode_staging_jobs("node-a")
+                .pretranscode_staging_jobs(&renewed_a.owner_node_id)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: predecessor staging: {error}"))
                 .contains(&successor.id),
@@ -15725,22 +15735,22 @@ impl ContractCluster {
                         Ok(0) => {
                             break Err(ContractStartError::Failed(format!(
                                 "contract voter {node_id} exited before ready"
-                            )))
+                            )));
                         }
                         Ok(_) if line.trim() == format!("PLURX_CONTRACT_NODE_READY {node_id}") => {
-                            break Ok(())
+                            break Ok(());
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_PORT_COLLISION ") => {
-                            break Err(ContractStartError::PortCollision)
+                            break Err(ContractStartError::PortCollision);
                         }
                         Ok(_) if line.starts_with("PLURX_CONTRACT_NODE_START_FAILED ") => {
-                            break Err(ContractStartError::Failed(line.trim().to_owned()))
+                            break Err(ContractStartError::Failed(line.trim().to_owned()));
                         }
                         Ok(_) => {}
                         Err(error) => {
                             break Err(ContractStartError::Failed(format!(
                                 "read contract voter {node_id} startup: {error}"
-                            )))
+                            )));
                         }
                     }
                 };
@@ -17759,7 +17769,7 @@ async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
     );
     std::fs::remove_dir(&key_path).expect("unblock credential-key loading");
 
-    let selected = select_daemon_store(&config)
+    let selected = startup_observer::select_applied_singleton(&config)
         .await
         .expect("direct legacy upgrade must activate after key recovery");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
@@ -18032,7 +18042,7 @@ async fn hiqlite_activation_node_process() {
         &std::env::var("PLURX_ACTIVATION_NODE_LAUNCH").expect("activation launch"),
     )
     .expect("decode activation launch");
-    let selected = select_daemon_store(&launch.config())
+    let selected = startup_observer::select_applied_singleton(&launch.config())
         .await
         .expect("select one-voter store");
     assert_eq!(selected.backend, SelectedBackend::Replicated);
