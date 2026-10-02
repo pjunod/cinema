@@ -6,6 +6,81 @@ const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
+test("a05 unknown original trial commits only stage-owned empirical segments without peak promotion", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/prepared-replacement.js","utf8");
+  const helpers=fs.readFileSync("crates/plurxd/src/web/player/stall-diagnosis.js","utf8");
+  const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4),route:"remux",width:3840,height:2160,
+    decoder_compatible:true,peak_bps:null,sustainable:true};
+  const incumbent={id:"c".repeat(32),route:"encode",width:1920,height:1080};
+  const player={fileId:7,qualityCandidates:[candidate],measuredCandidateOutputs:null,
+    directedChange:{autoMove:{candidateId:candidate.id,retainIncumbent:true}}};
+  const stage={sessionId:"stage",fileId:7,candidateRecipeDigest:[...candidate.recipe_digest],selection:{candidate_id:candidate.id},hls:{},stageAtMs:100};
+  let now=1000,active=stage;
+  const context=vm.createContext({URL,location:{href:"http://server/"},PLAYER:player,
+    performance:{now:()=>now},preparedState:()=>active,PlaybackPolicy:policy});
+  vm.runInContext(helpers.slice(helpers.indexOf("function candidateTransferOriginCurrent("),helpers.indexOf("\nasync function naturalBoundaryQualityCandidate(")),context);
+  vm.runInContext(source.slice(source.indexOf("function preparedQualityProofReady("),source.indexOf("// Reuse the existing health timer")),context);
+  const body=(index,start)=>({stage,pipeline:stage.hls,file_id:7,session_id:"stage",candidate_id:candidate.id,
+    recipe_digest:[...candidate.recipe_digest],origin:"http://server",receipt:`00000000-0000-0000-0000-${String(index).padStart(12,"0")}`,
+    etag:`etag-${index}`,object_name:`seg0000${index}.m4s`,segment_id:`/hls/stage/seg0000${index}.m4s`,
+    bytes:1000000,elapsed_ms:100,atMs:900,completed:true,from_cache:false,producer_paced:false,
+    media_duration_ms:1000,server_media_duration_ms:1000,media_start_ms:start});
+  const reset=()=>{stage.qualityTransfers=[body(1,0),body(2,1000)];stage.qualityTransfer=stage.qualityTransfers[1];};
+  reset();
+  assert.equal(context.candidateAdmissionCatalog(player,[incumbent,candidate],incumbent,null).length,2,"unknown compatible original is exposed for a trial");
+  assert.equal(context.candidatePositiveMargin(player,candidate,stage.qualityTransfer),false,"exposure never fabricates full-output recommendation");
+  assert.equal(context.preparedQualityProofReady(player,stage),true);
+  assert.equal(candidate.peak_bps,null,"observed segment maximum never becomes whole-title peak");
+  for(const [label,mutate] of [
+    ["one object",()=>stage.qualityTransfers.splice(0,1)],
+    ["same receipt",()=>stage.qualityTransfers[0].receipt=stage.qualityTransfer.receipt],
+    ["overlapping media",()=>stage.qualityTransfer.media_start_ms=500],
+    ["missing server duration",()=>stage.qualityTransfer.server_media_duration_ms=null],
+    ["pacing",()=>stage.qualityTransfer.producer_paced=true],
+    ["cache",()=>stage.qualityTransfer.from_cache=true],
+    ["unfinished",()=>stage.qualityTransfer.completed=false],
+    ["wrong item",()=>stage.qualityTransfer.file_id=8],
+    ["wrong stage",()=>stage.qualityTransfer.stage={}],
+    ["wrong pipeline",()=>stage.qualityTransfer.pipeline={}],
+    ["wrong session",()=>stage.qualityTransfer.session_id="incumbent"],
+    ["wrong digest",()=>stage.qualityTransfer.recipe_digest[31]=5],
+    ["foreign origin",()=>stage.qualityTransfer.origin="http://other"],
+    ["expired body",()=>stage.qualityTransfer.atMs=-15000],
+    ["insufficient observed margin",()=>stage.qualityTransfer.elapsed_ms=1000],
+  ]){reset();mutate();assert.equal(context.preparedQualityProofReady(player,stage),false,label);}
+  reset();now=15101;
+  assert.equal(context.preparedQualityProofReady(player,stage),false,"trial deadline");
+  now=1000;active={};
+  assert.equal(context.preparedQualityProofReady(player,stage),false,"retired staging");active=stage;
+  candidate.peak_bps=90000000;
+  assert.equal(context.preparedQualityProofReady(player,stage),false,"known peak cannot fall through to unknown trial");candidate.peak_bps=null;
+  const output={candidate_id:candidate.id,recipe_digest:[...candidate.recipe_digest],route:candidate.route,
+    artifact_id:"00000000-0000-0000-0000-000000000001",output_identity:"b".repeat(64),
+    qualification:"complete_full_mux_rfc8216_v1",average_bps:12000000,peak_bps:20000000};
+  player.measuredCandidateOutputs=[output];reset();stage.qualityTransfer.elapsed_ms=1000/3.75;
+  assert.equal(context.preparedQualityProofReady(player,stage),false,"30M cannot qualify full-mux 20M despite cheap trial objects");
+  output.peak_bps=14000000;
+  assert.equal(context.preparedQualityProofReady(player,stage),true,"known full-mux 14M preserves 1.8x branch");
+});
+
+test("a05 empirical stage authority keeps the captured item and full recipe immutable", () => {
+  const source=fs.readFileSync("crates/plurxd/src/web/player/prepared-replacement.js","utf8");
+  const candidate={id:"a".repeat(32),recipe_digest:Array(32).fill(4)};
+  const player={fileId:7};
+  const stage={fileId:7,candidateRecipeDigest:[...candidate.recipe_digest],sessionId:"stage",hls:{}};
+  const sample={stage,pipeline:stage.hls,file_id:7,session_id:"stage",candidate_id:candidate.id,
+    recipe_digest:[...candidate.recipe_digest],receipt:"00000000-0000-0000-0000-000000000001",etag:"etag",
+    bytes:4096,elapsed_ms:10,atMs:100,completed:true,from_cache:false,producer_paced:false};
+  const context=vm.createContext({PLAYER:player,preparedState:()=>stage,candidateTransferOriginCurrent:()=>true,PlaybackPolicy:policy});
+  const begin=source.indexOf("function preparedTransferOwned("),end=source.indexOf("// Reuse the existing health timer",begin);
+  vm.runInContext(source.slice(begin,end),context);
+  assert.equal(context.preparedTransferOwned(player,stage,candidate,sample,200),true);
+  player.fileId=8;sample.file_id=8;
+  assert.equal(context.preparedTransferOwned(player,stage,candidate,sample,200),false,"changing current item cannot restamp the stage");
+  player.fileId=7;sample.file_id=7;candidate.recipe_digest[31]=5;sample.recipe_digest[31]=5;
+  assert.equal(context.preparedTransferOwned(player,stage,candidate,sample,200),false,"later catalog collision cannot restamp captured full digest");
+});
+
 test("a05 prepared control sends only its explicit per-call nonce", async () => {
   const source=fs.readFileSync("crates/plurxd/src/web/player/prepared-switch-measurement.js","utf8");
   const begin=source.indexOf("async function sendPlaybackControl(");

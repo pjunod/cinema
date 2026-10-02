@@ -1451,6 +1451,98 @@ final class PlaybackControlReporterTests: XCTestCase {
 }
 
 final class DisplayAwareAutoEvidenceTests: XCTestCase {
+    func testA05BoundaryEpochFencesKeepCapturedOwnershipAndIndependentScopes() throws {
+        func attempt(lifecycle: Int = 1, open: Int = 2, viewer: Int = 3,
+                     seek: Int = 7, decision: Int = 4) -> Attempt {
+            Attempt(lifecycle: lifecycle, open: open, viewerAction: viewer,
+                initialDecision: decision, createRetry: 5, preparedAlignment: 6,
+                seek: seek, pgsSelection: 8, pgsItem: 9, item: nil)
+        }
+        let captured = attempt()
+        let expected: [(AttemptFence, Set<Attempt.Scope>)] = [
+            (.seekIntentAfterOptionalBoundary, [.viewerAction, .seek]),
+            (.autoBoundaryOwnerCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundarySeekCurrent, [.seek]),
+            (.autoBoundaryResumeCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundaryCommitViewerCurrent, [.viewerAction]),
+            (.autoBoundaryCommitOwnerCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoBoundaryCommitSeekCurrent, [.seek]),
+            (.autoResumeFallbackCurrent, [.lifecycle, .open, .viewerAction]),
+            (.autoResumeCompletedViewerCurrent, [.viewerAction])
+        ]
+        for (fence, scopes) in expected {
+            XCTAssertEqual(fence.scopes, scopes, fence.rawValue)
+            XCTAssertTrue(captured.stillCurrent(attempt(), scopes: fence.scopes))
+            XCTAssertTrue(captured.stillCurrent(attempt(decision: 99), scopes: fence.scopes),
+                "unrelated initial decision must not widen a boundary fence")
+            for (scope, changed) in [
+                (Attempt.Scope.lifecycle, attempt(lifecycle: 99)),
+                (.open, attempt(open: 99)), (.viewerAction, attempt(viewer: 99)),
+                (.seek, attempt(seek: 99))
+            ] {
+                XCTAssertEqual(captured.stillCurrent(changed, scopes: fence.scopes), !scopes.contains(scope), fence.rawValue)
+            }
+        }
+        let sourceURL = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+            .deletingLastPathComponent().appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        XCTAssertTrue(source.contains("AutoBoundaryAttempt(attempt: snapshotAttempt(), resumeIdentity:"))
+        XCTAssertTrue(source.contains("AutoBoundaryResumeOwner(attempt: snapshotAttempt(),"))
+        XCTAssertTrue(source.contains("let resumeIntentAttempt = snapshotAttempt()"))
+        XCTAssertTrue(source.contains("attemptStillCurrent(boundary.attempt, fence: .autoBoundaryCommitOwnerCurrent)"))
+        XCTAssertTrue(source.contains("AutoResumeIdentity(attempt) == owner.identity"))
+        XCTAssertFalse(source.contains("lifecycleGeneration == boundary.lifecycle"))
+        XCTAssertFalse(source.contains("owner.viewer == viewerActionEpoch"))
+    }
+
+    func testA05SeekCallsitesPreserveViewerAndAutomaticMarkerProvenance() throws {
+        // Check the actual controller callers, not just the budget helper:
+        // buttons and relative remote commands share skip(seconds:), whereas
+        // the position-clock marker writer must not open a viewer trial.
+        let sourceURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/PlayerController.swift")
+        let source = try String(contentsOf: sourceURL, encoding: .utf8)
+        func body(_ start: String, until end: String) throws -> String {
+            let lower = try XCTUnwrap(source.range(of: start))
+            let upper = try XCTUnwrap(source.range(of: end, range: lower.upperBound..<source.endIndex))
+            return String(source[lower.upperBound..<upper.lowerBound])
+        }
+        let relative = try body("func skip(seconds: Double) {", until: "func skipActiveMarker()")
+        XCTAssertTrue(relative.contains("seekState.relative("))
+        XCTAssertTrue(relative.contains("by: Int(seconds * 1000)"))
+        XCTAssertTrue(relative.contains("issueSeek(to: request.target, generation: request.generation, viewerBoundary: true)"))
+        let automatic = try body("func autoSkipActiveMarkerIfNeeded() {", until: "func reportMarkerOffer")
+        XCTAssertTrue(automatic.contains("beginSeek(toMs: marker.endMs, viewerOrigin: false)"))
+        XCTAssertFalse(automatic.contains("seek(toMs:"))
+        let absolute = try body("func seek(toMs requested: Int) {", until: "private func beginSeek")
+        XCTAssertTrue(absolute.contains("beginSeek(toMs: requested, viewerOrigin: true)"))
+        let forwarding = try body("private func beginSeek(toMs requested: Int, viewerOrigin: Bool) {", until: "private func issueSeek(")
+        XCTAssertTrue(forwarding.contains("viewerBoundary: viewerOrigin"))
+    }
+
+    func testA05ViewerBoundaryRetainsOriginalBudgetAndRefusesRenewal() {
+        let first = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 1_500)!
+        XCTAssertEqual(first.deadlineMs, 9_000)
+        XCTAssertEqual(first.optionalDeadlineMs, 7_000)
+        let coalesced = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 6_999)!
+        XCTAssertEqual(coalesced.optionalDeadlineMs, first.optionalDeadlineMs)
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 7_000))
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 16_000, nowMs: 999))
+        XCTAssertNil(AutoViewerBoundaryBudget(enteredAtMs: Int.max, originalDeadlineMs: Int.max, nowMs: Int.max))
+        let earlierExpiry = AutoViewerBoundaryBudget(enteredAtMs: 1_000, originalDeadlineMs: 5_000, nowMs: 2_000)!
+        XCTAssertEqual(earlierExpiry.deadlineMs, 5_000)
+        XCTAssertEqual(earlierExpiry.optionalDeadlineMs, 3_000)
+        // Quiet/cliff windows are still meaningful for ordinary mid-play, but
+        // observing an expired original EOF cannot renew the cliff timestamp.
+        let item = NSObject()
+        var window = AutoUpgradeEvidenceWindow()
+        window.bind(attachment: ObjectIdentifier(item), attempt: "viewer", nowMs: 0)
+        window.cliff(completedAtMs: 1_000, nowMs: 2_000)
+        XCTAssertFalse(window.allowsUpgrade(nowMs: 90_999))
+        window.cliff(completedAtMs: 1_000, nowMs: 91_000)
+        XCTAssertTrue(window.allowsUpgrade(nowMs: 91_000))
+    }
     private func candidate(_ height: Int, route: String = "encode", peak: UInt64? = 3_000_000, grade: String = "sdr") -> QualityCandidate {
         QualityCandidate(id: "0a7ba9bab6fbdd31bab5e5e362a3fac7", recipeDigest: Array(repeating: 0, count: 32),
             route: route, width: height * 16 / 9, height: height, targetHeight: height,
@@ -1604,6 +1696,45 @@ final class DisplayAwareAutoEvidenceTests: XCTestCase {
         XCTAssertTrue(window.allowsUpgrade(nowMs: 334_000), "original EOF age is not renewed")
         window.bind(attachment: nil, attempt: "second", nowMs: 335_000)
         XCTAssertFalse(window.allowsUpgrade(nowMs: 500_000))
+    }
+
+    func testA05StagedAdvertisedIntervalsRequireCapturedScopeAndOriginalDeadline() {
+        let manifest = "#EXTM3U\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXTINF:1.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n"
+        let intervals = autoVODAdvertisedIntervals(Data(manifest.utf8))!
+        XCTAssertEqual(intervals["seg00001.m4s"]?.startSeconds, 1)
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg00000").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "seg00001", with: "seg1").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(manifest.replacingOccurrences(of: "#EXT-X-ENDLIST", with: "#EXT-X-DISCONTINUITY").utf8)))
+        XCTAssertNil(autoVODAdvertisedIntervals(Data(repeating: 65, count: 1_048_577)))
+        let scope = UUID()
+        func transfer(_ index: Int) -> PlayerController.AutoCompletedTransfer {
+            .init(bodyBytes: 100_000, bodyDurationSeconds: 0.1, completedAtMs: 1_000,
+                origin: "https://node", networkLoad: true, fromLocalCache: false, producerPaced: false,
+                statusCode: 200, segmentId: "https://node/hls/staged/seg0000\(index).m4s", mediaDurationSeconds: nil,
+                receipt: "00000000-0000-0000-0000-00000000000\(index)", etag: "object\(index)",
+                installedSessionId: "staged", installedCandidateId: "candidate", observedMediaDurationMs: 1_000,
+                stageScope: scope)
+        }
+        let first = transfer(0), second = transfer(1)
+        func margin(_ samples: [PlayerController.AutoCompletedTransfer], now: Int = 2_000, token: UUID? = nil) -> Bool {
+            autoVODEmpiricalMargin(samples, intervals: intervals, scope: token ?? scope,
+                sessionId: "staged", candidateId: "candidate", nowMs: now, deadlineMs: 15_000)
+        }
+        XCTAssertTrue(margin([first, second]))
+        XCTAssertFalse(margin([first, first]))
+        XCTAssertFalse(margin([first, second], token: UUID()))
+        XCTAssertFalse(margin([first, second], now: 15_000))
+        XCTAssertFalse(margin([first, second], now: 999))
+        var mismatched = second
+        mismatched.observedMediaDurationMs = 1_002
+        XCTAssertFalse(margin([first, mismatched]))
+        mismatched = second
+        mismatched.installedCandidateId = "replacement"
+        XCTAssertFalse(margin([first, mismatched]))
+        let overlapping = ["seg00000.m4s": intervals["seg00000.m4s"]!,
+            "seg00001.m4s": AutoVODAdvertisedInterval(startSeconds: 0.5, durationSeconds: 1)]
+        XCTAssertFalse(autoVODEmpiricalMargin([first, second], intervals: overlapping, scope: scope,
+            sessionId: "staged", candidateId: "candidate", nowMs: 2_000, deadlineMs: 15_000))
     }
 
     func testStagedProductionProofRequiresExactCandidateAndCombinedAge() {

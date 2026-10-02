@@ -32,6 +32,7 @@ use crate::store::{
     AUTH_PROTOCOL_MIN, AUTH_SCHEMA_VERSION,
 };
 
+use super::clock::{ClockDecision, ClockRefusal};
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
@@ -1059,6 +1060,8 @@ const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
+    #[error("cluster clock cannot authorize new membership authority: {0:?}")]
+    ClockUnbounded(ClockRefusal),
     #[error("cluster membership is unavailable while this node uses SQLite recovery")]
     Unavailable,
     #[error("join token is invalid")]
@@ -1248,6 +1251,7 @@ impl MembershipError {
     #[must_use]
     pub fn code(&self) -> &'static str {
         match self {
+            Self::ClockUnbounded(_) => "cluster_clock_unbounded",
             Self::Unavailable => "membership_unavailable",
             Self::InvalidToken => "join_token_invalid",
             Self::ExpiredToken => "join_token_expired",
@@ -3776,6 +3780,10 @@ impl MembershipManager {
         expected_role: ClusterRole,
     ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        // Capture before the first Store await, without counting a refusal
+        // for exact already-published repair. Only new publication consumes it.
+        let prepared_admission = clock.acquire();
         if request.schema_version != AUTH_SCHEMA_VERSION {
             return Err(MembershipError::Incompatible);
         }
@@ -3825,7 +3833,12 @@ impl MembershipManager {
             );
             return Err(MembershipError::Incompatible);
         }
-        let now = unix_ms()?;
+        let now = match &prepared_admission {
+            Ok(ticket) => ticket.now_ms(),
+            // This value classifies token/repair state only. A failed capture
+            // cannot reach a new publication, irrespective of later recovery.
+            Err(_) => unix_ms()?,
+        };
         if role.is_learner() && !(cluster_min..=cluster_max).contains(&AUTH_LEARNER_PROTOCOL) {
             tracing::warn!(
                 cluster_min,
@@ -3874,6 +3887,9 @@ impl MembershipManager {
                 ))
             }
         };
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
 
         // Claiming the origin, reserving the token, installing the rolling-
         // upgrade guards, and publishing the staged node are one Raft
@@ -4100,6 +4116,11 @@ impl MembershipManager {
                 params!(request.token_digest.as_str()),
             ));
         }
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        // Once submitted, the existing ambiguous-result/identity repair path
+        // below remains available. A later clock refusal is not cancellation.
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
@@ -7525,6 +7546,8 @@ impl MembershipManager {
         node_id: &str,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         self.require_learner_lifecycle_capability().await?;
         if self.maintenance_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
@@ -7597,11 +7620,19 @@ impl MembershipManager {
                 MembershipChangeOutcome::Indeterminate => {}
             }
         }
+        // Committed promotion and ambiguous-result reconciliation above are
+        // ungated. Issuing a new proposal, even for a pending audit row, is not.
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
         let (attempt_id, new_attempt) = if let Some(existing) = existing {
             (existing.attempt_id, false)
         } else {
             let attempt_id = uuid::Uuid::new_v4().to_string();
-            let started_at = unix_ms()?;
+            let started_at = admission.now_ms();
+            clock
+                .revalidate_for(ClockDecision::MembershipChange, &admission)
+                .map_err(MembershipError::ClockUnbounded)?;
             let inserted = inner
                 .client
                 .execute(
@@ -7676,6 +7707,12 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
+        if let Err(cause) = clock.revalidate_for(ClockDecision::MembershipChange, &admission) {
+            if new_attempt {
+                self.clear_learner_promotion(node_id, &attempt_id).await;
+            }
+            return Err(MembershipError::ClockUnbounded(cause));
+        }
         match request_learner_promotion(&leader.addr_api, &inner.secrets.api, &target_node).await {
             Ok(()) => {}
             Err(MembershipChangeFailure::Rejected(error)) => {
@@ -8776,6 +8813,8 @@ impl MembershipManager {
     ///    built on.
     pub async fn activate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
         let inner = self.replicated_inner()?;
+        let clock = self.clock_guard();
+        let prepared_admission = clock.acquire();
         self.require_elected_leader().await?;
         let (active_min, active_max) = self.active_protocol_range().await?;
         if (active_min, active_max) == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL) {
@@ -8791,8 +8830,16 @@ impl MembershipManager {
                  {AUTH_LEARNER_PROTOCOL}..={AUTH_LEARNER_PROTOCOL}; refusing to narrow it"
             )));
         }
-        let absence_cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        let admission = clock
+            .admit_for(ClockDecision::MembershipChange, prepared_admission)
+            .map_err(MembershipError::ClockUnbounded)?;
+        let absence_cutoff = admission
+            .now_ms()
+            .saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
         self.refuse_unactivatable_cluster(absence_cutoff).await?;
+        clock
+            .revalidate_for(ClockDecision::MembershipChange, &admission)
+            .map_err(MembershipError::ClockUnbounded)?;
         let changed = inner
             .client
             .execute(
@@ -14635,6 +14682,133 @@ mod tests {
 
     /// The committing statement — not just the preflight — carries the
     /// capability precondition, and it is idempotent in both directions.
+    #[test]
+    fn change_refuses_unbounded_clock() {
+        use crate::cluster::clock::{ClusterClockGuard, PeerClockOffset};
+
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        let guard = ClusterClockGuard::new(true);
+        let publish = |guard: &ClusterClockGuard| {
+            let roster = guard.roster(&["node-b".to_owned(), "node-c".to_owned()]);
+            assert!(guard.publish(
+                roster,
+                ["node-b", "node-c"]
+                    .into_iter()
+                    .map(|peer| (
+                        peer.to_owned(),
+                        PeerClockOffset::Bounded {
+                            offset_us: 0,
+                            uncertainty_us: 1_000,
+                            observed_at: Instant::now(),
+                        }
+                    ))
+                    .collect()
+            ));
+        };
+        let submit = |prepared| -> Result<usize, MembershipError> {
+            let admission = guard
+                .admit_for(ClockDecision::MembershipChange, prepared)
+                .map_err(MembershipError::ClockUnbounded)?;
+            guard
+                .revalidate_for(ClockDecision::MembershipChange, &admission)
+                .map_err(MembershipError::ClockUnbounded)?;
+            Ok(connection
+                .execute(
+                    &narrow_protocol_range_sql(Some(activation_guard_predicate())),
+                    rusqlite::params![
+                        AUTH_LEARNER_PROTOCOL,
+                        AUTH_PROTOCOL_MIN,
+                        admission
+                            .now_ms()
+                            .saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS)
+                    ],
+                )
+                .expect("actual guarded protocol SQL"))
+        };
+        let unknown = submit(guard.acquire()).expect_err("unknown capture refuses SQL");
+        assert_eq!(unknown.code(), "cluster_clock_unbounded");
+        assert_eq!(active_range(&connection), (4, 4));
+        publish(&guard);
+        let before_read = guard.acquire();
+        guard.roster_failed();
+        publish(&guard);
+        assert!(matches!(
+            submit(before_read),
+            Err(MembershipError::ClockUnbounded(
+                ClockRefusal::GenerationChanged
+            ))
+        ));
+        assert_eq!(active_range(&connection), (4, 4));
+        let original = guard.acquire().expect("current bound");
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = $1",
+                [original.now_ms()],
+            )
+            .expect("fresh fixture nodes");
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = $1",
+                [original.now_ms()],
+            )
+            .expect("fresh fixture capabilities");
+        assert_eq!(
+            submit(Ok(original)).expect("same proof and actual statement"),
+            1
+        );
+        assert_eq!(active_range(&connection), (5, 5));
+
+        // These are call-site wiring checks, not a claim of real Raft/fleet
+        // acceptance. The preceding section executes the actual SQL primitive.
+        let source = include_str!("membership.rs");
+        for signature in [
+            "async fn redeem_for_role(",
+            "pub async fn promote_learner(",
+            "pub async fn activate_learner_protocol(",
+        ] {
+            let body = method_body(source, signature);
+            assert!(
+                body.find("let prepared_admission = clock.acquire();")
+                    .expect("entry capture")
+                    < body.find(".await").expect("awaited preparation")
+            );
+            assert!(
+                body.contains(".admit_for(ClockDecision::MembershipChange, prepared_admission)")
+            );
+            assert!(body.contains(".revalidate_for(ClockDecision::MembershipChange, &admission)"));
+        }
+        let redeem = method_body(source, "async fn redeem_for_role(");
+        let repair = redeem
+            .split_once("JoinEffect::RepairPublishedNode =>")
+            .expect("repair")
+            .1
+            .split_once("JoinEffect::PublishStagedNode")
+            .expect("new publication")
+            .0;
+        assert!(repair.contains("return Ok(())") && !repair.contains("admit_for"));
+        assert!(
+            redeem.find(".revalidate_for(").expect("fence")
+                < redeem
+                    .find("inner.client.txn(statements).await")
+                    .expect("submission")
+        );
+        let promotion = method_body(source, "pub async fn promote_learner(");
+        assert!(
+            promotion
+                .find("reconcile_promotion_change(")
+                .expect("reconcile")
+                < promotion.find(".admit_for(").expect("new authority")
+        );
+        assert!(promotion.contains("let started_at = admission.now_ms();"));
+        let activation = method_body(source, "pub async fn activate_learner_protocol(");
+        assert!(
+            activation
+                .find("return Ok(ProtocolChange")
+                .expect("already active")
+                < activation.find(".admit_for(").expect("new activation")
+        );
+    }
+
     #[test]
     fn activation_commits_once_and_only_with_every_voter_proven() {
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);

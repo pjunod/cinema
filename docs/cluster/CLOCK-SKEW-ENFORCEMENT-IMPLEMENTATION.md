@@ -101,6 +101,52 @@ fenced-target removal still require their complete separate boundary audit.
 This is private source preparation; current compiler/focused results and
 measurement evidence are not inferred from the decision.
 
+**2026-10-02 private membership preparation:** the same root-owned branch
+captures pure opaque admission results before the first awaited reads in
+`redeem_for_role`, `promote_learner` and `activate_learner_protocol`. The
+[core guard](../../crates/plurx-core/src/cluster/clock.rs)'s `admit_for`
+consumes that original result only when the authoritative lifecycle reads
+identify new authority. It never reacquires a ticket after preparation:
+an original Unknown/Offset refusal stays refused even if observation has
+recovered, and an originally safe ticket must still match the exact guard,
+both generations and current policy. Only an actual refusal increments the
+bounded `membership_change` counter; unused idempotent inspections do not.
+
+Redemption rechecks immediately before its new staging transaction; the
+caller-bound original time is the only admission timestamp bound into SQL.
+Exact published-node/HTTP-origin repair and post-submission error
+reconciliation stay ungated. Promotion rechecks before a new durable intent
+and before a new HTTP proposal, retains original `started_at`, and may clear
+only this invocation's newly created, still-unsubmitted intent on refusal.
+Earlier ambiguous intents and committed-voter role reconciliation remain.
+Repeating the HTTP promotion request constructs a proposal against the
+leader's current voter set, not an immutable replay of the old set, so a
+fresh submission still requires the original proof; read-only outcome
+reconciliation does not. Protocol activation preserves already-active
+idempotence, binds the original absence cutoff and rechecks before its
+compare-and-swap. Existing SQL capability/role/range fences are unchanged.
+
+The typed public refusal is `cluster_clock_unbounded` with HTTP503; no
+setting, deployment or switch is introduced. New focused development IDs
+are `prepared_admission_never_replaces_original_refusal_time_or_guard` and
+`change_refuses_unbounded_clock`. The latter combines actual guarded
+protocol SQL with explicit source-wiring checks; it is not a real Raft/fleet
+observation. Their actual outcomes must be recorded separately, never
+inferred from the implementation or an earlier compiler snapshot.
+
+This slice does **not** finish membership enforcement. Finalization,
+target-excluded durable removal and the vendored actual Raft admission
+boundaries still need implementation/audit. In particular,
+[management.rs](../../vendor/hiqlite/src/network/management.rs)'s
+`add_learner` and `become_member` call Raft below the application manager;
+guarding only application redemption or the outbound promotion request
+cannot close their leader-side awaited preparation window. A later complete
+implementation must bind the same node-local guard there without introducing
+a second guard, startup bypass or upward dependency from Hiqlite into core.
+No private enforcing source enters the effort before the unchanged identified
+measurement receipt; the original removal, replay and qualification scope
+remains open.
+
 ### E0 interfaces — local policy without an irreversible operation
 
 The 2026-10-01 review correction invalidates current evidence and advances
