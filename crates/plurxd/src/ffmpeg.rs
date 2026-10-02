@@ -197,6 +197,18 @@ pub(crate) struct ProducerDiagnostic {
 /// `libva error:` is not on this list and stays actionable.
 const INFORMATIONAL_DIAGNOSTIC_PREFIXES: &[&str] = &["libva info:"];
 
+/// Whether one stderr line is informational output rather than a diagnostic:
+/// it starts, after leading whitespace, with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`]. The one rule every ffmpeg stderr
+/// consumer uses, line by line ([`classify_diagnostic`], the rolling
+/// transcode's stderr log, the Live TV readiness error).
+pub(crate) fn is_informational_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    INFORMATIONAL_DIAGNOSTIC_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
 /// Classify a [`drain_diagnostics`] tail line by line. Blank lines are
 /// dropped; a line is informational only when it starts with one of
 /// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`], so anything unrecognised stays
@@ -210,10 +222,7 @@ pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
         if trimmed.trim_end().is_empty() {
             continue;
         }
-        if INFORMATIONAL_DIAGNOSTIC_PREFIXES
-            .iter()
-            .any(|prefix| trimmed.starts_with(prefix))
-        {
+        if is_informational_diagnostic(trimmed) {
             informational.push(line);
         } else {
             actionable.push(line);
@@ -5100,6 +5109,10 @@ mod tests {
         assert_eq!(mixed.informational, healthy.informational);
 
         // A recognised prefix later in a line is not the line's start.
+        assert!(is_informational_diagnostic(
+            "  libva info: VA-API version 1.24.0"
+        ));
+        assert!(!is_informational_diagnostic(driver));
         let quoted = "[mov @ 0x1] could not open 'libva info: x.mkv'";
         assert_eq!(classify_diagnostic(quoted).actionable, quoted);
         assert_eq!(classify_diagnostic(" \n\n"), ProducerDiagnostic::default());
