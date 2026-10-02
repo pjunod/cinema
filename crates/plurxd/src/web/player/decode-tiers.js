@@ -182,7 +182,8 @@ async function hevcTiersMediaCapabilities(){
 // stereo, never a guessed surround claim.
 function browserOutputChannels(){
   try{
-    const Ctx=window.AudioContext||window.webkitAudioContext;
+    // Safari before 14.1 named it webkitAudioContext; TypeScript knows only the standard name.
+    const Ctx=window.AudioContext||/** @type {any} */ (window).webkitAudioContext;
     if(!Ctx) return 2;
     const context=new Ctx();
     const channels=Number(context.destination&&context.destination.maxChannelCount);
