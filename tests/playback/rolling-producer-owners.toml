@@ -917,7 +917,9 @@ expected_occurrences = 6
 [[module_symbols]]
 id = "m4-producer-completion-disposition"
 pattern = "RollingProducerCompletionDisposition"
-expected_occurrences = 20
+# S10 remaining output: +2 normal-completion variants in the existing
+# Copy executor's observation callback. This grants no retained authority.
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-expected-executor-settlement"
@@ -1628,7 +1630,10 @@ pattern = "rendition_build_gate"
 # S10 #680: +2 in vod/retained.rs::repair_exact and link_complete. Both
 # acquire the EXISTING recipe-key build gate before validating/linking exact
 # bytes; neither starts a build nor owns a second producer/recovery loop.
-expected_occurrences = 16
+# S10 copy preparation: +2 acquisitions of this SAME gate, for exact
+# cancelled preparation termination and settled private artifact exposure.
+# Neither creates a new build owner or scheduler.
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
@@ -3625,7 +3630,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 100-ms timeout while holding the manifest lock, proving Activity does not
 # acquire that lock or renew idle life. This is a test-only assertion bound,
 # owned by the fixture; no production timer or recovery owner is added.
-expected_occurrences = 1155
+# S10 remaining output: +6, preserving main's 1155 baseline. Two constructors
+# bound the ONE outer watchdog (original deadline and existing 250 ms poll);
+# one bounds its modeled fixture wait, one the actual PUT fixture playlist,
+# one the existing inner completion deadline, one real preparation fixture.
+# No extra spawned task or producer loop; all fixture waits are awaited.
+expected_occurrences = 1161
 
 [[module_structures]]
 id = "bare-time-constructor"

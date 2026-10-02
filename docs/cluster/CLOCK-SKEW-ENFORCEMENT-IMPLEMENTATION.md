@@ -134,8 +134,30 @@ protocol SQL with explicit source-wiring checks; it is not a real Raft/fleet
 observation. Their actual outcomes must be recorded separately, never
 inferred from the implementation or an earlier compiler snapshot.
 
-This slice does **not** finish membership enforcement. Finalization,
-target-excluded durable removal and the vendored actual Raft admission
+**2026-10-02 private finalization preparation:** `finalize_for_role` now
+captures before its awaited token read and passes the opaque original result
+to `dispatch_clocked_join_finalization`. That production dispatcher retains
+the existing committed-role validation and completed retry short circuit.
+Only a still-redeeming token's new lifecycle publication consumes/revalidates
+the original proof; the original time is bound into the unchanged guarded
+token SQL. An initial refusal cannot be replaced by later healthy evidence,
+and changed evidence during the role read refuses before any CAS. Once the
+CAS is submitted, its result is handled by the existing lifecycle consumer;
+clock admission does not reinterpret its outcome or block an already-redeemed
+retry. No token TTL, role validation or token/node predicate is weakened.
+
+One genuinely new focused method,
+`finalization_preserves_clock_ticket_and_completed_retry`, passed once on
+the private working source. It invokes the actual production dispatcher and
+token SQL for both admitted roles, covering completed retries, Unknown-to-
+healthy transitions, post-read invalidation, incorrect committed role,
+original-time publication and a changed token owner. This remains SQLite
+primitive/dispatcher evidence, not a real multi-node Raft or fleet run.
+The earlier nine focused successes retain their original source attribution
+and are not replayed. Exact current compiler/hook receipts are separate.
+
+This slice does **not** finish membership enforcement. Target-excluded
+durable removal and the vendored actual Raft admission
 boundaries still need implementation/audit. In particular,
 [management.rs](../../vendor/hiqlite/src/network/management.rs)'s
 `add_learner` and `become_member` call Raft below the application manager;

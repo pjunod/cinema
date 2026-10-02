@@ -83,6 +83,9 @@ impl Default for PublishedOutputMeasurement {
 }
 
 impl PublishedOutputMeasurement {
+    pub(super) fn refuse(&mut self) {
+        self.refused = true;
+    }
     /// Invoked under the existing manifest fence AFTER successful disk commit.
     /// An ambiguous/repeated/different-origin observation loses measurement
     /// authority but never rejects ordinary playable output.

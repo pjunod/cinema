@@ -9858,7 +9858,7 @@ impl JobManager {
             // scratch and durable budget remainder prevents a claim whose
             // expected publication is already known not to fit.
             capabilities.scratch_bytes = capabilities.scratch_bytes.min(remaining_budget);
-            if !capabilities.validate() || capabilities.scratch_bytes == 0 {
+            if capabilities.scratch_bytes == 0 {
                 tracing::warn!(
                     decoders = ?capabilities.decoders,
                     scratch_bytes = capabilities.scratch_bytes,
@@ -9877,7 +9877,7 @@ impl JobManager {
                     .cloned()
                     .collect::<Vec<_>>()
             };
-            let (job, active, fence) = match crate::background_jobs::claim_pretranscode(
+            let claim = match crate::background_jobs::claim_pretranscode(
                 Arc::clone(&self.store),
                 Arc::clone(&self.job_authority),
                 &transcode,
@@ -9893,6 +9893,92 @@ impl JobManager {
                     tracing::warn!(%error, "could not claim speculative-transcode work");
                     *reasons.entry("claim_failed").or_default() += 1;
                     break;
+                }
+            };
+            let (job, active, fence) = match claim {
+                crate::background_jobs::PreparationClaim::Transcode(job, active, fence) => {
+                    (job, active, fence)
+                }
+                crate::background_jobs::PreparationClaim::Copy(job, active, admission) => {
+                    let fence = active.fence();
+                    let observation = transcode.copy_preparation_attachment_observation();
+                    let result = {
+                        let operation = async {
+                            let payload =
+                                job.supported_payload().map_err(|error| error.to_string())?;
+                            let plurx_core::store::background_jobs::JobPayload::CopyOutputPrepare {
+                                file_id,
+                                source_size,
+                                source_mtime,
+                                ..
+                            } = payload
+                            else {
+                                return Err("copy payload unsupported".to_owned());
+                            };
+                            let file = self
+                                .store
+                                .get_file(file_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                                .filter(|file| {
+                                    file.size == source_size && file.mtime == source_mtime
+                                })
+                                .ok_or("copy source row changed")?;
+                            let roots = match self
+                                .store
+                                .get_item(file.item_id)
+                                .await
+                                .map_err(|error| error.to_string())?
+                            {
+                                Some(item) => self
+                                    .store
+                                    .get_library(item.library_id)
+                                    .await
+                                    .map_err(|error| error.to_string())?
+                                    .map(|library| library.paths)
+                                    .unwrap_or_default(),
+                                None => Vec::new(),
+                            };
+                            // Preserve the existing worker's configured-library
+                            // boundary before the independently held source open.
+                            crate::transcode::pretranscode_source_snapshot(&file, &roots)
+                                .await
+                                .ok_or("copy source unavailable on owner")?;
+                            transcode
+                                .produce_copy_output_job(
+                                    &file,
+                                    &job,
+                                    fence.clone(),
+                                    &admission,
+                                    deadline,
+                                )
+                                .await
+                        };
+                        crate::background_jobs::watch_copy_preparation(
+                            &fence,
+                            deadline.into(),
+                            || transcode.copy_preparation_still_idle(&admission, observation),
+                            operation,
+                        )
+                        .await
+                    };
+                    match result {
+                        Ok(true) => produced += 1,
+                        Ok(false) | Err(_) => {
+                            let now = clock_ms();
+                            let _ = fence
+                                .settle(plurx_core::store::background_jobs::JobSettlement::Yield {
+                                    error_code: Some("copy_output_unavailable".to_owned()),
+                                    checkpoint: None,
+                                    not_before_ms: now.saturating_add(5_000),
+                                })
+                                .await;
+                            skipped += 1;
+                            *reasons.entry("copy_output_unavailable").or_default() += 1;
+                        }
+                    }
+                    active.finish().await;
+                    continue;
                 }
             };
             let lost = active.fence().loss_token();
