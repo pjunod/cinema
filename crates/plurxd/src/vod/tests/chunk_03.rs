@@ -3553,6 +3553,22 @@
         }
     }
 
+    #[tokio::test]
+    async fn cached_init_read_does_not_wake_an_idle_controlled_producer() {
+        let temp = crate::test_tempdir().expect("cached init");
+        let serve = bare_serve(temp.path());
+        let rendition = synthetic_rendition(temp.path()).await;
+        rendition.attach_reader("controlled", 22).await;
+        rendition.readers.lock().await.get_mut("controlled").expect("reader").authority_only = true;
+        rendition.dir.write_init(b"moov").await.expect("immutable cached init");
+        let ready = serve.serve_init(&rendition, Duration::from_secs(1), Arc::new(crate::meter::Meter::new()))
+            .await.expect("cached init is immediately readable");
+        assert_eq!(ready.len, 4);
+        assert!(rendition.demand_since.lock().expect("materialization ownership").is_empty());
+        assert!(tokio::time::timeout(Duration::from_millis(1), rendition.wake.notified()).await.is_err(),
+            "reading an existing init must not start work at the ordinary frontier");
+    }
+
     /// Fix 9: both wake paths for a blocked init GET — the init landing, and
     /// a producer failure — answer promptly instead of sleeping the budget.
     #[tokio::test]

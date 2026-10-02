@@ -731,10 +731,10 @@ impl VodServe {
             );
             return Err(VodError::ProducerFailed(cause));
         }
-        let demand = self
-            .shared
-            .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
-        rendition.kick();
+        // A cached immutable init needs no producer. In particular, checking
+        // an idle controlled rung must not wake it at the ordinary playhead
+        // before its preparation frontier has been admitted.
+        let mut demand = None;
         let deadline = Instant::now() + budget;
         loop {
             // Arm the notification — created AND enabled — before checking
@@ -768,6 +768,13 @@ impl VodServe {
             if let Some(cause) = rendition.failure_cause() {
                 return Err(VodError::ProducerFailed(cause));
             }
+            let demand = demand.get_or_insert_with(|| {
+                let demand = self
+                    .shared
+                    .arm_materialize_watchdog(rendition, INIT_DEMAND_INDEX);
+                rendition.kick();
+                demand
+            });
             if demand.expired() {
                 return Err(VodError::ProducerFailed(
                     "materializing init.mp4 exceeded the producer deadline".to_owned(),

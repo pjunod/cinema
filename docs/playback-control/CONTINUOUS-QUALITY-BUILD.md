@@ -3647,3 +3647,24 @@ calls the actual admission path twice with an existing credit, checks the
 production demands across an ordinary heartbeat, and proves the credit count
 stays one until parent removal. This patch is not yet runtime-qualified.
 No unit tests have run.
+
+### 10.121 Cached init verification does not restart idle work
+
+Pinned local compilation and the normal hook passed on `03e45c409`; the
+isolated Linux rebuild passed in three minutes. Its fresh Linux Firefox
+series still retained current on the return to 1080p (`media_wait_pending`,
+frontier 2448), so the retained-credit repair alone did not resolve the
+observed failure. The failed receipt and daemon log remain in ignored reports.
+
+Inspection also found that `serve_init` armed materialization and kicked
+the producer before checking for an already-cached immutable init. Family
+verification calls this path for every rung. An idle rung could therefore
+be woken at ordinary playback demand before target preparation installed its
+frontier. The init path now registers its notification before the disk check
+as before, but creates materialization ownership and wakes work only when
+the init is actually absent. Source fences and the bounded missing-init wait
+remain in place. Authored regression
+`cached_init_read_does_not_wake_an_idle_controlled_producer` verifies an
+actual cached read leaves no materialization owner or producer wake.
+Pinned all-target compilation passed; no unit test executed. The change
+and the repeated Firefox failure still require runtime qualification.
