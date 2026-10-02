@@ -2085,6 +2085,14 @@ async fn boot_observing(
     crate::telemetry::initialize(Arc::clone(&state.store))
         .await
         .context("seed playback telemetry settings")?;
+    // The Plex façade census continues across restarts (C-07 §8.5). Restored
+    // before the listener accepts; an unusable file is a new census, never a
+    // refusal to start.
+    state
+        .plex_census
+        .restore_durable(&config.storage.data_dir, http::plex_census::unix_now_s())
+        .await;
+    let plex_census = Arc::clone(&state.plex_census);
     let background_loops = BackgroundLoopGuard::new();
     spawn_background_loops(&state, background_loops.token());
 
@@ -2131,9 +2139,11 @@ async fn boot_observing(
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
     };
-    if let Some(owner) = observation {
-        owner.serve_normal(app, shutdown).await?;
-        drain_serving_state(progress, mdns).await
+    let served = if let Some(owner) = observation {
+        match owner.serve_normal(app, shutdown).await {
+            Ok(()) => drain_serving_state(progress, mdns).await,
+            Err(error) => Err(error),
+        }
     } else {
         serve(
             listener.expect("normal startup owns its listener"),
@@ -2143,7 +2153,18 @@ async fn boot_observing(
             shutdown,
         )
         .await
+    };
+    // The HTTP server has stopped, so no façade request can still be counted:
+    // this write is complete, and marking it clean is what tells the next
+    // start that nothing was lost. A failure here is recorded by that start as
+    // an unclean stop, which is the honest reading.
+    if let Err(error) = plex_census
+        .flush_durable(http::plex_census::unix_now_s(), true)
+        .await
+    {
+        tracing::warn!(%error, "could not record the Plex façade census at shutdown");
     }
+    served
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -3001,6 +3022,10 @@ fn spawn_background_loops(
         background_shutdown.clone(),
     ));
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(http::plex_census::flush_loop(
+        Arc::clone(&state.plex_census),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
         crate::http::cluster_operations::membership_status_cache_loop(
