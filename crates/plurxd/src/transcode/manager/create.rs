@@ -741,6 +741,16 @@ impl TranscodeManager {
                 Some(_) => {}
             }
         }
+        let note_phase = |phase: &'static str, started: std::time::Instant| {
+            tracing::debug!(
+                target: "plurxd::transcode",
+                file_id = file.id,
+                phase,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "encoded recipe preparation phase completed"
+            );
+        };
+        let phase_started = std::time::Instant::now();
         let source = crate::fragment_index_cluster::open_source_fence(file, None)
             .await
             .map_err(|error| {
@@ -749,6 +759,7 @@ impl TranscodeManager {
                     format!("the source could not be held for encoded preparation: {error}"),
                 )
             })?;
+        note_phase("source_fence", phase_started);
         // Bind preparation, burn extraction, key construction, and the final
         // producer open to the same inspected object, not scanner seconds.
         let source_object_version = source.object_version().to_owned();
@@ -821,6 +832,7 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
+        let phase_started = std::time::Instant::now();
         let held_probe =
             crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
                 .await
@@ -830,6 +842,7 @@ impl TranscodeManager {
                         format!("the held source could not be verified against its scan: {error}"),
                     )
                 })?;
+        note_phase("held_source_probe", phase_started);
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -979,6 +992,7 @@ impl TranscodeManager {
         }
         // Catalog identity describes the muxed candidate. Verify that exact
         // plan before deriving the video-only or shared-AAC execution recipe.
+        let phase_started = std::time::Instant::now();
         let catalog_plan = if let Some(context) = req
             .candidate_context
             .as_ref()
@@ -1026,6 +1040,7 @@ impl TranscodeManager {
         } else {
             None
         };
+        note_phase("catalog_decoder_plan", phase_started);
         if let Some(media) = req.continuous_media.as_ref() {
             options.effective_rate_control = plurx_core::transcode::EffectiveRateControl::Vbr;
             if media.role == ContinuousMediaRole::SharedAudio {
@@ -1064,9 +1079,11 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
+        let phase_started = std::time::Instant::now();
         let plan = self
             .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
             .await?;
+        note_phase("execution_decoder_plan", phase_started);
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
@@ -1129,6 +1146,7 @@ impl TranscodeManager {
         } else {
             None
         };
+        let phase_started = std::time::Instant::now();
         let engine = crate::ffmpeg::EncodedEngine::capture(
             options
                 .subtitle_burn
@@ -1138,6 +1156,7 @@ impl TranscodeManager {
         )
         .await
         .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        note_phase("encoded_engine_capture", phase_started);
         if !source.unchanged() {
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",

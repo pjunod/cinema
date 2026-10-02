@@ -3936,3 +3936,42 @@ owned FFmpeg children were absent at the immediate, one-, three- and
 five-second samples, with the same daemon PID and executable identity verified
 at every sample. This is process-census cleanup evidence, not physical audio,
 display or queue-retirement qualification. The complete case remains failed.
+
+
+### 10.131 Exact reserved-artifact repair is under runtime qualification
+
+Committed source `4904742cb` passed its normal hook: catalog lint, pinned
+Rust formatting, all-target Clippy with denied warnings, and 72 served-script
+syntax checks. Source-only transfer to the approved isolated Linux root built
+that exact commit with Rust 1.97.1 in 3m14s. No unit tests executed.
+
+The targeted Chrome diagnostic is running rapid choices across pause/resume,
+then pending-quality cold seek and a five-second End census. Its engine
+attestation is explicitly warmed by an ordinary Activity read; it is not cold
+startup qualification. Runtime verdict remains pending. The status page now
+separates active work, latest failures, partial evidence and remaining work
+so the current state can be read without the full chronological ledger.
+
+
+### 10.132 Startup failures still prevent transport qualification
+
+The first exact-source `4904742cb` diagnostic reached healthy playback but
+failed a 500 ms callback gap immediately after its first frame. It therefore
+did not attempt rapid choices. That failed receipt is preserved. A separate
+diagnostic now preserves any failed precondition while allowing later
+transport measurements only when the attached player is healthy; the whole
+case can never become green by this continuation.
+
+That follow-up failed before presentation: VOD creation completed in 8,756 ms,
+then successful response publication lost its exact durable activation and
+returned 503. It reached neither rapid choices nor cold seek. Both receipts
+remain failed and the reserved-artifact repair remains unqualified.
+
+Bounded debug phase timings now distinguish source fence, held-source probe,
+catalog decoder planning, execution planning and encoded engine capture.
+Earlier timings establish that the delay precedes rendition setup, but do
+not identify which preparation operation dominates. The new instrumentation
+changes no startup deadline, activation rule or media qualification threshold.
+No unit tests executed.
+
+Pinned workspace/all-target compilation of these diagnostics passed in 29.00s.
