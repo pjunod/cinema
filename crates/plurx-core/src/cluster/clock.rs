@@ -134,6 +134,71 @@ mod tests {
     }
 
     #[test]
+    fn prepared_admission_never_replaces_original_refusal_time_or_guard() {
+        let guard = ClusterClockGuard::new(true);
+        let initially_unknown = guard.acquire();
+        assert!(guard.prometheus().contains(
+            "plurx_cluster_clock_refusals_total{decision=\"membership_change\",cause=\"unknown\"} 0\n"
+        ));
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard
+                .admit_for(ClockDecision::MembershipChange, initially_unknown)
+                .err(),
+            Some(ClockRefusal::Unknown),
+            "later recovery must not mint a new pre-await admission"
+        );
+        let prepared = guard.acquire().expect("bounded entry");
+        let original_now = prepared.now_ms();
+        let admitted = guard
+            .admit_for(ClockDecision::MembershipChange, Ok(prepared))
+            .expect("unchanged exact guard");
+        assert_eq!(admitted.now_ms(), original_now);
+        guard.roster_failed();
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard
+                .admit_for(ClockDecision::MembershipChange, Ok(prepared))
+                .err(),
+            Some(ClockRefusal::GenerationChanged)
+        );
+        let other = ClusterClockGuard::new(false);
+        assert_eq!(
+            other
+                .admit_for(ClockDecision::MembershipChange, guard.acquire())
+                .err(),
+            Some(ClockRefusal::GenerationChanged),
+            "an equal-looking foreign guard is not authority"
+        );
+        publish_offset(&guard, 2_500_000, 1_000);
+        let originally_unbounded = guard.acquire();
+        publish_offset(&guard, 0, 1_000);
+        assert_eq!(
+            guard
+                .admit_for(ClockDecision::MembershipChange, originally_unbounded)
+                .err(),
+            Some(ClockRefusal::Offset)
+        );
+        let before = guard.prometheus();
+        let unused_idempotent_capture = guard.acquire();
+        assert!(unused_idempotent_capture.is_ok());
+        assert_eq!(
+            guard.prometheus(),
+            before,
+            "discarded pure capture is not refusal"
+        );
+        assert!(before.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"membership_change\",cause=\"unknown\"} 1\n"
+        ));
+        assert!(before.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"membership_change\",cause=\"generation_changed\"} 1\n"
+        ));
+        assert!(before.contains(
+            "plurx_cluster_clock_refusals_total{decision=\"membership_change\",cause=\"offset\"} 1\n"
+        ));
+    }
+
+    #[test]
     fn consumer_refusals_count_only_typed_admission_not_policy_or_scrapes() {
         let guard = ClusterClockGuard::new(true);
         assert_eq!(guard.acquire().err(), Some(ClockRefusal::Unknown));
@@ -710,6 +775,25 @@ impl ClusterClockGuard {
             return Err(ClockRefusal::GenerationChanged);
         }
         Self::acquisition_policy(&inner)
+    }
+
+    /// Actual consumer entry only; pure policy inspection remains uncounted.
+    /// Consume a proof captured before awaited identity/preflight reads. An
+    /// idempotent already-committed operation can discard that pure result;
+    /// new authority must not replace an original refusal with a fresh proof.
+    pub fn admit_for<'guard>(
+        &'guard self,
+        decision: ClockDecision,
+        prepared: Result<ClockAcquisitionTicket<'guard>, ClockRefusal>,
+    ) -> Result<ClockAcquisitionTicket<'guard>, ClockRefusal> {
+        prepared
+            .and_then(|ticket| {
+                self.revalidate(&ticket)?;
+                Ok(ticket)
+            })
+            .inspect_err(|cause| {
+                self.refusals[decision.index()][cause.index()].fetch_add(1, Ordering::Relaxed);
+            })
     }
 
     /// Actual consumer entry only; pure policy inspection remains uncounted.
