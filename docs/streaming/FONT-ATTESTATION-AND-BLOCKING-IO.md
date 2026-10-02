@@ -1,11 +1,12 @@
 # Font attestation and blocking I/O — stat off the runtime now, freeze the font environment per recipe next
 
-**Status:** M1 merged (PR #413, in `main`) · M2 built in draft PR #553 on
-`plan/S-04-2`, not deployed; fleet evidence owed · **Executes:** §2.7, F-stream-7, assessment
+**Status:** M1 merged (PR #413, in `main`) · M2 merged (PR #553,
+`2b09d7a32`) · M2 owned-lab evidence PASS on lab3, 2026-10-02 (§5.2.1); the
+lab4/media1 reading and M1's "before" are still owed (§5.1) · **Executes:** §2.7, F-stream-7, assessment
 correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a` · **Updated:**
-2026-09-26
+2026-10-02
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -472,6 +473,13 @@ text-burn session running, `curl -s :32400/metrics | grep
 plurx_engine_attestation_seconds_count` shows `font,spawn` incrementing
 about once per materialised segment (the "before" for M2).
 
+**Open, 2026-10-02:** this "before" can no longer be taken on the fleet —
+M2 is deployed on every node, so no node runs the per-segment enumeration.
+Taking it would need a lab image without M2. The figures §7.6 measured by
+hand (51–64 ms per cold Fontconfig load, across three Fontconfig builds) are
+the nearest substitute; whether they stand in for M1's fleet "before" is
+Paul's ruling, not recorded as decided here.
+
 ### 5.2 M2 — frozen font environment per recipe
 
 Code: §3.2. Tests, all in `crates/plurxd/src/fontenv_tests.rs` and all run by
@@ -504,20 +512,30 @@ Acceptance: those green; `make unit` green; `make vodencode-restart-check`
 green; on lab4 or media1 with a text-burn session,
 `plurx_engine_attestation_seconds_count{kind="font",phase="spawn"}` rises by
 one capture's worth when the session starts and then stays flat for the
-session's life while `phase="stat"` increments per segment; `pgrep -f
-'fc-(list|conflist)'` during playback finds nothing.
+session's life while `phase="stat"` increments per segment; no `fc-*`
+process runs in the container during playback (`docker top`, or a host-side
+reader of `/proc` for every pid in the container's cgroup — the image has no
+`pgrep`).
 
 GPT prompt for the fleet check after deploy. It uses only what the image
 has (`sh`, `find`, `grep`, `sed`, `cp`, `fc-cache`, the Jellyfin ffmpeg) and,
 on the host, `docker` and `curl`; the image has no `pgrep`, `curl` or
-`python3`.
+`python3`. (Corrected 2026-10-02, from the owned-lab run in §5.2.1: step 1
+searched `find / -xdev`, which never enters `/var/lib/plurx` because that is
+a bind mount, so it always found nothing; steps 5 and 6 wrote into
+`/usr/local/share/fonts`, which is `root:staff 2775` while the daemon runs as
+uid 1000, so they need `docker exec -u 0`; and nothing confirmed the session
+took the encoded-VOD route, without which M2 is never exercised.)
 
 > On media1 after PR #553 is deployed, on the host: (1) `C=$(docker ps
-> --format '{{.Names}}' | grep -m1 plurx)` and find the runtime cache's font
-> environments with `docker exec "$C" find / -xdev -type d -name fontenv
-> 2>/dev/null` (call it `F`; it appears once a text burn has run). (2) From the
-> web client start any title with a *text* subtitle track burnt in (choose a
-> quality that transcodes). While it plays, run on the host `for i in $(seq
+> --format '{{.Names}}' | grep -m1 plurx)`. (2) From the web client start
+> any title with a *text* subtitle track burnt in (choose a quality that
+> transcodes), then find the runtime cache's font environments with
+> `docker exec "$C" find /var/lib/plurx -maxdepth 4 -type d -name fontenv`
+> (call it `F`; on the production layout it is
+> `/var/lib/plurx/cache/runtime/fontenv`). If `F` does not exist or is empty,
+> the session did not take the encoded-VOD route — stop and report that,
+> because nothing below is then measuring M2. While it plays, run on the host `for i in $(seq
 > 30); do docker top "$C" | grep -cE 'fc-(list|conflist)'; sleep 2; done` and
 > paste the output (expect zeros after the first few seconds). Find the
 > daemon's published port with `docker port "$C"` (or the compose file if it
@@ -534,16 +552,73 @@ on the host, `docker` and `curl`; the image has no `pgrep`, `curl` or
 > -f framemd5 - | grep -E 'config (file from|dir)|^0,'"` and paste it: every
 > config line must start with `$D/root`, and the `0,` frame line's hash must
 > equal the same command run without the `FONTCONFIG_SYSROOT=` and
-> `FONTCONFIG_FILE=` assignments. (5) `docker exec "$C" sh -c 'cp
+> `FONTCONFIG_FILE=` assignments. (5) `docker exec -u 0 "$C" sh -c 'cp
 > /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
 > /usr/local/share/fonts/PlurxFleetProbe.ttf && fc-cache'` (any `.ttf` the
-> image has will do), confirm the session keeps playing and `docker logs
-> --since 10m "$C" | grep -c 'immutable media engine changed'` is 0. (6) Stop
-> the session, start it again, and confirm a new directory appears under `F`
-> whose `manifest.json` lists `PlurxFleetProbe.ttf` (the first one is removed
-> when its last rendition is purged, or at the next daemon start's first text
-> burn). Then remove the probe font: `docker exec "$C" rm
-> /usr/local/share/fonts/PlurxFleetProbe.ttf`.
+> image has will do; note the `-u 0`), confirm the session keeps playing and
+> `docker logs --since 10m "$C" 2>&1 | grep -c 'immutable media engine
+> changed'` is 0. (6) Stop the session, start it again, and confirm a new
+> directory appears under `F` whose `manifest.json` lists
+> `PlurxFleetProbe.ttf` (the first one is removed when its last rendition is
+> purged, or at the next daemon start's first text burn). Then remove the
+> probe font: `docker exec -u 0 "$C" sh -c 'rm
+> /usr/local/share/fonts/PlurxFleetProbe.ttf && fc-cache'`.
+
+#### 5.2.1 Owned-lab evidence, 2026-10-02 — M2 PASS
+
+**Where.** A throwaway container on **lab3** (same Alder Lake GPU class as
+lab4), from an image built from the effort branch with the P-02
+reproducibility continuation (`9ed98a30c`), so it carries #553; fresh
+process; sessions created over the API. Burn session: an HEVC 1080p title
+with one ASS track, `subtitle_burn:0`, encoded-VOD route, 40 segments fetched
+at 0.6 s pacing. **Caveat:** an owned lab on lab3, not lab4 or media1.
+
+**One capture, then flat.** `plurx_engine_attestation_seconds_count`, read
+every 3 s:
+
+| Time | `media,stat` | `font,spawn` | `font,stat` |
+|---|---:|---:|---:|
+| before the session | 0 | 0 | 0 |
+| +3 s | 10 | 1 | 10 |
+| +9 s | 32 | 1 | 32 |
+| +18 s | 63 | 1 | 63 |
+| +24 s | 83 | 1 | 83 |
+| +27 s to +48 s (session deleted at +25 s) | 88 | 1 | 88 |
+
+One capture (`font,spawn` sum 141.8 ms; `media,spawn` one observation,
+53.4 ms) and then flat for the session's life, while `font,stat` tracked
+materialisation: 88 checks for 84 materialised segments, mean 0.29 ms per
+check. A host-side sampler reading `/proc` of every pid in the container's
+cgroup once a second saw **0** ticks with any `fc-*` process, across the boot
+and the session (the capture itself is shorter than a tick). First segment
+of this cold-font burn start: 1457.7 ms (create 751.5 ms).
+
+**The environment.** `cache/runtime/fontenv/<id>/{manifest.json,probe.ass,root/}`
+under the data directory; the manifest names `config=/etc/fonts/fonts.conf`,
+the font digest and the sysroot, with 40 entries (`rules copy` and
+`font link`). The burn producer ran with `FONTCONFIG_FILE=/etc/fonts/fonts.conf`
+and `FONTCONFIG_SYSROOT=<that directory>/root`.
+
+**Mid-session mutation.** With the session at about +20 s, a system font was
+added as root (`cp` of a DejaVu face into `/usr/local/share/fonts`, then
+`fc-cache`). The running session was untouched: all 40 segments answered
+200, the last 25 s after the start, `producer_state` stayed `running`, and
+`immutable media engine changed` appeared **0** times. A **new session** for
+the same title and burn then made **one new capture** (`font,spawn` 1 → 2)
+into a **new directory**, under a new rendition id, so none of the earlier
+burn segments was reused (first segment 790 ms, a fresh encode with no
+Fontconfig rebuild penalty). The manifest diff from the first environment to
+the second is **exactly one addition** — the added font, as a `font link`;
+nothing removed or changed. The new producer's `FONTCONFIG_SYSROOT` named the
+new directory.
+
+**Frame proof** (step 4 of the prompt above), for both environments: 138
+Fontconfig configuration lines each, **0** outside `$D/root`; the frozen
+`framemd5` equals the live one (`72ecc306…3949` both), and an unburnt frame
+hashes differently (`af667489…6f7a`), so the burn is not vacuous.
+
+**Verdict: M2 PASS** on every §5.2 fleet bar, in the owned lab. The probe
+font was removed and `fc-cache` re-run afterwards.
 
 ## 6. Verification and rollout
 
@@ -650,3 +725,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 review round | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | All four findings of the adversarial review (comment 5377) addressed, after merging `main` @ `7d545ffc`. (1) The rule and face parity refusals are now pinned through `capture_from` (`a_capture_whose_frozen_rules_diverge_is_refused`, `a_capture_whose_frozen_faces_diverge_is_refused`); each fails when its call in `build` is deleted. (2) A capture's directory is owned by a guard from before the first write and removed if the capture is refused or abandoned (`a_cancelled_capture_leaves_no_environment_behind` fails without it). (3) Capture burns a probe once with the producer's own ffmpeg under the child's environment and `FC_DEBUG=1024` and refuses unless that library loaded only the frozen configuration (`a_producer_library_that_ignores_the_sysroot_is_refused`); the `fc-cache` run and its false "no launch pays a scan" comment are gone. The trace format was taken from the production image, where the bundled library honoured the sysroot. (4) §6's rollback line now says truthfully that nothing removes `fontenv/` after a revert, and §5.2's fleet prompt uses host-side `docker`/`curl` and in-image `sh`/`find`/`sed`/`grep`. **needs:** the same fleet evidence as above. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 promotion | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | **Stopped and flagged.** The fast Rust gate at `56f684030` (the merge of `main` @ `abb6fe647`) failed 11 tests in `ubuntu:24.04`, each with "traced no Fontconfig configuration". Proof 3 (§5.2, point 3) reads `FC_DEBUG` output from the producer's library. Fontconfig before 2.17 does not read `FC_DEBUG` for a parse that libass starts itself, which 2.17 changed ("Make sure that the debugging facilities are initialized at loading config phase"). On a warm cache such a library is therefore silent. The lane's Ubuntu ffmpeg 6.1.1 links Fontconfig 2.15.0, and proof 2's `fc-list` warms the sysroot cache in the same format first. Reproduced in a clean `ubuntu:24.04` container: warm burn 0 trace lines, cold 70, after `fc-list` 0. The production `plurxd` image's bundled library printed 136 lines on each of three warm runs. Options are in [comment 5433](http://192.168.4.7:3000/noirr/plurx/pulls/553#issuecomment-5433); M2 stays unmerged until one is chosen. |
 | 2026-09-26 | claude-opus-5-5 | https://claude.ai/code/session_01AZemhL7Y1nXGWxUGRC2tkK | M2 fast-lane fix | [#553](http://192.168.4.7:3000/noirr/plurx/pulls/553) | Decision §7.6 (taken on Paul's behalf, overturnable): the producer-library proof no longer depends on cache warmth. `build` spawns the probe burn first, on the brand-new root, whose every `<cachedir>` resolves inside the sysroot and is therefore empty, and judges its trace after proofs 1 and 2; a probe that still traces nothing is refused. `the_producer_probe_is_a_cold_load` (a stand-in that exits if any `*.cache-*` exists under the sysroot) and `a_producer_that_traces_nothing_is_refused` are new; the ignore-sysroot stand-in drops the live cache, as a pre-2.13.1 library would not read it. Evidence: `cargo test -p plurxd --bin plurxd -- fontenv:: ffmpeg::tests::` 73 passed, 0 failed in a clean `ubuntu:24.04` container (ffmpeg 6.1.1, Fontconfig 2.15.0) and on nuc3 (2.17.1); 19 passed with `PLURX_FFMPEG` set to the production image's Jellyfin FFmpeg 8.1.2 and its bundled libraries. With the production hunk reverted the container fails 11 (the CI failure) and nuc3 fails `the_producer_probe_is_a_cold_load`; with the `library_loads_match` call deleted both refusal tests fail. The capture sequence was run by hand in each environment: the cold probe loaded exactly the live files, none outside the root, and three later producer launches wrote no cache. **needs:** the same fleet evidence as above. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M2 owned-lab evidence | branch `opus/encoder-lab-evidence` (evidence-only docs) | Owned lab on lab3 (not lab4 or media1), image carrying #553. M2 PASS (§5.2.1): one `font,spawn` capture then flat while `font,stat` tracked materialisation (88 checks, 84 segments, 0.29 ms mean); 0 sampler ticks with an `fc-*` process. A font added mid-session left the running session untouched (0 engine-changed lines); the next session made one new capture into a new directory and the manifest diff was exactly one addition. Frozen and live `framemd5` identical, unburnt frame different (non-vacuous). §5.2 prompt steps 1, 5 and 6 corrected (bind-mount `find`, `-u 0`, route check). M1's fleet "before" is no longer obtainable; substitute left to Paul (§5.1). |
