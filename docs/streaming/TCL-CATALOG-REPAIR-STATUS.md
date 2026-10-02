@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`dd304bf99`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+(`4f55ae17e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -248,3 +248,12 @@ All fixes and this page are published in PR #718. The PR is held as draft
 solely to avoid allocating the unconditional full unit rerun before the user
 resolves the conflict between that workflow and failed-only reruns. No merge
 or green current-head aggregate CI gate is claimed.
+
+
+Main subsequently advanced to `4f55ae17e` with the two-file scratch-hold
+capacity correction. It merged cleanly in `145e41a1e`. Only its changed
+regression was executed on the combined source:
+`transcode::tests::scratch_hold_publication_deadline_prepublication_capacity_waits_out_a_global_scratch_hold`
+passed (1 case, 0.02 s; Rust 1.97.1). Every unaffected passing result remains
+retained. The PR's final code is integrated with that main revision; the
+remaining hold is the explicit CI-policy decision above.
