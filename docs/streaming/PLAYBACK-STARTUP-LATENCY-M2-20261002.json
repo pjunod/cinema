@@ -1,5 +1,5 @@
 {
-  "status": "candidate; continuity and native qualification pending",
+  "status": "generated hls.js 30-minute continuity passed; Safari native sweep and continuity in progress",
   "build_base": "dea1a403e9a650fc51e35909b36e596be5a5ed13",
   "target_ms": 16000,
   "writer_gate_ms": 12000,
@@ -125,7 +125,7 @@
     }
   ],
   "hlsjs_sweep_receipt_sha256": "ad457f5957ab54a09df9868188b9cc9927bfdcc35de7ae79f7b09dc3d423b083",
-  "native_status": "not started; Mac locked, user unlock pending",
+  "native_status": "running in an authorized separate Safari window; no native qualification pass yet",
   "physical_apple_android_status": "not qualified; absent transport metadata retains conservative policy",
   "limits": [
     "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
@@ -136,5 +136,28 @@
   "regressions": "authored, not run; deferred until final adversarial review fixes",
   "integrated_main": "b43d9cdb8d3de0edf918b5af9b17a4f4bdab5737",
   "compiled_source_head": "e3cffab449d7db31a77b985667f1097badf1c34c",
-  "compiler": "rustc 1.97.1, macOS, workspace all-target check --locked passed; units deferred"
+  "compiler": "rustc 1.97.1, macOS, workspace all-target check --locked passed; units deferred",
+  "hlsjs_generated_continuity": {
+    "transport": "Chrome / shipped hls.js",
+    "threshold_media_s": 32,
+    "fixed_target_s": 16,
+    "post_bootstrap_production_ratio": 1.05,
+    "first_frame_ms": 8683,
+    "observed_playback_s": 1869.208218,
+    "elapsed_ms": 1877952,
+    "post_first_frame_waits": 0,
+    "native_errors": 0,
+    "fatal_hls_errors": 0,
+    "receipt_sha256": "58b7a6a0e5c6676cb43df1cdd03ea3f9b7cb1e6fa8f17f61167a27929ef23448",
+    "raw_receipt": "/Users/pjunod/Documents/Codex/2026-10-01/heated-rivalry-quorum-build/outputs/fast-start-evidence/plurx-fast-start-hlsjs-continuity-20261002.json",
+    "passes_generated_30min_check": true,
+    "served_script_hashes": "not captured for this completed run; actual shipped HLS loader/config was executed, daemon actor/scratch were not",
+    "qualification_limit": "generated AVC/AAC, local transfer, 1x playback; not live HEVC/DV or fleet qualification"
+  },
+  "pull_request": {
+    "number": 711,
+    "url": "http://192.168.4.7:3000/noirr/plurx/pulls/711",
+    "draft": true
+  },
+  "native_measurement_note": "Record both first composited frame and advancing playback: Safari may render an initial frame while waiting for more media."
 }

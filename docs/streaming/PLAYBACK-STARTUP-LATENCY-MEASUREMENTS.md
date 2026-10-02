@@ -242,8 +242,13 @@ qualification and are not converted into a pass by additional buffering.
 The generated Chrome/shipped-hls.js sweep observed first frames after 4.459,
 4.428, 6.548, 8.639 and 12.868 seconds for 12/16/24/32/48-second thresholds.
 Each short trial had no observed waiting event after the first frame in its
-45-second window. The 32-second continuity trial is in progress; Safari is
-blocked by the locked Mac pending user unlock. Do not infer native/HEVC
+45-second window. The selected 32-second Chrome continuity run completed:
+first frame 8.683 s, 1,869.208 s of advancing playback, and zero observed
+post-first-frame waiting, native errors or fatal HLS errors. The full receipt
+SHA-256 is `58b7a6a0e5c6676cb43df1cdd03ea3f9b7cb1e6fa8f17f61167a27929ef23448`.
+Safari native qualification is now running in the authorized separate window.
+Record initial composited frame and advancing playback separately: Safari
+can show the first frame while still buffering. Do not infer native/HEVC
 qualification or production startup timing from these AVC trials.
 
 The fixture exposes a complete 8-second object at 2.25 seconds, bursts at
