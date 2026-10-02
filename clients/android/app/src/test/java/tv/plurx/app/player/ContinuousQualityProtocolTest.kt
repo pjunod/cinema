@@ -9,22 +9,27 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
+import tv.plurx.app.player.ContinuousQualityFixtures.identity
+import tv.plurx.app.player.ContinuousQualityFixtures.transaction
+import tv.plurx.app.player.ContinuousQualityFixtures.nextTransaction
+import tv.plurx.app.player.ContinuousQualityFixtures.operation
+import tv.plurx.app.player.ContinuousQualityFixtures.reply
 
-class ContinuousQualityProtocolTest {
+internal object ContinuousQualityFixtures {
     private val generation = "11111111-1111-4111-8111-111111111111"
-    private val transaction = "22222222-2222-4222-8222-222222222222"
-    private val nextTransaction = "33333333-3333-4333-8333-333333333333"
-    private val identity = buildJsonObject {
+    val transaction = "22222222-2222-4222-8222-222222222222"
+    val nextTransaction = "33333333-3333-4333-8333-333333333333"
+    val identity = buildJsonObject {
         put("version", 1); put("generation", generation); put("control_epoch", 1)
         put("attachment", buildJsonObject {
             put("client_instance_id", generation); put("attachment_id", transaction)
             put("lifetime_id", "test-owned-playback"); put("family_id", "a".repeat(64))
         })
     }
-    private fun operation(revision: Long = 1) = buildJsonObject {
+    fun operation(revision: Long = 1) = buildJsonObject {
         put("kind", "prepare"); put("intent_revision", revision); put("target_rendition_id", "b".repeat(64))
     }
-    private fun reply(request: JsonObject): JsonObject {
+    fun reply(request: JsonObject): JsonObject {
         val transition = request.obj("transition")
         val sequence = transition?.number("sequence") ?: 0
         val op = transition?.obj("operation")
@@ -49,6 +54,9 @@ class ContinuousQualityProtocolTest {
         }
     }
 
+}
+
+class ContinuousQualityProtocolTest {
     @Test fun lostAcknowledgementReplaysTheSameRequestBeforeNewIntent() = runBlocking {
         val requests = mutableListOf<JsonObject>()
         val protocol = ContinuousQualityProtocol(identity, { request ->

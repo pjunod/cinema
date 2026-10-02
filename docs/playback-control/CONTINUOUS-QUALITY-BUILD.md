@@ -2907,3 +2907,28 @@ and sink observations, and fence queue resets and reused extractors. These
 are implementation constraints, not qualified native playback evidence.
 The inspected implementation is
 [SampleQueue 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/source/SampleQueue.java).
+
+
+### 10.93 Android retains its selection object and publishes only reserved intent
+
+The native selection component matches actual AVC track-group formats to the
+frozen family and caches one selection object for unchanged supported indices
+and type. Future-load intent is published from the owning protocol's accepted
+latest transaction only when an undisposed reservation covers the requested
+frontier. Preparing, cancelled, superseded, unreserved or conflicting intent
+cannot replace the published choice. The selected index accounts for Media3's
+bitrate ordering; source track indices are not assumed to be selection indices.
+
+The component retains queued chunks, declines automatic load cancellation and
+never excludes a track to select an unreserved substitute. Ordinary periods
+use the existing adaptive factory. A controlled period without a verified,
+reserved group refuses instead of falling through to an independent ABR
+owner; enrollment must handle that refusal before adoption. Existing native
+Auto remains the quality-policy owner. The component is not yet connected to
+runtime enrollment: reserved loads, actual accepted-sample ownership, disposal
+and optional-failure retention still need integration.
+
+Authored regressions cover the real selection-index reorder, stable instance
+reuse, reservation-before-selection, an interval boundary, stale/unknown
+choices and supported-definition changes. Production and regression sources
+compile. Unit execution and physical buffer-retention proof remain deferred.
