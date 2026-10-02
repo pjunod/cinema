@@ -105,11 +105,16 @@ pub(crate) fn decode_snapshot(
 /// Scheduled dependencies are read directly from the atomic ledger, including
 /// historical appends and takeover epochs. Disposal removes them in that same
 /// CAS write; receipt expiry and producer termination do not.
-pub(crate) const RESERVED_INTERVALS: &str = "SELECT DISTINCT interval.value AS interval_json
+pub(crate) const RESERVED_INTERVALS: &str = "SELECT DISTINCT interval_json FROM (
+    SELECT interval.value AS interval_json
     FROM continuous_quality_ledgers ledger,
          json_each(ledger.ledger_json, '$.transactions') transaction_fact,
          json_each(transaction_fact.value, '$.reserved') interval
-    WHERE json_extract(interval.value, '$.rendition_id') = $1
+    UNION ALL
+    SELECT interval.value AS interval_json
+    FROM continuous_quality_ledgers ledger,
+         json_each(ledger.ledger_json, '$.shared_audio_reserved') interval
+    ) WHERE json_extract(interval_json, '$.rendition_id') = $1
     LIMIT 4097";
 
 pub(crate) fn decode_reserved_intervals(

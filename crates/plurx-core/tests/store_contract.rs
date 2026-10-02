@@ -35866,6 +35866,18 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
             },
         );
         let receipt = ledger.apply(&append, 1900).expect("append");
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48_000,
+            from_tick: 0,
+            through_tick: 96_256,
+            byte_length: 40_000,
+        };
+        ledger
+            .reserve_shared_audio(std::slice::from_ref(&audio))
+            .expect("verified AAC dependency");
+
         assert!(
             store
                 .write_quality_ledger(&ledger, "staged-node", 1, 2000)
@@ -35887,6 +35899,14 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
                 .await
                 .expect("unrelated rendition")
                 .is_empty(),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("shared AAC projection"),
+            vec![audio.clone()],
             "{backend}"
         );
         let persisted = store
@@ -35961,6 +35981,19 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
         );
         assert!(adopted.ledger.transactions[0].ever_appended, "{backend}");
         assert_eq!(
+            adopted.ledger.shared_audio_reserved(),
+            std::slice::from_ref(&audio),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("takeover retains AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        assert_eq!(
             store
                 .quality_reserved_intervals(&interval.rendition_id)
                 .await
@@ -35990,6 +36023,40 @@ async fn continuous_quality_ledger_cas_and_takeover_preserve_appended_dependenci
                 .quality_reserved_intervals(&interval.rendition_id)
                 .await
                 .expect("disposed dependencies released")
+                .is_empty(),
+            "{backend}"
+        );
+
+        assert_eq!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("video disposal retains shared AAC"),
+            vec![audio.clone()],
+            "{backend}"
+        );
+        let dispose_audio = request(
+            &ledger,
+            2,
+            QualityOperation::Disposed {
+                artifacts: vec![audio.artifact_id.clone()],
+            },
+        );
+        ledger
+            .apply(&dispose_audio, takeover_at + 3)
+            .expect("named AAC disposal");
+        assert!(
+            store
+                .write_quality_ledger(&ledger, "replacement-node", 4, takeover_at + 3)
+                .await
+                .expect("persist AAC disposal"),
+            "{backend}"
+        );
+        assert!(
+            store
+                .quality_reserved_intervals(&audio.rendition_id)
+                .await
+                .expect("disposed AAC released")
                 .is_empty(),
             "{backend}"
         );

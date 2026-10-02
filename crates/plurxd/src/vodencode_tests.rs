@@ -286,6 +286,38 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert!(matches!(reader.next_unit().expect("soundtrack media"), Some(Unit::Fragment(_))));
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
+    encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("bounded audio policy");
+    let serve = bare_serve(&base.path().join("shared-audio-cache"));
+    let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
+    let mut cached_reader = FragmentReader::new();
+    cached_reader.push(&cached_init);
+    let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else { panic!("init first"); };
+    let audio = plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
+        &encoding.plan, encoding.shared_audio.as_ref().expect("AAC recipe"), &cached,
+        &"f".repeat(64), &encoding.source_object_version).expect("verified cached AAC");
+    let plan = encoding.media_plan(file.duration_ms.expect("source duration"));
+    let verify = super::vod_serve_serve::verify_cached_shared_audio_interval;
+    for (index, bytes) in [first, second].iter().enumerate() {
+        let entry = &plan.entries[index];
+        let interval = plurx_core::playback::continuous_quality::QualityInterval {
+            artifact_id: hex::encode(Sha256::digest(bytes)), rendition_id: audio.rendition_id().into(),
+            timescale: 48_000, from_tick: entry.start_ticks, through_tick: entry.end_ticks(),
+            byte_length: bytes.len() as u64,
+        };
+        verify(&cached_init, bytes, &audio, &interval, false).expect("actual cached AAC samples");
+        let mut shifted = interval.clone();
+        shifted.from_tick += 1_024;
+        shifted.through_tick += 1_024;
+        assert!(verify(&cached_init, bytes, &audio, &shifted, false).is_err());
+        let mut shortened = interval.clone();
+        shortened.through_tick -= 1_024;
+        assert!(verify(&cached_init, bytes, &audio, &shortened, false).is_err());
+        let damaged = &bytes[..bytes.len() - 1];
+        let mut truncated = interval;
+        truncated.artifact_id = hex::encode(Sha256::digest(damaged));
+        truncated.byte_length = damaged.len() as u64;
+        assert!(verify(&cached_init, damaged, &audio, &truncated, false).is_err());
+    }
 }
 
 #[tokio::test]

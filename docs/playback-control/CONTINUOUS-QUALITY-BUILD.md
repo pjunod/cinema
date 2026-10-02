@@ -1627,3 +1627,20 @@ dependencies. Each video interval names at most three AAC intervals. The
 regression covers boundary drift and the final whole-frame tail. This is the
 server-side projection; durable AAC reservations and serving integration still
 need to call it. Unit execution remains deferred.
+
+### 10.32 Durable shared-audio reservations and verified publication
+
+The parent ledger now retains shared AAC separately from its video
+transactions, within the same total interval and byte allowance. Video
+disposal, cancellation and owner takeover do not remove these facts; named
+audio transport disposal does. The soundtrack identity remains frozen even after its byte pins are disposed, so the same attachment cannot substitute another audio rendition. SQLite and Hiqlite retention queries include
+the AAC dependencies. Empty fields remain absent in older ledger fixtures.
+
+The physical reservation publisher derives audio dependencies from verified
+family plans and checks cached init identity, AAC-LC shape, payload bounds,
+contiguous sample clocks and permitted final-packet trim. It holds all video
+and audio keys through the one durable CAS settlement. Budget refusal writes
+nothing. Regressions cover durable backend projection/takeover/disposal,
+capacity refusal and cached AAC bytes. HTTP/peer and parent actor callers,
+shared-cache pins and final qualification remain unfinished. Unit execution
+is deferred.

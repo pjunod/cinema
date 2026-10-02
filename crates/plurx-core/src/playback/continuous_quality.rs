@@ -264,6 +264,8 @@ impl QualityTransitionReceipt {
             latest_intent_revision: self.transaction.intent_revision,
             accepted_sequence: self.accepted_sequence,
             transactions: vec![self.transaction.clone()],
+            shared_audio_rendition_id: None,
+            shared_audio_reserved: Vec::new(),
             receipts: vec![],
         };
         candidate.valid()
@@ -292,6 +294,13 @@ pub struct QualityLedger {
     pub latest_intent_revision: u64,
     pub accepted_sequence: u64,
     pub transactions: Vec<QualityTransaction>,
+    /// Server-derived dependencies for the attachment's one shared soundtrack.
+    /// Kept separately from video transactions because video disposal is not
+    /// evidence that the shared audio transport has disposed its media.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_audio_rendition_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    shared_audio_reserved: Vec<QualityInterval>,
     receipts: Vec<ReplayReceipt>,
 }
 
@@ -305,7 +314,7 @@ pub trait QualityReservationPublisher: Send + Sync {
         owner_node_id: &str,
         expected: &crate::store::QualityLedgerSnapshot,
         candidate: &QualityLedger,
-        family: &crate::transcode::VodVideoFamily,
+        family: &crate::transcode::VodPresentationFamily,
         now_ms: i64,
         deadline: std::time::Instant,
     ) -> impl std::future::Future<Output = Result<bool, String>> + Send;
@@ -349,6 +358,8 @@ impl QualityLedger {
             latest_intent_revision: 0,
             accepted_sequence: 0,
             transactions: Vec::new(),
+            shared_audio_rendition_id: None,
+            shared_audio_reserved: Vec::new(),
             receipts: Vec::new(),
         })
     }
@@ -367,8 +378,38 @@ impl QualityLedger {
             return false;
         }
         let mut ids = std::collections::HashSet::new();
-        let mut count = 0_usize;
+        if self.shared_audio_reserved.len() > MAX_QUALITY_INTERVALS {
+            return false;
+        }
+        let mut audio_artifacts = std::collections::HashSet::new();
+        let audio_rendition = self.shared_audio_rendition_id.as_deref();
+        if audio_rendition.is_some_and(|id| !valid_artifact(id))
+            || self
+                .transactions
+                .iter()
+                .any(|tx| Some(tx.target_rendition_id.as_str()) == audio_rendition)
+        {
+            return false;
+        }
+        let mut count = self.shared_audio_reserved.len();
         let mut bytes = 0_u64;
+        for interval in &self.shared_audio_reserved {
+            if !interval.valid()
+                || interval.timescale != crate::transcode::VOD_AUDIO_RATE
+                || Some(interval.rendition_id.as_str()) != audio_rendition
+                || !audio_artifacts.insert(&interval.artifact_id)
+                || self
+                    .transactions
+                    .iter()
+                    .any(|tx| tx.target_rendition_id == interval.rendition_id)
+            {
+                return false;
+            }
+            let Some(sum) = bytes.checked_add(interval.byte_length) else {
+                return false;
+            };
+            bytes = sum;
+        }
         for tx in &self.transactions {
             if !valid_uuid(&tx.transaction_id)
                 || !ids.insert(&tx.transaction_id)
@@ -440,6 +481,54 @@ impl QualityLedger {
                 tx.state = QualityState::Preparing;
             }
         }
+        Ok(())
+    }
+
+    pub fn shared_audio_rendition_id(&self) -> Option<&str> {
+        self.shared_audio_rendition_id.as_deref()
+    }
+
+    pub fn shared_audio_reserved(&self) -> &[QualityInterval] {
+        &self.shared_audio_reserved
+    }
+
+    /// Install only owner-verified immutable AAC facts. A client cannot supply
+    /// this list through the transition envelope. Pin budget refusal is atomic.
+    pub fn reserve_shared_audio(
+        &mut self,
+        intervals: &[QualityInterval],
+    ) -> Result<(), QualityTransitionError> {
+        if intervals.len() > MAX_QUALITY_INTERVALS {
+            return Err(QualityTransitionError::Capacity);
+        }
+        let mut next = self.clone();
+        for interval in intervals {
+            if !interval.valid()
+                || interval.timescale != crate::transcode::VOD_AUDIO_RATE
+                || next
+                    .shared_audio_rendition_id
+                    .as_ref()
+                    .is_some_and(|id| id != &interval.rendition_id)
+            {
+                return Err(QualityTransitionError::Invalid);
+            }
+            next.shared_audio_rendition_id
+                .get_or_insert_with(|| interval.rendition_id.clone());
+            if next
+                .shared_audio_reserved
+                .iter()
+                .any(|old| old.artifact_id == interval.artifact_id && old != interval)
+            {
+                return Err(QualityTransitionError::Invalid);
+            }
+            if !next.shared_audio_reserved.contains(interval) {
+                next.shared_audio_reserved.push(interval.clone());
+            }
+        }
+        if !next.valid() {
+            return Err(QualityTransitionError::Capacity);
+        }
+        *self = next;
         Ok(())
     }
 
@@ -663,6 +752,10 @@ impl QualityLedger {
                         !tx.reserved
                             .iter()
                             .any(|interval| interval.artifact_id == *artifact)
+                            && !self
+                                .shared_audio_reserved
+                                .iter()
+                                .any(|interval| interval.artifact_id == *artifact)
                             && !tx.disposed.contains(artifact)
                     })
                 {
@@ -673,6 +766,8 @@ impl QualityLedger {
                         tx.disposed.push(artifact.clone());
                     }
                 }
+                self.shared_audio_reserved
+                    .retain(|interval| !artifacts.contains(&interval.artifact_id));
                 tx.reserved
                     .retain(|interval| !artifacts.contains(&interval.artifact_id));
                 tx.appended
@@ -693,7 +788,11 @@ impl QualityLedger {
             }
             QualityOperation::Prepare { .. } => unreachable!("handled above"),
         }
-        let mut reserved = self.transactions.iter().flat_map(|tx| &tx.reserved);
+        let mut reserved = self
+            .transactions
+            .iter()
+            .flat_map(|tx| &tx.reserved)
+            .chain(&self.shared_audio_reserved);
         let count = reserved.clone().count();
         let bytes = reserved
             .try_fold(0_u64, |sum, interval| sum.checked_add(interval.byte_length))
@@ -891,6 +990,104 @@ mod tests {
         ledger.apply(&schedule, 1100).expect("schedule");
         ledger
     }
+    #[test]
+    fn shared_audio_pins_survive_video_disposal_and_owner_takeover() {
+        let mut ledger = scheduled();
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48_000,
+            from_tick: 480_000,
+            through_tick: 576_256,
+            byte_length: 40_000,
+        };
+        ledger
+            .reserve_shared_audio(&[audio.clone(), audio.clone()])
+            .expect("verified AAC");
+        assert_eq!(ledger.shared_audio_reserved(), std::slice::from_ref(&audio));
+        let appended = request(
+            &ledger,
+            3,
+            QualityOperation::Appended {
+                intervals: vec![interval()],
+            },
+        );
+        ledger.apply(&appended, 1200).expect("append");
+        let dispose_video = request(
+            &ledger,
+            4,
+            QualityOperation::Disposed {
+                artifacts: vec![interval().artifact_id],
+            },
+        );
+        ledger.apply(&dispose_video, 1300).expect("video consumed");
+        assert!(ledger.transactions[0].reserved.is_empty());
+        assert_eq!(
+            ledger.shared_audio_reserved(),
+            std::slice::from_ref(&audio),
+            "video disposal cannot release shared audio"
+        );
+        ledger.adopt_epoch(2).expect("takeover");
+        assert_eq!(ledger.shared_audio_reserved(), std::slice::from_ref(&audio));
+        let dispose_audio = request(
+            &ledger,
+            1,
+            QualityOperation::Disposed {
+                artifacts: vec![audio.artifact_id.clone()],
+            },
+        );
+        let receipt = ledger
+            .apply(&dispose_audio, 1400)
+            .expect("named audio transport disposal");
+        assert!(ledger.shared_audio_reserved().is_empty());
+        assert_eq!(
+            ledger.shared_audio_rendition_id(),
+            Some("e".repeat(64).as_str())
+        );
+        let mut different_audio = audio.clone();
+        different_audio.rendition_id = "f".repeat(64);
+        assert_eq!(
+            ledger.reserve_shared_audio(&[different_audio]),
+            Err(QualityTransitionError::Invalid),
+            "disposing bytes does not authorize substituting the attachment's soundtrack"
+        );
+        assert_eq!(
+            ledger.apply(&dispose_audio, 1500).expect("disposal replay"),
+            receipt
+        );
+    }
+
+    #[test]
+    fn shared_audio_pin_capacity_and_conflicting_artifacts_refuse_atomically() {
+        let mut ledger = scheduled();
+        let audio = QualityInterval {
+            artifact_id: "d".repeat(64),
+            rendition_id: "e".repeat(64),
+            timescale: 48_000,
+            from_tick: 0,
+            through_tick: 96_256,
+            byte_length: MAX_QUALITY_PINNED_BYTES,
+        };
+        let before = ledger.clone();
+        assert_eq!(
+            ledger.reserve_shared_audio(std::slice::from_ref(&audio)),
+            Err(QualityTransitionError::Capacity)
+        );
+        assert_eq!(ledger, before);
+        let mut audio = audio;
+        audio.byte_length = 40_000;
+        ledger
+            .reserve_shared_audio(std::slice::from_ref(&audio))
+            .expect("bounded AAC");
+        let before = ledger.clone();
+        audio.through_tick += 1;
+        assert_eq!(
+            ledger.reserve_shared_audio(&[audio]),
+            Err(QualityTransitionError::Invalid)
+        );
+        assert_eq!(ledger, before);
+    }
+
     #[test]
     fn cancellation_carries_lost_append_facts_and_preserves_dependency_pins() {
         let mut ledger = scheduled();

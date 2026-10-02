@@ -8,7 +8,7 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
         owner_node_id: &str,
         expected: &plurx_core::store::QualityLedgerSnapshot,
         candidate: &plurx_core::playback::continuous_quality::QualityLedger,
-        family: &plurx_core::transcode::VodVideoFamily,
+        family: &plurx_core::transcode::VodPresentationFamily,
         now_ms: i64,
         deadline: Instant,
     ) -> Result<bool, String> {
@@ -20,6 +20,20 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
                 || candidate.attachment != expected.ledger.attachment
                 || candidate.attachment.family_id != family.id()
                 || candidate.control_epoch < expected.ledger.control_epoch
+                || candidate.shared_audio_rendition_id()
+                    != expected.ledger.shared_audio_rendition_id()
+                || expected
+                    .ledger
+                    .shared_audio_rendition_id()
+                    .is_some_and(|id| {
+                        family
+                            .audio()
+                            .is_none_or(|audio| audio.rendition_id() != id)
+                    })
+                || candidate
+                    .shared_audio_reserved()
+                    .iter()
+                    .any(|interval| !expected.ledger.shared_audio_reserved().contains(interval))
                 || self
                     .shared
                     .cluster_node_id
@@ -42,16 +56,24 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
             let mut keys: Vec<_> = old
                 .iter()
                 .chain(&current)
+                .copied()
+                .chain(expected.ledger.shared_audio_reserved().iter())
+                .chain(candidate.shared_audio_reserved().iter())
                 .map(|interval| interval.rendition_id.as_str())
                 .collect();
+            if let Some(audio) = family.audio() {
+                keys.push(audio.rendition_id());
+            }
             keys.sort_unstable();
             keys.dedup();
             let mut guards = Vec::with_capacity(keys.len());
             for key in keys {
                 guards.push(self.shared.rendition_build_gate(key).lock_owned().await);
             }
+            let mut derived_audio = Vec::new();
             for interval in current.iter().filter(|interval| !old.contains(interval)) {
                 let rung = family
+                    .video()
                     .rungs()
                     .iter()
                     .find(|rung| rung.rendition_id() == interval.rendition_id)
@@ -120,9 +142,97 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
                 {
                     return Err("reservation source changed during artifact verification".into());
                 }
+                if let Some(audio) = family.audio() {
+                    let soundtrack = self
+                        .shared
+                        .renditions
+                        .lock()
+                        .await
+                        .get(audio.rendition_id())
+                        .cloned()
+                        .ok_or("shared AAC rendition is not locally attached")?;
+                    if soundtrack.closed.load(Relaxed)
+                        || soundtrack.failure().is_some()
+                        || soundtrack
+                            .source
+                            .as_ref()
+                            .is_none_or(|source| !source.unchanged())
+                        || soundtrack.recipe.encoding.as_ref().is_none_or(|encoding| {
+                            encoding.source_object_version != audio.source_object_version()
+                                || encoding
+                                    .shared_audio
+                                    .as_ref()
+                                    .is_none_or(|recipe| recipe.digest() != audio.recipe_id())
+                                || soundtrack.recipe.source_object_version.as_deref()
+                                    != Some(encoding.source_object_version.as_str())
+                        })
+                    {
+                        return Err("shared AAC source or recipe is no longer verified".into());
+                    }
+                    let dependencies = family
+                        .shared_audio_dependencies(
+                            &interval.rendition_id,
+                            &rendition.plan,
+                            entry.index,
+                            Some(&soundtrack.plan),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    let init =
+                        read_quality_artifact(&soundtrack.dir.path().join(INIT_NAME), 256 * 1024)
+                            .await?;
+                    for index in dependencies {
+                        let entry = soundtrack
+                            .plan
+                            .entry(index)
+                            .ok_or("shared AAC plan changed")?;
+                        if !soundtrack
+                            .manifest
+                            .lock()
+                            .await
+                            .state(index)
+                            .is_some_and(SegState::is_materialized)
+                        {
+                            return Err("shared AAC dependency is not materialized".into());
+                        }
+                        let media = read_quality_artifact(
+                            &soundtrack.dir.path().join(segment_name(u64::from(index))),
+                            16 * 1024 * 1024,
+                        )
+                        .await?;
+                        let dependency =
+                            plurx_core::playback::continuous_quality::QualityInterval {
+                                artifact_id: hex::encode(Sha256::digest(&media)),
+                                rendition_id: audio.rendition_id().into(),
+                                timescale: soundtrack.timescale,
+                                from_tick: entry.start_ticks,
+                                through_tick: entry.end_ticks(),
+                                byte_length: media.len() as u64,
+                            };
+                        verify_cached_shared_audio_interval(
+                            &init,
+                            &media,
+                            audio,
+                            &dependency,
+                            index as usize + 1 == soundtrack.plan.len(),
+                        )?;
+                        if !derived_audio.contains(&dependency) {
+                            derived_audio.push(dependency);
+                        }
+                    }
+                    if soundtrack
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| !source.unchanged())
+                    {
+                        return Err("shared AAC source changed during artifact verification".into());
+                    }
+                }
             }
             let store = Arc::clone(&self.shared.store);
-            let candidate = candidate.clone();
+            let mut candidate = candidate.clone();
+            candidate
+                .reserve_shared_audio(&derived_audio)
+                .map_err(|error| error.to_string())?;
             let owner = owner_node_id.to_owned();
             let revision = expected.revision;
             let submitted_at_ms = now_ms.max(super::now_ms());
@@ -819,6 +929,86 @@ pub(super) fn verify_cached_quality_interval(
     }
     if fragments == 0 || reader.buffered() != 0 || next != interval.through_tick {
         return Err("continuous media does not complete its declared interval".into());
+    }
+    Ok(())
+}
+
+/// Verify actual published AAC bytes, including the final packet trim. No
+/// fragment number or manifest-only claim can substitute for sample evidence.
+pub(super) fn verify_cached_shared_audio_interval(
+    init_bytes: &[u8],
+    media: &[u8],
+    audio: &plurx_core::transcode::VodSharedAudioRendition,
+    interval: &plurx_core::playback::continuous_quality::QualityInterval,
+    final_interval: bool,
+) -> Result<(), String> {
+    if interval.rendition_id != audio.rendition_id()
+        || !interval.matches_bytes(media)
+        || interval.timescale != plurx_core::transcode::VOD_AUDIO_RATE
+        || hex::encode(Sha256::digest(init_bytes)) != audio.init_id()
+    {
+        return Err("shared AAC artifact bytes or identities changed".into());
+    }
+    let mut reader = FragmentReader::new();
+    reader.push(init_bytes);
+    let Some(Unit::Init(init)) = reader.next_unit().map_err(|error| error.to_string())? else {
+        return Err("shared AAC artifact has no complete init".into());
+    };
+    if reader.buffered() != 0
+        || init.tracks.len() != 1
+        || init.tracks[0].kind != plurx_core::fmp4::TrackKind::Audio
+        || init.tracks[0].timescale != interval.timescale
+        || &plurx_core::fmp4::aac_lc_sample_entry_facts(&init).map_err(|error| error.to_string())?
+            != audio.facts()
+    {
+        return Err("shared AAC init shape or clock changed".into());
+    }
+    reader.push(media);
+    let mut next = interval.from_tick;
+    let mut fragments = 0;
+    while let Some(unit) = reader.next_unit().map_err(|error| error.to_string())? {
+        let Unit::Fragment(fragment) = unit else {
+            return Err("shared AAC media contains an unexpected init or trailer".into());
+        };
+        let track = fragment
+            .track(init.tracks[0].id)
+            .ok_or("shared AAC lost its track")?;
+        if fragment.tracks.len() != 1 || track.sample_count() == 0 || track.base_decode_time != next
+        {
+            return Err("shared AAC sample clock is discontinuous".into());
+        }
+        for run in &track.runs {
+            let mut offset = run.data_offset;
+            for sample in &run.samples {
+                let through = offset
+                    .checked_add(sample.size as usize)
+                    .ok_or("shared AAC payload overflow")?;
+                let end = next
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or("shared AAC clock overflow")?;
+                if sample.duration == 0
+                    || sample.duration > 1_024
+                    || sample.cto != 0
+                    || sample.size == 0
+                    || offset < fragment.mdat_payload.start
+                    || through > fragment.mdat_payload.end
+                    || through > fragment.bytes.len()
+                    || end > interval.through_tick
+                    || (sample.duration != 1_024
+                        && (!final_interval || end != interval.through_tick))
+                {
+                    return Err(
+                        "shared AAC sample payload or final trim differs from its plan".into(),
+                    );
+                }
+                next = end;
+                offset = through;
+            }
+        }
+        fragments += 1;
+    }
+    if fragments == 0 || reader.buffered() != 0 || next != interval.through_tick {
+        return Err("shared AAC media does not complete its exact interval".into());
     }
     Ok(())
 }

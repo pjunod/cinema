@@ -406,6 +406,9 @@ impl VodSharedAudioRendition {
     pub fn recipe_id(&self) -> &str {
         &self.recipe_id
     }
+    pub fn source_object_version(&self) -> &str {
+        &self.source_object_version
+    }
     pub fn facts(&self) -> &crate::fmp4::AacSampleEntryFacts {
         &self.facts
     }
