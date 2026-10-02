@@ -3628,3 +3628,12 @@ source = "clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt"
 source_anchor = "internal fun audioSinkClaims("
 test = "clients/android/app/src/test/java/tv/plurx/app/data/CapsPolicyTest.kt"
 test_anchor = "theAudioSinkClaimFollowsTheRouteAndPassesBitstreamsOnlyToTheSink"
+# D-02 prepared-successor audio focus (claude-opus-5-5). The device re-run of
+# a prepared quality change remains separate physical evidence.
+[[fixes]]
+id = "android.successor-audio-focus-owner"
+commits = ["32053528"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/AudioFocusOwnershipTest.kt"
+test_anchor = "everySwapSiteMovesFocusToTheAudiblePlayer"
