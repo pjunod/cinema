@@ -40,6 +40,11 @@ pub enum WriterRequest {
     MetadataApplied((Option<LogId<NodeId>>, oneshot::Sender<()>)),
     Backup(BackupRequest),
     Shutdown(oneshot::Sender<()>),
+    #[cfg(feature = "validation-test-helpers")]
+    RegisterPrecommitHold {
+        hold: ValidationPrecommitHold,
+        registered: oneshot::Sender<()>,
+    },
     #[cfg(test)]
     HoldForStartupDrain {
         entered: oneshot::Sender<()>,
@@ -47,6 +52,16 @@ pub enum WriterRequest {
     },
     #[allow(clippy::upper_case_acronyms)]
     RTT(RTTRequest),
+}
+
+/// Instance-local validation ownership; absent from production builds.
+#[cfg(feature = "validation-test-helpers")]
+#[derive(Debug)]
+pub struct ValidationPrecommitHold {
+    pub exact_statement: String,
+    pub entered: oneshot::Sender<()>,
+    pub release: std::sync::mpsc::Receiver<()>,
+    pub until: std::time::Instant,
 }
 
 #[derive(Debug)]
@@ -238,6 +253,8 @@ pub fn spawn_writer(
         let (copy_tx, copy_rx) = flume::unbounded();
         let mut copy_in_flight = false;
         let mut pending_snapshot: Option<SnapshotRequest> = None;
+        #[cfg(feature = "validation-test-helpers")]
+        let mut precommit_hold: Option<ValidationPrecommitHold> = None;
 
         // TODO should we maybe save a backup task handle in case of shutdown overlap?
 
@@ -406,6 +423,10 @@ CREATE TABLE IF NOT EXISTS _metadata
                     }
 
                     Query::Transaction(req) => {
+                        #[cfg(feature = "validation-test-helpers")]
+                        let matches_hold = precommit_hold.as_ref().is_some_and(|hold| {
+                            req.queries.iter().any(|query| query.sql.as_ref() == hold.exact_statement)
+                        });
                         sm_data.last_applied_log_id = req.last_applied_log_id;
 
                         let txn = match conn.transaction() {
@@ -539,6 +560,14 @@ CREATE TABLE IF NOT EXISTS _metadata
                                 .send(Err(err))
                                 .expect("oneshot tx to never be dropped");
                         } else {
+                            #[cfg(feature = "validation-test-helpers")]
+                            if matches_hold && let Some(hold) = precommit_hold.take() {
+                                let _ = hold.entered.send(());
+                                let remaining = hold.until.saturating_duration_since(std::time::Instant::now());
+                                // Retain the actual uncommitted Transaction and writer.
+                                // Sender drop or the finite bound always releases it.
+                                let _ = hold.release.recv_timeout(remaining);
+                            }
                             match txn.commit() {
                                 Ok(()) => {
                                     req.tx
@@ -804,6 +833,11 @@ CREATE TABLE IF NOT EXISTS _metadata
                 WriterRequest::HoldForStartupDrain { entered, release } => {
                     let _ = entered.send(());
                     let _ = release.blocking_recv();
+                }
+                #[cfg(feature = "validation-test-helpers")]
+                WriterRequest::RegisterPrecommitHold { hold, registered } => {
+                    precommit_hold = Some(hold);
+                    let _ = registered.send(());
                 }
             }
         }
