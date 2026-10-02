@@ -190,21 +190,60 @@ pub(crate) struct QualityCatalogRequest {
 }
 
 impl QualityCatalogRequest {
+    pub(crate) fn validate(&self) -> Result<(), CatalogValidationError> {
+        let failure = |clause, observed, limit| CatalogValidationError {
+            clause,
+            observed,
+            limit,
+        };
+        if self
+            .copy_contract
+            .is_some_and(|(_, preserve, convert)| convert && !preserve)
+        {
+            return Err(failure("copy_contract", 1, 0));
+        }
+        if self.file_id <= 0 || self.source_size < 0 || self.source_mtime < 0 {
+            return Err(failure("source_identity", 0, 1));
+        }
+        if self.caps.v != plurx_core::playback::DeviceCaps::VERSION {
+            return Err(failure("caps_version", usize::from(self.caps.v), 2));
+        }
+        if self.caps.video.len() > MAX_CAPABILITIES {
+            return Err(failure(
+                "video_entries",
+                self.caps.video.len(),
+                MAX_CAPABILITIES,
+            ));
+        }
+        if self.caps.validate_audio_sinks().is_err() {
+            return Err(failure("audio_sinks", self.caps.audio_sinks.len(), 0));
+        }
+        if self
+            .caps
+            .validate_progressive_hevc_sample_entries()
+            .is_err()
+        {
+            return Err(failure("progressive_hevc_sample_entries", 1, 0));
+        }
+        if !(-15_000..=15_000).contains(&self.audio_offset_ms) {
+            return Err(failure(
+                "audio_offset",
+                self.audio_offset_ms.unsigned_abs() as usize,
+                15_000,
+            ));
+        }
+        if [self.audio_index, self.subtitle_burn]
+            .into_iter()
+            .flatten()
+            .any(|index| !(0..=MAX_TRACK_INDEX).contains(&index))
+        {
+            return Err(failure("track_index", 1, MAX_TRACK_INDEX as usize));
+        }
+        Ok(())
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
-        self.copy_contract
-            .is_none_or(|(_, preserve, convert)| !convert || preserve)
-            && self.file_id > 0
-            && self.source_size >= 0
-            && self.source_mtime >= 0
-            && self.caps.v == plurx_core::playback::DeviceCaps::VERSION
-            && self.caps.video.len() <= MAX_CAPABILITIES
-            && self.caps.validate_audio_sinks().is_ok()
-            && self.caps.validate_progressive_hevc_sample_entries().is_ok()
-            && (-15_000..=15_000).contains(&self.audio_offset_ms)
-            && [self.audio_index, self.subtitle_burn]
-                .into_iter()
-                .flatten()
-                .all(|index| (0..=MAX_TRACK_INDEX).contains(&index))
+        self.validate().is_ok()
     }
 }
 
@@ -215,10 +254,27 @@ pub(crate) struct WorkerQualityCandidate {
     pub candidate: plurx_core::playback::candidate::QualityCandidate,
 }
 
-/// Evidence from the existing catalogue boundary, never a decoder verdict.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CatalogValidationError {
+    pub clause: &'static str,
+    pub observed: usize,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CatalogCause {
+    RequestInvalid(CatalogValidationError),
+    LocalDeadline,
+}
+
+/// Completion and bounded causes survive aggregation; empty rows alone are
+/// never proof that discovery completed.
+#[derive(Clone, Debug)]
 pub(crate) struct QualityCatalogResult {
     pub candidates: Vec<WorkerQualityCandidate>,
     pub authority_refused: bool,
+    pub complete: bool,
+    pub causes: Vec<CatalogCause>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -890,10 +946,22 @@ impl MediaPool {
         state: &AppState,
         request: QualityCatalogRequest,
     ) -> QualityCatalogResult {
-        if !request.is_valid() {
+        let started = tokio::time::Instant::now();
+        if let Err(error) = request.validate() {
+            tracing::warn!(
+                file_id = request.file_id,
+                video_entries = request.caps.video.len(),
+                clause = error.clause,
+                observed = error.observed,
+                limit = error.limit,
+                elapsed_ms = started.elapsed().as_millis(),
+                "quality catalog request_invalid before discovery"
+            );
             return QualityCatalogResult {
                 candidates: Vec::new(),
                 authority_refused: false,
+                complete: false,
+                causes: vec![CatalogCause::RequestInvalid(error)],
             };
         }
         let deadline = deadline_after(QUALITY_CATALOG_DEADLINE);
@@ -972,13 +1040,29 @@ impl MediaPool {
             )
         };
         let (local, remote) = tokio::join!(local, remote);
+        let complete = local.is_ok();
+        let causes = if complete {
+            Vec::new()
+        } else {
+            vec![CatalogCause::LocalDeadline]
+        };
         let mut candidates = local.unwrap_or_default();
         let authority_refused =
             remote.1 || (candidates.is_empty() && !state.serving.accepting_new_media().await);
         candidates.extend(remote.0);
+        tracing::info!(
+            file_id = request.file_id,
+            video_entries = request.caps.video.len(),
+            candidate_count = candidates.len(),
+            complete,
+            elapsed_ms = started.elapsed().as_millis(),
+            "quality catalog discovery finished"
+        );
         QualityCatalogResult {
             candidates,
             authority_refused,
+            complete,
+            causes,
         }
     }
 
@@ -1757,6 +1841,32 @@ mod tests {
             live_tv_processing: false,
             live_tv_resource_processing: true,
         }
+    }
+
+    #[test]
+    fn catalog_validation_retains_video_count_clause() {
+        let caps = serde_json::from_value(serde_json::json!({
+            "v": 2, "video": (0..17).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
+        })).expect("valid decoder rows");
+        let request = QualityCatalogRequest {
+            copy_contract: None,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 1,
+            caps,
+            audio_index: Some(1),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        assert_eq!(
+            request.validate(),
+            Err(CatalogValidationError {
+                clause: "video_entries",
+                observed: 17,
+                limit: 16,
+            })
+        );
     }
 
     #[test]

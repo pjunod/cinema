@@ -188,6 +188,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md](streaming/TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md) | Why TCL Auto rejects Android capability counts, the catalog read-budget failure, and the reviewed plan for one catalog per create with legacy-client compatibility. | open |
+| [TCL-CATALOG-REPAIR-STATUS.md](streaming/TCL-CATALOG-REPAIR-STATUS.md) | Implementation decisions, commit milestones, compile and review evidence, and remaining physical TCL acceptance. | open |
 | [PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md](streaming/PLAYBACK-STALL-RECOVERY-IMPLEMENTATION.md) | Bounded October 1 repair: periodic quorum-loss diagnosis, startup/retirement/recovery correctness, VOD delivery truth, agent/Opus review dispositions, and one fast-lane PR. | open |
 | [HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md](streaming/HEATED-RIVALRY-S1E5-QUORUM-RCA-AND-FIX.md) | S1E5 outage: WAL correlations and SQL reproduction establish the missing lookup index; reviewed proposal covers migrations, cadence, and web recovery. | open |
 | [Heated Rivalry quorum build status](streaming/HEATED-RIVALRY-S1E5-QUORUM-STATUS.html) | Current implementation phase, review, validation, PR, decisions, and cleanup for the quorum repair. | open |

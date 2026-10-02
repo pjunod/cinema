@@ -1198,6 +1198,8 @@ pub(crate) async fn resolve_plan(
                     },
                 )
                 .await;
+            tracing::info!(file_id, purpose = "selection", complete = catalogue_result.complete,
+                causes = ?catalogue_result.causes, "create catalog accounting");
             let authority_refused = catalogue_result.authority_refused;
             let worker_catalog = catalogue_result.candidates;
             let catalog: Vec<_> = worker_catalog
