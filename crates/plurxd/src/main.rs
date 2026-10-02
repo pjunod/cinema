@@ -1733,7 +1733,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
         let probed = tokio::select! {
             biased;
             () = shutdown.clone().signalled() => None,
-            probed = probe_system(&config, &store, &dirs.transcode) => Some(probed?),
+            probed = probe_system(&config, &store, &dirs.transcode, &dirs.runtime_cache) => Some(probed?),
         };
         let Some((encoder_caps, system)) = probed else {
             tracing::info!("shutdown signal received during system probing; not serving");
@@ -2382,6 +2382,7 @@ async fn probe_system(
     config: &Config,
     store: &Arc<dyn plurx_core::store::Store>,
     transcode_dir: &std::path::Path,
+    runtime_cache: &std::path::Path,
 ) -> anyhow::Result<(plurx_core::transcode::EncoderCaps, SystemInfo)> {
     let ffmpeg = crate::ffmpeg::ffmpeg_bin();
     let configured_ffprobe = crate::ffmpeg::ffprobe_bin();
@@ -2424,7 +2425,12 @@ async fn probe_system(
     // a graph is only worth probing if it can feed the encoder that won. Costs
     // a few seconds on a box with a GPU worth testing and nothing at all on one
     // without.
-    let tone_map = pipeprobe::probe(transcode_dir, encoder_caps.choose(&probe_pref)).await;
+    let tone_map = pipeprobe::probe(
+        transcode_dir,
+        runtime_cache,
+        encoder_caps.choose(&probe_pref),
+    )
+    .await;
     // Measure this node's own FFmpeg once, and decide from it whether any
     // retained contract covers the binary that is about to run. A node with no
     // covering contract still reads every child's stderr; it simply reads it
