@@ -48,7 +48,7 @@ const CONSISTENT_READ_SITES: &[(&str, usize)] = &[
     ("hiqlite_import.rs", 3),
     ("hiqlite_library_channels.rs", 13),
     ("hiqlite_live_tv_resource.rs", 1),
-    ("hiqlite_media.rs", 67),
+    ("hiqlite_media.rs", 68),
     ("hiqlite_pretranscode.rs", 2),
     ("hiqlite_publication.rs", 5),
     ("hiqlite_reading.rs", 2),

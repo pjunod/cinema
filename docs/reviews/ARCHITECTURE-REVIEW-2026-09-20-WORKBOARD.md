@@ -62,8 +62,9 @@ masters, public DELETE and listener reuse are asserted. The external owned
 session watchdog passed terminal zero with no surviving children. This is
 Darwin FFmpeg9.0.1 development evidence, one H264/AAC input and one media
 segment, not shipped Linux8.1.3, variable-window/corpus, native/device,
-unseen-tail or whole-film qualification. Actual effort advanced to `801d6c6b`;
-preserve its tri-state settings and recheck the additive composition without
+unseen-tail or whole-film qualification. Actual effort advanced through
+`801d6c6b` to `0f295f9b`; preserve tri-state settings, S07 frame backfill and
+tone-map corrections, and recheck the additive composition without
 replaying the successful method. Different independent review, current gate
 and task integration remain pending; main promotion stays held.
 

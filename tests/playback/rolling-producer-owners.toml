@@ -2066,6 +2066,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # leased catalogue job that walks a node-local cursor and writes MaxCLL,
 # MaxFALL, mastering peak and provenance columns. It owns no producer, no
 # process and no timer of its own.
+# +1 from S-07's first-frame luminance backfill (PR #727). The same per-tick
+# block spawns `backfill_frame_luminance` beside it: a leased catalogue job
+# (`catalogue:luminance-frame`) that walks a node-local cursor over HDR rows
+# the stored-document walk left `none` and writes the luminance columns. It
+# owns no producer and no timer; its one child per row is the bounded
+# background ffprobe of `scan::probe::first_frame_luminance` (one thread,
+# 30 s / 256 KiB, `ChildWork::background`), awaited inside the job.
 # 546 -> 547 with C-05: `spawn_background_loops` spawns one more per-node
 # background loop, `fragment_index_validation_loop`, beside the shared-cache
 # and media-session loops already there. Fragment indexes are node-local for
@@ -2484,7 +2491,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # waiter cancellation does not cancel the observer owner. No production owner.
 # S10 public Copy wire control: +1 owned loopback HTTP serve task, stopped and
 # joined under bounded cleanup. Failure guards retain state and directory.
-expected_occurrences = 716
+# +1 S-07 PR #727: `scan::library_root_available` awaits one
+# `tokio::task::spawn_blocking` for the root's canonicalise-and-list read, the
+# same blocking-I/O shape the scanner's own root fingerprint uses. Awaited by
+# the frame luminance backfill inside its lease; no producer, timer or child.
+expected_occurrences = 718
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -4028,7 +4039,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # terminated and reaped it for foreground, download, ownership and deadline yields.
 # +1 test-only finite FFmpeg fixture in retained_durable.rs, synchronously
 # collected before exercising actual trailerless vodgen completion.
-expected_occurrences = 204
+# +1 S-07 PR #727: pipeprobe's test-only
+# `the_cpu_tone_map_survives_a_frame_without_primaries` runs one finite
+# ffmpeg (a 0.25 s lavfi source to framemd5) and awaits its `.output()`.
+expected_occurrences = 205
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -4514,7 +4528,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Review64 R4: +3 actual HTTP response status assertions and the same +1
 # owned/joined finite-stack test thread; none launches a process.
 # S10 public wire: +2 reqwest response.status() reads, not process launches.
-expected_occurrences = 430
+# +1 S-07 PR #727: the matching awaited `.output()` of pipeprobe's test-only
+# untagged-primaries tone-map fixture counted under process-command-construction.
+expected_occurrences = 431
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

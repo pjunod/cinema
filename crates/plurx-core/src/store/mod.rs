@@ -2092,6 +2092,15 @@ pub mod keys {
     pub const JOB_FIELD_ORDER_BACKFILL_CURSOR: &str = "jobs.field_order_backfill_v2_cursor";
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
+    /// Set after every HDR row the stored-document backfill left `none` has
+    /// been considered for one bounded first-frame read. The walk starts only
+    /// after [`JOB_LUMINANCE_BACKFILL_DONE`], so no row that walk classifies
+    /// lands behind its cursor. A later rescan can still write `none` under a
+    /// passed id, but only after attempting the same frame read itself; such
+    /// a row waits for the file's next change.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_DONE: &str = "jobs.luminance_frame_backfilled";
+    /// Node-local strictly-after cursor for the first-frame luminance walk.
+    pub const JOB_LUMINANCE_FRAME_BACKFILL_CURSOR: &str = "jobs.luminance_frame_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -3140,6 +3149,25 @@ pub trait MediaStore: Send + Sync + 'static {
         max_fall: Option<i64>,
         mastering_max_luminance: Option<i64>,
         source: &str,
+    ) -> Result<bool, StoreError>;
+    /// HDR rows whose stored stream document carried no luminance record
+    /// (`luminance_source = 'none'`), strictly after `after_id` in ascending
+    /// id order: the candidates for the bounded first-frame read. Same
+    /// identity projection, so the write below is fenced to this snapshot.
+    async fn files_without_luminance_facts(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    /// Record what the first frame carried and classify the row `frame`,
+    /// only while it is still `none` and still the exact source and probe
+    /// snapshot `files_without_luminance_facts` returned.
+    async fn set_file_frame_luminance(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        max_cll: Option<i64>,
+        max_fall: Option<i64>,
+        mastering_max_luminance: Option<i64>,
     ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
