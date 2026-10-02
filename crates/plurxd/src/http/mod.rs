@@ -11968,6 +11968,267 @@ mod tests {
         );
     }
 
+    /// Runs only in a disposable namespace with an assigned CGNAT fixture IP.
+    /// The production endpoint validator, DNS, pinned dialer and both routers
+    /// remain in the path. This proves protocol recovery, not Tailscale topology.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires an isolated CGNAT network; run explicitly with PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart() {
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            sharing::{MutationOutcome, StoredImport},
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+        };
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit disposable fixture address")
+            .parse()
+            .expect("numeric fixture address");
+        assert!(plurx_core::sharing::is_tailnet_address(address));
+        let temporary = tempfile::tempdir().expect("fixture TLS directory");
+        let tls = Arc::new(
+            LiveNodeTls::open(temporary.path(), crate::state::clock_ms() / 1000)
+                .expect("generated source TLS"),
+        );
+        let (pin, _) = tls.status().expect("public source pin");
+        let socket = tokio::net::TcpListener::bind((address, 0))
+            .await
+            .expect("isolated source listener");
+        let port = socket.local_addr().expect("fixture port").port();
+        let acceptor = SharingTlsListener::new(socket, tls);
+        let (source_app, source) = test_app_with_state();
+        let source_admin = setup_admin(&source_app).await;
+        let seeded = seed_content(&source).await;
+        source
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable source");
+        let endpoints = json!([{"ipv4":address.to_string(),"ipv6":null,
+            "ts_fqdn":"source.fixture.ts.net","port":port,"spki_sha256":pin}]);
+        assert_eq!(
+            call(
+                &source_app,
+                put(
+                    "/api/v1/sharing/endpoints",
+                    Some(&source_admin),
+                    json!({"expected_revision":0,"endpoints":endpoints})
+                )
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let invitation = call(
+            &source_app,
+            post(
+                "/api/v1/sharing/invitations",
+                Some(&source_admin),
+                json!({"library_ids":[seeded.lib.to_string()]}),
+            ),
+        )
+        .await;
+        assert_eq!(invitation.0, StatusCode::OK);
+        let peer_router = sharing::peer_router(source.clone());
+        let lose_claim = Arc::new(AtomicBool::new(true));
+        let lose_rotation = Arc::new(AtomicBool::new(true));
+        let server = ScanWorker(tokio::spawn(async move {
+            loop {
+                let (stream, _) = acceptor.accept().await.expect("fixture TLS acceptance");
+                let router = peer_router.clone();
+                let claim = lose_claim.clone();
+                let rotation = lose_rotation.clone();
+                tokio::spawn(async move {
+                    let service = hyper::service::service_fn(
+                        move |request: Request<hyper::body::Incoming>| {
+                            let router = router.clone();
+                            let claim = claim.clone();
+                            let rotation = rotation.clone();
+                            async move {
+                                let drop_response = request.method() == "POST"
+                                    && match request.uri().path() {
+                                        "/sharing/v1/claims" => claim.swap(false, Ordering::SeqCst),
+                                        "/sharing/v1/grant/rotation" => {
+                                            rotation.swap(false, Ordering::SeqCst)
+                                        }
+                                        _ => false,
+                                    };
+                                let response = router
+                                    .oneshot(request.map(Body::new))
+                                    .await
+                                    .expect("source router");
+                                if drop_response && response.status().is_success() {
+                                    // The router has committed, but Hyper sends no response.
+                                    return Err(std::io::Error::new(
+                                        std::io::ErrorKind::ConnectionReset,
+                                        "synthetic committed response loss",
+                                    ));
+                                }
+                                Ok::<_, std::io::Error>(response)
+                            }
+                        },
+                    );
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        }));
+        let (_, mut recipient) = test_app_with_state();
+        let network = SharingNetworkConfig {
+            bind: "127.0.0.1:32444".parse().expect("unused listener config"),
+            egress: SharingEgressConfig::LocalAddress { address },
+        };
+        let restart = |state: &AppState| {
+            Arc::new(crate::sharing::SharingManager::new(
+                state.sharing.key.clone(),
+                temporary.path().join("recipient-unused-tls"),
+                network.clone(),
+            ))
+        };
+        recipient.sharing = restart(&recipient);
+        let recipient_app = router(recipient.clone());
+        let recipient_admin = setup_admin(&recipient_app).await;
+        recipient
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "1")
+            .await
+            .expect("enable recipient");
+        let response = call(
+            &recipient_app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&recipient_admin),
+                json!({"invitation":invitation.1["invitation"]}),
+            ),
+        )
+        .await;
+        assert_eq!(response.0, StatusCode::OK, "{response:?}");
+        let id: uuid::Uuid = response.1["id"]
+            .as_str()
+            .expect("import ID")
+            .parse()
+            .expect("UUID");
+        let load = |state: AppState| async move {
+            state
+                .store
+                .sharing_import(id)
+                .await
+                .expect("durable read")
+                .expect("retained import")
+        };
+        let claiming: StoredImport = load(recipient.clone()).await;
+        assert_eq!(claiming.summary.state, "claiming");
+        assert!(claiming.claim.is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("committed claim")
+                .len(),
+            1
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, claiming)
+            .await
+            .expect("recover claim after restart");
+        let pending = load(recipient.clone()).await;
+        assert_eq!(pending.summary.state, "pending");
+        assert!(pending.claim.is_none());
+        let local = recipient
+            .store
+            .sharing_identity(crate::state::clock_ms())
+            .await
+            .expect("recipient identity");
+        let before =
+            crate::sharing::ImportCredential::open(&recipient.sharing, local.server_id, &pending)
+                .expect("confirmed pending metadata");
+        assert!(before.pending_expires_at_ms.is_some());
+        let grants = source
+            .store
+            .sharing_exports(None)
+            .await
+            .expect("exact replay");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(
+            source
+                .store
+                .approve_share(grants[0].grant.id, 1, crate::state::clock_ms())
+                .await
+                .expect("source approval"),
+            MutationOutcome::Applied
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_import(&recipient, pending)
+            .await
+            .expect("recover approval");
+        let active = load(recipient.clone()).await;
+        assert_eq!(active.summary.state, "active");
+        assert!(
+            recipient
+                .sharing
+                .resume_rotation(&recipient, active, true)
+                .await
+                .is_err(),
+            "source commits the rotation and loses its response"
+        );
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("pending replacement")
+            .is_some());
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("source generation")[0]
+                .grant
+                .credential_generation,
+            2
+        );
+        recipient.sharing = restart(&recipient);
+        recipient
+            .sharing
+            .resume_rotation(&recipient, load(recipient.clone()).await, false)
+            .await
+            .expect("recover rotation through old status-only authority");
+        assert!(recipient
+            .store
+            .sharing_import_rotation(id)
+            .await
+            .expect("settled replacement")
+            .is_none());
+        let recovered = crate::sharing::ImportCredential::open(
+            &recipient.sharing,
+            local.server_id,
+            &load(recipient.clone()).await,
+        )
+        .expect("recovered credential");
+        assert_ne!(recovered.credential.expose(), before.credential.expose());
+        assert_eq!(
+            recovered.pending_expires_at_ms,
+            before.pending_expires_at_ms
+        );
+        assert_eq!(
+            source
+                .store
+                .sharing_exports(None)
+                .await
+                .expect("no duplicate grant")
+                .len(),
+            1
+        );
+        drop(server);
+    }
+
     #[tokio::test]
     async fn sharing_http_isolates_peer_routes_and_saves_without_readiness() {
         let (app, state) = test_app_with_state();
