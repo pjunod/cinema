@@ -70,7 +70,12 @@
             )
             .await
             .expect("replacement gate");
-        let settled = crate::seam_hooks::AsyncPause::new("started session cleanup settled");
+        // This hold includes real SQLite work, so its watchdog must tolerate
+        // a loaded runner. It is a deadlock bound, not a cleanup latency SLA.
+        let settled = crate::seam_hooks::AsyncPause::with_bound(
+            "started session cleanup settled",
+            Duration::from_secs(60),
+        );
         let (released_tx, released_rx) = tokio::sync::oneshot::channel();
         let mut guard = StartedSessionGuard::new(
             fixture.state.clone(),
@@ -90,7 +95,8 @@
             "the cleanup aborts the worker before it settles"
         );
         let retry_incarnation = uuid::Uuid::new_v4().to_string();
-        let retry_now_ms = unix_ms();
+        // Lease expiry cannot stand in for actual claim settlement.
+        let retry_now_ms = now_ms;
         let retried = fixture
             .state
             .store
@@ -112,70 +118,34 @@
             ),
             "the cleanup settles the request claim before it settles: {retried:?}"
         );
+        // Poll in this task so registration cannot race a spawned task or a
+        // virtual clock. Start after the database work: the production gate
+        // may reclaim an abandoned holder after its own three-second wait.
+        let replacement_wait = fixture.state.transcode.acquire_cluster_takeover_replacement(
+            &request,
+            7,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
+        tokio::pin!(replacement_wait);
+        assert!(
+            futures_util::poll!(replacement_wait.as_mut()).is_pending(),
+            "cleanup must retain the replacement gate while its hook is held"
+        );
+
+        held.release();
+        released_rx
+            .await
+            .expect("replacement guard was dropped after cleanup settlement");
+        let reacquired = replacement_wait
+            .await
+            .expect("cleanup settlement releases the gate to the registered waiter");
+        drop(reacquired);
         assert!(fixture
             .state
             .store
             .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
             .await
             .expect("settle retry claim"));
-
-        // SQLite uses real blocking work. Keep time running through those
-        // awaits above so an idle runtime cannot advance background timers
-        // while the cleanup's wall-clock safety hold is counting down.
-        // Only the gate-wait assertion needs a controlled clock.
-        tokio::time::pause();
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let blocked = tokio::spawn({
-            let state = fixture.state.clone();
-            let request = request.clone();
-            async move {
-                let blocked = tokio::time::timeout(
-                    Duration::from_secs(1),
-                    state.transcode.acquire_cluster_takeover_replacement(
-                        &request,
-                        7,
-                        tokio::time::Instant::now() + Duration::from_secs(10),
-                    ),
-                );
-                tokio::pin!(blocked);
-                let mut entered_tx = Some(entered_tx);
-                std::future::poll_fn(|context| {
-                    let result = std::future::Future::poll(blocked.as_mut(), context);
-                    if result.is_pending() {
-                        if let Some(entered_tx) = entered_tx.take() {
-                            let _ = entered_tx.send(());
-                        }
-                    }
-                    result
-                })
-                .await
-            }
-        });
-        entered_rx
-            .await
-            .expect("replacement waiter registered behind the cleanup-owned gate");
-        tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(
-            blocked.await.expect("replacement waiter task").is_err(),
-            "cleanup must retain the replacement gate"
-        );
-        tokio::time::resume();
-
-        held.release();
-        released_rx
-            .await
-            .expect("replacement guard was dropped after cleanup settlement");
-        let reacquired = fixture
-            .state
-            .transcode
-            .acquire_cluster_takeover_replacement(
-                &request,
-                7,
-                tokio::time::Instant::now() + Duration::from_secs(1),
-            )
-            .await
-            .expect("cleanup settlement releases the replacement gate");
-        drop(reacquired);
 
         let replacement = fixture
             .state
