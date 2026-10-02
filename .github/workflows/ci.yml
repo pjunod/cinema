@@ -1362,9 +1362,11 @@ jobs:
         with:
           lane: package-smoke-${{ matrix.arch }}
       - name: Derive the binary-only Bookworm build
-        run: >-
-          python3 -m validation.release_dockerfile --binary-export
-          Dockerfile Dockerfile.binaries
+        id: binary-build
+        run: |
+          python3 -m validation.release_dockerfile --binary-export \
+            Dockerfile Dockerfile.binaries
+          echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"
       - name: Compile and export the exact candidate binaries
         uses: https://github.com/docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -1376,6 +1378,7 @@ jobs:
           build-args: |
             PLURX_BUILD_REF=${{ github.sha }}
             PLURX_BUILD_SHA=${{ github.sha }}
+            SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}
           cache-from: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,scope=package-compile-{0}', matrix.arch) || '' }}
           cache-to: ${{ steps.buildx-cache.outputs.local != 'true' && format('type=gha,mode=max,scope=package-compile-{0}', matrix.arch) || '' }}
       - name: Bind the binary set to this candidate tree

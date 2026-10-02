@@ -1065,6 +1065,78 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(supported_max_startup_seconds, 18135)
         self.assertIn("`5h3m`", read("docs/OPERATIONS.md"))
 
+    def test_image_builds_pass_the_commit_time_as_source_date_epoch(self):
+        """P-02 M6: two builds of one commit must be the same binary.
+
+        `crates/plurxd/build.rs` used to stamp `built_at` from the compile
+        clock, so no rebuild was ever byte-identical. It now honours
+        `SOURCE_DATE_EPOCH`, which is only worth anything if every image build
+        actually passes the commit's time: the Docker context has no `.git`.
+        """
+        dockerfile = read("Dockerfile")
+        build_stage = dockerfile.split(" AS build\n", 1)[1].split("\nFROM ", 1)[0]
+        self.assertRegex(build_stage, r"(?m)^ARG SOURCE_DATE_EPOCH$")
+        self.assertLess(
+            build_stage.index("ARG SOURCE_DATE_EPOCH"), build_stage.index("cargo build")
+        )
+
+        makefile = read("Makefile")
+        self.assertIn(
+            "SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)",
+            makefile,
+        )
+        commit_time = subprocess.run(
+            ["git", "log", "-1", "--format=%ct"],
+            cwd=ROOT, check=True, text=True, stdout=subprocess.PIPE,
+        ).stdout.strip()
+        if commit_time and "SOURCE_DATE_EPOCH" not in os.environ:
+            (docker,) = [
+                c for c in make_dry_run_commands("docker") if "docker build" in c
+            ]
+            self.assertIn(f'--build-arg SOURCE_DATE_EPOCH="{commit_time}"', docker)
+        (pinned,) = [
+            c
+            for c in make_dry_run_commands("docker", "SOURCE_DATE_EPOCH=1234")
+            if "docker build" in c
+        ]
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="1234"', pinned)
+        (rollout,) = [
+            c
+            for c in make_dry_run_commands("docker-up", "SOURCE_DATE_EPOCH=1234")
+            if "docker compose up -d --build" in c
+        ]
+        self.assertIn('SOURCE_DATE_EPOCH="1234" ', rollout)
+        self.assertIn(
+            "SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:-}", read("deploy/docker-compose.yml")
+        )
+
+        push = read("scripts/registry-push")
+        self.assertIn('SOURCE_DATE_EPOCH="$(git log -1 --format=%ct "$FULL_SHA")"', push)
+        self.assertIn('--build-arg SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH"', push)
+
+        smoke = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
+        self.assertIn(
+            'echo "source_date_epoch=$(git log -1 --format=%ct HEAD)" >> "$GITHUB_OUTPUT"',
+            smoke,
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ steps.binary-build.outputs.source_date_epoch }}", smoke
+        )
+        release = read(".github/workflows/publish-release.yml")
+        self.assertIn(
+            'echo "source_date_epoch=$(git show -s --format=%ct "$commit_sha")"', release
+        )
+        self.assertIn(
+            "source_date_epoch: ${{ steps.release.outputs.source_date_epoch }}", release
+        )
+        self.assertIn(
+            "SOURCE_DATE_EPOCH=${{ needs.resolve.outputs.source_date_epoch }}", release
+        )
+
+        build_rs = read("crates/plurxd/build.rs")
+        self.assertIn("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH", build_rs)
+        self.assertIn('std::env::var("SOURCE_DATE_EPOCH")', build_rs)
+
     def test_docker_build_frees_each_ffmpeg_download_before_the_next(self):
         dockerfile = read("Dockerfile")
         # Only the shipped media installer owns these two cache-clean points.

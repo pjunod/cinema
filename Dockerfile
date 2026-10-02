@@ -16,6 +16,13 @@ ARG PLURX_BUILD_REF=""
 ENV PLURX_BUILD_REF=${PLURX_BUILD_REF}
 ARG PLURX_BUILD_SHA=""
 ENV PLURX_BUILD_SHA=${PLURX_BUILD_SHA}
+# The commit's committer time, so two builds of one commit stamp the same
+# `built_at` into plurxd (crates/plurxd/build_support/source_date.rs) and
+# BuildKit writes the same image timestamps. Every caller derives it:
+#   docker build --build-arg SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+# Left unset, build.rs falls back to the compile clock, because this context
+# has no `.git` to read the commit time from.
+ARG SOURCE_DATE_EPOCH
 ARG TARGETARCH
 WORKDIR /src
 COPY . .
