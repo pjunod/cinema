@@ -372,8 +372,10 @@ pub fn resolve_audio(
     // only have to fit when the bitstream is passed through undecoded to a
     // receiver. A codec the claim does not mention keeps the legacy answer.
     let decodes = profile.claimed_audio_decoders.contains(&codec);
+    // A sink that lists no rates is only a channel ceiling (the flat
+    // `achannels` form): it carries no route evidence and authorizes no copy.
     let sink_admits = explicit_sink.is_some_and(|sink| {
-        decodes
+        (!sink.sample_rates_hz.is_empty() && decodes)
             || (sink.passthrough
                 && source_channels <= sink.max_channels
                 && source.sample_rate.is_some_and(|rate| {
