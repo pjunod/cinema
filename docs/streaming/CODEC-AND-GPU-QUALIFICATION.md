@@ -1,6 +1,7 @@
 # Codec and GPU qualification — widen the measured boundary, one graph at a time
 
-**Status:** open: M1 corpus and M2 contract implementation, 2026-09-30 · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
+**Status:** open: M1 corpus/M2 contract; sixteen internal M3 cells recorded,
+original qualification open, 2026-10-02 · **Executes:** Q12 (§3.1.3), Q6 / F-stream-10,
 Q8 / F-stream-16 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -916,6 +917,44 @@ The old candidate lacks the supervisor consumer and refuses those new tests;
 no previous unit successes repeated. Review 50's deadline and cleanup findings
 are repaired in this same candidate, pending independent disposition.
 
+**2026-10-02 internal acquisition continuation — not original M3 acceptance:**
+the [sanitized sixteen-cell ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md)
+records four separately hash-pinned synthetic 70.023-second inputs at
+360/480/720/1080, measured using source `fb4360792` / tree `cc943750`,
+lab binary SHA-256 `656e7589` and ARM64 runtime `b7bc6f79`. This is older
+measured-source evidence, not runtime qualification of the current effort.
+Each cell fetched 35 contiguous complete objects/70 advertised seconds,
+presented at least60 seconds at real1×, and independently censused1,680
+video packets at24fps. Probed outputs are640×360,854×480,1280×720 and
+1920×1080. EXTINF min/median/max is2/2/2 seconds,35/35 first-packet keyflags,
+maximum grid error0.0006666666666666666ms: no measured packet-grid drift.
+Grain720 has **two extra internal keyflags**, at13.958333s and38.000000s;
+the other15 cells have zero. Extra keys remain separate from grid drift.
+
+Actual NUL encoder argv/source-FD/executable/parent/PUT-socket ownership,
+complete served revisions, all35 fetched/retained/census byte equalities,
+raw probes and exact cleanup/terminal watchdog receipts are retained
+privately and bound by the ledger's hashes. Capability-bearing argv is not
+published. Original acquisition2CPU/2GiB/256PID/600s and offline
+2CPU/1GiB/64PID/690s bounds stayed unchanged. Distinct source-generation
+resource variants and failed-only verifier repairs retain separate failures;
+the PQ10-bit/BT.2020 source has actual frame/SPS-VUI evidence, but unspecified
+mastering/CLL and no calibrated HDR fidelity. All cells delivered software
+H264/yuv420p; PQ source class does not imply HDR output or tone-map fidelity.
+
+This is **16 internal cells /4 synthetic inputs /0 original fully-qualified
+public cells**. Every successful context ran once; no prior passing unit,
+source or cell was replayed. Exact owned containers/volumes and temporary
+watchdog/expiry owners were removed/terminal before each lease handback;
+original finite input/runtime expiries were not extended. Earlier failed
+acquisitions, OOM partials, missing raw verifier results and the reconstructed
+HDR360 admission-storage record remain honestly disclosed. No production
+GOP flags, qualified tuple, cache identity or gate changed. The original
+media1/public-create-route matrix, two hash-named real-film censuses,
+NAL-level IDR/CRA and applicable physical/native/GPU/fidelity acceptance
+remain open. The preceding "no actual acquisition" statements describe
+their dated candidate, not this separately authorized internal continuation.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).
@@ -1155,6 +1194,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 internal acquisition/census evidence, original acceptance incomplete | evidence-only continuation | [Sixteen-cell sanitized ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md): four synthetic inputs,16 distinct internal once-successful cells at measured fb436 source/cc943750 tree/656e binary/b7bc runtime;35 objects/1680 packets/60+s real1× each,35 first keys/no drift. Grain720 has two internal extra keyflags, unchanged. Actual source-FD/PUT owner and four-way byte equality/exact cleanup retained privately; failures remain failed. No current-effort/public/NAL/physical/native/HDR-fidelity/GPU/full-M3 qualification or production GOP change. Independent review/current-head effort gate remain separate. |
 | 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://192.168.4.7:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |
