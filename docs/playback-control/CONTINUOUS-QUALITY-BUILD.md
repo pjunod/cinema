@@ -3618,3 +3618,32 @@ the explicitly approved isolated Linux directory. The generated thirty-minute
 MPEG-4/AAC fixture has been transferred there for real Auto qualification.
 No unit test has executed, and the adversarial / Fable stop boundary remains
 as recorded in §10.118.
+
+### 10.120 Firefox launch diagnosis and retained-credit preparation frontier
+
+The macOS Firefox 157 / geckodriver 0.37.1 run on `a7db2ac28` failed
+before playback. A fresh explicit profile reproduced `Could not find
+profile folder.` both with and without WebDriver. Mozilla records the
+matching direct-exec failure on macOS 27 in
+[bug 2062988](https://bugzilla.mozilla.org/show_bug.cgi?id=2062988).
+No user profile or browser security setting was changed.
+
+An official Linux Firefox 157 archive, verified against Mozilla's SHA256SUMS,
+and geckodriver 0.37.1 were prepared under the approved isolated directory.
+That browser started and entered the production quality cycle on `a7db2ac28`,
+but the return to 1080p failed with `media_wait_pending` at frontier 2592.
+The complete failed receipt and daemon log were copied to the independent
+clone's ignored reports directory. This is failed production evidence,
+not a successful Firefox series.
+
+Inspection found that controlled admission returned immediately whenever the
+target already retained a credit. That bypassed the preparation-frontier
+update, allowing ordinary playback demand to remain its production anchor.
+Admission now checks the attachment and source under the original lifecycle
+and build gates, reuses retained capacity, and publishes the new preparation
+frontier in both the warm and cold cases. A focused authored regression
+`admitted_controlled_target_moves_preparation_frontier_without_duplicate_credit`
+calls the actual admission path twice with an existing credit, checks the
+production demands across an ordinary heartbeat, and proves the credit count
+stays one until parent removal. This patch is not yet runtime-qualified.
+No unit tests have run.

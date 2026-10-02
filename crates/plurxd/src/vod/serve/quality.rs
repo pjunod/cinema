@@ -136,7 +136,7 @@ impl VodServe {
                     .iter()
                     .find(|child| child.rendition.key == rendition_id)
                     .ok_or("controlled target is outside its parent")?;
-                if !child.controlled || child._reservation.is_some() {
+                if !child.controlled {
                     return Ok(());
                 }
                 let media = session
@@ -164,16 +164,25 @@ impl VodServe {
                 );
             }
             let _lifecycle = lifecycle.lock().await;
-            {
+            let needs_reservation = {
                 let sessions = self.shared.sessions.lock().await;
-                if sessions.get(session_id).is_none_or(|session| {
-                    session.tombstone.is_some()
-                        || !Arc::ptr_eq(&session.incarnation, &incarnation)
-                        || !Arc::ptr_eq(&session.lifecycle, &lifecycle)
-                }) {
+                let session = sessions
+                    .get(session_id)
+                    .ok_or("controlled parent disappeared")?;
+                if session.tombstone.is_some()
+                    || !Arc::ptr_eq(&session.incarnation, &incarnation)
+                    || !Arc::ptr_eq(&session.lifecycle, &lifecycle)
+                {
                     return Err("controlled attachment changed during admission".into());
                 }
-            }
+                session
+                    .children
+                    .iter()
+                    .find(|child| child.controlled && child.rendition.key == rendition_id)
+                    .ok_or("controlled target disappeared")?
+                    ._reservation
+                    .is_none()
+            };
             if media.iter().any(|rendition| {
                 rendition.closed.load(Acquire)
                     || rendition
@@ -183,9 +192,17 @@ impl VodServe {
             }) {
                 return Err("controlled source changed during admission".into());
             }
-            let permits =
-                Self::reserve_media_group(&media, Some(crate::admission::Priority::Speculative))
-                    .await?;
+            let permits = if needs_reservation {
+                Some(
+                    Self::reserve_media_group(
+                        &media,
+                        Some(crate::admission::Priority::Speculative),
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
             // Lock every participant before publishing any credit or demand.
             let mut sessions = self.shared.sessions.lock().await;
             let session = sessions
@@ -203,17 +220,23 @@ impl VodServe {
             let reader = readers
                 .get_mut(&child.reader_id)
                 .ok_or("controlled reader disappeared")?;
-            let permit = media
-                .iter()
-                .zip(permits)
-                .find_map(|(rendition, permit)| (rendition.key == rendition_id).then_some(permit))
-                .ok_or("controlled credit missing")?;
+            // An already admitted producer still needs the new preparation
+            // frontier. Its retained credit is capacity, not a demand anchor.
+            if let Some(permits) = permits {
+                let permit = media
+                    .iter()
+                    .zip(permits)
+                    .find_map(|(rendition, permit)| {
+                        (rendition.key == rendition_id).then_some(permit)
+                    })
+                    .ok_or("controlled credit missing")?;
+                child._reservation = Some(permit);
+            }
             reader.preparation_frontier = Some(media_entry_containing_ms(
                 &child.rendition.plan,
                 frontier_ms,
             ));
             reader.authority_only = false;
-            child._reservation = Some(permit);
             child.rendition.kick();
             Ok(())
         };

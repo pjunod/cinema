@@ -1317,6 +1317,42 @@
     }
 
     #[tokio::test]
+    async fn admitted_controlled_target_moves_preparation_frontier_without_duplicate_credit() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let parent = "already-admitted-parent";
+        insert_control_session(&serve, parent, Arc::clone(&rendition), Instant::now()).await;
+        rendition.attach_reader("target", 3).await;
+        let admissions = crate::admission::Admissions::new();
+        let estimate = crate::admission::TranscodeResourceEstimate {
+            hardware_slot: false, cpu_threads: 1, decoder_threads: Some(1),
+        };
+        let permit = admissions.try_admit_bundle(0, 1, &estimate, crate::admission::Priority::Speculative)
+            .expect("one retained credit");
+        serve.shared.sessions.lock().await.get_mut(parent).expect("parent").children.push(ParentMediaReader {
+            controlled: true, candidate_id: Some(plurx_core::playback::candidate::CandidateId([1;16])),
+            reader_id: "target".into(), rendition: Arc::clone(&rendition), _reservation: Some(permit.into()),
+        });
+        for frontier_ms in [4_000, 72_000] {
+            serve.admit_controlled_video_before(parent, &rendition.key, frontier_ms,
+                Instant::now() + Duration::from_secs(1)).await.expect("reuse admitted target");
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("target");
+            target.accept_control(7, 11);
+            assert_eq!(target.preparation_frontier, Some(media_entry_containing_ms(&rendition.plan, frontier_ms)));
+            assert_eq!(target.frontier, 11, "the ordinary heartbeat remains independent");
+            assert!(!target.authority_only);
+            let manifest = rendition.manifest.lock().await;
+            assert!(playback_demands(&serve.shared.pool, &rendition, &readers, &manifest)
+                .iter().any(|demand| demand.frontier == media_entry_containing_ms(&rendition.plan, frontier_ms)));
+            assert_eq!(admissions.software_in_use(), 1, "reuse never reserves another permit");
+        }
+        serve.shared.sessions.lock().await.remove(parent);
+        assert_eq!(admissions.software_in_use(), 0, "the parent still owns and releases the credit");
+    }
+
+    #[tokio::test]
     async fn controlled_preparation_frontier_survives_incumbent_control_before_wait_registration() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
