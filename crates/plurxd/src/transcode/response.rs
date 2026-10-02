@@ -60,6 +60,9 @@ impl MediaResponseOwner {
         else {
             return None;
         };
+        if let Some(artifact) = &session.rolling_artifact {
+            return artifact.object_etag(object_name);
+        }
         let identity = format!(
             "{session_id}\0{}\0{producer_attempt}\0{object_name}\0{len}",
             session.response_incarnation

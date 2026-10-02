@@ -392,7 +392,15 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             "pub fn hls_args(plan: &ResolvedTranscode, execution: &TranscodeExecution)",
             normalized(self.core_transcode),
         )
-        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3)
+        # Three producer builders and two non-launching canonical identity
+        # projections retain the same resolved plan/argument contract.
+        projections = (
+            "transcode::hls_args(&retained_plan, &execution)",
+            "transcode::hls_args(&plan, &canonical_execution)",
+        )
+        for projection in projections:
+            self.assertEqual(self.daemon_transcode.count(projection), 1)
+        self.assertEqual(self.daemon_transcode.count("transcode::hls_args("), 3 + len(projections))
         self.assertNotIn("transcode::hls_args(&file", self.daemon_transcode)
         self.assertIn("plan: &'a ResolvedTranscode", self.daemon_transcode)
         self.assertEqual(

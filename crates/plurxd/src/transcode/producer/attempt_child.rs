@@ -57,10 +57,30 @@ impl FrozenHlsPresentation {
     }
 
     pub(super) fn from_contract(
+        file: plurx_core::domain::MediaFile,
+        context: HlsContext,
+        kind: &SessionKind,
+        contract: Option<&plurx_core::transcode::PresentationContract>,
+    ) -> Self {
+        Self::from_contract_and_rolling(file, context, kind, contract, None)
+    }
+
+    pub(super) fn from_rolling_artifact(
+        file: plurx_core::domain::MediaFile,
+        context: HlsContext,
+        kind: &SessionKind,
+        contract: Option<&plurx_core::transcode::PresentationContract>,
+        artifact: &crate::vodserve::retained::RollingArtifact,
+    ) -> Self {
+        Self::from_contract_and_rolling(file, context, kind, contract, Some(artifact))
+    }
+
+    fn from_contract_and_rolling(
         mut file: plurx_core::domain::MediaFile,
         mut context: HlsContext,
         kind: &SessionKind,
         contract: Option<&plurx_core::transcode::PresentationContract>,
+        artifact: Option<&crate::vodserve::retained::RollingArtifact>,
     ) -> Self {
         let normalized = contract.filter(|contract| contract.normalized_geometry().is_some());
         if let Some(contract) = normalized {
@@ -90,6 +110,12 @@ impl FrozenHlsPresentation {
             };
             file.width = geometry.map(|(width, _)| width);
             file.height = geometry.map(|(_, height)| height);
+        }
+        if let Some(artifact) = artifact {
+            // Preserve qualified geometry/video/audio shaping; only the
+            // privately acquired complete full-mux cost replaces prediction,
+            // before fingerprint/hash sealing. No received rate grants this.
+            context.bandwidth = artifact.bandwidth();
         }
         let mut identity = serde_json::json!({
             "version": 2,
