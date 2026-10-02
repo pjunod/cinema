@@ -296,9 +296,36 @@ impl QualityTransitionReceipt {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ReplayReceipt {
-    request: QualityTransitionRequest,
-    response: QualityTransitionReceipt,
+    sequence: u64,
+    transaction_id: String,
+    operation: QualityOperation,
+    transaction: QualityTransaction,
     accepted_at_ms: i64,
+}
+
+impl ReplayReceipt {
+    fn request(&self, ledger: &QualityLedger) -> QualityTransitionRequest {
+        QualityTransitionRequest {
+            version: CONTINUOUS_QUALITY_VERSION,
+            generation: ledger.generation.clone(),
+            control_epoch: ledger.control_epoch,
+            attachment: ledger.attachment.clone(),
+            sequence: self.sequence,
+            transaction_id: self.transaction_id.clone(),
+            operation: self.operation.clone(),
+        }
+    }
+
+    fn response(&self, ledger: &QualityLedger) -> QualityTransitionReceipt {
+        QualityTransitionReceipt {
+            version: CONTINUOUS_QUALITY_VERSION,
+            generation: ledger.generation.clone(),
+            control_epoch: ledger.control_epoch,
+            attachment: ledger.attachment.clone(),
+            accepted_sequence: self.sequence,
+            transaction: self.transaction.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,14 +501,14 @@ impl QualityLedger {
         count <= MAX_QUALITY_INTERVALS
             && bytes <= MAX_QUALITY_PINNED_BYTES
             && self.receipts.iter().all(|receipt| {
-                receipt.request.generation == self.generation
-                    && receipt.request.control_epoch == self.control_epoch
-                    && receipt.request.attachment == self.attachment
-                    && receipt.request.sequence > 0
-                    && receipt.request.sequence <= self.accepted_sequence
+                receipt.sequence > 0
+                    && receipt.sequence <= self.accepted_sequence
                     && receipt.accepted_at_ms > 0
-                    && receipt.response.accepted_sequence == receipt.request.sequence
-                    && receipt.response.valid_for(&receipt.request)
+                    && receipt.transaction.ready.is_empty()
+                    && receipt.transaction.reserved.is_empty()
+                    && receipt.transaction.appended.is_empty()
+                    && receipt.transaction.disposed.is_empty()
+                    && receipt.response(self).valid_for(&receipt.request(self))
             })
     }
 
@@ -572,10 +599,10 @@ impl QualityLedger {
         if let Some(receipt) = self
             .receipts
             .iter()
-            .find(|receipt| receipt.request.sequence == request.sequence)
+            .find(|receipt| receipt.sequence == request.sequence)
         {
-            return if receipt.request == *request {
-                Ok(receipt.response.clone())
+            return if receipt.request(self) == *request {
+                Ok(receipt.response(self))
             } else {
                 Err(QualityTransitionError::ConflictingReplay)
             };
@@ -592,12 +619,18 @@ impl QualityLedger {
         }
         next.apply_operation(request)?;
         next.accepted_sequence = request.sequence;
-        let transaction = next
+        let mut transaction = next
             .transactions
             .iter()
             .find(|tx| tx.transaction_id == request.transaction_id)
             .ok_or(QualityTransitionError::UnknownTransaction)?
             .clone();
+        // A canonical acknowledgement records the accepted command state.
+        // Media facts live once in the current ledger, never in every replay.
+        transaction.ready.clear();
+        transaction.reserved.clear();
+        transaction.appended.clear();
+        transaction.disposed.clear();
         let response = QualityTransitionReceipt {
             version: CONTINUOUS_QUALITY_VERSION,
             generation: next.generation.clone(),
@@ -607,8 +640,10 @@ impl QualityLedger {
             transaction,
         };
         next.receipts.push(ReplayReceipt {
-            request: request.clone(),
-            response: response.clone(),
+            sequence: request.sequence,
+            transaction_id: request.transaction_id.clone(),
+            operation: request.operation.clone(),
+            transaction: response.transaction.clone(),
             accepted_at_ms: now_ms,
         });
         if serde_json::to_vec(&next)
@@ -1078,6 +1113,124 @@ mod tests {
         ledger
     }
     #[test]
+    fn sustained_rolling_receipts_remain_bounded_and_replay_exactly() {
+        let mut ledger = ledger();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: interval().rendition_id,
+            },
+        );
+        ledger.apply(&prepare, 1000).expect("prepare");
+        let mut sequence = 2;
+        for window in 0..300_u64 {
+            let now = 2000 + window as i64 * 4000;
+            let videos: Vec<_> = (0..2_u64)
+                .map(|offset| QualityInterval {
+                    artifact_id: format!("{:064x}", window * 4 + offset + 1),
+                    rendition_id: interval().rendition_id,
+                    timescale: 24_000,
+                    from_tick: (window * 2 + offset) * 48_048,
+                    through_tick: (window * 2 + offset + 1) * 48_048,
+                    byte_length: 500_000,
+                })
+                .collect();
+            let audio: Vec<_> = (0..2_u64)
+                .map(|offset| QualityInterval {
+                    artifact_id: format!("{:064x}", window * 4 + offset + 3),
+                    rendition_id: "e".repeat(64),
+                    timescale: 48_000,
+                    from_tick: (window * 2 + offset) * 96_096,
+                    through_tick: (window * 2 + offset + 1) * 96_096,
+                    byte_length: 40_000,
+                })
+                .collect();
+            ledger
+                .ready(TRANSACTION, videos.clone())
+                .expect("rolling readiness");
+            ledger.reserve_shared_audio(&audio).expect("shared AAC");
+            let scheduled = request(
+                &ledger,
+                sequence,
+                QualityOperation::Scheduled {
+                    intervals: videos.clone(),
+                },
+            );
+            let canonical = ledger.apply(&scheduled, now).expect("schedule");
+            assert!(
+                canonical.transaction.reserved.is_empty(),
+                "ACK does not duplicate current facts"
+            );
+            assert_eq!(ledger.transactions[0].reserved, videos);
+            sequence += 1;
+            let appended = request(
+                &ledger,
+                sequence,
+                QualityOperation::Appended {
+                    intervals: videos.clone(),
+                },
+            );
+            ledger
+                .apply(&appended, now + 1)
+                .expect("actual completed appends");
+            sequence += 1;
+            if window == 0 {
+                let presented = request(
+                    &ledger,
+                    sequence,
+                    QualityOperation::Presented {
+                        artifact_id: videos[0].artifact_id.clone(),
+                        film_tick: 0,
+                        observed_at_ms: now + 2,
+                    },
+                );
+                ledger
+                    .apply(&presented, now + 2)
+                    .expect("first actual frame");
+                sequence += 1;
+            }
+            let disposed = request(
+                &ledger,
+                sequence,
+                QualityOperation::Disposed {
+                    artifacts: videos
+                        .iter()
+                        .chain(&audio)
+                        .map(|row| row.artifact_id.clone())
+                        .collect(),
+                },
+            );
+            ledger
+                .apply(&disposed, now + 3)
+                .expect("completed video and AAC removals");
+            sequence += 1;
+            let bytes = serde_json::to_vec(&ledger).expect("durable ledger");
+            assert!(bytes.len() < MAX_QUALITY_LEDGER_BYTES);
+            ledger = serde_json::from_slice(&bytes).expect("restore exact durable facts");
+            assert!(ledger.valid());
+            assert_eq!(
+                ledger
+                    .apply(&scheduled, now + 4)
+                    .expect("lost canonical ACK replay"),
+                canonical
+            );
+            let mut conflict = scheduled.clone();
+            if let QualityOperation::Scheduled { intervals } = &mut conflict.operation {
+                intervals[0].byte_length += 1;
+            }
+            assert_eq!(
+                ledger.apply(&conflict, now + 5),
+                Err(QualityTransitionError::ConflictingReplay)
+            );
+            assert!(ledger.transactions[0].reserved.is_empty());
+            assert!(ledger.shared_audio_reserved().is_empty());
+            assert!(ledger.receipts.len() < MAX_QUALITY_RECEIPTS);
+        }
+    }
+
+    #[test]
     fn preparation_replay_cannot_move_frontier_or_extend_deadline() {
         let mut ledger = ledger();
         let prepare = request(
@@ -1506,7 +1659,13 @@ mod tests {
                     step["state"]
                 );
                 assert_eq!(
-                    receipt.transaction.reserved.len() as u64,
+                    ledger
+                        .transactions
+                        .iter()
+                        .find(|tx| tx.transaction_id == request.transaction_id)
+                        .expect("current transaction")
+                        .reserved
+                        .len() as u64,
                     step["reserved"].as_u64().expect("pins")
                 );
                 assert!(ledger.valid());

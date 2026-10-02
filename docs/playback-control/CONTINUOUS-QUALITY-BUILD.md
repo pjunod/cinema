@@ -2200,3 +2200,29 @@ from §10.56. Owner changes still refuse stale cleanup; they are not absence
 evidence. Regressions cover lost reservation acknowledgement, false active
 proof, read-only retained pins, wrong attachment and refused post-End scheduling.
 Pinned source and normal-hook compilation apply without unit execution.
+
+
+### 10.62 Sustained receipts fit the existing bounds
+
+Canonical acknowledgements now retain accepted transaction metadata, while
+current media facts live once in the ledger. Durable replay stores the exact
+operation and accepted metadata with the ledger's fenced identity, rather
+than duplicating identity and accumulated media arrays per command. Exact
+replay after later disposal still returns the original acknowledgement;
+changed operations at the same sequence still conflict. Epoch adoption clears
+replay authority as before. Clients read current pins from the ledger.
+
+The web adapter reports the first presented frame once per transaction and
+batches subsequent actual completed video appends in pairs. Removal facts
+are captured at updateend, then sent in batches of four or after ten seconds.
+Pending append facts settle before disposal. A seek reloading an already
+removed object and a quality change flush pending evidence before scheduling
+new bytes. Detach uses its actual absence barrier and clears pending timers.
+No timestamp, raster, append or AAC disposal evidence is inferred by batching.
+
+A regression models 300 rolling four-second windows with video and AAC,
+durable roundtrips, canonical lost acknowledgements and conflicting replays
+under the unchanged 90-second, 128-receipt and 128 KiB bounds. Web regressions
+cover batching, first presentation and disposal-before-reload ordering.
+Pinned compilation and normal hooks apply; these tests are authored and
+remain deferred until the final review and fast lane.

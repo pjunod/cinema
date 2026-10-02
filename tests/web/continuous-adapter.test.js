@@ -38,8 +38,13 @@ function fixture({holdScheduled=false}={}){
  const context=vm.createContext({ArrayBuffer,Uint8Array,DataView,crypto:webcrypto,URL,location:{href:'http://localhost/'},
   Hls,CONTROL_CLIENT_ID:uuid(3),newRequestId:()=>uuid(4),setTimeout,clearTimeout,AbortController,TextDecoder});
  for(const path of ['continuous-media.js','continuous-quality.js'])vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/'+path,'utf8'),context);
- const intervals=family.video.map((row,index)=>({artifact_id:digest(index?secondMedia:firstMedia),rendition_id:row.rendition_id,
-  timescale:24000,from_tick:0,through_tick:2002,byte_length:(index?secondMedia:firstMedia).length}));
+ const intervals=family.video.flatMap((row,index)=>Array.from({length:4},(_,ordinal)=>{
+  const data=ordinal===0?(index?secondMedia:firstMedia):media({start:ordinal*2002,
+   payload:Buffer.from([ordinal,index,6,5,4,3,2,1])});
+  resources.set(prefix+`video/${row.rendition_id}/segment/${ordinal}.m4s`,data);
+  return {artifact_id:digest(data),rendition_id:row.rendition_id,timescale:24000,
+   from_tick:ordinal*2002,through_tick:(ordinal+1)*2002,byte_length:data.length};
+ }));
  const exchange=async(url,request)=>{
   requests.push(copy(request));
   if(!ledger)ledger={version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),
@@ -51,7 +56,7 @@ function fixture({holdScheduled=false}={}){
    if(operation.kind==='prepare'){
     ledger.transactions.forEach(row=>row.intent_superseded=true);
     transaction={transaction_id:command.transaction_id,intent_revision:operation.intent_revision,target_rendition_id:operation.target_rendition_id,
-     state:'ready',intent_superseded:false,cancel_requested:false,ready:[copy(intervals.find(row=>row.rendition_id===operation.target_rendition_id))],
+     state:'ready',intent_superseded:false,cancel_requested:false,ready:copy(intervals.filter(row=>row.rendition_id===operation.target_rendition_id).slice(0,2)),
      reserved:[],appended:[],ever_appended:false,disposed:[],first_presented_tick:null,first_presented_at_ms:null};
     ledger.transactions.push(transaction);ledger.latest_intent_revision=operation.intent_revision;
    }else if(operation.kind==='scheduled'){
@@ -70,6 +75,11 @@ function fixture({holdScheduled=false}={}){
    ledger.accepted_sequence=command.sequence;
    receipt={version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),
     accepted_sequence:command.sequence,transaction:copy(transaction)};
+  }
+  if(request.window){
+   transaction=ledger.transactions.find(row=>row.transaction_id===request.window.transaction_id);
+   transaction.ready=copy(intervals.filter(row=>row.rendition_id===transaction.target_rendition_id
+    &&row.from_tick>=request.window.frontier.through_tick).slice(0,2));
   }
   return {version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),revision:++revision,
    receipt,ledger:copy(ledger)};
@@ -128,4 +138,33 @@ test('live MediaSource transfer cannot settle disposal',async()=>{
  await assert.rejects(f.adapter.detached(),/detach receipt/);
  f.hls.emit('detached',{transferMedia:true});await pause();assert.equal(f.requests.some(row=>row.transition?.operation.kind==='disposed'),false);
  f.hls.emit('detached',{});await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='disposed'));
+});
+
+test('rolling appends batch actual facts and present each transaction once',async()=>{
+ const f=fixture();const prefix=f.prefix+`video/${f.primary.rendition_id}/`;
+ const firstInit=await f.load(prefix+`init/${f.primary.init_id}.mp4`);
+ f.surface.appendBuffer(firstInit);f.surface.emit('updateend');
+ for(let ordinal=0;ordinal<3;ordinal++){
+  const fragment=await f.load(prefix+`segment/${ordinal}.m4s`);
+  f.surface.appendBuffer(fragment);f.surface.emit('updateend');
+  if(ordinal===0)await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='appended'));
+  else await pause();
+  f.present((ordinal*2002+1001)/24000);
+  await waitFor(()=>f.player.continuousQualityPresented?.film_tick===ordinal*2002+1001);
+ }
+ const commands=f.requests.filter(row=>row.transition).map(row=>row.transition.operation);
+ assert.equal(commands.filter(row=>row.kind==='presented').length,1);
+ assert.deepEqual(commands.filter(row=>row.kind==='appended').map(row=>row.intervals.length),[1,2]);
+});
+test('reloading an actually removed artifact flushes disposal before a fresh reservation',async()=>{
+ const f=fixture();const prefix=f.prefix+`video/${f.primary.rendition_id}/`;
+ const firstInit=await f.load(prefix+`init/${f.primary.init_id}.mp4`),fragment=await f.load(prefix+'segment/0.m4s');
+ f.surface.appendBuffer(firstInit);f.surface.emit('updateend');f.surface.appendBuffer(fragment);f.surface.emit('updateend');
+ await waitFor(()=>f.requests.some(row=>row.transition?.operation.kind==='appended'));
+ f.surface.remove(0,2002/24000);f.surface.emit('updateend');
+ await f.load(prefix+'segment/0.m4s');
+ const kinds=f.requests.filter(row=>row.transition).map(row=>row.transition.operation.kind);
+ const disposed=kinds.indexOf('disposed');assert.ok(disposed>0);
+ assert.equal(kinds[disposed+1],'prepare');assert.equal(kinds[disposed+2],'scheduled');
+ f.hls.emit('detached',{});await pause();
 });

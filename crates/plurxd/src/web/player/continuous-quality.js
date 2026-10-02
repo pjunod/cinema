@@ -242,6 +242,8 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     lifetime_id:lifetime,attachment_id:continuousQualityNewIdentity(),family_id:family.family_id},exchange);
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
+  const pendingAppends=new Map(),pendingDisposals=new Set();
+  let disposalTimer=null;
   let work=Promise.resolve(),queued=0;
   const current=()=>!closed&&attachment.current()&&player.continuousQuality===adapter;
   let wanted=family.video.find(row=>row.candidate_id===bootstrap.primary_candidate_id);
@@ -306,6 +308,8 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     if(facts.timescale!==found.row.timescale||(found.type==='video'
       ?facts.type!=='vide'||facts.width!==found.row.width||facts.height!==found.row.height
       :facts.type!=='soun'||facts.channels!==found.row.channels))throw new Error('Continuous fragment format');
+    const previousRecord=records.get(`${found.row.rendition_id}:${artifact}`);
+    if(previousRecord?.removed)await flushDisposals(true);
     let pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
     if(!pin){
       if(found.type==='video'){
@@ -329,7 +333,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     if(!record){
       if(records.size>=64)throw new Error('Continuous media provenance bound');
       record={interval:{...pin},facts,transactions:new Set(),type:found.type,
-        exposed:false,appended:false,presented:false,disposed:false};records.set(recordKey,record);
+        exposed:false,appended:false,presented:false,removed:false,disposed:false};records.set(recordKey,record);
     }
     if(found.type==='video')for(const owner of protocol.ledger.transactions){
       if(owner.reserved.some(row=>row.artifact_id===artifact))record.transactions.add(owner.transaction_id);
@@ -349,6 +353,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       const completedRemoval=operation.kind==='remove'?Array.from(records.values()).filter(row=>!row.disposed&&row.exposed&&row.type===type
         &&operation.from<=row.interval.from_tick/row.interval.timescale
         &&operation.through>=row.interval.through_tick/row.interval.timescale):[];
+      // Capture absence at the actual completion, before later frame callbacks
+      // or a loader can mistake this record for currently buffered media.
+      for(const row of completedRemoval)row.removed=true;
       if(operation.kind==='append')serial(async()=>{
         const facts=await operation.facts;if(!facts)return;
         const matches=Array.from(records.values()).filter(row=>!row.disposed&&row.exposed&&row.type===type
@@ -360,11 +367,17 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         const record=matches[0];record.appended=true;
         if(type==='video'){
           frontier=Math.max(frontier,record.interval.through_tick);
-          for(const owner of record.transactions)await protocol.transition(owner,{kind:'appended',intervals:[record.interval]});
+          for(const owner of record.transactions){
+            let pending=pendingAppends.get(owner);
+            if(!pending){pending=new Set();pendingAppends.set(owner,pending);}
+            pending.add(record);
+            if(!tx(owner)?.ever_appended||pending.size>=2)await flushAppends(owner);
+          }
         }
       }).catch(note);
       else serial(async()=>{
-        await dispose(completedRemoval.filter(row=>row.appended&&!row.disposed));
+        for(const row of completedRemoval.filter(row=>row.appended&&!row.disposed))pendingDisposals.add(row);
+        await flushDisposals(false);
       }).catch(note);
     };
     buffer.addEventListener('error',failed,true);buffer.addEventListener('abort',failed,true);
@@ -389,6 +402,29 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       try{return remove(from,through);}catch(error){if(pending===operation)pending=null;throw error;}
     };
   }
+  async function flushAppends(owner=null){
+    for(const [id,pending] of pendingAppends){
+      if(owner&&id!==owner)continue;
+      const rows=Array.from(pending);
+      if(rows.length)await protocol.transition(id,{kind:'appended',intervals:rows.map(row=>row.interval)});
+      for(const row of rows)pending.delete(row);
+      if(!pending.size)pendingAppends.delete(id);
+    }
+  }
+  async function flushDisposals(force){
+    if(!pendingDisposals.size)return;
+    if(!force&&pendingDisposals.size<4){
+      if(disposalTimer==null)disposalTimer=setTimeout(()=>{
+        disposalTimer=null;if(!closed)serial(()=>flushDisposals(true)).catch(note);
+      },10000);
+      return;
+    }
+    if(disposalTimer!=null){clearTimeout(disposalTimer);disposalTimer=null;}
+    const rows=Array.from(pendingDisposals);
+    await flushAppends();
+    await dispose(rows);
+    for(const row of rows)pendingDisposals.delete(row);
+  }
   async function dispose(rows){
     const videoRows=rows.filter(row=>row.type==='video'),audioRows=rows.filter(row=>row.type==='audio');
     const owners=new Set(videoRows.flatMap(row=>Array.from(row.transactions)));
@@ -405,7 +441,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     frameToken=video.requestVideoFrameCallback((wall,metadata)=>{
       frameToken=null;if(!current()){frames();return;}
       const width=metadata.width||video.videoWidth,height=metadata.height||video.videoHeight;
-      const matches=Array.from(records.values()).filter(row=>row.type==='video'&&row.appended&&!row.disposed&&!row.presented
+      const matches=Array.from(records.values()).filter(row=>row.type==='video'&&row.appended&&!row.removed&&!row.disposed&&!row.presented
         &&row.facts.width===width&&row.facts.height===height
         &&metadata.mediaTime*row.interval.timescale>=row.interval.from_tick
         &&metadata.mediaTime*row.interval.timescale<row.interval.through_tick);
@@ -414,8 +450,12 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         if(tick>=record.interval.from_tick&&tick<record.interval.through_tick){
           record.presented=true;
           serial(async()=>{
-            for(const owner of record.transactions)await protocol.transition(owner,{kind:'presented',artifact_id:record.interval.artifact_id,
-              film_tick:tick,observed_at_ms:observedAt});
+            if(record.removed||record.disposed)return;
+            for(const owner of record.transactions)if(tx(owner)?.first_presented_tick==null){
+              await flushAppends(owner);
+              await protocol.transition(owner,{kind:'presented',artifact_id:record.interval.artifact_id,
+                film_tick:tick,observed_at_ms:observedAt});
+            }
             if(current()){
               const row=family.video.find(row=>row.rendition_id===record.interval.rendition_id);
               player.qualityCandidateId=row.candidate_id;
@@ -476,6 +516,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       if(next.rendition_id===wanted.rendition_id)return 'continuous';
       const previous=wanted,old=transaction;
       try{
+        await flushAppends();await flushDisposals(true);
         const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+next.playlist));
         if(level<0)throw new Error('Continuous target level missing');
         await prepare(next,frontier);
@@ -514,6 +555,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     detached(){
       if(!mediaDetached)return Promise.reject(new Error('Continuous media disposal needs detach receipt'));
       if(closed)return;closed=true;
+      if(disposalTimer!=null){clearTimeout(disposalTimer);disposalTimer=null;}
       if(frameToken!=null)try{video.cancelVideoFrameCallback(frameToken);}catch(e){}
       for(const loader of loaders)loader.abort();loaders.clear();
       // Called only after the hls.js MediaSource has detached. Include pins
@@ -528,7 +570,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
           if(owner.transaction_id===audioOwner)artifacts.push(...audio);
           if(artifacts.length)await protocol.transition(owner.transaction_id,{kind:'disposed',artifacts});
         }
-        records.clear();buffers.clear();readers.clear();
+        records.clear();buffers.clear();readers.clear();pendingAppends.clear();pendingDisposals.clear();
       }).catch(note);
     },
   };
