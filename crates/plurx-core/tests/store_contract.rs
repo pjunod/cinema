@@ -12130,7 +12130,7 @@ async fn assert_migrated_fragment_prune_budget(client: &Client) {
     // triggers. The workload runs in a rollback-only local mirror; this does
     // not pretend to measure cluster application or commits.
     let rows: Vec<SchemaText> = client.query_consistent_map(
-        "SELECT sql AS value FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name",
+        "SELECT sql AS value FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' AND name NOT IN (SELECT name FROM pragma_table_list WHERE type = 'shadow') ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name",
         hiqlite::params!()).await.expect("read full migrated schema");
     let conn = rusqlite::Connection::open_in_memory().expect("migrated schema mirror");
     for row in rows {
@@ -19850,8 +19850,8 @@ async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutatio
         store.as_ref(),
         user.id,
         "prune-playback",
-        "prune-incarnation",
-        "prune-session",
+        "11111111-1111-4111-8111-111111119901",
+        "11111111-1111-4111-8111-111111119902",
         "quorum-prune",
     )
     .await;

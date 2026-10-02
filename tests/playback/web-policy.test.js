@@ -6911,7 +6911,7 @@ test("fenced retirement followed by native error 3 reopens once without codec bl
       "let PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0}; const callbacks={},reopens=[],rescues=[];",
       "PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:PLAYER.mediaAttachment,reason};",
       "const document={getElementById:()=>({})},console={warn(){}},performance={now:()=>1};",
-      "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function notifyPlaybackControl(){}function clearStall(){}function endWait(){}",
+      "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function notifyPlaybackControl(){}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}",
       "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}",
       "function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}",
       shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),

@@ -1,6 +1,6 @@
-INSERT INTO libraries (id,name,kind,paths) VALUES (991,'prune semantics','movies','[]');
-INSERT INTO items (id,library_id,kind,title,sort_title) VALUES (991,991,'movie','semantics','semantics');
-INSERT INTO files (id,item_id,path,size,mtime) VALUES (991,991,'/retention.mkv',100,10);
+INSERT INTO libraries (id,name,kind,paths,created_at) VALUES (991,'prune semantics','movies','[]',1);
+INSERT INTO items (id,library_id,kind,title,sort_title,added_at,updated_at) VALUES (991,991,'movie','semantics','semantics',1,1);
+INSERT INTO files (id,item_id,path,size,mtime,scanned_at) VALUES (991,991,'/retention.mkv',100,10,1);
 INSERT INTO cluster_fragment_index_jobs
 (cache_key,target_node_id,file_id,source_size,source_mtime,source_sha256,pipeline_sha256,state,not_before_ms,created_at_ms,updated_at_ms) VALUES
 ('','node',991,100,10,'source','pipeline','failed',1,1,1),

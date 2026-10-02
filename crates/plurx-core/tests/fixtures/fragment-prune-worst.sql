@@ -1,7 +1,7 @@
-INSERT INTO libraries (id,name,kind,paths) VALUES (991,'prune budget','movies','[]');
-INSERT INTO items (id,library_id,kind,title,sort_title) VALUES (991,991,'movie','budget','budget');
+INSERT INTO libraries (id,name,kind,paths,created_at) VALUES (991,'prune budget','movies','[]',1);
+INSERT INTO items (id,library_id,kind,title,sort_title,added_at,updated_at) VALUES (991,991,'movie','budget','budget',1,1);
 WITH RECURSIVE rows(id) AS (SELECT 1 UNION ALL SELECT id+1 FROM rows WHERE id<4000)
-INSERT INTO files(id,item_id,path,size,mtime) SELECT id,991,'/prune-budget-'||id||'.mkv',100,10 FROM rows;
+INSERT INTO files(id,item_id,path,size,mtime,scanned_at) SELECT id,991,'/prune-budget-'||id||'.mkv',100,10,1 FROM rows;
 INSERT INTO cluster_fragment_index_jobs
 (cache_key,target_node_id,file_id,source_size,source_mtime,source_sha256,pipeline_sha256,state,not_before_ms,created_at_ms,updated_at_ms)
 SELECT 'retained-'||id,'node',id,100,10,'source','pipeline','failed',1,1,1 FROM files WHERE item_id=991;

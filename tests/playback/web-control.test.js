@@ -7068,8 +7068,8 @@ function quorumDiagnosisHarness(fetcher){
 }
 
 test("probes preserve fenced retirement and describe unknown HTTP failures factually",async()=>{
-  for(const status of [404,410,503]){
-    const h=quorumDiagnosisHarness(async()=>new Response('',{status}));
+  for(const status of [404,410,503]) for(const body of [null,'']){
+    const h=quorumDiagnosisHarness(async()=>new Response(body,{status}));
     await h.diagnose();
     assert.match(h.faults[0].detail,new RegExp(`HTTP ${status}`));
     assert.doesNotMatch(JSON.stringify(h.faults),/ad.block|extension|ffmpeg failed/i);
@@ -7109,7 +7109,7 @@ test("late control terminal and typed 410 preserve authority retirement before n
       "const CONTROL_CLIENT_ID='test',window={PlurxPlaybackControl:{}},performance={now:()=>1},console={warn(){}},document={getElementById:()=>({})};",
       "class Reporter{constructor(config){this.config=config;}start(){}notify(){return null;}} const PlurxPlaybackControl={Reporter,capture:(snapshot,intentGeneration,owner)=>({intentGeneration,owner})};",
       "function stopPlaybackControl(){}function continueStoppingPlaybackControl(){return false;}function playbackOwnsAttachedMedia(p){return p===PLAYER;}function playbackControlSnapshot(){return {};}function sendPlaybackControl(){}function settlePlaybackControlWaiters(){}function settlePlaybackControlAcknowledgement(){}",
-      "function notifyPlaybackControl(){return null;}function clearStall(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
+      "function notifyPlaybackControl(){return null;}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
       "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}function finishStallRecovery(){return false;}function playbackIsReal(){return false;}function streamRejectionFacts(){return {};}",
       shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),shippedSource('startPlaybackControl'),
       shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
