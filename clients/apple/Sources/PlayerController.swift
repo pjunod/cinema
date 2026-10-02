@@ -10692,25 +10692,10 @@ extension PlayerController: PreparedSuccessorHost {
         // monitor returns as soon as this call does.
         preparedMonitor = nil
         preparedLifecycle.removeAll()
-        // Put the successor on the incumbent's position BEFORE the viewer can
-        // see it.
-        //
-        // The successor is seeked exactly once — when its item first becomes
-        // playable, to the film position the offer named — and is never
-        // played. By the time it is worth switching to, the incumbent has run
-        // on by however long priming took, which since M2 is a wait the viewer
-        // spends watching. Exposing the item at its staged position would
-        // rewind the film by that much, and `boundaryMs` would then reject
-        // every frame until playback caught back up: at best a visible
-        // rewind-and-resync, at worst a `switchedWithoutAFrame` and a reopen,
-        // for a handoff whose whole point is that neither happens.
-        //
-        // So the alignment finishes first and the exposure follows it. The
-        // incumbent is still on the layer for the whole of this seek, so the
-        // picture the viewer is looking at keeps playing while it runs — the
-        // same reason the wait that produced this staging is affordable at
-        // all. The seek is issued while the item is still attached to its own
-        // player, which is where AVFoundation will honour one.
+        // Prepare a future film instant on the muted successor's own layer.
+        // The incumbent remains visible and audible while its seek lands and
+        // its decoded output is checked, then advances to that same instant.
+        // All waits consume the pipeline's original physical overlap budget.
         let layerReady = await awaitBoundedValue(
             boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),
             pollMs: PreparedReplacementBounds.pollMs,
@@ -10734,10 +10719,17 @@ extension PlayerController: PreparedSuccessorHost {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
+        let rendezvousRate = preferredRate
+        guard rendezvousRate.isFinite, rendezvousRate > 0,
+              preparedOverlapRemainingMs > 1_000 else {
+            discardPreparedSuccessor()
+            return .failedWithoutReopen
+        }
         let rendezvous = PreparedCommitRendezvous.plan(
             stagedFilmPositionMs: preparedFilmPositionMs,
             incumbentFilmPositionMs: realPositionMs(),
-            mediaOriginMs: action.mediaOriginMs
+            mediaOriginMs: action.mediaOriginMs,
+            leadMs: Int(min(16, Double(rendezvousRate)) * 1_000)
         )
         // Bounded, because an unbounded one does not degrade the way it looks
         // as though it would. The incumbent does keep playing — but the
@@ -10758,6 +10750,15 @@ extension PlayerController: PreparedSuccessorHost {
                 item: item, successor: successor, output: alignedOutput,
                 rendezvous: rendezvous, frameDurationSeconds: frameDurationSeconds, viewerEpoch: commitViewerEpoch
               ) else {
+            discardPreparedSuccessor()
+            return .failedWithoutReopen
+        }
+
+        guard await awaitPreparedRendezvous(
+            item: item, successor: successor, rendezvous: rendezvous,
+            frameDurationSeconds: frameDurationSeconds, rate: rendezvousRate,
+            viewerEpoch: commitViewerEpoch
+        ) else {
             discardPreparedSuccessor()
             return .failedWithoutReopen
         }
@@ -11047,6 +11048,28 @@ extension PlayerController: PreparedSuccessorHost {
         )
         task.cancel()
         return cadence.flatMap { $0 > 0 ? $0 : nil }
+    }
+
+    /// The successor waits at a future film instant while the incumbent
+    /// advances to it. Seeking the moving incumbent clock chases seek latency.
+    private func awaitPreparedRendezvous(
+        item: AVPlayerItem, successor: AVPlayer, rendezvous: PreparedCommitRendezvous,
+        frameDurationSeconds: Double, rate: Float, viewerEpoch: Int
+    ) async -> Bool {
+        let began = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - began < PreparedReplacementBounds.alignmentMs,
+              preparedOverlapRemainingMs > 0 {
+            guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
+                  viewerActionEpoch == viewerEpoch, wantsPlayback, preferredRate == rate,
+                  UIApplication.shared.applicationState == .active,
+                  !pictureInPictureIsActive, !player.isExternalPlaybackActive,
+                  item.status == .readyToPlay else { return false }
+            let drift = Double(realPositionMs()) - Double(rendezvous.filmPositionMs)
+            if abs(drift) <= frameDurationSeconds * 1_000 { return true }
+            if drift > 0 { return false }
+            try? await Task.sleep(nanoseconds: 8_000_000)
+        }
+        return false
     }
 
     /// Check the parked item's decoded output after its alignment seek.

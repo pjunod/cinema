@@ -2759,3 +2759,39 @@ candidate replay remains pending the requested source-transfer authorization.
 Earlier attempted local-client receipts preserve their original metrics and
 claims, with the correction recorded alongside them rather than becoming
 successful evidence.
+
+
+### 10.87 Apple parks at a future rendezvous rather than chasing seek latency
+
+A one-frame acceptance check against the playhead sampled before seeking can
+refuse an otherwise usable successor whenever seek latency exceeds one frame.
+Apple now parks one wall-second ahead, expressed in media time using the
+viewer's rate, proves the parked decoded frame, and waits for the incumbent
+to reach that film instant. The eight-millisecond observation loop ends at the
+original overlap deadline or the existing alignment bound. Pause, background,
+rate change, stale ownership or passing the frame window retains the incumbent.
+There is no new overlap clock and no seek of the visible player.
+
+The authored rendezvous regression covers the future lead, unchanged item
+origin, negative lead and overflow. Inspection also corrected a fixture edit
+that had accidentally changed a rejected 8.251-second sample into 8 + 1/241;
+this was found during source review, before unit execution. The rejected
+sample is now 8.05 seconds for a 24 fps boundary. iOS production/test-source
+compilation passed; physical timing remains unmeasured.
+
+Pinned Media3 1.10.1 source inspection identified a separate Android design
+constraint: `HlsSampleStreamWrapper.selectTracks` resets buffered media when
+the primary selection object changes. Replacing public track overrides alone
+cannot prove future-load continuity. The native adapter needs one retained
+selection object whose chosen index changes internally; queue retention and
+physical disposal still need integration. The inspected implementation is
+[the pinned upstream source](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsSampleStreamWrapper.java).
+
+
+A fresh isolated native Safari probe on October 2 also timed out creating its
+WebDriver session (`Safari POST /session`, 15-second deadline). Its own driver
+and local HTTP server were closed. The failed receipt remains
+`safari-native-autonomous-blocked.json`; no native media or switch evidence
+was obtained, and no lock-state diagnosis is inferred from that timeout.
+The future-rendezvous iOS production/test-source and tvOS production builds
+both passed. No unit test was executed.

@@ -74,7 +74,7 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
         XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8 + 1 / 24, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
         XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 7.95, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
-        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8 + 1 / 241, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.05, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
         XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.2, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
         XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720, frameDurationSeconds: 0))
         XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .nan, width: 1280, height: 720, frameDurationSeconds: 1 / 24))
@@ -95,6 +95,19 @@ final class PreparedCommitRendezvousTests: XCTestCase {
             plan.itemPositionMs, 12_000,
             "the successor's own zero is its media_origin_ms, not the film's"
         )
+    }
+
+    func testFutureRendezvousParksAheadWithoutChangingTheSuccessorOrigin() {
+        let plan = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: 2_000)
+        XCTAssertEqual(plan.filmPositionMs, 44_000)
+        XCTAssertEqual(plan.itemPositionMs, 14_000)
+        let negative = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 30_000,
+            incumbentFilmPositionMs: 42_000, mediaOriginMs: 30_000, leadMs: -2_000)
+        XCTAssertEqual(negative.filmPositionMs, 42_000)
+        let overflow = PreparedCommitRendezvous.plan(stagedFilmPositionMs: 0,
+            incumbentFilmPositionMs: Int.max, mediaOriginMs: 0, leadMs: 1_000)
+        XCTAssertEqual(overflow.filmPositionMs, Int.max)
     }
 
     func testTheSuccessorIsNeverAskedToSeekBehindWhereItWasPrimed() {

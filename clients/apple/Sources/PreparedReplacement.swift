@@ -407,9 +407,11 @@ struct PreparedCommitRendezvous: Equatable {
     static func plan(
         stagedFilmPositionMs: Int,
         incumbentFilmPositionMs: Int,
-        mediaOriginMs: Int
+        mediaOriginMs: Int,
+        leadMs: Int = 0
     ) -> PreparedCommitRendezvous {
-        let film = max(max(0, stagedFilmPositionMs), max(0, incumbentFilmPositionMs))
+        let (future, overflow) = max(0, incumbentFilmPositionMs).addingReportingOverflow(max(0, leadMs))
+        let film = max(max(0, stagedFilmPositionMs), overflow ? Int.max : future)
         return PreparedCommitRendezvous(
             filmPositionMs: film,
             itemPositionMs: max(0, film - mediaOriginMs)
