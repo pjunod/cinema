@@ -600,8 +600,8 @@ pub(super) struct ParentMediaReader {
     pub(super) candidate_id: Option<plurx_core::playback::candidate::CandidateId>,
     pub(super) reader_id: String,
     pub(super) rendition: Arc<Rendition>,
-    /// Family admission lasts through detach; a worker's exclusive claim
-    /// independently retains the same reservation through confirmed reap.
+    /// Autonomous admission lasts through detach; controlled cold video may
+    /// release this claim. Workers retain their own claim through confirmed reap.
     pub(super) _reservation: Option<crate::vodencode::EncodePermit>,
 }
 impl ParentMediaReader {

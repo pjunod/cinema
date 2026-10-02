@@ -1,4 +1,5 @@
 "use strict";
+const CONTINUOUS_QUALITY_MAX_INTERVALS=128;
 function continuousQualityIdentity(value){
   return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
@@ -18,11 +19,11 @@ function continuousQualityTransaction(value){
     &&['preparing','ready','scheduled','appended','presented','cancelling','retained_current','superseded','recovery_owned','disposed'].includes(value.state)
     &&typeof value.intent_superseded==='boolean'&&typeof value.cancel_requested==='boolean'
     &&typeof value.ever_appended==='boolean'
-    &&arrays.every(key=>Array.isArray(value[key])&&value[key].length<=64
+    &&arrays.every(key=>Array.isArray(value[key])&&value[key].length<=CONTINUOUS_QUALITY_MAX_INTERVALS
       &&value[key].every(row=>continuousQualityInterval(row)&&row.rendition_id===value.target_rendition_id)
       &&new Set(value[key].map(row=>row.artifact_id)).size===value[key].length)
     &&value.appended.every(row=>value.reserved.some(pin=>continuousQualitySameInterval(pin,row)))
-    &&Array.isArray(value.disposed)&&value.disposed.length<=64&&value.disposed.every(continuousQualityArtifact)
+    &&Array.isArray(value.disposed)&&value.disposed.length<=CONTINUOUS_QUALITY_MAX_INTERVALS&&value.disposed.every(continuousQualityArtifact)
     &&(value.first_presented_tick==null?value.first_presented_at_ms==null:
       continuousQualityInteger(value.first_presented_tick)&&continuousQualityInteger(value.first_presented_at_ms,1))
     &&(value.ever_appended||(!value.appended.length&&value.first_presented_tick==null));
@@ -47,11 +48,11 @@ function continuousQualityResponse(value,request){
     ||!ledger.transactions.every(row=>continuousQualityTransaction(row)&&row.intent_revision<=ledger.latest_intent_revision)
     ||new Set(ledger.transactions.map(row=>row.transaction_id)).size!==ledger.transactions.length)return false;
   const audio=ledger.shared_audio_reserved||[];
-  if(!Array.isArray(audio)||audio.length>64||!audio.every(row=>continuousQualityInterval(row)
+  if(!Array.isArray(audio)||audio.length>CONTINUOUS_QUALITY_MAX_INTERVALS||!audio.every(row=>continuousQualityInterval(row)
     &&row.timescale===48000&&row.rendition_id===ledger.shared_audio_rendition_id)
     ||new Set(audio.map(row=>row.artifact_id)).size!==audio.length)return false;
   const pins=ledger.transactions.flatMap(row=>row.reserved).concat(audio);
-  if(pins.length>64||pins.reduce((sum,row)=>sum+row.byte_length,0)>256*1024*1024)return false;
+  if(pins.length>CONTINUOUS_QUALITY_MAX_INTERVALS||pins.reduce((sum,row)=>sum+row.byte_length,0)>256*1024*1024)return false;
   const receipt=value.receipt,transition=request.transition;
   if(!transition)return receipt==null;
   if(!receipt||receipt.version!==1||receipt.generation!==request.generation
@@ -332,7 +333,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     const recordKey=`${pin.rendition_id}:${artifact}`;
     let record=records.get(recordKey);
     if(!record){
-      if(records.size>=64)throw new Error('Continuous media provenance bound');
+      if(records.size>=CONTINUOUS_QUALITY_MAX_INTERVALS)throw new Error('Continuous media provenance bound');
       record={interval:{...pin},facts,transactions:new Set(),type:found.type,
         exposed:false,appended:false,presented:false,removed:false,disposed:false};records.set(recordKey,record);
     }
@@ -473,7 +474,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const adapter={
     protocol,family,get wanted(){return wanted;},get frontier(){return frontier;},get closed(){return closed;},
     loader:Base=>class {
-      constructor(config){this.base=new Base(config);this.aborted=false;this.context=null;loaders.add(this);}
+      constructor(config){this.base=new Base(config);this.aborted=false;this.destroyed=false;this.context=null;loaders.add(this);}
       get stats(){return this.base.stats;}
       load(context,config,callbacks){
         this.context=context;const captured=transaction;
@@ -488,8 +489,13 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         }};
         this.base.load(context,config,guarded);
       }
-      abort(){this.aborted=true;this.base.abort();}
-      destroy(){this.abort();loaders.delete(this);this.base.destroy();}
+      abort(){if(this.aborted||this.destroyed)return;this.aborted=true;this.base.abort();}
+      destroy(){
+        if(this.destroyed)return;this.destroyed=true;this.aborted=true;loaders.delete(this);
+        // hls.js resets a loader from its abort callback. Base destruction
+        // cancels transport silently; invoking abort here re-enters that reset.
+        this.base.destroy();
+      }
       getCacheAge(){return this.base.getCacheAge?.()||null;}
       getResponseHeader(name){return this.base.getResponseHeader?.(name)||null;}
     },

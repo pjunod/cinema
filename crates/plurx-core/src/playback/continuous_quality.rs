@@ -9,7 +9,9 @@ use serde::{Deserialize, Serialize};
 
 pub const CONTINUOUS_QUALITY_VERSION: u8 = 1;
 pub const MAX_QUALITY_TRANSACTIONS: usize = 16;
-pub const MAX_QUALITY_INTERVALS: usize = 64;
+// Normal 60-second forward + 30-second back buffers retain about 90
+// independent two-second video/AAC intervals, with room for a pending join.
+pub const MAX_QUALITY_INTERVALS: usize = 128;
 pub const MAX_QUALITY_PINNED_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_QUALITY_RECEIPTS: usize = 128;
 pub const QUALITY_RECEIPT_HORIZON_MS: i64 = 90_000;
@@ -1725,6 +1727,74 @@ mod tests {
             target_rendition_id: "C".repeat(64),
         };
         assert!(!uppercase.valid());
+    }
+
+    #[test]
+    fn normal_forward_and_back_buffers_fit_without_releasing_live_pins() {
+        let mut ledger = ledger();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: interval().rendition_id,
+            },
+        );
+        ledger.apply(&prepare, 1000).expect("prepare");
+        let video: Vec<_> = (0..45_u64)
+            .map(|index| QualityInterval {
+                artifact_id: format!("{:064x}", index + 1),
+                rendition_id: interval().rendition_id,
+                timescale: 24_000,
+                from_tick: index * 48_048,
+                through_tick: (index + 1) * 48_048,
+                byte_length: 500_000,
+            })
+            .collect();
+        let audio: Vec<_> = (0..45_u64)
+            .map(|index| QualityInterval {
+                artifact_id: format!("{:064x}", index + 100),
+                rendition_id: "e".repeat(64),
+                timescale: 48_000,
+                from_tick: index * 96_096,
+                through_tick: (index + 1) * 96_096,
+                byte_length: 40_000,
+            })
+            .collect();
+        ledger
+            .ready(TRANSACTION, video.clone())
+            .expect("verified video");
+        ledger
+            .reserve_shared_audio(&audio)
+            .expect("normal AAC buffer");
+        let schedule = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: video.clone(),
+            },
+        );
+        ledger.apply(&schedule, 1100).expect("normal video buffer");
+        assert!(ledger.valid());
+        assert_eq!(ledger.transactions[0].reserved, video);
+        assert_eq!(ledger.shared_audio_reserved(), audio);
+        assert!(serde_json::to_vec(&ledger).expect("bounded ledger").len() < 128 * 1024);
+        let before = ledger.clone();
+        let excess: Vec<_> = (0..39_u64)
+            .map(|index| QualityInterval {
+                artifact_id: format!("{:064x}", index + 200),
+                rendition_id: "e".repeat(64),
+                timescale: 48_000,
+                from_tick: (index + 45) * 96_096,
+                through_tick: (index + 46) * 96_096,
+                byte_length: 40_000,
+            })
+            .collect();
+        assert_eq!(
+            ledger.reserve_shared_audio(&excess),
+            Err(QualityTransitionError::Capacity)
+        );
+        assert_eq!(ledger, before, "capacity refusal preserves live pins");
     }
 
     #[test]

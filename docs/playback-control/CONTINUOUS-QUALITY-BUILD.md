@@ -2509,3 +2509,34 @@ call without changing scoring or publishing credentials. The controlled
 regressions cover passive-reader fairness, future-load retirement without
 disposing incumbent facts, and strict metadata in both delivery modes. Their
 source is compiled; execution remains deferred to the final fast lane.
+
+
+### 10.75 Normal buffering fits the interval bound
+
+The ordinary web buffer policy retains up to 60 seconds ahead and 30 seconds
+behind. With independent two-second video and AAC artifacts this is about 90
+physical intervals, before a pending join. The previous 64-interval limit
+could refuse ordinary healthy playback even when the byte budget was ample.
+The common ledger, web receipt validator and provenance map now allow 128
+intervals. The 256 MiB pin ceiling, bounded encoded ledger, transaction count
+and receipt horizon remain in force; buffer lengths are unchanged.
+
+Authored Rust and web regressions retain 45 video and 45 audio intervals and
+require over-capacity refusal without losing live pins. They await the final
+fast lane. The exact-source production probe of the preceding committed
+controlled implementation is running separately; it remains partial evidence.
+
+
+### 10.76 hls.js loader destruction does not emit another abort
+
+The exact controlled production probe captured the first-frame RangeError:
+our loader's destruction called abort, whose hls.js callback reset and
+redestroyed that same loader recursively. Destruction now marks the wrapper
+closed and calls the base loader's silent destruction directly. Explicit
+abort is idempotent and still sends its single transport notification.
+
+The authored adapter regression models hls.js abort callback re-entry and
+requires one abort, one destruction, and silent normal destruction. The
+failed production receipt is `continuous-chrome-partial-linux-controlled.json`.
+Its stack identifies the cause; it does not qualify first-frame playback. The
+fixed committed candidate will receive a fresh isolated production probe.

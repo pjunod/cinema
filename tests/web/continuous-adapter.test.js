@@ -180,3 +180,21 @@ test('controlled metadata keeps the same strict immutable family contract',()=>{
  const invalid=copy(source);invalid.mode='controlled';invalid.video[1].init_id='unverified';
  assert.equal(context.continuousQualityFamily(invalid),false);
 });
+
+
+test('fragment loader destruction stays silent across hls abort re-entry',()=>{
+ const f=fixture();let aborts=0,destroys=0,callbacks;let loader;
+ class Base {
+  constructor(){this.stats={};}
+  load(ctx,config,handlers){callbacks=handlers;}
+  abort(){aborts++;callbacks.onAbort();}
+  destroy(){destroys++;}
+ }
+ const Loader=f.adapter.loader(Base);loader=new Loader({});
+ loader.load({url:f.prefix+'pending'}, {}, {onAbort(){loader.destroy();}});
+ loader.abort();loader.abort();loader.destroy();
+ assert.equal(aborts,1);assert.equal(destroys,1);
+ loader=new Loader({});loader.load({url:f.prefix+'completed'}, {}, {onAbort(){assert.fail('destroy must not emit abort');}});
+ loader.destroy();loader.destroy();loader.abort();
+ assert.equal(aborts,1);assert.equal(destroys,2);
+});

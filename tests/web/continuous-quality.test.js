@@ -93,3 +93,18 @@ test('an active snapshot cannot clear an uncertain command as terminal',async()=
  const pending=clone(client.pending);snapshots=true;
  await assert.rejects(client.reconcileTerminal(),/durable End proof/);assert.deepEqual(clone(client.pending),pending);
 });
+
+
+test('normal ninety-second video and AAC buffers fit the bounded receipt',()=>{
+ const request={version:1,...bootstrap,attachment};const response=answer(request);
+ const segments=(rendition,timescale,first)=>Array.from({length:45},(_,index)=>({...interval,
+  artifact_id:(first+index).toString(16).padStart(64,'0'),rendition_id:rendition,timescale,
+  from_tick:index*timescale*2,through_tick:(index+1)*timescale*2}));
+ const tx=response.ledger.transactions[0];tx.reserved=segments(interval.rendition_id,24000,1);
+ tx.appended=clone(tx.reserved);tx.ever_appended=true;tx.state='appended';
+ response.ledger.shared_audio_rendition_id='e'.repeat(64);
+ response.ledger.shared_audio_reserved=segments('e'.repeat(64),48000,100);
+ assert.equal(valid(response,request),true);
+ const extra=segments('e'.repeat(64),48000,200).slice(0,39);
+ response.ledger.shared_audio_reserved.push(...extra);assert.equal(valid(response,request),false);
+});
