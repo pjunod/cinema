@@ -841,6 +841,25 @@ pub struct AppState {
     pub started_at: Instant,
 }
 
+/// What one page of the first-frame luminance backfill did with its rows.
+#[derive(Debug, Default)]
+struct FrameBackfillTally {
+    observed: usize,
+    absent: usize,
+    refused: usize,
+    fenced: usize,
+    changed: usize,
+    gone: usize,
+    ineligible: usize,
+}
+
+impl FrameBackfillTally {
+    /// Reads ffprobe completed, whatever the frame carried.
+    fn read(&self) -> usize {
+        self.observed + self.absent + self.fenced
+    }
+}
+
 fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
     serde_json::from_str::<serde_json::Value>(probe_json)
         .ok()
@@ -6036,6 +6055,10 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_luminance_facts().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_frame_luminance().await });
+        }
         Ok(())
     }
 
@@ -6801,8 +6824,11 @@ impl JobManager {
     }
 
     /// Classify existing HDR rows from their retained stream document. This
-    /// never opens media: SEI-only rows are stamped `none` and the next normal
-    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    /// never opens media: rows whose document carries no luminance record —
+    /// HEVC that keeps MDCV/CLL only as SEI, the common case — are stamped
+    /// `none`. An unchanged file is never rescanned, so nothing else would
+    /// revisit them; [`Self::backfill_frame_luminance`] reads their first
+    /// frame once this walk is complete.
     async fn backfill_luminance_facts(self: Arc<Self>) {
         const BACKFILL_PER_TICK: i64 = 256;
         if !matches!(
@@ -6895,6 +6921,278 @@ impl JobManager {
             fenced,
             cursor = walked,
             "luminance backfill: considered stored probe rows"
+        );
+    }
+
+    /// Read the first frame of every HDR row the stored-document walk left
+    /// `none`, with the scanner's own bounded probe.
+    ///
+    /// Without this, a title mastered at 4,000 nits whose metadata lives only
+    /// in frame side data tone-maps against the 1,000-nit policy default for
+    /// as long as its file is unchanged: the scanner runs this read only when
+    /// it probes a file, and it probes only new or changed files.
+    ///
+    /// What it does not cover: a row the scanner writes `none` *after* this
+    /// walk has passed its id. The scanner writes `none` only once it has
+    /// already attempted this same frame read on that file, at scan time, so
+    /// such a row is not one that never had the read — it is one whose read
+    /// found nothing or failed then, and it waits for the file's next change
+    /// like every other scan-time probe fact. This walk exists for the rows
+    /// that never had a frame read at all: those the stored-document walk
+    /// classified from a retained stream document.
+    async fn backfill_frame_luminance(self: Arc<Self>) {
+        self.backfill_frame_luminance_with(|path| async move {
+            plurx_core::scan::probe::first_frame_luminance(&path, "catalogue luminance backfill")
+                .await
+        })
+        .await;
+    }
+
+    /// [`Self::backfill_frame_luminance`] with the frame read supplied, so
+    /// the walk's state transitions are testable without media.
+    ///
+    /// One small page per tick, because each candidate opens and decodes
+    /// media. The cursor only moves past a row on evidence about that row;
+    /// anything that says "this node cannot read right now" stops the page
+    /// where it is, so an unavailable library or a broken ffprobe is retried
+    /// rather than walked to `done` having read nothing. Per candidate:
+    ///
+    /// - stored document not PQ/HLG without a stream luminance record (the
+    ///   scanner's own eligibility for this read; the stored-document walk
+    ///   stamps every unclassified HDR row, including a Dolby Vision stream
+    ///   whose base layer is neither): skipped;
+    /// - file on disk is not the catalogued size/mtime: skipped, because the
+    ///   rescan that change triggers runs this same read;
+    /// - file cannot be stat'ed: its library root is checked with the
+    ///   scanner's root-availability read. Root available → the file is gone
+    ///   or a dangling link, a stale row the next scan reconciles: skipped.
+    ///   Root unavailable (share unmounted, media not on this node) → stop;
+    /// - frame carries luminance: written as `frame`, fenced to the exact row
+    ///   snapshot and to the row still being `none`;
+    /// - frame carries none: stays `none`, cursor moves on;
+    /// - ffprobe refused the file (a [`plurx_core::error::ProbeError::is_file_verdict`]): stays
+    ///   `none`, cursor moves on — a new probe document is what earns it
+    ///   another read (open question 2 of the tone-map plan). But a page in
+    ///   which more than one read was attempted and every one was refused
+    ///   stops without advancing: one refusal is a statement about one file,
+    ///   several with no successful read beside them are a statement about
+    ///   the reader;
+    /// - ffprobe could not run or did not finish (not a verdict): stop;
+    /// - the store write fails: stop.
+    ///
+    /// The `done` stamp therefore follows a walk in which every row passed
+    /// was skipped on its own facts, read, or refused by a reader that read
+    /// other files successfully — the rows it leaves `none` are the ones a
+    /// frame read cannot improve until their file changes.
+    async fn backfill_frame_luminance_with<F, Fut>(&self, read_frame: F)
+    where
+        F: Fn(PathBuf) -> Fut,
+        Fut: std::future::Future<
+            Output = Result<
+                Option<plurx_core::scan::probe::FrameLuminance>,
+                plurx_core::error::ProbeError,
+            >,
+        >,
+    {
+        const FRAME_READS_PER_TICK: i64 = 16;
+        // Rows become `none` through the stored-document walk; starting
+        // before it finishes would let this cursor pass ids it later stamps.
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        match self
+            .store
+            .get_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE)
+            .await
+        {
+            Ok(None) => {}
+            Ok(Some(_)) => return,
+            Err(error) => {
+                tracing::warn!(%error, "reading the luminance frame backfill stamp");
+                return;
+            }
+        }
+        let lease = match self
+            .acquire_job("catalogue:luminance-frame".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "luminance frame backfill lease failed");
+                return;
+            }
+        };
+        let lost = lease.loss_token();
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let page = match self
+            .store
+            .files_without_luminance_facts(cursor, FRAME_READS_PER_TICK)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance frame backfill");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+        if page.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance frame backfill: complete"),
+                Err(error) => {
+                    tracing::warn!(%error, "stamping the luminance frame backfill complete");
+                }
+            }
+            let _ = lease.release().await;
+            return;
+        }
+        let roots: Vec<PathBuf> = match self.store.list_libraries().await {
+            Ok(libraries) => libraries
+                .into_iter()
+                .flat_map(|library| library.paths)
+                .collect(),
+            Err(error) => {
+                tracing::warn!(%error, "listing library roots for the luminance frame backfill");
+                let _ = lease.release().await;
+                return;
+            }
+        };
+
+        let mut walked = cursor;
+        let mut tally = FrameBackfillTally::default();
+        for candidate in page {
+            if lost.is_cancelled() {
+                break;
+            }
+            if stored_luminance(&candidate.probe_json)
+                .luminance_source
+                .as_deref()
+                != Some("none")
+            {
+                tally.ineligible += 1;
+                walked = candidate.id;
+                continue;
+            }
+            let path = PathBuf::from(&candidate.path);
+            match scan::file_stat(&path).await {
+                Ok(identity) if identity == (candidate.size, candidate.mtime) => {}
+                Ok(_) => {
+                    tally.changed += 1;
+                    walked = candidate.id;
+                    continue;
+                }
+                Err(error) => {
+                    let root = roots
+                        .iter()
+                        .filter(|root| path.starts_with(root))
+                        .max_by_key(|root| root.as_os_str().len());
+                    // A row under no configured root belongs to no library
+                    // the scanner walks; there is no mount to wait for.
+                    let root_available = match root {
+                        Some(root) => scan::library_root_available(root).await,
+                        None => true,
+                    };
+                    if root_available {
+                        tally.gone += 1;
+                        walked = candidate.id;
+                        continue;
+                    }
+                    tracing::info!(
+                        file_id = candidate.id,
+                        %error,
+                        "luminance frame backfill: library root unavailable here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            match read_frame(path).await {
+                Ok(Some(frame)) => match self
+                    .store
+                    .set_file_frame_luminance(
+                        &candidate,
+                        frame.max_cll,
+                        frame.max_fall,
+                        frame.mastering_max_luminance,
+                    )
+                    .await
+                {
+                    Ok(true) => tally.observed += 1,
+                    Ok(false) => tally.fenced += 1,
+                    Err(error) => {
+                        tracing::warn!(
+                            file_id = candidate.id,
+                            %error,
+                            "writing first-frame luminance facts"
+                        );
+                        break;
+                    }
+                },
+                Ok(None) => tally.absent += 1,
+                Err(error) if error.is_file_verdict() => {
+                    tally.refused += 1;
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "ffprobe refused the first frame; the row stays none"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "luminance frame backfill: ffprobe could not read here; retrying next tick"
+                    );
+                    break;
+                }
+            }
+            walked = candidate.id;
+        }
+        if tally.refused > 1 && tally.read() == 0 {
+            tracing::warn!(
+                refused = tally.refused,
+                "luminance frame backfill: every frame read in this page was refused; \
+                 not advancing until a read succeeds"
+            );
+            walked = cursor;
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance frame backfill cursor");
+            }
+        }
+        let _ = lease.release().await;
+        tracing::info!(
+            observed = tally.observed,
+            absent = tally.absent,
+            refused = tally.refused,
+            fenced = tally.fenced,
+            changed = tally.changed,
+            gone = tally.gone,
+            ineligible = tally.ineligible,
+            cursor = walked,
+            "luminance frame backfill: read first frames"
         );
     }
 
@@ -10574,6 +10872,446 @@ mod tests {
         assert_eq!(recovered.mastering_max_luminance, Some(4000));
         assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
         assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
+
+    /// A file-backed catalogue with one library root and one movie item, for
+    /// driving the first-frame luminance backfill with a stubbed frame read.
+    struct LuminanceFixture {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        database: PathBuf,
+        store: Arc<SqliteStore>,
+        item: i64,
+        jobs: Arc<JobManager>,
+    }
+
+    impl LuminanceFixture {
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().expect("fixture");
+            let root = dir.path().join("library");
+            std::fs::create_dir(&root).expect("library root");
+            let database = dir.path().join("catalogue.sqlite");
+            let store = Arc::new(SqliteStore::open(&database).expect("store"));
+            let library = store
+                .create_library(&NewLibrary {
+                    name: "HDR".to_owned(),
+                    kind: LibraryKind::Movies,
+                    paths: vec![root.clone()],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            let item = store
+                .insert_item(&NewItem {
+                    library_id: library.id,
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: "Fixture".to_owned(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("item");
+            let artwork = dir.path().join("artwork");
+            std::fs::create_dir(&artwork).expect("artwork");
+            let store_handle: Arc<dyn Store> = store.clone();
+            let jobs = Arc::new(JobManager::new(store_handle, artwork));
+            Self {
+                _dir: dir,
+                root,
+                database,
+                store,
+                item,
+                jobs,
+            }
+        }
+
+        async fn document_walk_done(&self) {
+            self.store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+                .expect("document walk done");
+        }
+
+        /// Seed one catalogued file whose on-disk identity matches its row.
+        async fn row(
+            &self,
+            name: &str,
+            hdr: Option<&str>,
+            luminance_source: Option<&str>,
+            transfer: &str,
+        ) -> (i64, PathBuf) {
+            let path = self.root.join(name);
+            std::fs::write(&path, path.to_string_lossy().as_bytes()).expect("media stand-in");
+            let (size, mtime) = scan::file_stat(&path).await.expect("stat");
+            let id = self
+                .store
+                .upsert_file(
+                    self.item,
+                    path.to_str().expect("utf8 path"),
+                    size,
+                    mtime,
+                    &ProbeResult {
+                        hdr: hdr.map(str::to_owned),
+                        luminance_source: luminance_source.map(str::to_owned),
+                        raw_json: Some(format!(
+                            r#"{{"streams":[{{"codec_type":"video","color_transfer":"{transfer}"}}],"path":"{}"}}"#,
+                            path.display()
+                        )),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("file");
+            (id, path)
+        }
+
+        async fn run<F, Fut>(&self, read_frame: F)
+        where
+            F: Fn(PathBuf) -> Fut,
+            Fut: std::future::Future<
+                Output = Result<
+                    Option<plurx_core::scan::probe::FrameLuminance>,
+                    plurx_core::error::ProbeError,
+                >,
+            >,
+        {
+            self.jobs.backfill_frame_luminance_with(read_frame).await;
+        }
+
+        async fn cursor(&self) -> Option<String> {
+            let key = self
+                .jobs
+                .local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+            self.store.get_setting(&key).await.expect("cursor")
+        }
+
+        async fn done(&self) -> bool {
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_FRAME_BACKFILL_DONE)
+                .await
+                .expect("stamp")
+                .is_some()
+        }
+
+        async fn file(&self, id: i64) -> MediaFile {
+            self.store.get_file(id).await.expect("read").expect("row")
+        }
+    }
+
+    fn frame(max_cll: i64) -> plurx_core::scan::probe::FrameLuminance {
+        plurx_core::scan::probe::FrameLuminance {
+            max_cll: Some(max_cll),
+            max_fall: Some(612),
+            mastering_max_luminance: Some(4000),
+        }
+    }
+
+    fn refusal(path: &Path) -> plurx_core::error::ProbeError {
+        plurx_core::error::ProbeError::Failed {
+            path: path.display().to_string(),
+            code: Some(1),
+            reason: "Invalid data found when processing input".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_reads_none_rows_once_and_stamps_done() {
+        let fixture = LuminanceFixture::new().await;
+        let (sei_id, sei) = fixture
+            .row("sei.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (bare_id, bare) = fixture
+            .row("bare.mkv", Some("hlg"), Some("none"), "arib-std-b67")
+            .await;
+        let (broken_id, broken) = fixture
+            .row("broken.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        // The stored-document walk stamps every unclassified HDR row `none`,
+        // including Dolby Vision whose base layer is neither PQ nor HLG; the
+        // scanner never frame-reads such a stream, so this walk does not.
+        let (dv_id, _) = fixture
+            .row("dv.mkv", Some("dolby_vision"), Some("none"), "bt709")
+            .await;
+        let (stream_id, _) = fixture
+            .row("stream.mkv", Some("hdr10"), Some("stream"), "smpte2084")
+            .await;
+        let (sdr_id, _) = fixture.row("sdr.mkv", None, None, "bt709").await;
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let read_frame = {
+            let reads = Arc::clone(&reads);
+            let (sei, broken) = (sei.clone(), broken.clone());
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path.clone());
+                let answer = if path == sei {
+                    Ok(Some(frame(2008)))
+                } else if path == broken {
+                    Err(refusal(&path))
+                } else {
+                    Ok(None)
+                };
+                async move { answer }
+            }
+        };
+
+        // Nothing runs until the stored-document walk has finished: rows it
+        // has not yet classified would otherwise fall behind this cursor.
+        fixture.run(&read_frame).await;
+        assert!(reads.lock().expect("reads").is_empty());
+        fixture.document_walk_done().await;
+
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            *reads.lock().expect("reads"),
+            vec![sei.clone(), bare.clone(), broken.clone()],
+            "only PQ/HLG rows the document left none are read, in id order"
+        );
+        let read = fixture.file(sei_id).await;
+        assert_eq!(
+            (
+                read.max_cll,
+                read.max_fall,
+                read.mastering_max_luminance,
+                read.luminance_source.as_deref()
+            ),
+            (Some(2008), Some(612), Some(4000), Some("frame"))
+        );
+        for id in [bare_id, broken_id, dv_id] {
+            let row = fixture.file(id).await;
+            assert_eq!(row.luminance_source.as_deref(), Some("none"));
+            assert_eq!(row.max_cll, None);
+        }
+        assert_eq!(
+            fixture.file(stream_id).await.luminance_source.as_deref(),
+            Some("stream")
+        );
+        assert_eq!(fixture.file(sdr_id).await.luminance_source, None);
+        assert_eq!(
+            fixture.cursor().await,
+            Some(dv_id.to_string()),
+            "a frame with nothing, a refusal beside successful reads and an \
+             ineligible row all advance the cursor"
+        );
+        assert!(!fixture.done().await);
+
+        // The next tick finds nothing after the cursor and stamps the walk
+        // done; a stamped walk never reads again.
+        fixture.run(&read_frame).await;
+        assert!(fixture.done().await);
+        let key = fixture
+            .jobs
+            .local_job_key(keys::JOB_LUMINANCE_FRAME_BACKFILL_CURSOR);
+        fixture.store.put_setting(&key, "0").await.expect("rewind");
+        fixture.run(&read_frame).await;
+        assert_eq!(reads.lock().expect("reads").len(), 3);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_skips_stale_rows_but_waits_for_an_unavailable_root() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (changed_id, changed) = fixture
+            .row("changed.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (gone_id, gone) = fixture
+            .row("gone.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (dangling_id, dangling) = fixture
+            .row("dangling.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (kept_id, kept) = fixture
+            .row("kept.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        std::fs::write(&changed, b"a different, longer body than the catalogue saw")
+            .expect("change on disk");
+        std::fs::remove_file(&gone).expect("delete");
+        std::fs::remove_file(&dangling).expect("replace with a link");
+        // A dangling link where the platform has them; elsewhere the row is
+        // simply another deleted file, with the same expected outcome.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(fixture.root.join("missing-target.mkv"), &dangling)
+            .expect("dangling link");
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let read_frame = {
+            let reads = Arc::clone(&reads);
+            move |path: PathBuf| {
+                reads.lock().expect("reads").push(path);
+                async { Ok(None) }
+            }
+        };
+
+        // Unmounted share: the root is an empty directory (a mountpoint with
+        // nothing on it). Nothing is read, nothing is skipped, the cursor
+        // does not move.
+        let parked = fixture.root.with_extension("parked");
+        std::fs::rename(&fixture.root, &parked).expect("unmount");
+        std::fs::create_dir(&fixture.root).expect("empty mountpoint");
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "an empty mountpoint holds the cursor"
+        );
+        // Missing root entirely: the same.
+        std::fs::remove_dir(&fixture.root).expect("remove mountpoint");
+        fixture.run(&read_frame).await;
+        assert_eq!(
+            fixture.cursor().await,
+            None,
+            "a missing root holds the cursor"
+        );
+        assert!(reads.lock().expect("reads").is_empty());
+
+        // Root back: a changed file is the rescan's, a deleted file and a
+        // dangling link are stale rows the next scan reconciles; all three
+        // advance without a read, and the intact file is read.
+        std::fs::rename(&parked, &fixture.root).expect("remount");
+        fixture.run(&read_frame).await;
+        assert_eq!(*reads.lock().expect("reads"), vec![kept.clone()]);
+        assert_eq!(fixture.cursor().await, Some(kept_id.to_string()));
+        for id in [changed_id, gone_id, dangling_id, kept_id] {
+            assert_eq!(
+                fixture.file(id).await.luminance_source.as_deref(),
+                Some("none")
+            );
+        }
+        fixture.run(&read_frame).await;
+        assert!(fixture.done().await);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_does_not_advance_when_the_reader_cannot_read() {
+        use plurx_core::error::ProbeError;
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (first_id, _) = fixture
+            .row("first.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (second_id, _) = fixture
+            .row("second.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+
+        // ffprobe could not run (missing, not executable, exit 126/127) and
+        // ffprobe did not finish (timeout, signal) are not verdicts on a file.
+        let spawn = |_path: PathBuf| async {
+            Err(ProbeError::Spawn("No such file or directory".to_owned()))
+        };
+        fixture.run(spawn).await;
+        assert_eq!(fixture.cursor().await, None, "Spawn stops the page");
+        let transient = |path: PathBuf| async move {
+            Err(ProbeError::Transient {
+                path: path.display().to_string(),
+                reason: "ffprobe exceeded 30 s".to_owned(),
+            })
+        };
+        fixture.run(transient).await;
+        assert_eq!(fixture.cursor().await, None, "Transient stops the page");
+
+        // Every read in a page refused, with more than one attempted, is a
+        // statement about the reader, not about those files.
+        let refuse_all = |path: PathBuf| async move { Err(refusal(&path)) };
+        fixture.run(refuse_all).await;
+        assert_eq!(fixture.cursor().await, None, "an all-refused page holds");
+        assert!(!fixture.done().await);
+
+        // One refusal beside a successful read is a statement about one file.
+        let first = fixture.file(first_id).await.path;
+        let refuse_first = move |path: PathBuf| {
+            let answer = if path == first {
+                Err(refusal(&path))
+            } else {
+                Ok(None)
+            };
+            async move { answer }
+        };
+        fixture.run(&refuse_first).await;
+        assert_eq!(fixture.cursor().await, Some(second_id.to_string()));
+        fixture.run(&refuse_first).await;
+        assert!(fixture.done().await);
+    }
+
+    #[tokio::test]
+    async fn frame_luminance_backfill_stops_on_a_store_error_and_survives_a_fenced_write() {
+        let fixture = LuminanceFixture::new().await;
+        fixture.document_walk_done().await;
+        let (raced_id, raced) = fixture
+            .row("raced.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        let (refused_id, _) = fixture
+            .row("refused.mkv", Some("hdr10"), Some("none"), "smpte2084")
+            .await;
+        // A store write that fails stops the page where it is.
+        rusqlite::Connection::open(&fixture.database)
+            .expect("trigger connection")
+            .execute_batch(
+                "CREATE TRIGGER refuse_frame BEFORE UPDATE OF luminance_source ON files
+                   WHEN NEW.luminance_source = 'frame'
+                 BEGIN SELECT RAISE(ABORT, 'refused by the fixture'); END;",
+            )
+            .expect("refusing trigger");
+
+        // The first row is rescanned between the listing and the write (its
+        // probe document changes), so its write matches no row: fenced, not
+        // an error, and the trigger never fires for it.
+        let read_frame = {
+            let store = Arc::clone(&fixture.store);
+            let item = fixture.item;
+            let raced = raced.clone();
+            move |path: PathBuf| {
+                let store = Arc::clone(&store);
+                let raced = raced.clone();
+                async move {
+                    if path == raced {
+                        let (size, mtime) = scan::file_stat(&path).await.expect("stat");
+                        store
+                            .upsert_file(
+                                item,
+                                path.to_str().expect("utf8"),
+                                size,
+                                mtime,
+                                &ProbeResult {
+                                    hdr: Some("hdr10".to_owned()),
+                                    luminance_source: Some("none".to_owned()),
+                                    raw_json: Some(
+                                        r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084"}],"rescanned":true}"#
+                                            .to_owned(),
+                                    ),
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .expect("concurrent rescan");
+                    }
+                    Ok(Some(frame(1000)))
+                }
+            }
+        };
+        fixture.run(&read_frame).await;
+        let raced_row = fixture.file(raced_id).await;
+        assert_eq!(raced_row.luminance_source.as_deref(), Some("none"));
+        assert_eq!(raced_row.max_cll, None, "the fenced write changed nothing");
+        assert_eq!(
+            fixture.file(refused_id).await.luminance_source.as_deref(),
+            Some("none")
+        );
+        assert_eq!(
+            fixture.cursor().await,
+            Some(raced_id.to_string()),
+            "the fenced row advances; the failed write holds the cursor before it"
+        );
+
+        rusqlite::Connection::open(&fixture.database)
+            .expect("trigger connection")
+            .execute_batch("DROP TRIGGER refuse_frame;")
+            .expect("drop trigger");
+        fixture.run(&read_frame).await;
+        let refused_row = fixture.file(refused_id).await;
+        assert_eq!(refused_row.luminance_source.as_deref(), Some("frame"));
+        assert_eq!(refused_row.max_cll, Some(1000));
+        assert_eq!(fixture.cursor().await, Some(refused_id.to_string()));
     }
 
     #[tokio::test]
