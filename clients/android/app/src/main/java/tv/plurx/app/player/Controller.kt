@@ -4885,6 +4885,7 @@ class BuiltPlayer internal constructor(
     internal val progressiveMediaOrigin: ProgressiveMediaOrigin,
     internal val autoTransfers: AutoTransferEvidence = AutoTransferEvidence(progressiveMediaOrigin),
     internal val continuousSources: ContinuousSourceRegistry = ContinuousSourceRegistry(),
+    internal val continuousOutput: ContinuousOutputEvidence = ContinuousOutputEvidence(),
 )
 
 @UnstableApi
@@ -4929,11 +4930,13 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
     val progressiveMediaOrigin = ProgressiveMediaOrigin()
     val autoTransfers = AutoTransferEvidence(progressiveMediaOrigin)
     val continuousSources = ContinuousSourceRegistry()
+    val continuousOutput = ContinuousOutputEvidence()
     val player = PlurxPlayerBuilder(context, role).build(
         dataSource = Net.dataSourceFactory(),
         audioLanguage = vm.audioLang,
         transferListener = autoTransfers,
         continuousSources = continuousSources,
+        continuousOutput = continuousOutput,
     )
     player.addAnalyticsListener(object : AnalyticsListener {
         override fun onMediaItemTransition(eventTime: AnalyticsListener.EventTime, mediaItem: MediaItem?, reason: Int) {
@@ -4949,7 +4952,7 @@ private fun buildPipeline(context: Context, vm: AppViewModel, role: PlayerRole):
             autoTransfers.discard(loadEventInfo.uri.toString())
         }
     })
-    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources)
+    return BuiltPlayer(player, progressiveMediaOrigin, autoTransfers, continuousSources, continuousOutput)
 }
 
 /**

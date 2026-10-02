@@ -3014,3 +3014,42 @@ playback by themselves. Production and regression sources compile, including
 reservation ordering, unsupported target retention, retry ranges and actual
 supported-format snapshots. Unit execution remains deferred to the final
 fast lane after adversarial review.
+
+
+### 10.97 Android binds bootstrap and output facts to their creating owner
+
+The native bootstrap negotiates bounded candidate pairs on a captured profile,
+validates candidate digests and the controlled family, and requires the exact
+parent schedule, descriptor and master-playlist paths. A malformed admitted
+bootstrap attempts bounded parent release on that same profile. Unsupported
+codec, grade, burn or native-text selections retain ordinary creation. Stable
+request identities retain their family generation for negotiation retries.
+The controller still needs to adopt the result and own its lifetime.
+
+One captured-profile JSON transport now serves bootstrap, family and schedule
+work. It refuses redirects, path normalization outside the requested API
+path, malformed UTF-8 and oversized bodies. The authored local HTTP fixture
+checks authority after another profile changes, redirect refusal, response
+bounds and closed transport behavior; its sources compile without execution.
+
+The output observer captures each processed video frame's format and owner
+against its actual codec timestamp, including the offset for a skipped flush.
+A hardware frame callback consumes that exact record; later format changes,
+reset epochs and another attachment cannot borrow it. It preserves Media3's
+existing tunneled callback and prepared-frame metadata. The bounded timestamp
+map refuses unsafe positions and cannot grow beyond 512 entries. Audio-head
+observations come from the actual sink, normalized at its stream offset.
+A returned sink flush/reset is recorded separately and does not establish
+complete audio ownership release or externally audible continuity.
+
+Successful codec flush and release primitives report decoder disposal. The
+renderer state-reset hook is insufficient: Media3 calls it from a finally
+block even when flushing throws. The wrapper therefore credits no decoder
+release on an exception. Authored regressions cover this failure, timestamp
+format binding, older epochs and attachment ownership. Production and test
+sources compile. Actual AudioTrack retirement, controller adoption, optional
+quality changes and complete terminal reconciliation remain to be connected
+and physically qualified. No unit tests or final adversarial review ran.
+The inspected implementation is
+[MediaCodecRenderer 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/mediacodec/MediaCodecRenderer.java)
+and [MediaCodecVideoRenderer 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/MediaCodecVideoRenderer.java).
