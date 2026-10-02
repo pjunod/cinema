@@ -8,7 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use plurx_core::store::SqliteStore;
+use plurx_core::store::{MediaSessionStore, SqliteStore};
 use serde::Deserialize;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
@@ -203,6 +203,141 @@ async fn frame(State(b): State<Bridge>, Json(f): Json<Frame>) -> axum::response:
     }
 }
 
+// Keep the actual acquisition setup and its SQLite regression on one seam.
+// Durable Store claims require the existing fixed-width identity, not the
+// process-local JSON identity used by the transcode manager.
+async fn setup_owned_rolling_route(
+    store: &dyn Store,
+    req: &SessionRequest,
+    generation: &str,
+    session_id: &str,
+    response_json: String,
+    origin_ms: i64,
+) -> plurx_core::domain::MediaSessionRoute {
+    let now = crate::media_sessions::unix_ms();
+    let fingerprint = req.durable_intent_fingerprint(7);
+    assert_eq!(
+        store
+            .claim_media_session_request(
+                7,
+                generation,
+                &fingerprint,
+                &req.playback_id,
+                generation,
+                now,
+                now + 600000,
+            )
+            .await
+            .expect("claim"),
+        plurx_core::domain::MediaSessionRequestClaim::Acquired {
+            incarnation_id: generation.into(),
+        }
+    );
+    assert!(store
+        .assign_media_session_request_owner(7, generation, generation, "rolling-lab", now)
+        .await
+        .expect("assign"));
+    let activation = plurx_core::domain::MediaSessionActivation {
+        recovery_epoch: String::new(),
+        expected_desired_revision: None,
+        incarnation_id: generation.into(),
+        session_id: session_id.into(),
+        user_id: 7,
+        playback_id: req.playback_id.clone(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: Some(generation.into()),
+        request_fingerprint: fingerprint,
+        owner_node_id: "rolling-lab".into(),
+        recipe_json: serde_json::to_string(req).expect("recipe"),
+        response_json,
+        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: origin_ms,
+        now_ms: now,
+        lease_expires_at_ms: now + 600000,
+    };
+    store
+        .activate_media_session(&activation)
+        .await
+        .expect("activate")
+        .expect("accepted");
+    store
+        .settle_media_session_activation(
+            &activation,
+            plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms: 0,
+            },
+            now,
+        )
+        .await
+        .expect("settle")
+        .expect("confirmed")
+}
+
+#[tokio::test]
+async fn owned_rolling_setup_claims_and_activates_durable_route() {
+    let store = SqliteStore::open_in_memory().expect("real SQLite store");
+    let req: SessionRequest = serde_json::from_value(serde_json::json!({
+        "file_id": 1, "playback_id": "owned-rolling-setup", "request_id": null,
+        "control_sequence": null, "automatic": false, "previous_session_id": null,
+        "reopen_reason": null, "kind": {"kind": "transcode", "height": 360},
+        "start_seconds": 0.0, "audio_index": null, "subtitle_burn": null,
+        "audio_offset_ms": 0, "hdr10": false, "presentation": "live",
+        "transport": "hlsjs"
+    }))
+    .expect("internal request");
+    let generation = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let response = serde_json::json!({"session_id": session_id}).to_string();
+    let route = setup_owned_rolling_route(
+        &store,
+        &req,
+        &generation,
+        &session_id,
+        response.clone(),
+        1250,
+    )
+    .await;
+    assert_eq!(route.user_id, 7);
+    assert_eq!(route.playback_id, req.playback_id);
+    assert_eq!(route.incarnation_id, generation);
+    assert_eq!(route.session_id, session_id);
+    assert_eq!(route.owner_node_id, "rolling-lab");
+    assert_eq!(route.request_fingerprint, req.durable_intent_fingerprint(7));
+    assert_eq!(route.publication_ready_at_ms, 0);
+    assert_eq!(route.media_origin_ms, 1250);
+    assert_eq!(route.response_json, response);
+    assert_eq!(
+        store
+            .media_session_route(&route.session_id)
+            .await
+            .expect("read route"),
+        Some(route.clone())
+    );
+    let now = crate::media_sessions::unix_ms();
+    assert_eq!(
+        store
+            .claim_media_session_request(
+                7,
+                &generation,
+                &req.durable_intent_fingerprint(7),
+                &req.playback_id,
+                &generation,
+                now,
+                now + 600000,
+            )
+            .await
+            .expect("durable replay"),
+        // Confirmation arms the route but does not publish the create reply.
+        // This internal bridge must preserve that existing Store boundary.
+        plurx_core::domain::MediaSessionRequestClaim::InFlight {
+            incarnation_id: route.incarnation_id,
+            owner_node_id: Some(route.owner_node_id),
+            claim_expires_at_ms: route.lease_expires_at_ms,
+        }
+    );
+}
+
 #[tokio::test]
 #[ignore = "explicit owned rolling campaign only; requires validated manifest and real browser"]
 async fn owned_real_rolling_cell() {
@@ -336,61 +471,9 @@ async fn owned_real_rolling_cell() {
     let run=std::panic::AssertUnwindSafe(async {
     assert!(!info.vod && info.encoder != "copy" && info.encoder != "cached");
     assert_eq!(info.target_height,cell.height,"actual producer rung differs");
-    let now = crate::media_sessions::unix_ms();
-    let fingerprint = req.intent_fingerprint("rolling-lab");
-    store
-        .claim_media_session_request(
-            7,
-            &generation,
-            &fingerprint,
-            &cell.nonce,
-            &generation,
-            now,
-            now + 600000,
-        )
-        .await
-        .expect("claim");
-    assert!(store
-        .assign_media_session_request_owner(7, &generation, &generation, "rolling-lab", now)
-        .await
-        .expect("assign"));
     let origin_ms = (info.media_origin_seconds * 1000.0).round() as i64;
     let response_json=serde_json::json!({"session_id":info.session_id,"playlist_url":info.playlist_url,"duration_ms":info.duration_ms,"media_origin_seconds":info.media_origin_seconds,"target_height":info.target_height,"encoder":info.encoder,"grade":info.grade,"vod":info.vod}).to_string();
-    let activation = plurx_core::domain::MediaSessionActivation {
-        recovery_epoch: String::new(),
-        expected_desired_revision: None,
-        incarnation_id: generation.clone(),
-        session_id: info.session_id.clone(),
-        user_id: 7,
-        playback_id: cell.nonce.clone(),
-        expected_predecessor_incarnation_id: None,
-        fence_predecessor: false,
-        request_id: Some(generation.clone()),
-        request_fingerprint: fingerprint,
-        owner_node_id: "rolling-lab".into(),
-        recipe_json: serde_json::to_string(&req).expect("recipe"),
-        response_json,
-        publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
-        media_origin_ms: origin_ms,
-        now_ms: now,
-        lease_expires_at_ms: now + 600000,
-    };
-    store
-        .activate_media_session(&activation)
-        .await
-        .expect("activate")
-        .expect("accepted");
-    store
-        .settle_media_session_activation(
-            &activation,
-            plurx_core::domain::MediaSessionActivationSettlement::Confirm {
-                publication_ready_at_ms: 0,
-            },
-            now,
-        )
-        .await
-        .expect("settle")
-        .expect("confirmed");
+    setup_owned_rolling_route(store.as_ref(), &req, &generation, &info.session_id, response_json, origin_ms).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("loopback");
