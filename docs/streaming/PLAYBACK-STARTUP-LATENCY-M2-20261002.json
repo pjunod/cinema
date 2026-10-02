@@ -37,7 +37,7 @@
       7999,
       15999
     ],
-    "bounded_initial_endpoint": "Round up unless it exceeds position + 124s; then use the largest complete endpoint in the grant."
+    "bounded_initial_endpoint": "Round up unless it exceeds position + 124s first-snapshot limit; then use the largest complete eligible endpoint. Producer allowance and complete-cut envelope remain unchanged (140s at 4x)."
   },
   "model_summary": {
     "12000:12000": {
@@ -159,5 +159,86 @@
     "url": "http://192.168.4.7:3000/noirr/plurx/pulls/711",
     "draft": true
   },
-  "native_measurement_note": "Record both first composited frame and advancing playback: Safari may render an initial frame while waiting for more media."
+  "native_measurement_note": "Record both first composited frame and advancing playback: Safari may render an initial frame while waiting for more media.",
+  "native_generated_sweep": [
+    {
+      "threshold_media_s": 12,
+      "first_composited_frame_ms": 4467,
+      "first_playing_ms": 20438,
+      "last_position_s": 24.080182750008674,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 16,
+      "first_composited_frame_ms": 4439,
+      "first_playing_ms": 20424,
+      "last_position_s": 24.262190458653947,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 24,
+      "first_composited_frame_ms": 6538,
+      "first_playing_ms": 22520,
+      "last_position_s": 22.335781541339774,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 32,
+      "first_composited_frame_ms": 8642,
+      "first_playing_ms": 8645,
+      "last_position_s": 35.383391625020636,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 48,
+      "first_composited_frame_ms": 12888,
+      "first_playing_ms": 12881,
+      "last_position_s": 31.319192666345618,
+      "waiting_after_first_frame": 1,
+      "waiting_after_advancing_half_second": 0,
+      "observation_s": 45
+    }
+  ],
+  "native_sweep_receipt_sha256": "89e32beb22ec573fed16d73f3453a0d6d2ebb60209a0276c5d0562a19b599b29",
+  "native_continuity_source_hashes": {
+    "crates/plurxd/src/web/player/player.js": "ea9e153b37b299f4da90fa51b580500e4c04ad71266a1a5ce2489f7abc343191",
+    "crates/plurxd/src/web/playback-policy.js": "725dc45d48c7b216e94b199d60e7a1abe48c6f314d9cfaeb67ad70a2ca1ee7aa",
+    "crates/plurxd/src/web/hls.min.js": "442f599c34f103c3355b375a23bdff560592d7117d09a8c847242ea3de2d40e0",
+    "tests/playback/native-hls-browser-fixture.py": "be790bf5124f4d83e0e7dccb3f94e3449eed7350da7d45d178db6602d3a89126"
+  },
+  "native_continuity_source_hash_note": "Observed file hashes while run 6 is active; executable tree unchanged since e3cffab4. Receipt does not independently contain hashes sent by the browser.",
+  "production_ratio_design_replay": {
+    "ratios": {
+      "0.95": {
+        "rows": 180,
+        "buffer_deficits": 180,
+        "illegal_update_spacing": 90
+      },
+      "1.05": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 54
+      },
+      "1.2": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 54
+      },
+      "2": {
+        "rows": 180,
+        "buffer_deficits": 0,
+        "illegal_update_spacing": 36
+      }
+    },
+    "sha256": "d59a1403c06190ac97fa0c9c544b22c22b5321f01c443302bd4f276d032e0387",
+    "limits": "Arithmetic only; unconstrained inventory and assumed 2.5s transfer/append. Below-consumption is a negative control, not an admitted production class."
+  }
 }

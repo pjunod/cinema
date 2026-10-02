@@ -621,9 +621,11 @@
         let served = clock.served.as_ref().expect("first snapshot");
         assert_eq!(served.end_ms, 120_000);
         assert!(served.end_ms >= 124_000 - ROLLING_SEGMENT_MAX_MS);
-        assert!(
-            served.end_ms <= 124_000,
-            "whole cuts do not exceed the grant"
+        assert!(served.end_ms <= 124_000, "bootstrap endpoint is bounded");
+        assert_eq!(
+            clock.allowed_end_ms,
+            Some(140_000),
+            "the producer retains the paid steady allowance and cut envelope"
         );
     }
 

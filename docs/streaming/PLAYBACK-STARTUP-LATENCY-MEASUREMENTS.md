@@ -219,9 +219,13 @@ The new replay uses the normal 16-second publication cadence, complete
 8/16-second objects, 0.25–4× playback, 1.05× relative production, three origin
 leads, three reload phases, a 0/2-second source pause and an assumed 2.5-second
 transfer/append margin. `scripts/playback-startup-trace --output <owned-path>`
-reproduces it. Initial endpoint rounding is capped by position plus 124 seconds;
-when rounding up crosses the grant, the model uses the largest complete
-in-grant endpoint, matching the ceiling regression. These margins are experiment inputs, not measured fleet bounds.
+reproduces it. The candidate first-snapshot endpoint is capped by position plus 124 seconds;
+when rounding up crosses that snapshot limit, the model uses the largest
+complete eligible endpoint within the limit. The producer keeps its existing
+paid steady allowance and complete-cut envelope (140 seconds at 4×); first
+snapshot selection does not shrink that grant. The ceiling regression checks
+both limits separately. These margins are experiment inputs, not measured
+fleet bounds.
 
 | 1× candidate / minimum | Buffer deficits / 180 rows |
 |---|---:|

@@ -1027,10 +1027,25 @@ impl Session {
             };
             selected.index
         } else {
+            // The producer retains its steady allowance plus a complete-cut
+            // envelope. A web bootstrap may use less of that paid allowance:
+            // keep its first advertised endpoint within the policy ceiling.
+            let first_web_snapshot = previous_served.is_none()
+                && self.publication.lock().await.startup_policy
+                    == RollingStartupPolicy::WebFixedHlsV1;
+            let selection_allowed_end_ms = if first_web_snapshot {
+                budget.allowed_end_ms.min(
+                    budget
+                        .consumed_end_ms
+                        .saturating_add(ROLLING_RESERVE_MAX_MS),
+                )
+            } else {
+                budget.allowed_end_ms
+            };
             let earned = index.segs.iter().find(|segment| {
                 segment.index >= first_new_segment
                     && segment.end_ms >= budget.desired_end_ms
-                    && segment.end_ms <= budget.allowed_end_ms
+                    && segment.end_ms <= selection_allowed_end_ms
             });
             let low_reserve = {
                 let clock = self.publication.lock().await;
@@ -1039,12 +1054,13 @@ impl Session {
             };
             let floor = earned.or_else(|| {
                 budget.demand_sequence.and_then(|_| {
-                    if previous_served.is_none() {
-                        // At the 124s ceiling the next complete cut may fall
-                        // outside the grant. Round down by at most one bounded
+                    if first_web_snapshot {
+                        // At the 124s bootstrap ceiling the next complete cut
+                        // may be paid for but exceed the first snapshot limit.
+                        // Round down by at most one bounded
                         // segment, never fall through to the first tiny object.
                         return index.segs.iter().rev().find(|segment| {
-                            segment.end_ms <= budget.allowed_end_ms
+                            segment.end_ms <= selection_allowed_end_ms
                                 && segment.end_ms
                                     >= budget.desired_end_ms.saturating_sub(ROLLING_SEGMENT_MAX_MS)
                         });
