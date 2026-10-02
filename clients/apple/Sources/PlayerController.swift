@@ -2354,8 +2354,8 @@ final class PlayerController: ObservableObject {
     //  preparedPlayer  -- muted, retained staging layer ------->  nothing
     //
     // The incumbent stays authoritative until the moment of commit. The
-    // successor is never audible and never on a layer, because two audible
-    // streams is the failure viewers report as an echo and nobody reproduces.
+    // successor is muted on its own attached hidden layer; audible ownership
+    // moves only after aligned decoded media is ready for exposure.
     /// The muted second `AVPlayer` with its retained staging layer. Nil whenever no staging is
     /// live, and every exit sets it back to nil — dismiss, background, session
     /// end, seek, another quality change. On tvOS a leaked second player
@@ -2363,6 +2363,8 @@ final class PlayerController: ObservableObject {
     private var preparedPlayer: AVPlayer?
     /// The successor's item stays in its own player through promotion.
     private var preparedItem: AVPlayerItem?
+    /// Item-specific decoded alignment proof retained across warm promotion.
+    private var preparedVideoOutput: AVPlayerItemVideoOutput?
     private var preparedMonitor: Task<Void, Never>?
     private var preparedLifecycle: [AnyCancellable] = []
     /// The film position the successor was primed to, and the boundary the
@@ -7482,14 +7484,16 @@ final class PlayerController: ObservableObject {
     /// item's output reached the requested timeline, but AVPlayerItemVideoOutput
     /// does not acknowledge physical display by AVPlayerLayer; device playback
     /// qualification must still verify that final rendering boundary.
-    private func installSeekVideoOutput(on item: AVPlayerItem) {
+    private func installSeekVideoOutput(
+        on item: AVPlayerItem, retaining preparedOutput: AVPlayerItemVideoOutput? = nil
+    ) {
         seekPresentationTask?.cancel()
         seekPresentationTask = nil
         seekVideoOutput?.setDelegate(nil, queue: nil)
-        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        let output = preparedOutput ?? AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
         let wakeup = SeekOutputWakeup()
         output.setDelegate(wakeup, queue: .main)
-        item.add(output)
+        if !item.outputs.contains(where: { $0 === output }) { item.add(output) }
         seekVideoOutput = output
         seekOutputWakeup = wakeup
     }
@@ -10412,7 +10416,7 @@ extension PlayerController {
 /// failing to prime a successor is an error branch produces a stuck player on
 /// the first device that has one slot.
 extension PlayerController: PreparedSuccessorHost {
-    /// Build the muted, layer-less second pipeline and prime it to the film
+    /// Build the muted second pipeline on its staging layer and prime it to the film
     /// position the viewer is watching.
     func startPreparedSuccessor(
         _ action: PreparedReplacementAction,
@@ -10428,6 +10432,9 @@ extension PlayerController: PreparedSuccessorHost {
         else { return false }
         let item = AVPlayerItem(url: url)
         Self.configureBuffering(item, growingHLS: true)
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+        item.add(output)
+        preparedVideoOutput = output
         let successor = AVPlayer(playerItem: item)
         // Muted on a retained staging layer; the predecessor owns playback
         // until the target's layer and aligned item are ready for promotion.
@@ -10508,6 +10515,11 @@ extension PlayerController: PreparedSuccessorHost {
         preparedMonitor?.cancel()
         preparedMonitor = nil
         preparedLifecycle.removeAll()
+        if let output = preparedVideoOutput {
+            output.setDelegate(nil, queue: nil)
+            preparedItem?.remove(output)
+        }
+        preparedVideoOutput = nil
         preparedPlayer?.replaceCurrentItem(with: nil)
         preparedPlayer = nil
         if let previous = warmPredecessor, previous !== player {
@@ -10633,16 +10645,9 @@ extension PlayerController: PreparedSuccessorHost {
         return action.mediaOriginMs + Int(((playhead + runway) * 1_000).rounded())
     }
 
-    /// Put the primed successor in front of the viewer, and report the wall
-    /// clock of its own first qualifying frame.
-    ///
-    /// The item moves rather than the player: the incumbent `AVPlayer` owns
-    /// the layer, Picture in Picture, the periodic time observer, and every
-    /// KVO this controller installed, and swapping the player object would
-    /// have to re-establish all of it at the exact instant a viewer is
-    /// watching. Reassociating an item is the narrower change — and it is
-    /// guarded, because AVFoundation raises rather than returns when an item
-    /// is handed to a second player while the first still holds it.
+    /// Promote the primed player and its retained layer after item-specific
+    /// decoded alignment. The item and decoder output stay bound throughout;
+    /// physical display and audio qualification remains a separate observation.
     func commitPreparedSuccessor(
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
@@ -10728,6 +10733,15 @@ extension PlayerController: PreparedSuccessorHost {
             discardPreparedSuccessor()
             return automaticTrial ? .failedWithoutReopen : PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
         }
+        guard let alignedOutput = preparedVideoOutput,
+              await awaitPreparedDecodedAlignment(
+                item: item, successor: successor, output: alignedOutput,
+                rendezvous: rendezvous, viewerEpoch: commitViewerEpoch
+              ) else {
+            discardPreparedSuccessor()
+            return .failedWithoutReopen
+        }
+
         // The staging can be taken away under that await — the player ending,
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
@@ -10750,6 +10764,7 @@ extension PlayerController: PreparedSuccessorHost {
         let exposureRecipeRevision = recipeRevision.desired
         preparedPlayer = nil
         preparedItem = nil
+        preparedVideoOutput = nil
         warmPredecessor = incumbentPlayer
         stagedSurfacePlayer = incumbentPlayer
         defer {
@@ -10798,7 +10813,7 @@ extension PlayerController: PreparedSuccessorHost {
         player.volume = incumbentVolume
         player.isMuted = incumbentMuted
         stopStatusPolling()
-        installSeekVideoOutput(on: item)
+        installSeekVideoOutput(on: item, retaining: alignedOutput)
         #if os(iOS)
         item.externalMetadata = [titleMetadata(title)]
         #endif
@@ -10955,6 +10970,36 @@ extension PlayerController: PreparedSuccessorHost {
         // the wrapper task rather than the media operation inside it.
         seek.cancel()
         return landed ?? false
+    }
+
+    /// Check the parked item's decoded output after its alignment seek.
+    /// A hidden layer ready bit from before the seek cannot satisfy this proof.
+    private func awaitPreparedDecodedAlignment(
+        item: AVPlayerItem, successor: AVPlayer, output: AVPlayerItemVideoOutput,
+        rendezvous: PreparedCommitRendezvous, viewerEpoch: Int
+    ) async -> Bool {
+        let startedAt = Int(ProcessInfo.processInfo.systemUptime * 1_000)
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - startedAt < PreparedReplacementBounds.alignmentMs {
+            guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
+                  preparedVideoOutput === output, viewerActionEpoch == viewerEpoch,
+                  wantsPlayback, UIApplication.shared.applicationState == .active,
+                  !pictureInPictureIsActive, !player.isExternalPlaybackActive,
+                  item.status == .readyToPlay else { return false }
+            let itemTime = item.currentTime()
+            var displayTime = CMTime.invalid
+            if itemTime.isValid, itemTime.seconds.isFinite,
+               output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pixels = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &displayTime),
+               displayTime.isValid,
+               rendezvous.acceptsDecodedAlignment(
+                displaySeconds: displayTime.seconds,
+                width: CVPixelBufferGetWidth(pixels), height: CVPixelBufferGetHeight(pixels)
+               ), playbackSurface?.canPromote(successor) == true {
+                return true
+            }
+            try? await Task.sleep(nanoseconds: UInt64(PreparedReplacementBounds.pollMs) * 1_000_000)
+        }
+        return false
     }
 
     /// Wall clock at the successor's first frame that is actually at or past

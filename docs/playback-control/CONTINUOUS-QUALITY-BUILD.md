@@ -2355,3 +2355,26 @@ scripts/playback-lab run --suite continuous --browser chrome \
 The suite and observer/scorer regressions are authored and syntax-checked;
 no unit execution or twenty-switch production qualification is claimed yet.
 Controlled cold-rung ownership and native adapters remain unfinished.
+
+
+### 10.68 Apple warm promotion verifies the post-seek decoded sample
+
+A hidden AVPlayerLayer's readiness can describe the frame from before an
+alignment seek. Apple preparation now attaches an item-specific video output
+when constructing the successor. After alignment, promotion requires a real
+pixel buffer with a finite item-local display time within 250 ms of the
+rendezvous and a nonempty raster, under the same item/player/viewer lifecycle
+fences. The incumbent stays visible throughout this bounded check.
+
+Warm promotion retains that exact video output for the successor's ordinary
+seek and first-frame observation; it does not install a new decoder sample
+observer at exposure. Discard removes the staged output and its delegate.
+Stale samples, failed seeks, backgrounding and ownership changes retain the
+incumbent. This improves the pre-exposure proof; it does not turn pixel-buffer
+availability into a physical-display or audio-output acknowledgement.
+
+Production and test-source iOS compilation and production tvOS compilation
+passed. The authored rendezvous regression covers exact/tolerance-edge times,
+stale/nonfinite timestamps and missing rasters. Unit execution remains
+deferred. Device audiovisual qualification and native continuous adapters
+remain open.

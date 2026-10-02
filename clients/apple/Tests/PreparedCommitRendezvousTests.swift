@@ -55,6 +55,19 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         return source[start.upperBound...]
     }
 
+    func testDecodedAlignmentRejectsStaleInvalidAndEmptySamples() {
+        let rendezvous = PreparedCommitRendezvous.plan(
+            stagedFilmPositionMs: 1_000, incumbentFilmPositionMs: 10_000, mediaOriginMs: 2_000
+        )
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 1280, height: 720))
+        XCTAssertTrue(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.25, width: 1280, height: 720))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 7.749, width: 1280, height: 720))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8.251, width: 1280, height: 720))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .nan, width: 1280, height: 720))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: .infinity, width: 1280, height: 720))
+        XCTAssertFalse(rendezvous.acceptsDecodedAlignment(displaySeconds: 8, width: 0, height: 720))
+    }
+
     // MARK: The rendezvous itself
 
     func testTheSwitchHappensWhereTheIncumbentGotToNotWhereTheOfferStagedIt() {
