@@ -502,6 +502,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("autoQualityCard"), shippedSource("displayAwareAutoCard"), shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("libraryChannelsSettingsCard"),
       shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
+      shippedSource("rateControlCard"),
       shippedSource("playbackPanel"), shippedSource("metadataPanel"),
       shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
       shippedSource("maintenancePanel"), shippedSource("presetOpts"),
@@ -1408,6 +1409,42 @@ test("HEVC override saves either choice without consulting advisory readiness", 
     assert.equal(card.outerHTML, `saved:${enabled}`);
     assert.equal(err.textContent, "");
   }
+});
+
+test("Rate control round-trips an unset request as unset and keeps explicit choices", async () => {
+  const card = new Function("setCard","cardHead","setCardFoot","esc",
+    `${shippedSource("rateControlCard")}\nreturn rateControlCard;`)(
+    (body, opts) => `CARD#${(opts||{}).id}[${body}]`, (title) => `HEAD:${title}`, (fn) => `FOOT:${fn}`, esc);
+  const request = new Function(`${shippedSource("rateControlRequest")}\nreturn rateControlRequest;`)();
+  const selected = (html) => {
+    const chosen = [...html.matchAll(/<option value="([^"]*)" (selected)?>/g)].filter((m) => m[2]);
+    assert.equal(chosen.length, 1, html);
+    return chosen[0][1];
+  };
+  const quality = (html) => /id="prq"[^>]*value="([^"]*)"/.exec(html)[1];
+  const unset = {transcode_rate_mode:null, transcode_quality:null, transcode_rate_mode_default:"bitrate",
+    transcode_rate_mode_default_encoder:"qsv", transcode_quality_default:22};
+  const html = card(unset);
+  assert.match(html, /Default \(per encoder\) — qsv uses bitrate/);
+  assert.match(html, /placeholder="family default \(22\)"/);
+  assert.match(html, /FOOT:saveRateControl/);
+  // A Save that never touched the control sends the clear, never a bitrate pin.
+  assert.deepEqual(request(selected(html), quality(html)), {transcode_rate_mode:null, transcode_quality:null});
+  for (const [mode, q] of [["bitrate", null], ["quality", 21]]) {
+    const explicit = card({...unset, transcode_rate_mode:mode, transcode_quality:q});
+    assert.deepEqual(request(selected(explicit), quality(explicit)), {transcode_rate_mode:mode, transcode_quality:q});
+  }
+
+  const calls = [];
+  const fields = {prc:{value:""}, prq:{value:""}, rcerr:{textContent:""}, rccard:{outerHTML:""}};
+  const save = new Function("api","document","cacheSettings","toast","setCardSaved","rateControlCard","rateControlRequest",
+    `${shippedSource("saveRateControl")}\nreturn saveRateControl;`)(
+    async (path, opts) => { calls.push([path, opts.method, opts.body]); return unset; },
+    {getElementById:(id) => fields[id]}, () => {}, () => {}, () => {}, (s) => `rerendered:${s.transcode_rate_mode}`, request);
+  await save({disabled:false});
+  assert.deepEqual(calls, [["/settings", "PUT", {transcode_rate_mode:null, transcode_quality:null}]]);
+  assert.equal(fields.rccard.outerHTML, "rerendered:null");
+  assert.equal(fields.rcerr.textContent, "");
 });
 
 main().then(() => {

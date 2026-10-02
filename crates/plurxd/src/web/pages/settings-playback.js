@@ -469,3 +469,49 @@ function verifiedDecodeCard(s){
       <div class="err" id="dhqerr" role="alert"></div>
       ${setCardFoot("saveVerifiedDecode")}`,{id:"vdcard"});
 }
+
+// Encoder rate control. The stored request is tri-state: unset (each encoder
+// family's measured code default applies), or an explicit bitrate / quality
+// choice that stays put if a family default later changes. The server reports
+// unset as null and the default it resolves to separately; this card must
+// round-trip null as null. Writing the displayed default back as "bitrate"
+// was how a cluster ended up pinned to an explicit bitrate nobody chose.
+function rateControlRequest(mode,quality){
+  const m=String(mode==null?"":mode).trim();
+  const q=String(quality==null?"":quality).trim();
+  return {transcode_rate_mode:m===""?null:m,transcode_quality:q===""?null:Number(q)};
+}
+function rateControlCard(s){
+  const mode=s.transcode_rate_mode==null?"":String(s.transcode_rate_mode);
+  const family=s.transcode_rate_mode_default_encoder||"this encoder";
+  const familyMode=s.transcode_rate_mode_default||"bitrate";
+  const quality=s.transcode_quality==null?"":String(s.transcode_quality);
+  const qualityDefault=s.transcode_quality_default==null?"family default":`family default (${s.transcode_quality_default})`;
+  const opt=(value,label)=>`<option value="${value}" ${mode===value?"selected":""}>${esc(label)}</option>`;
+  return setCard(`${cardHead("Encoder rate control","Server encoding · Applies to new transcodes. Default follows each encoder family's measured choice; an explicit choice stays put if a default changes.")}
+      <div class="setfields">
+        <div><label for="prc">Rate control</label><select id="prc" style="min-width:260px">
+          ${opt("",`Default (per encoder) — ${family} uses ${familyMode}`)}
+          ${opt("bitrate","Bitrate — fixed target")}
+          ${opt("quality","Quality — constant quality, capped")}</select></div>
+        <div><label for="prq">Quality value</label><input id="prq" type="number" min="0" max="255" step="1" placeholder="${esc(qualityDefault)}" value="${esc(quality)}"></div>
+      </div>
+      <div class="hint">Changing this moves the cache identity of affected transcodes, so those titles are encoded again on next demand. A quality request is tested on this node's encoder before it is saved; a driver that refuses it keeps bitrate.</div>
+      <div class="err" id="rcerr" role="alert"></div>
+      ${setCardFoot("saveRateControl")}`,{id:"rccard"});
+}
+async function saveRateControl(btn){
+  const err=document.getElementById("rcerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const mode=/** @type {HTMLSelectElement} */(document.getElementById("prc"));
+    const quality=/** @type {HTMLInputElement} */(document.getElementById("prq"));
+    const saved=await api("/settings",{method:"PUT",body:rateControlRequest(mode.value,quality.value)});
+    cacheSettings(saved);
+    toast("Rate control saved"); if(btn) setCardSaved(btn);
+    // Re-render this card from the response: the server's answer, including
+    // the default it resolves an unset request to, is what is in force.
+    const card=document.getElementById("rccard");
+    if(card) card.outerHTML=rateControlCard(saved);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
