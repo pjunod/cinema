@@ -73,8 +73,9 @@ def private_file(path):
 
 def admit_owner(manifest):
     """Cheap bounded ownership admission; never hash or inspect media/tools."""
-    if set(manifest) != {"nonce", "root", "source", "source_sha256", "probe", "height", "page", "test_binary", "test_binary_sha256", "browser", "browser_sha256", "hls_sha256", "ffmpeg", "ffmpeg_sha256", "ffprobe", "ffprobe_sha256"}:
+    if set(manifest) - {"test_stack_bytes"} != {"nonce", "root", "source", "source_sha256", "probe", "height", "page", "test_binary", "test_binary_sha256", "browser", "browser_sha256", "hls_sha256", "ffmpeg", "ffmpeg_sha256", "ffprobe", "ffprobe_sha256"}:
         raise ValueError("unknown or missing manifest fields")
+    owned_child_environment(manifest)
     nonce = manifest["nonce"]
     if not isinstance(nonce, str) or not re.fullmatch(r"[a-f0-9]{64}", nonce):
         raise ValueError("invalid owner nonce")
@@ -126,6 +127,20 @@ def stop_owned(process, expected_pid):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+
+
+def owned_child_environment(manifest, cell_path=None):
+    """Explicit lab test settings only; never inherit the caller's environment."""
+    env = {"PATH": os.defpath, "HOME": str(manifest["root"])}
+    if "test_stack_bytes" in manifest:
+        stack = manifest["test_stack_bytes"]
+        if type(stack) is not int or not 2 * 1024**2 <= stack <= 8 * 1024**2 or stack % 4096:
+            raise ValueError("test_stack_bytes must be page-aligned and between 2MiB and 8MiB")
+        env["RUST_MIN_STACK"] = str(stack)
+    if cell_path is not None:
+        env.update(PLURX_ROLLING_CELL=str(cell_path), PLURX_FFMPEG=manifest["ffmpeg"],
+                   PLURX_FFPROBE=manifest["ffprobe"])
+    return env
 
 
 def execution_envelope():
@@ -256,7 +271,7 @@ def acquire(manifest):
     manifest_path.chmod(0o600)
     command = [sys.executable, str(Path(__file__).resolve()), '--exec-owned-cell',
                str(manifest_path), str(deadline - 15)]
-    env = {'PATH': os.defpath, 'HOME': str(root)}
+    env = owned_child_environment(manifest)
     try:
         process = subprocess.Popen(command, env=env)
     except BaseException as error:
@@ -275,7 +290,6 @@ def acquire(manifest):
 def acquire_worker(manifest, deadline):
     root = validate(manifest)
     envelope=execution_envelope()
-    (root/"execution-envelope.json").write_text(json.dumps(envelope))
     source_before = Path(manifest["source"]).stat()
     cell = {k: manifest[k] for k in ("nonce", "root", "source", "source_sha256", "probe", "height", "page")}
     cell_path = root / "cell.json"
@@ -283,7 +297,9 @@ def acquire_worker(manifest, deadline):
     os.chmod(cell_path, 0o600)
     log = (root / "bridge.log").open("xb")
     os.chmod(root / "bridge.log",0o600)
-    env = {"PATH":os.defpath,"HOME":str(root),"PLURX_ROLLING_CELL":str(cell_path),"PLURX_FFMPEG":manifest["ffmpeg"],"PLURX_FFPROBE":manifest["ffprobe"]}
+    env = owned_child_environment(manifest, cell_path)
+    envelope["test_process_environment"] = env
+    (root/"execution-envelope.json").write_text(json.dumps(envelope))
     command = [sys.executable,str(Path(__file__).resolve()),"--exec-owned-test",manifest["test_binary"]]
     process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, env=env)
     pid = process.pid

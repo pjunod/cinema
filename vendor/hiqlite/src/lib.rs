@@ -16,6 +16,8 @@ compile_error!("features `cast_ints` and `cast_ints_unchecked` are mutually excl
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub use hiqlite_wal::LogSync;
+pub use reduction::ReductionFenceReference;
+mod reduction;
 #[cfg(feature = "sqlite")]
 pub use hiqlite_wal::{
     BoundedWalError, WalRecoveryObservation, WalRuntimeState, WalStatusHandle, WalStatusSnapshot,

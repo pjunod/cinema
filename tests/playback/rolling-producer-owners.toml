@@ -1138,7 +1138,10 @@ pattern = "media_session_route_for_playback"
 # `a_settlement_delayed_past_its_retry_budget_expires_uncommitted` proves the
 # expired settlement left the predecessor current. Neither is a shipped read;
 # the store's CAS stays the only pointer authority.
-expected_occurrences = 25
+# A05 recovery: 25 -> 27 for incumbent's authenticated pointer reads before
+# and after physical-source validation. Both refuse stale observations; they
+# neither publish nor mutate the pointer and grant no recovery authority.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -1272,7 +1275,10 @@ pattern = "publication_ready_at_ms"
 # S11 durable-claim harness: +1 test-only route read asserts that the existing
 # Confirm settlement arms publication at zero. The extracted setup retains
 # its two prior references; no shipped publication writer or owner is added.
-expected_occurrences = 104
+# A05 recovery: 104 -> 112, six activation/confirmation fixture fields in
+# three new exact recovery/ack cases plus two refusal-only incumbent reads.
+# No new publication writer or lifecycle owner is introduced.
+expected_occurrences = 112
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1316,7 +1322,9 @@ pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
 # tests/rolling_grid_campaign.rs, settled by the existing activation API.
 # Same A05 consumer fixture; test-only blocked initial activation, not a new
 # writer/settlement/producer lifecycle owner.
-expected_occurrences = 35
+# A05 recovery: 35 -> 38, three new exact ack/typed-recovery fixtures use
+# the existing blocked activation then Confirm. No new shipped sentinel write.
+expected_occurrences = 38
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
@@ -3635,7 +3643,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # one bounds its modeled fixture wait, one the actual PUT fixture playlist,
 # one the existing inner completion deadline, one real preparation fixture.
 # No extra spawned task or producer loop; all fixture waits are awaited.
-expected_occurrences = 1161
+# A05 recovery: 1161 -> 1169, eight bounded 100ms observational waits:
+# six authenticated fault/memory/current-incumbent helpers, one prepared
+# memory read, one negative-ack fold. None renew a playback/producer budget.
+expected_occurrences = 1169
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -4446,7 +4457,14 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # S09 composition retains all of the above: effort414 plus B-R1's two
 # non-process response reads and the one bounded queued-publication child.
 # +1 matching collected `.output()` for that finite trailer-negative fixture.
-expected_occurrences = 418
+# A05 HTTP ack: 418 -> 422 for four test-only Axum Response.status() checks.
+# They assert ordinary204/accepted-header behavior, not child launches.
+# +1 same58: the NEW durable-conflict ClientLog fixture reads Response.status()
+# to verify ordinary204 without an acceptance header. This is an in-process
+# response assertion, not a child launch, task or lifecycle owner.
+# +1 same58 final exact-readback control: another in-process Response.status()
+# verifies older-completion refusal without ACK. No child or new owner.
+expected_occurrences = 424
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

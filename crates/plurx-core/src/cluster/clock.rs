@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub const CLOCK_OFFSET_REFUSAL_MS: i64 = 2_000;
 pub const CLOCK_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(25);
 pub const CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS: i64 = 250;
+#[cfg(feature = "hiqlite-store")]
+const REMOVAL_REACHABILITY_STABILIZATION: Duration = Duration::from_secs(30);
 
 /// Address-free identity of a locally applied Raft membership entry. Log
 /// identity is part of coverage even when an ABA change restores the same IDs.
@@ -708,6 +710,54 @@ pub struct ClockAcquisitionTicket<'guard> {
     decision: ClockDecisionTicket,
 }
 
+/// Original node-local observation for a reduction, not admission by itself.
+/// Only an exact durable removal fence can qualify exclusion of its target.
+#[cfg(feature = "hiqlite-store")]
+pub struct ClockRemovalCapture<'guard> {
+    guard: &'guard ClusterClockGuard,
+    decision: ClockDecisionTicket,
+    membership: ClockMembershipIdentity,
+    peers: BTreeMap<String, PeerClockOffset>,
+    target: RemovalTarget,
+    captured_at: Instant,
+    reachability_stable: bool,
+}
+
+#[cfg(feature = "hiqlite-store")]
+enum RemovalTarget {
+    Node(String),
+    Raft(u64),
+}
+
+#[cfg(feature = "hiqlite-store")]
+impl ClockRemovalCapture<'_> {
+    #[must_use]
+    pub fn now_ms(&self) -> i64 {
+        self.decision.now_ms
+    }
+
+    /// A wall-age comparison is unavailable for the entire original operation
+    /// when it began inside a post-step stabilization window. Waiting cannot
+    /// renew this capture into a new reachability observation.
+    #[must_use]
+    pub(crate) fn permits_wall_reachability(&self) -> bool {
+        self.reachability_stable
+    }
+
+    pub(crate) fn remaining_removal_budget(&self) -> Option<Duration> {
+        Duration::from_secs(15)
+            .checked_sub(Instant::now().checked_duration_since(self.captured_at)?)
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    fn matches_target(&self, node_id: &str, raft_id: u64) -> bool {
+        match &self.target {
+            RemovalTarget::Node(expected) => expected == node_id,
+            RemovalTarget::Raft(expected) => *expected == raft_id,
+        }
+    }
+}
+
 impl ClockAcquisitionTicket<'_> {
     /// Bind this original value to the caller's expiry query/proposal. A later
     /// revalidation never replaces it with a fresh wall reading.
@@ -777,6 +827,7 @@ struct ClockInner {
     standalone: bool,
     roster_observed_at: Option<Instant>,
     membership: Option<ClockMembershipIdentity>,
+    last_discontinuity: Option<Instant>,
 }
 
 pub struct ClusterClockGuard {
@@ -824,6 +875,7 @@ impl ClusterClockGuard {
                 standalone: !replicated,
                 roster_observed_at: None,
                 membership: None,
+                last_discontinuity: None,
             }),
         }
     }
@@ -890,6 +942,161 @@ impl ClusterClockGuard {
         Ok(ClockAcquisitionTicket {
             guard: self,
             decision,
+        })
+    }
+
+    /// Capture before the manager resolves this UUID through any awaited read.
+    /// Unknown target evidence is retained, never silently called NoPeers.
+    #[cfg(feature = "hiqlite-store")]
+    pub fn capture_removal_node(
+        &self,
+        node_id: &str,
+    ) -> Result<ClockRemovalCapture<'_>, ClockRefusal> {
+        if node_id.is_empty() || node_id.len() > 256 {
+            return Err(ClockRefusal::Unknown);
+        }
+        self.capture_removal(RemovalTarget::Node(node_id.to_owned()))
+    }
+
+    /// Receiver-local capture; the untrusted requested id grants no exclusion.
+    #[cfg(feature = "hiqlite-store")]
+    pub fn capture_removal_raft(
+        &self,
+        raft_id: u64,
+    ) -> Result<ClockRemovalCapture<'_>, ClockRefusal> {
+        self.capture_removal(RemovalTarget::Raft(raft_id))
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    fn capture_removal(
+        &self,
+        target: RemovalTarget,
+    ) -> Result<ClockRemovalCapture<'_>, ClockRefusal> {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
+        let generation = inner.snapshot.clock_generation;
+        let before = Instant::now();
+        let decision = Self::continuity(&mut inner, before, wall_ms(), Instant::now());
+        if decision.clock_generation != generation {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
+        let membership = inner.membership.clone().ok_or(ClockRefusal::Unknown)?;
+        if !inner.roster_proved
+            || membership.members.len() > 64
+            || !membership.members.contains(&membership.local_node)
+            || inner.snapshot.peers.len() != membership.members.len().saturating_sub(1)
+        {
+            return Err(ClockRefusal::Unknown);
+        }
+        let reachability_stable = inner.last_discontinuity.is_none_or(|changed| {
+            before
+                .checked_duration_since(changed)
+                .is_some_and(|age| age >= REMOVAL_REACHABILITY_STABILIZATION)
+        });
+        Ok(ClockRemovalCapture {
+            guard: self,
+            decision,
+            membership,
+            peers: inner.snapshot.peers.clone(),
+            target,
+            captured_at: before,
+            reachability_stable,
+        })
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn revalidate_removal_capture(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+    ) -> Result<(), ClockRefusal> {
+        if !std::ptr::eq(self, captured.guard) {
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.refresh_membership(&mut inner);
+        let now = Instant::now();
+        let current = Self::continuity(&mut inner, now, wall_ms(), Instant::now());
+        if current.clock_generation != captured.decision.clock_generation {
+            return Err(ClockRefusal::LocalDiscontinuity);
+        }
+        if current.state_generation != captured.decision.state_generation
+            || inner.membership.as_ref() != Some(&captured.membership)
+        {
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        if !inner.roster_proved
+            || !now
+                .checked_duration_since(captured.captured_at)
+                .is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE)
+        {
+            return Err(ClockRefusal::Unknown);
+        }
+        Ok(())
+    }
+
+    /// Final local redemption of an original observation and actual fenced
+    /// target. Called only before a new proposal, never for its reconciliation.
+    #[cfg(feature = "hiqlite-store")]
+    pub(super) fn admit_fenced_removal(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+        fence: &super::membership::AppliedRemovalFence,
+    ) -> Result<(), ClockRefusal> {
+        let result = (|| {
+            self.revalidate_removal_capture(captured)?;
+            let reference = fence.reference();
+            if !captured.matches_target(&reference.target_node_id, reference.target_raft_id)
+                || !captured
+                    .membership
+                    .members
+                    .contains(&reference.target_raft_id)
+                || (reference.target_raft_id != captured.membership.local_node
+                    && !captured.peers.contains_key(&reference.target_node_id))
+            {
+                return Err(ClockRefusal::GenerationChanged);
+            }
+            if fence.relies_on_wall_reachability() && !captured.permits_wall_reachability() {
+                return Err(ClockRefusal::LocalDiscontinuity);
+            }
+            let now = Instant::now();
+            for (node_id, observation) in &captured.peers {
+                if node_id == &reference.target_node_id {
+                    continue;
+                }
+                let PeerClockOffset::Bounded {
+                    offset_us,
+                    uncertainty_us,
+                    observed_at,
+                } = observation
+                else {
+                    return Err(ClockRefusal::Unknown);
+                };
+                if *uncertainty_us < 0
+                    || !now
+                        .checked_duration_since(*observed_at)
+                        .is_some_and(|age| age <= CLOCK_OBSERVATION_MAX_AGE)
+                {
+                    return Err(ClockRefusal::Unknown);
+                }
+                let upper = offset_us
+                    .checked_abs()
+                    .and_then(|offset| offset.checked_add(*uncertainty_us))
+                    .ok_or(ClockRefusal::Unknown)?;
+                if upper > CLOCK_OFFSET_REFUSAL_MS * 1_000 {
+                    return Err(ClockRefusal::Offset);
+                }
+            }
+            Ok(())
+        })();
+        result.inspect_err(|cause| {
+            self.refusals[ClockDecision::MembershipChange.index()][cause.index()]
+                .fetch_add(1, Ordering::Relaxed);
         })
     }
 
@@ -1003,6 +1210,7 @@ impl ClusterClockGuard {
                 (lower..=upper).contains(&delta)
             });
         if !valid {
+            inner.last_discontinuity = Some(after);
             inner.snapshot.clock_generation += 1;
             inner.snapshot.state_generation += 1;
             inner.snapshot.discontinuities += 1;

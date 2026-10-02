@@ -2496,11 +2496,19 @@ pub async fn decision(
     // advisory selection, never the feature switch or a manual request.
     let selection_candidates = if q.force.as_deref().unwrap_or("auto") == "auto" {
         if let Some(catalog) = quality_candidates.as_ref() {
+            let catalog = super::hls::candidate_recovery::decision_catalog(
+                &state,
+                identity.as_ref(),
+                &file,
+                super::hls::link_receipts::requested_receipt(&headers),
+                catalog.clone(),
+            )
+            .await;
             let catalog = super::hls::link_receipts::filter_catalog(
                 &state,
                 identity.as_ref(),
                 &file,
-                catalog.clone(),
+                catalog,
             )
             .await;
             Some(
