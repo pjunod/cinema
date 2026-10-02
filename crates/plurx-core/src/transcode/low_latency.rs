@@ -228,7 +228,9 @@ impl<'a> ReloadFrontier<'a> {
             // Future parent lengths are unknown. Do not park requests across
             // an unfinished boundary: only its own parts can be bounded from
             // this inventory. A completed parent can roll to its next part 0.
-            if sequence > last.media_sequence && !last.complete {
+            if sequence > last.media_sequence
+                && (!last.complete || last.media_sequence.checked_add(1) != Some(sequence))
+            {
                 return ReloadDecision::BadRequest;
             }
             let count = parent.map_or(0, |parent| parent.parts);
@@ -237,12 +239,7 @@ impl<'a> ReloadFrontier<'a> {
             }
             // Compare using a count so an empty parent's conceptual last
             // index (-1) needs neither signed casts nor unsigned subtraction.
-            let missing_parents = sequence
-                .saturating_sub(last.media_sequence)
-                .saturating_sub(1);
-            if u64::from(index).saturating_add(missing_parents)
-                >= u64::from(count).saturating_add(policy.advance_part_limit())
-            {
+            if u64::from(index) >= u64::from(count).saturating_add(policy.advance_part_limit()) {
                 return ReloadDecision::BadRequest;
             }
         }
@@ -446,6 +443,16 @@ mod tests {
         assert_eq!(
             frontier.classify(request(7, Some(8)), policy()),
             ReloadDecision::BadRequest
+        );
+        let completed = ReloadFrontier::new(&parents[..1], false).expect("complete fixture");
+        assert_eq!(
+            completed.classify(request(7, Some(5)), policy()),
+            ReloadDecision::Wait
+        );
+        assert_eq!(
+            completed.classify(request(8, Some(0)), policy()),
+            ReloadDecision::BadRequest,
+            "do not infer the part count of an entirely unpublished intervening parent"
         );
         let ended = ReloadFrontier::new(&parents[..1], true).expect("complete fixture");
         assert_eq!(

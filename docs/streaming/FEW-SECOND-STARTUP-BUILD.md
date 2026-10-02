@@ -150,8 +150,8 @@ preserving a remote main merge. Its base is `772b9cf236e989fbb75ac4d1aa760c0ad63
 At this packet's preparation, policy preflight passed; required Rust/Windows
 and aggregate gates were still pending. This is not a merge or deploy receipt.
 
-Review follow-up head `8d87d286095ef3d3f2ec3b24297c474b09eb79c6` is pushed
-with B1/B2 fixes; its remote gates are pending. Sections below describing the
+Review follow-up head `7b8954fca` is pushed with B1/B2 fixes and the
+transaction-census correction; its remote gates are pending. Sections below describing the
 original review tree are historical evidence, not qualification of this head.
 
 **Problem proved:** Wicked's current-engine preparation request stayed queued
@@ -205,7 +205,7 @@ invalid ordering or a non-final unfinished parent. `ReloadRequest` distinguishes
 whole-parent requests from part requests. Classification returns ready, wait or
 bad request; it handles evicted requests, completed-parent rollover, finite
 lookahead and completed presentations. Unknown future part requests beyond an
-unfinished parent fail promptly because this inventory cannot establish their
+unfinished parent, or across an entirely unpublished intervening parent, fail promptly because this inventory cannot establish their
 cross-parent distance; this is a conservative admission policy, not a claim
 that the protocol forbids every such request. It owns no tasks, timers, media bytes or
 mutable runtime catalog. The daemon must still implement identity fencing,
@@ -491,3 +491,37 @@ classification; a complete resolver timeout and durable attempt-refund cycle
 was not newly exercised. Host/path privacy aliases are explicitly labeled to
 preserve provenance. Remote gate results and merge status must be checked on
 the updated head; the earlier head's success cannot qualify this follow-up.
+
+### 11.7 Declared target isolated from actual parent length
+
+A subsequent clean HTTP/1.1 LL-tagged probe kept TARGETDURATION at 16 s while
+using actual six-second parents after the two-second opener. Safari requested
+12 parts (one parent), showed a static frame at 3.419 s, and first advanced at
+21.770 s with [0, 26] buffered. The 60-second source ended at 81.718 s, with
+no waiting event after advancement. Server error output was empty; free space
+was recorded before the run and remained about 15.1 GB afterward.
+
+Compared with the target-6/parent-6 result (11.752 s, 14 s coverage), this
+isolates a material effect of the declared target. However, 26 s is neither
+2 + 2×16 nor 2 + 2×6. The exact two-target rule that fit the original four
+rows is therefore not a general explanation. The remaining native threshold
+is unproven. This HTTP/1.1 run is a diagnostic control, not native LL profile
+qualification; the trusted TLS/h2 experiment stays deferred by Paul's choice.
+
+### 11.8 PR #745 gate follow-up
+
+The prior full Rust gate on the original repair tree failed the SQLite
+transaction census: it still named `claim_analysis_request_compatible` after
+the concrete implementation moved to `claim_analysis_request_for_capacity`.
+The inventory entry now follows the actual method; transaction mechanism and
+shape remain unchanged. The focused `hiqlite-store`-enabled
+`every_sqlite_transaction_site_is_classified` regression passed. Independent
+review confirmed that no other transaction census entry needs changing.
+
+That run also failed 14 broader daemon tests, chiefly the ten-second create
+allowance under the full runner load, plus provider and telemetry deadlines.
+All 14 failed daemon cases passed in focused local execution (17 tests total
+including three neighboring cases). This does not reproduce the runner's full-suite contention or establish a flaky-test root cause; the fresh
+required gate remains necessary. No source merge or deployment is claimed by
+this packet. The LL contract branch and effort base are backed up on Forgejo;
+no LL pull request was opened.
