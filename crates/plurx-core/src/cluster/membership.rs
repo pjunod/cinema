@@ -1951,6 +1951,30 @@ pub struct ClockLeadershipIdentity {
 pub struct StartupActivationAdmission {
     clock: OwnedClockAcquisitionTicket,
     deadline: tokio::time::Instant,
+    #[cfg(test)]
+    settlement_pause: Option<StartupSettlementPause>,
+}
+
+#[cfg(test)]
+type StartupSettlementSignals = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+#[cfg(test)]
+struct StartupSettlementPause {
+    once: std::sync::Mutex<Option<StartupSettlementSignals>>,
+}
+
+#[cfg(test)]
+impl StartupSettlementPause {
+    async fn after_durable_transaction(&self) {
+        let once = self.once.lock().expect("instance settlement pause").take();
+        if let Some((entered, release)) = once {
+            let _ = entered.send(());
+            release.await.expect("owned settlement release");
+        }
+    }
 }
 
 impl StartupActivationAdmission {
@@ -1999,6 +2023,8 @@ pub struct StartupMembershipAdmission {
     /// Bound exactly once after construction; never retains the manager/client
     /// cycle or borrows another installed node's removal authority.
     removal_owner: OnceLock<Weak<ReplicatedMembership>>,
+    #[cfg(test)]
+    activation_capture_pause: StartupSettlementPause,
 }
 
 #[derive(Default)]
@@ -2018,6 +2044,10 @@ impl Default for StartupMembershipAdmission {
             source,
             startup_deadline: None,
             removal_owner: OnceLock::new(),
+            #[cfg(test)]
+            activation_capture_pause: StartupSettlementPause {
+                once: std::sync::Mutex::new(None),
+            },
         }
     }
 }
@@ -3816,6 +3846,11 @@ impl MembershipManager {
                 "startup activation cannot replace original deadline".into(),
             ));
         }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MembershipError::Internal(
+                "startup activation original phase expired".into(),
+            ));
+        }
         let applied = inner.local_metrics.current().ok_or_else(|| {
             MembershipError::Internal("activation lacks applied membership".into())
         })?;
@@ -3824,12 +3859,29 @@ impl MembershipManager {
                 "desired voter is not an applied voter".into(),
             ));
         }
+        let clock = self
+            .clock
+            .acquire_owned_for(ClockDecision::MembershipChange);
+        #[cfg(test)]
+        if let Some(policy) = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+        {
+            policy
+                .activation_capture_pause
+                .after_durable_transaction()
+                .await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(MembershipError::Internal(
+                "startup activation original phase expired".into(),
+            ));
+        }
         let original = StartupActivationAdmission {
-            clock: self
-                .clock
-                .acquire_owned_for(ClockDecision::MembershipChange)
-                .map_err(MembershipError::ClockUnbounded)?,
+            clock: clock.map_err(MembershipError::ClockUnbounded)?,
             deadline,
+            #[cfg(test)]
+            settlement_pause: None,
         };
         original.revalidate()?;
         self.initialize_startup(&original).await?;
@@ -4191,6 +4243,12 @@ impl MembershipManager {
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        // Test-only delay AFTER the actual durable result, never a writer
+        // hold or fabricated acknowledgement. Production admission is unchanged.
+        #[cfg(test)]
+        if let Some(pause) = original.and_then(|original| original.settlement_pause.as_ref()) {
+            pause.after_durable_transaction().await;
+        }
         if let Some(original) = original {
             original.revalidate()?;
         }
@@ -12901,6 +12959,7 @@ mod tests {
                 .acquire_owned_for(ClockDecision::MembershipChange)
                 .expect("NoPeers"),
             deadline,
+            settlement_pause: None,
         };
         admission
             .revalidate()
@@ -12915,6 +12974,247 @@ mod tests {
             .revalidate()
             .expect("clock proof remains valid");
         assert_eq!(admission.deadline, deadline, "no replenished phase budget");
+    }
+
+    #[test]
+    fn k06_durable_activation_settlement_keeps_original_phase_and_refuses_next_submission() {
+        let worker = std::thread::Builder::new()
+            .name("k06-delayed-settlement".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned settlement runtime")
+                    .block_on(Box::pin(delayed_activation_settlement_fixture(false)));
+            })
+            .expect("owned settlement thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn k06_direct_activation_phase_precedes_clock_refusal_before_and_after_capture() {
+        let worker = std::thread::Builder::new()
+            .name("k06-direct-phase".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(4)
+                    .thread_stack_size(8 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .expect("owned phase runtime")
+                    .block_on(Box::pin(delayed_activation_settlement_fixture(true)));
+            })
+            .expect("owned phase thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    async fn delayed_activation_settlement_fixture(direct_phase: bool) {
+        use crate::cluster::migration::{select_daemon_store_observing, StartupClockObserver};
+        use crate::config::Config;
+
+        struct SingletonObserver;
+        impl StartupClockObserver for SingletonObserver {
+            fn start(
+                &self,
+                manager: MembershipManager,
+                node: String,
+            ) -> std::pin::Pin<
+                Box<dyn Future<Output = Result<(), crate::error::StoreError>> + Send + '_>,
+            > {
+                Box::pin(async move {
+                    let roster = manager
+                        .clock_peers()
+                        .await
+                        .map_err(|error| crate::error::StoreError::Database(error.to_string()))?;
+                    let applied = roster.membership.as_ref().expect("actual singleton watch");
+                    assert_eq!(applied.members, BTreeSet::from([applied.local_node]));
+                    assert_eq!(applied.voters, applied.members);
+                    assert!(roster.peers.is_empty());
+                    let nonce = uuid::Uuid::now_v7().to_string();
+                    let body = b"signed singleton route control, not a remote clock sample";
+                    let path = "/_internal/v1/clock";
+                    let signature = manager
+                        .sign_internal_peer_response(&node, &nonce, path, body)
+                        .expect("actual signing manager");
+                    let message = internal_peer_response_message(&node, &node, &nonce, path, body)
+                        .expect("exact signed message");
+                    let decoded = hex::decode(&signature).expect("actual signature bytes");
+                    assert!(manager
+                        .activity_signature_is_valid(&node, &message, &decoded)
+                        .await
+                        .expect("actual durable signing-key verification"));
+                    let changed =
+                        internal_peer_response_message(&node, &node, &nonce, path, b"changed")
+                            .expect("changed signed message");
+                    assert!(!manager
+                        .activity_signature_is_valid(&node, &changed, &decoded)
+                        .await
+                        .expect("changed body refuses signature"));
+                    // A singleton has no peer HTTP exchange. Never relabel
+                    // self-signing as an authorized learner/peer route.
+                    assert!(!manager
+                        .authorize_internal_peer_member_response(
+                            &node, &node, &nonce, path, body, &signature,
+                        )
+                        .await
+                        .expect("self-relay authorization refuses"));
+                    let guard = manager.clock_guard();
+                    let round = guard
+                        .roster_for_peer_directory(&roster)
+                        .expect("proved actual singleton roster");
+                    assert!(guard.publish(round, BTreeMap::new()));
+                    Ok(())
+                })
+            }
+        }
+
+        let root = tempfile::tempdir().expect("owned activation directory");
+        let held: Vec<_> = (0..3)
+            .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("owned fixture port"))
+            .collect();
+        let addresses: Vec<_> = held
+            .iter()
+            .map(|listener| listener.local_addr().expect("address"))
+            .collect();
+        let mut config = Config::default();
+        config.storage.data_dir = root.path().into();
+        config.server.bind = addresses[0];
+        config.cluster.raft_bind = addresses[1];
+        config.cluster.api_bind = addresses[2];
+        config.cluster.advertise_host = "localhost".into();
+        config.cluster.join_url = format!("http://{}", addresses[0]);
+        config.cluster.artwork_url = config.cluster.join_url.clone();
+        drop(held);
+        drop(
+            crate::store::SqliteStore::open(&root.path().join("plurx.db")).expect("source schema"),
+        );
+        let selected = Box::pin(select_daemon_store_observing(
+            &config,
+            Some(&SingletonObserver),
+        ))
+        .await
+        .expect("actual singleton activation and lock owner");
+        let client = selected.local_client().expect("actual Client");
+        let installed = client
+            .local_membership_admission()
+            .expect("installed policy");
+        let original_deadline = installed
+            .as_any()
+            .downcast_ref::<StartupMembershipAdmission>()
+            .expect("same installed phase policy")
+            .startup_deadline()
+            .expect("original 45-second deadline");
+        let manager = selected.membership_manager();
+        if direct_phase {
+            let policy = installed
+                .as_any()
+                .downcast_ref::<StartupMembershipAdmission>()
+                .expect("exact installed policy");
+            let (entered, captured) = tokio::sync::oneshot::channel();
+            let (release, resumed) = tokio::sync::oneshot::channel();
+            *policy
+                .activation_capture_pause
+                .once
+                .lock()
+                .expect("instance pause") = Some((entered, resumed));
+            let pending_manager = manager.clone();
+            let pending = tokio::spawn(async move {
+                pending_manager
+                    .finish_clock_observation(original_deadline)
+                    .await
+            });
+            captured.await.expect("actual clock capture reached");
+            assert!(!pending.is_finished());
+            tokio::time::sleep_until(original_deadline).await;
+            release.send(()).expect("release original capture");
+            assert!(matches!(
+                pending.await.expect("capture consumer completed"),
+                Err(MembershipError::Internal(_))
+            ));
+            assert!(matches!(
+                manager.finish_clock_observation(original_deadline).await,
+                Err(MembershipError::Internal(_))
+            ));
+            assert_eq!(policy.startup_deadline(), Some(original_deadline));
+            selected
+                .shutdown()
+                .await
+                .expect("actual phase Client drain");
+            return;
+        }
+        let (manager, mut admission) = manager
+            .finish_clock_observation(original_deadline)
+            .await
+            .expect("actual activation proof, no reconstructed owner");
+        assert_eq!(admission.deadline, original_deadline);
+        client
+            .execute("DROP TRIGGER cluster_node_removal_insert_guard", params!())
+            .await
+            .expect("make actual transaction effect observable");
+        let (entered, durable) = tokio::sync::oneshot::channel();
+        let (release, resumed) = tokio::sync::oneshot::channel();
+        admission.settlement_pause = Some(StartupSettlementPause {
+            once: std::sync::Mutex::new(Some((entered, resumed))),
+        });
+        let admission = Arc::new(admission);
+        let pending_manager = manager.clone();
+        let pending_admission = Arc::clone(&admission);
+        let pending = tokio::spawn(async move {
+            pending_manager
+                .install_membership_schema_only_admitted(Some(&pending_admission))
+                .await
+        });
+        durable
+            .await
+            .expect("actual transaction settled durably before pause");
+        let rows = client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM sqlite_master \
+                 WHERE type='trigger' AND name='cluster_node_removal_insert_guard'",
+                params!(),
+            )
+            .await
+            .expect("actual durable trigger readback");
+        assert_eq!(rows.first().map(|row| row.count), Some(1));
+        assert!(!pending.is_finished(), "caller has not observed settlement");
+        tokio::time::sleep_until(original_deadline).await;
+        assert!(matches!(
+            admission.revalidate(),
+            Err(MembershipError::Internal(_))
+        ));
+        assert_eq!(admission.deadline, original_deadline);
+        release
+            .send(())
+            .expect("release settlement, not cancel accepted work");
+        assert!(matches!(
+            pending.await.expect("retained consumer completion"),
+            Err(MembershipError::Internal(_))
+        ));
+        assert!(matches!(
+            manager
+                .install_membership_schema_only_admitted(Some(&admission))
+                .await,
+            Err(MembershipError::Internal(_))
+        ));
+        // Do not reacquire a clock ticket here: that separate API can refuse
+        // expired clock evidence before evaluating the phase. This control
+        // proves the original admission's post-settlement/next-write fence.
+        assert_eq!(
+            admission.deadline, original_deadline,
+            "no renewed phase budget"
+        );
+        selected
+            .shutdown()
+            .await
+            .expect("actual Client and directory owner drain");
     }
 
     #[test]
