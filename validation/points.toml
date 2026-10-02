@@ -1006,10 +1006,11 @@ depends_on = [
 [[points]]
 id = "plex.compatibility"
 title = "Plex-compatible discovery and API surface"
-contract = "Direct-connection Plex clients receive compatible discovery, metadata, playback, and timeline responses."
+contract = "Direct-connection Plex clients receive compatible discovery, metadata, playback, and timeline responses, and every node keeps a census of those requests by handler and outcome that survives restarts, counts each unclean stop and its window, and starts a new census rather than failing when its file is missing or unusable."
 paths = [
   "crates/plurx-compat-plex/**",
   "crates/plurxd/src/http/plex.rs",
+  "crates/plurxd/src/http/plex_census.rs",
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["server.api", "api.contract", "playback.pipeline"]

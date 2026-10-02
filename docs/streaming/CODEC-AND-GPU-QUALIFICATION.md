@@ -955,6 +955,27 @@ NAL-level IDR/CRA and applicable physical/native/GPU/fidelity acceptance
 remain open. The preceding "no actual acquisition" statements describe
 their dated candidate, not this separately authorized internal continuation.
 
+**2026-10-02 retained Grain720 NAL continuation — one header context only:**
+the [reviewable evidence ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md)
+records one new offline parse of unchanged retained TS/probe bytes. Actual
+PAT/PMT/PES/Annex-B/AUD/picture/SPS-PPS/PTS parsing measured 1,680 access
+units, 35/35 first type-5 IDR headers and 37 total IDRs. The two extras at
+13.958333333…s and38s match the old Grain720 keyflags; no GOP code changed.
+Nine tiny new syntax controls and this one corpus attempt passed once;
+no producer/probe/decoder, old test or successful cell was replayed.
+
+Historical parser/control/wrapper, sanitized AU facts, ordered input hashes
+and actual process/cgroup/export/cleanup receipts are review snapshots, not
+registered tests or permanent tooling. Private audit-byte attachment retention
+is separate from unchanged original input/runtime expiry. The original raw
+receipt/result identities stay distinct from sanitized publication. The
+bounded parser proves header identity, not entropy/pixel decode, closed-GOP
+reference independence, decoder/device random access or current-effort
+runtime acceptance. Fifteen other internal NAL contexts remain unmeasured.
+The original public-route/media1/real-film/physical/native/GPU/fidelity bars
+and whole-S11 qualification remain open: 16 internal /4 synthetic /0 original
+fully-qualified public cells, with old measured fb436 provenance unchanged.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).
@@ -1194,6 +1215,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained Grain720 header evidence, original qualification open | evidence-only continuation | [NAL ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md): one old fb436 context,35 first IDRs/1680 actual AUs/37 total IDRs including TWO extras, matched to retained probes. Nine new syntax controls and one offline corpus success retained once; no media or test replay. Historical review snapshots, sanitized-not-raw provenance, durable private bytes and exact cleanup bounds recorded;15 other NAL contexts and original public/film/native/GPU/fidelity acceptance remain open. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 internal acquisition/census evidence, original acceptance incomplete | evidence-only continuation | [Sixteen-cell sanitized ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md): four synthetic inputs,16 distinct internal once-successful cells at measured fb436 source/cc943750 tree/656e binary/b7bc runtime;35 objects/1680 packets/60+s real1× each,35 first keys/no drift. Grain720 has two internal extra keyflags, unchanged. Actual source-FD/PUT owner and four-way byte equality/exact cleanup retained privately; failures remain failed. No current-effort/public/NAL/physical/native/HDR-fidelity/GPU/full-M3 qualification or production GOP change. Independent review/current-head effort gate remain separate. |
 | 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://192.168.4.7:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
