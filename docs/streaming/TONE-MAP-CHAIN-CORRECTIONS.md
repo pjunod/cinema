@@ -1,6 +1,6 @@
 # Tone-map chain corrections — an explicit peak, primaries before the curve, dither
 
-**Status:** M0–M1 complete; M2 source complete but image evidence pending; M3 post-deploy fleet evidence pending · **Executes:** Q3 / F-stream-3 from
+**Status:** M0–M1 complete (M1's SEI-only gap closed 2026-10-02 by the first-frame backfill); M2 source complete, real-title image evidence recorded on lab3 2026-10-02 ([§5.3.1](#531-m2-evidence-2026-10-02)), the media1 QSV leg pending; M3 post-deploy fleet evidence pending · **Executes:** Q3 / F-stream-3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -273,9 +273,31 @@ Backfill without a rescan: a bounded job modelled on
 luminance_source IS NULL`, 256 per tick, fenced by path/size/mtime/
 `probe_json`. It recovers stream-level values from `probe_json` at no I/O
 cost and marks `luminance_source = 'none'` when the stored document lacks
-them — it does **not** open media. SEI-only files are picked up by the next
-ordinary rescan of that file. The held decode-fact route below is stream-only
-and cannot replace that bounded frame probe.
+them — it does **not** open media. The held decode-fact route below is
+stream-only and cannot replace that bounded frame probe.
+
+**Correction, 2026-10-02:** the sentence this replaces said SEI-only files
+"are picked up by the next ordinary rescan of that file". An unchanged file
+is never rescanned — the incremental scan keys on size and mtime — so those
+rows stayed `none` and tone-mapped against the 1,000-nit default however
+their frames were mastered. A read-only fleet audit found 1,004 of 1,074 HDR
+rows on the production catalogue classified `none`. A second bounded job now
+closes that: once `jobs.luminance_backfilled` is stamped, it walks HDR rows
+with `luminance_source = 'none'` by id cursor, 16 per tick under the
+`catalogue:luminance-frame` cluster job lease, and runs the scanner's own
+first-frame read (`scan::probe::first_frame_luminance` — one thread, the same
+30 s / 256 KiB bounds, the background child class, attributed as "catalogue
+luminance backfill"). A frame that carries MDCV/CLL is written as `frame`
+through `set_file_frame_luminance`, fenced to the listed id/path/size/mtime/
+probe snapshot and to the row still being `none`. A frame with nothing, or
+one that cannot be read, leaves `none` and moves the cursor (open question 2's
+ruling: a new probe document earns another read). A file whose disk identity
+changed is left to the rescan that change triggers; a file that cannot be
+stat'ed stops the page without advancing, so an offline mount is retried
+rather than walked to completion. Exhaustion stamps
+`jobs.luminance_frame_backfilled`; the cursor is
+`jobs.luminance_frame_backfill_cursor.node.<id>`, node-local like the other
+backfill cursors.
 
 Decode facts: add `stream_side_data=max_content,max_average,max_luminance`
 to the `-show_entries` list at `decode_facts.rs:3343`; `DecodeFacts` gains
@@ -301,13 +323,22 @@ tolerance changed.
 
 ```text
 scale=-2:'min({h},ih)',
-zscale=tin={tin}:min=bt2020nc:pin=bt2020:t=linear:npl=100,
+zscale=tin={tin}:min=bt2020nc:pin=bt2020:t=linear:p=bt709:npl=100,
 format=gbrpf32le,
-zscale=p=bt709,
 tonemap=tonemap=hable:desat=0:peak={peak},
 zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,
 format=yuv420p
 ```
+
+As first merged, the gamut conversion was a separate `zscale=p=bt709` pass
+between the linearising zscale and `tonemap`. 2026-10-02: it is folded into
+the linearising zscale (`p=bt709`), which is bit-identical (zimg converts
+primaries in linear light either way, still ahead of the curve), one float32
+pass cheaper, and names the output primaries explicitly — without `p=`, a PQ
+frame that arrives with no primaries tag fails the graph with "no path
+between colorspaces". The chain is spelled once, in
+`transcode::zscale_tone_map_filter`, and the boot probe's CPU reference takes
+it from there.
 
 - `peak={peak}` where `peak = max_cll / 100` when `max_cll` is known, else
   `mastering_max_luminance / 100`, else **`10`** — the 1,000-nit policy
@@ -316,10 +347,11 @@ format=yuv420p
   "a policy assumption, not source truth"; the plan says so wherever the
   value is printed. HLG sources keep FFmpeg's own HLG handling: the same
   `10` (1,000-nit reference display) unless the source states otherwise.
-- `zscale=p=bt709` **before** `tonemap`: FFmpeg's documented chain and
+- `p=bt709` **before** `tonemap`: FFmpeg's documented chain and
   Jellyfin's `GetSwTonemapFilter` map gamut in linear light before the
   curve; mapping after compresses out-of-709 values that are then clipped,
-  which shifts hue on saturated highlights. The trailing zscale drops `p=`.
+  which shifts hue on saturated highlights. The primaries ride on the linearising
+  zscale; the trailing zscale has no `p=`.
 - `dither=error_diffusion` on the final zscale: the float→8-bit step is
   where tone-mapped gradients band. Cost is measured in M2's acceptance, not
   assumed small.
@@ -365,9 +397,10 @@ tolerance, resolved in CODEC-AND-GPU-QUALIFICATION.md — never by loosening
   `provenance=default` appears in the recipe, the log line and playback
   info. A reviewer must be able to tell "the source said 1,000" from "we
   assumed 1,000".
-- **No blanket rescan.** M1's backfill reads `probe_json`; only files whose
-  document lacks the facts and whose transfer is PQ/HLG get a bounded frame
-  probe, and only when they are next scanned or planned.
+- **No blanket rescan.** M1's backfill reads `probe_json`; only HDR rows
+  whose document lacks the facts get a bounded first-frame read — at scan
+  time for new or changed files, and once, 16 per tick, from the frame
+  backfill for rows already catalogued `none`.
 - **Do not widen `MAX_CHANNEL_DELTA` or lower `MIN_SPEEDUP`** to keep a
   verdict.
 - **Do not rate-limit or skip the decode-fact probe** to pay for the new
@@ -458,9 +491,15 @@ not a variable; repeated on media1 for the QSV hwdownload path):
 3. Readings per frame: `signalstats` YAVG/YMAX/YMIN; a histogram
    (`histogram` filter to PNG); `psnr`/`ssim` between before and after to
    quantify the change; visual stills side by side in the PR.
-4. Banding: on the gradient source, count distinct 8-bit luma levels across
-   a horizontal line (`-vf crop=1920:1:0:540,format=gray -f rawvideo` piped
-   through `sort -u | wc -l`) before and after dither.
+4. Banding: on the gradient source, read one horizontal line of 8-bit luma
+   (`-vf crop=1920:1:0:540,extractplanes=y -f rawvideo`) before and after
+   dither and count **level transitions** along it (adjacent pixels that
+   differ) and the **longest flat run** in pixels. *Restated 2026-10-02:* the
+   original measure, distinct 8-bit levels on the line, cannot show dither.
+   On a monotonic ramp error diffusion only interleaves the two neighbouring
+   levels at each step, so the set of levels is unchanged (measured 240 = 240,
+   113 = 113, 36 = 36 with dither working), and the earlier 20 → 21 reading
+   did not reproduce.
 5. Cost: `-benchmark` wall time before/after at 1080p on lab4; the added
    zscale pass and dither must stay within 5 % or the PR says why it is
    worth more.
@@ -471,9 +510,10 @@ asserting `peak=10` with `default` provenance for a source with no facts,
 `peak=40` for MaxCLL 4000, `peak=` from mastering luminance when only MDCV
 exists; the `assert_no_pq_at_8_bit` guard still passes.
 
-Acceptance: the PR carries the stills, the level counts (after > before on
-the ramp), `psnr` numbers, the cost delta, and `cargo test -p plurx-core
-transcode` green.
+Acceptance: the PR carries the stills, the ramp readings (more level
+transitions and a shorter longest flat run after than before, at an equal
+distinct-level count), `psnr` numbers, the cost delta, and `cargo test -p
+plurx-core transcode` green.
 
 The generated narrow 10-bit ramp was compared inside media1's shipped
 FFmpeg 8.1.2-Jellyfin, without deploying branch code. The production-before
@@ -494,6 +534,109 @@ does **not** complete M2 acceptance. The required lab4 captures, all three
 10/50/90 percent frames and histograms, and the named Harbor Lights real-title
 comparison have not been run. M2 remains pending until those artifacts and
 readings are attached; none are inferred from the generated-ramp sample.
+
+#### 5.3.1 M2 evidence, 2026-10-02
+
+Measured on lab3 (12-core laptop-class Intel, software decode only, every run
+in a throwaway container from the shipped `plurx/plurxd` image capped at six
+CPUs, `nice 10`; FFmpeg 8.1.3-Jellyfin). Before = the `88a3957a` chain,
+after = §3.3's chain with the stored peak, 1080-line output, frames at 10 %,
+50 % and 90 % of duration. The private receipt keeps the scripts, logs,
+stills and histograms; titles and paths are not reproduced here. Not run:
+lab4, the media1 QSV hardware-download repeat, and the named reference
+remux, which was not located; four library HDR10 titles stand in.
+
+Inputs — all HEVC Main 10, BT.2020/PQ, MDCV/CLL carried only as SEI (the
+frame-probe path):
+
+| label | raster | MDCV max | MaxCLL / MaxFALL | after peak (provenance) |
+|---|---|---:|---|---|
+| A | 3840×2160 | 1000 | 793 / 73 | 7.93 (cll) |
+| B | 3840×1604 | 4000 | 9978 / 812 | 99.78 (cll) |
+| C | 3840×2076 | 1000 | 2008 / 612 | 20.08 (cll) |
+| D | 3840×2160 | 1000 | 0 / 0 (ignored) | 10 (mdcv) |
+| E | 3 s stream copies of A, prefix SEI removed | — | — | 10 (default) |
+
+The before chain computed `peak=10` on all 18 real-title frames, including
+B's MaxCLL 9978 — M0's finding reproduces on 8.1.3.
+
+| label | ΔYAVG after − before (10/50/90 %) | before → after YMAX range | PSNR-Y after vs before (dB) |
+|---|---|---|---|
+| A | +0.53 / +0.47 / +0.08 | 128–145 → 131–147 | 48.9–55.6 |
+| B | −7.68 / −7.79 / −2.32 | 214–238 → 191–213 | 29.0–36.4 |
+| C | −2.48 / −2.26 / −2.28 | 125–233 → 119–220 | 38.3–39.2 |
+| D | −0.78 / −0.81 / −0.55 | 175–209 → 171–208 | 44.0–47.6 |
+| E | −0.02 / −0.07 / 0.00 | 145–156 → 144–154 | 56.0–57.8 |
+
+Where the peak does not move (D, E: 10 → 10) the whole M2 change —
+gamut before curve plus dither — moves mean luma by under one level at
+44–58 dB: invisible. The visible changes are the explicit peak doing its job:
+MaxCLL 793 renders slightly brighter, 2008 about two levels darker, 9978
+about eight levels darker, and B's highlights no longer reach super-white
+(before YMAX 232–238, after 191–213).
+
+Banding, on a generated PQ ramp (row 540, 8-bit luma):
+
+| ramp (10-bit codes) | distinct levels before / after | transitions before → after | longest flat run px before → after |
+|---|---|---|---|
+| wide 64–940 | 240 / 240 | 239 → 639 | 178 → 173 |
+| mid 300–560 | 113 / 113 | 112 → 640 | 29 → 17 |
+| narrow 380–460 | 36 / 36 | 35 → 617 | 72 → 49 |
+
+The after chain without dither matches before exactly on all three ramps, so
+the change is the dither. This meets the restated bar in step 4.
+
+Cost, `-benchmark` on 20 s of A at 4K software decode → 1080 (480 frames),
+median of three, two independent sets:
+
+| chain | end-to-end Δ vs before | filter-only Δ (decoded once, looped) |
+|---|---:|---:|
+| as first merged (separate `zscale=p=bt709`) | +13.6 % / +10.3 % | +19.3 % / +10.9 % |
+| as first merged, no dither | +4.1 % | +13.1 % |
+| **folded `p=bt709` (now shipped)** | **+4.2 %** | +7.4 % |
+| folded, no dither | +1.0 % | noise |
+
+The first-merged chain failed the 5 % bar; the folded chain meets it
+end to end. Dither is the only material added cost and is what the banding
+readings above buy. On the production image, the folded and separate forms
+produced identical framemd5 sets over 24 frames of a 10-bit PQ pattern at
+`peak` 10, 20.08 and 99.78, and for HLG input.
+
+Findings recorded with this evidence:
+
+1. **Fixed — the separate gamut pass cost the bar.** Folded as described in
+   §3.3; output bytes unchanged, so cache identity does not move (neither
+   `plan_digest` nor `Recipe::hash` feeds the filter string).
+2. **Fixed — an untagged-primaries frame failed both chains.** With
+   `pin=bt2020:t=linear` and no `p=`, zimg read the output primaries from the
+   frame; a PQ frame tagged for range, matrix and transfer but not primaries
+   produced 0 frames ("code 3074: no path between colorspaces") on the before
+   and first-merged chains alike. The folded chain names `p=bt709` and emits
+   the same frames as for tagged input. No real title was observed to
+   deliver such frames; M0 found QSV/VA-API keep the tags.
+3. **Fixed — SEI-only titles kept the default peak.** See the §3.2
+   correction: catalogued rows classified `none` now get one first-frame
+   read.
+4. **Recorded, no change — signal above the stated peak becomes
+   super-white.** `tonemap` does not clamp `sig > peak`, and the final zscale
+   writes such values above 235 (to 255 on the synthetic wide ramp, in both
+   chains). With an explicit peak this now happens only when content exceeds
+   the stored peak: a default-peak title brighter than 1,000 nits, or a
+   MaxCLL that understates. Recommendation: no clamp in this plan. Levels
+   236–254 are legal 8-bit limited-range headroom that displays clip, the
+   measured exposure is narrow, and a clamp would add a pass to the cost the
+   bar just recovered. Revisit only if a client is shown to render
+   super-white visibly wrong.
+5. **Recorded, policy note — MaxCLL is trusted above the mastering peak.**
+   B declares MaxCLL 9978 against a 4,000-nit mastering display; the shipped
+   order (CLL → mastering → 1,000) emits `peak=99.78`. `min(MaxCLL,
+   mastering)` would give 40; measured difference 1.2–1.3 levels of mean luma
+   because Hable compresses. Recommendation: keep CLL-first now. A MaxCLL
+   above the mastering peak is an authoring inconsistency rather than a
+   picture defect here, and changing the order would move the plan digest of
+   every affected title for a barely visible gain; if a future picture review
+   finds such titles look dim, `min(MaxCLL, mastering)` is the candidate rule
+   and needs its own before/after.
 
 ### 5.4 M3 — boot-probe re-qualification
 
@@ -573,3 +716,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added bounded stream/frame luminance collection, SQLite v64 and replicated v43 storage, exact-snapshot backfill, decode/cache identity and read-only DTO fields. Parser/facts/schema/store-contract regressions pass, including the actual Hiqlite contract path. The review follow-up makes Dolby Vision with a PQ/HLG selected base layer eligible for frame luminance recovery; legacy SEI-only recovery remains explicitly owned by ordinary scan rather than the stream-only held probe. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 (source complete; evidence pending) | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added explicit peak/provenance, gamut-before-curve, final error-diffusion dither, log/metric/recipe identity and matching boot-probe reference. Held stream facts now refine the actual filter; the plan digest version is 2; playback-info exposes peak value and provenance. On the generated narrow ramp, dither increased distinct 8-bit luma levels 20→21; corrected wall time was 0.488 s versus 0.479 s before (+1.9%). Temporary media was removed. Required lab4, 10/50/90 and Harbor Lights still/histogram evidence remains pending, so M2 is not accepted. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / pending | Needs the merged/coordinated schema build deployed to media1 and before/after `/api/v1/system` pipeline verdicts. The named real-title image protocol remains an M2 prerequisite; Apple TV/Chrome post-deploy playback and selected-pipeline observations remain M3. No branch build was deployed from this draft. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M2 evidence + corrections (Opus continuation) | pending | Real-title before/after on lab3 (§5.3.1): four HDR10 titles and an SEI-stripped clip at 10/50/90 %, ramp banding, cost. The first-merged chain failed the 5 % cost bar (+10–14 %); folding `p=bt709` into the linearising zscale is bit-identical, brings it to +4.2 % and closes an untagged-primaries zero-frame failure. Banding bar restated to transitions and flat-run length (35 → 617, 72 → 49 px on the narrow ramp). New first-frame luminance backfill for HDR rows catalogued `none` (1,004 of 1,074 on the production catalogue), both store backends. Super-white and MaxCLL-above-mastering recorded with recommendations. media1 QSV leg and M3 remain. |
