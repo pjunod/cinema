@@ -6,6 +6,76 @@ impl VodServe {
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn prepare_copy_output(
         &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        source_version: &str,
+        cap: u64,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        admissions: crate::admission::Admissions,
+        media_engine: (
+            Arc<crate::ffmpeg::EncodedExecutable>,
+            crate::ffmpeg::EncodedEngine,
+        ),
+        still_idle: impl Fn() -> bool,
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+        if prepared.encoding.is_some() {
+            return Err("copy preparation not admitted".to_owned());
+        }
+        self.prepare_complete_output(
+            prepared,
+            file,
+            settings,
+            source_version,
+            cap,
+            fence,
+            deadline,
+            admissions,
+            media_engine,
+            still_idle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn prepare_encoded_output(
+        &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        source_version: &str,
+        cap: u64,
+        fence: crate::background_jobs::JobFence,
+        deadline: Instant,
+        admissions: crate::admission::Admissions,
+        media_engine: (
+            Arc<crate::ffmpeg::EncodedExecutable>,
+            crate::ffmpeg::EncodedEngine,
+        ),
+        still_idle: impl Fn() -> bool,
+    ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+        if prepared.encoding.is_none() {
+            return Err("encoded preparation requires an actual resolved plan".to_owned());
+        }
+        self.prepare_complete_output(
+            prepared,
+            file,
+            settings,
+            source_version,
+            cap,
+            fence,
+            deadline,
+            admissions,
+            media_engine,
+            still_idle,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_complete_output(
+        &self,
         mut prepared: VodRecipeRequest<'_>,
         file: &MediaFile,
         settings: &VodSettings,
@@ -20,12 +90,16 @@ impl VodServe {
         ),
         still_idle: impl Fn() -> bool,
     ) -> Result<super::copy_preparation::PreparedCopyOutput, String> {
+        let expected_encoded_plan = prepared
+            .encoding
+            .as_ref()
+            .map(|encoding| encoding.plan.plan_digest().to_owned());
         let attachment_observation = *self
             .shared
             .preparation_attachment
             .lock()
             .expect("attachment observation");
-        if !still_idle() || Instant::now() >= deadline || prepared.encoding.is_some() {
+        if !still_idle() || Instant::now() >= deadline {
             return Err("copy preparation not admitted".to_owned());
         }
         let allowance = super::retained::RetainedArtifactRegistry::reserve_preparation(
@@ -65,6 +139,7 @@ impl VodServe {
             deadline,
             logical,
             source_version.to_owned(),
+            expected_encoded_plan,
             admissions,
             media_engine,
             attachment_observation,

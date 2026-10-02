@@ -76,6 +76,64 @@ impl VodServe {
 }
 
 impl PreparedCopyOutput {
+    pub(crate) async fn settle_encoded_and_expose(
+        mut self,
+        intent: &plurx_core::store::background_jobs::EncodedOutputIntent,
+    ) -> Result<bool, String> {
+        if !self.preparation.live(&self.rendition).await
+            || !recipe_engine_is_current(&self.rendition.recipe).await
+        {
+            return Ok(false);
+        }
+        let rates = &self.artifact.observation.rates;
+        let facts = self.artifact.facts();
+        let output = plurx_core::store::background_jobs::CopyOutputJobOutput {
+            artifact_id: facts.artifact_id,
+            output_identity: facts.output_identity,
+            source_object_version: self.preparation.source_version.clone(),
+            wire_bytes: i64::try_from(rates.wire_bytes).map_err(|_| "encoded byte overflow")?,
+            duration_micros: i64::try_from(rates.duration_micros)
+                .map_err(|_| "encoded duration overflow")?,
+            average_bps: rates.average_bps,
+            peak_bps: rates.rfc_peak_bps,
+        };
+        if !self
+            .preparation
+            .fence
+            .publish_encoded_output(intent.clone(), output)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            return Ok(false);
+        }
+        // Settlement is historical. Re-read current logical media facts before
+        // exposing any local capability, even when physical size/mtime match.
+        let current = self
+            .shared
+            .store
+            .get_file(self.rendition.recipe.file.id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if current
+            .as_ref()
+            .and_then(|file| super::retained::encoded_policy_generation(file, intent))
+            != super::retained::encoded_policy_generation(&self.rendition.recipe.file, intent)
+        {
+            return Ok(false);
+        }
+        self.exposed = self
+            .shared
+            .retained_artifacts
+            .expose_prepared(
+                &self.shared,
+                &self.rendition,
+                &self.preparation,
+                &self.artifact,
+            )
+            .await;
+        Ok(self.exposed)
+    }
+
     #[cfg(test)]
     pub(super) fn private_facts(&self) -> crate::transcode::RetainedOutputFacts {
         self.artifact.facts()
@@ -177,6 +235,7 @@ pub(super) struct CopyPreparation {
     pub(super) deadline: Instant,
     pub(super) logical: super::retained_manifest::LogicalOutput,
     pub(super) source_version: String,
+    expected_encoded_plan: Option<String>,
     admissions: crate::admission::Admissions,
     attachment_observation: u64,
     pub(super) executable: Arc<crate::ffmpeg::EncodedExecutable>,
@@ -197,6 +256,7 @@ impl CopyPreparation {
         deadline: Instant,
         logical: super::retained_manifest::LogicalOutput,
         source_version: String,
+        expected_encoded_plan: Option<String>,
         admissions: crate::admission::Admissions,
         media_engine: (
             Arc<crate::ffmpeg::EncodedExecutable>,
@@ -211,6 +271,7 @@ impl CopyPreparation {
             deadline,
             logical,
             source_version,
+            expected_encoded_plan,
             admissions,
             attachment_observation,
             executable: media_engine.0,
@@ -243,7 +304,12 @@ impl CopyPreparation {
             && owned
             && !rendition.closed.load(Relaxed)
             && rendition.failure().is_none()
-            && rendition.recipe.encoding.is_none()
+            && rendition
+                .recipe
+                .encoding
+                .as_ref()
+                .map(|encoding| encoding.plan.plan_digest())
+                == self.expected_encoded_plan
             && rendition.recipe.retained_logical.as_ref() == Some(&self.logical)
             && rendition.source.as_ref().is_some_and(|source| {
                 source.unchanged() && source.object_version() == self.source_version

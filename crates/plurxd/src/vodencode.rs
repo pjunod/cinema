@@ -376,6 +376,29 @@ impl Encoding {
             Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
         >,
     ) -> Option<EncodePermit> {
+        self.try_permit_with_priority(policy, None).await
+    }
+
+    /// The finite output-preparation owner uses real background resources;
+    /// it never registers foreground demand or borrows a handoff claim.
+    pub(crate) async fn try_background_permit(&self) -> Option<EncodePermit> {
+        self.try_permit_with_priority(
+            self.store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+            Some(Priority::Background),
+        )
+        .await
+    }
+
+    async fn try_permit_with_priority(
+        &self,
+        policy: impl std::future::Future<
+            Output = Result<(Option<String>, Option<String>), plurx_core::error::StoreError>,
+        >,
+        preparation_priority: Option<Priority>,
+    ) -> Option<EncodePermit> {
         // Pool policy is current node state, not immutable media identity.
         // A failed policy read closes admission; an existing child's permit
         // remains owned until reap and is never confiscated underneath it.
@@ -400,7 +423,8 @@ impl Encoding {
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or_else(crate::admission::software_budget);
         let mut queued = self.queued.lock().expect("VOD encoder admission");
-        let priority = self.priority();
+        // Preserve ordinary promotion's post-policy-read observation.
+        let priority = preparation_priority.unwrap_or_else(|| self.priority());
         if priority == Priority::Live {
             queued.get_or_insert_with(|| self.admissions.wait_for_slot());
         }
@@ -421,7 +445,9 @@ impl Encoding {
         if self.resources.cpu_threads > software_budget {
             return refuse(true);
         }
-        let claim = *self.handoff_claim.lock().expect("VOD handoff claim");
+        let claim = (priority != Priority::Background)
+            .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
+            .flatten();
         let Some(bundle) = self.admissions.try_admit_bundle_claiming(
             hardware_limit,
             software_budget,
