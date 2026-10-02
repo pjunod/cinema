@@ -3587,3 +3587,14 @@ without removing candidates or replacing the policy. It has a deterministic
 source generation is bounded to one encoder thread. The existing manual AVC
 fixture and its qualification criteria remain unchanged. The new fixture is
 source coverage; its switches and physical output are not yet qualified.
+
+
+### 10.118 External review handoff before fast lane
+
+The human updated the landing sequence on October 2: finish implementation
+and qualification, obtain the adversarial agent review, then stop for external
+Fable reviews. The handoff must include the concrete changes, agent findings
+and unresolved issues. No fast-lane unit execution or main merge happens
+before the human resumes work following that external review. This supersedes
+the earlier autonomous review-to-test-to-merge instruction at that boundary;
+independent implementation and current runtime qualification continue now.
