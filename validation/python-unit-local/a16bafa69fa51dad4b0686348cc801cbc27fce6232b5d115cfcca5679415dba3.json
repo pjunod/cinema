@@ -18,5 +18,5 @@
     "unexpected_successes": 0,
     "count": 1
   },
-  "source_attribution": "Original own worktree execution on current effort ae83960b, before metadata commit. Actual page SHA309ad1ccf456b11f5985a9bf257a8b62272013d24cdef0b6ace744644d72906c. Test file hash identifies exact executed source; later receipt and documentation additions do not relabel this as a later execution. Synthetic Node execution of the actual reviewed page with delayed response, progressing frames, one in-flight exchange and terminal real-refusal behavior; not browser or media qualification."
+  "source_attribution": "Original own worktree execution on current effort ae83960b, before metadata commit. Full executed controller scripts/rolling-grid-acquire SHA309ad1ccf456b11f5985a9bf257a8b62272013d24cdef0b6ace744644d72906c; its literal PAGE UTF-8 SHA251f67302c17b299077830e01b0e93b88273799dcfcd4597b663d4cd5a508d0b was independently extracted read-only during sole review60, not a new test execution. Test file hash identifies exact executed source; later receipt and documentation additions do not relabel this as a later execution. Synthetic Node execution of the actual reviewed page with delayed response, progressing frames, one in-flight exchange and terminal real-refusal behavior; not browser or media qualification."
 }
