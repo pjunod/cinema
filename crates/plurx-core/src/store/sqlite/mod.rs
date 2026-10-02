@@ -2228,6 +2228,40 @@ impl SettingsStore for SqliteStore {
         .await
     }
 
+    async fn put_setting_retiring(
+        &self,
+        key: &str,
+        value: &str,
+        retired_families: &[&str],
+    ) -> Result<(), StoreError> {
+        crate::store::validate_retired_setting_families(key, retired_families)?;
+        let key = key.to_owned();
+        let value = value.to_owned();
+        let families = retired_families
+            .iter()
+            .map(|family| (*family).to_owned())
+            .collect::<Vec<_>>();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO settings (key, value, updated_at)
+                 VALUES (?1, ?2, unixepoch())
+                 ON CONFLICT(key) DO UPDATE
+                    SET value = excluded.value, updated_at = unixepoch()",
+                params![key, value],
+            )?;
+            for family in &families {
+                tx.execute(
+                    crate::store::RETIRE_SETTING_FAMILY_SQL_SQLITE,
+                    params![family],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
     async fn put_settings_if_generation(
         &self,
         generation_key: &str,

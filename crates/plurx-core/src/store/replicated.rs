@@ -284,6 +284,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::VerbatimBatch,
     },
+    // S-08's re-armed field-order backfill: one upsert and the deletes of the
+    // superseded pass's keys, applied verbatim with no read between them.
+    SqliteTransactionSite {
+        module: "mod.rs",
+        method: "put_setting_retiring",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
     SqliteTransactionSite {
         module: "mod.rs",
         method: "with_fenced_conn",
@@ -1190,7 +1199,9 @@ mod tests {
         // E2 retires the unfenced manifest-cursor transaction.
         // DVR catalog cleanup removes the linked rows and clears the recording
         // links together so a failed delete remains retryable.
-        assert_eq!(methods.len(), 95);
+        // S-08's `put_setting_retiring` stamps the re-armed field-order
+        // backfill done and deletes the superseded pass's keys in one write.
+        assert_eq!(methods.len(), 96);
     }
 
     #[test]

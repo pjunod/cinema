@@ -504,6 +504,13 @@ impl DolbyVisionFacts {
     }
 }
 
+/// The stored token for "probed, and the probe reported no field order".
+///
+/// [`crate::scan::probe::parse_probe_json`] is its single owner: every parsed
+/// probe carries either FFprobe's token or this one, so a `NULL` field order
+/// in the catalogue means only that the row has never been probed.
+pub const FIELD_ORDER_UNKNOWN: &str = "unknown";
+
 /// The ordering FFprobe reports for an interlaced video stream.
 ///
 /// The spelling remains separate from [`MediaFile::field_order`]: storage
@@ -562,8 +569,10 @@ pub struct MediaFile {
     /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
     /// identity, not a second spelling of the codec family.
     pub video_codec_tag: Option<String>,
-    /// FFprobe's field-order token for the selected playable video stream.
-    /// Decisions must use [`ScanType::from_field_order`], not string inequality.
+    /// FFprobe's field-order token for the selected playable video stream,
+    /// [`FIELD_ORDER_UNKNOWN`] for a probed row that reported none, `None`
+    /// only for a row never probed. Decisions must use
+    /// [`ScanType::from_field_order`], not string inequality.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
@@ -668,6 +677,10 @@ pub struct ProbeResult {
     pub container: Option<String>,
     pub video_codec: Option<String>,
     pub video_codec_tag: Option<String>,
+    /// FFprobe's token for the selected playable video stream, or
+    /// [`FIELD_ORDER_UNKNOWN`] when the probe was parsed and reported none
+    /// (including audio-only files). `None` only on a result that was never
+    /// parsed from a probe document.
     pub field_order: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,

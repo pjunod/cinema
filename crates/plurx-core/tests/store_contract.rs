@@ -231,6 +231,9 @@ const SETTINGS_METHODS: &[&str] = &[
     "put_setting_if_absent_if_artwork_repair_current",
     "prune_unreferenced_book_cover_origins",
     "put_settings",
+    // S-08's re-armed field-order backfill stamps itself done and deletes the
+    // superseded pass's stamp and node cursors in one write.
+    "put_setting_retiring",
     // The generation-fenced settings write. It belongs beside `put_settings`
     // rather than in a Live TV group: nothing about it is Live TV specific,
     // and any caller that needs a settings batch to land only against an
@@ -18309,7 +18312,11 @@ fn contract_inventory_matches_every_store_method() {
     // E2 removes two unfenced legacy scrub methods.
     // Safari seek adds viewer joins and two source-I/O observations.
     // DVR physical cleanup adds the atomic linked-catalog purge.
-    assert_eq!(declared.len(), 450, "review the Store method count");
+    // S-08's re-armed field-order backfill adds `put_setting_retiring` on
+    // `SettingsStore`: stamp the new pass done and delete the superseded
+    // pass's stamp and node cursors in one write. Covered on both backends by
+    // `rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_pass`.
+    assert_eq!(declared.len(), 451, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -18839,6 +18846,178 @@ async fn field_order_round_trips_and_backfill_updates_are_exactly_fenced() {
             Some("progressive".into()),
             "{backend}: stale snapshot cannot overwrite a newer scan"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn rearmed_field_order_backfill_converges_null_rows_and_retires_the_first_pass() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Field order re-arm".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/field-order-rearm".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Re-armed backfill".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        // FFprobe omits `field_order` for this HEVC stream.
+        let hevc = r#"{"streams":[{"codec_type":"video","codec_name":"hevc","width":3840,"height":2160}]}"#;
+        let hevc_value: serde_json::Value = serde_json::from_str(hevc).expect("hevc json");
+
+        // The current scanner's write for that document.
+        let scanned = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/scanned.mkv",
+                10,
+                100,
+                &plurx_core::scan::probe::parse_probe_json(&hevc_value),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        // The pre-fix scanner's write for the same document: probed, NULL.
+        let stranded = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/stranded.mkv",
+                20,
+                200,
+                &ProbeResult {
+                    raw_json: Some(hevc.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stranded file: {error}"));
+        // A probed row with a reporter token, which the pass must not touch.
+        let progressive = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/progressive.mkv",
+                30,
+                300,
+                &plurx_core::scan::probe::parse_probe_json(&serde_json::json!({
+                    "streams": [{"codec_type":"video","codec_name":"h264","field_order":"progressive"}]
+                })),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: progressive file: {error}"));
+        // A row never probed stays NULL: there is no document to answer from.
+        let unprobed = store
+            .upsert_file(
+                item,
+                "/field-order-rearm/unprobed.mkv",
+                40,
+                400,
+                &ProbeResult::default(),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unprobed file: {error}"));
+
+        // The first pass's leftovers, plus neighbours that only share a prefix.
+        store
+            .put_settings(&[
+                (plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_V1_DONE, "1"),
+                ("jobs.field_order_backfill_cursor.node.node-a", "77"),
+                ("jobs.field_order_backfill_cursor.node.node-b", "91"),
+                ("jobs.field_order_backfill_v2_cursor.node.node-a", "3"),
+                ("jobs.field_order_backfill_cursor_unrelated", "keep"),
+                ("jobs.field_order_backfilledness", "keep"),
+            ])
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: seed settings: {error}"));
+
+        let field_order = |id: i64| {
+            let store = Arc::clone(&store);
+            async move {
+                store
+                    .get_file(id)
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: read {id}: {error}"))
+                    .and_then(|file| file.field_order)
+            }
+        };
+        assert_eq!(field_order(scanned).await.as_deref(), Some("unknown"), "{backend}");
+        assert_eq!(field_order(stranded).await, None, "{backend}");
+
+        let first = plurx_core::store::field_order_backfill_page(store.as_ref(), 0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first page: {error}"));
+        assert!(!first.complete, "{backend}");
+        assert!(first.write_error.is_none(), "{backend}");
+        assert_eq!((first.updated, first.fenced), (1, 0), "{backend}");
+        assert_eq!(first.cursor, stranded, "{backend}");
+        assert_eq!(
+            field_order(stranded).await,
+            field_order(scanned).await,
+            "{backend}: identical media now stores one token whichever path wrote it"
+        );
+        assert_eq!(field_order(progressive).await.as_deref(), Some("progressive"), "{backend}");
+        assert_eq!(field_order(unprobed).await, None, "{backend}");
+        assert_eq!(
+            store
+                .get_setting(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stamp read: {error}")),
+            None,
+            "{backend}: a page that wrote rows is not the completing page"
+        );
+
+        let last = plurx_core::store::field_order_backfill_page(store.as_ref(), first.cursor, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: completing page: {error}"));
+        assert!(last.complete, "{backend}");
+        let settings = store
+            .settings_snapshot()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: snapshot: {error}"));
+        assert_eq!(
+            settings.get(plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_DONE).map(String::as_str),
+            Some("1"),
+            "{backend}"
+        );
+        for retired in [
+            plurx_core::store::keys::JOB_FIELD_ORDER_BACKFILL_V1_DONE,
+            "jobs.field_order_backfill_cursor.node.node-a",
+            "jobs.field_order_backfill_cursor.node.node-b",
+            "jobs.field_order_backfill_v2_cursor.node.node-a",
+        ] {
+            assert!(!settings.contains_key(retired), "{backend}: {retired} left behind");
+        }
+        for neighbour in [
+            "jobs.field_order_backfill_cursor_unrelated",
+            "jobs.field_order_backfilledness",
+        ] {
+            assert_eq!(
+                settings.get(neighbour).map(String::as_str),
+                Some("keep"),
+                "{backend}: {neighbour} only shares a prefix"
+            );
+        }
+
+        // A family that would delete the write it accompanies is refused.
+        assert!(store
+            .put_setting_retiring(
+                "jobs.example.node.node-a",
+                "1",
+                &["jobs.example"],
+            )
+            .await
+            .is_err(), "{backend}");
     })
     .await;
 }
