@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`d4bf682b7`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
+(`c63859963`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -163,3 +163,10 @@ admission fixture adds Response::status(), not a process. The inventory records
 those owners. Reran only that failing test; it passed. Rust and platform jobs
 were skipped, not executed. The workflow's automatic full-preflight rerun on
 each push conflicts with failed-only reruns; user reconciliation is pending.
+
+2026-10-02 continuation: user clarified that unit tests need to pass once on
+the merged code. Automatic static preflight may run again; retain unit passes
+and rerun failed units only. Main advanced with test stability changes in
+cleanup and concurrent pretranscode claims. The combined ownership totals
+retain both explanations: 684 task sites, 1128 timer sites, 411 method sites.
+The prior unit lane never started. PR is draft during this integration.
