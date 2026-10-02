@@ -689,7 +689,7 @@ function classicItemBody(p){
   if(it.recorded_at){ chips.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`); }
   if(p.years){ const y=p.years; chips.push(`<span>${y.from}${y.to>y.from?'–'+y.to:''}</span>`); }
   if(runtime) chips.push(`<span>${fmtDur(runtime)}</span>`);
-  if(it.kind) chips.push(`<span>${esc(it.kind)}</span>`);
+  if(it.kind) chips.push(`<span>${esc(itemKindLabel(it))}</span>`);
   // A container has no watch flag of its own, so say what it's made of:
   // "3 of 10 watched" is the thing the mark-watched buttons below act on.
   if(it.rollup&&it.rollup.leaves){

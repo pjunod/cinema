@@ -38,7 +38,7 @@ function playbackInfoOverview(t,live=false){
     (t.source_display_aspect&&t.source_display_aspect!=="Unavailable"?`<p>${esc(`Source display aspect ${t.source_display_aspect}. ${t.aspect_comparison||"Not verified"}.`)}</p>`:"")+`</div>`+
     `<div class="pi-explanation"><strong>${esc([t.method,t.frame_comparison&&t.frame_comparison!=="Unavailable"?t.frame_comparison:null].filter(Boolean).join(" · ")||"Method not reported")}</strong><p>${esc(reason)}</p></div>`+
     `<div class="pi-tracks"><div>${fact("Stream audio track",t.decode_audio,"Track metadata; device output is not reported.")+(t.decode_audio?"":t.source_audio?fact("Original audio track",t.source_audio):"")}</div>${fact("Subtitles",t.subtitles,t.subtitles_note)}</div>`+
-    `<div class="pi-metrics">${fact("Buffered on this device",t.client_loaded,"Contiguous media loaded ahead of your position.")}${fact(live?"Behind stream live edge":"Buffering interruptions",live?t.live_edge:t.stalls,live?"Behind the latest available media; not broadcast delay.":"Player-reported interruptions for this playback; intentional pauses excluded.")}</div>`+
+    `<div class="pi-metrics">${fact("Buffered on this device",t.client_loaded,"Contiguous media loaded ahead of your position.")}${fact(live?"Behind stream live edge":"Buffering interruptions",live?t.live_edge:t.stalls,live?"Behind the latest available media; not broadcast delay.":"Player-reported interruptions for this playback; intentional pauses excluded.")}${fact("Frame drops / total",t.frames,"Dropped frames out of all frames reported by this player.")}</div>`+
     (live?`<div class="pi-explanation"><strong>Tuner reception</strong><p>${esc(t.reception||"Not reported")}</p></div>`:"");
 }
 function playbackInfoCompact(t){

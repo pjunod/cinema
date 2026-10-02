@@ -1,5 +1,8 @@
 "use strict";
 // ---- detail helpers -------------------------------------------------------
+function itemKindLabel(it){
+  return it.kind==='episode'&&it.episode_number!=null?`episode ${it.episode_number}`:it.kind||'';
+}
 function fmtChannels(n){ return n===8?"7.1":n===7?"6.1":n===6?"5.1":n===2?"2.0":n===1?"Mono":(n?n+"ch":""); }
 function fmtMbps(bps){ return bps? (bps>=1000000? (bps/1000000).toFixed(bps>=10000000?0:1)+" Mb/s" : Math.round(bps/1000)+" kb/s") : ""; }
 function fmtBytes(n){ if(n==null||!Number.isFinite(n)||n<0) return ""; const u=["B","KB","MB","GB","TB"]; let i=0; while(n>=1000&&i<u.length-1){ n/=1000; i++; } return (i?n.toFixed(n>=10?0:1):Math.round(n))+" "+u[i]; }

@@ -1,4 +1,5 @@
 "use strict";
+const test = require("node:test");
 
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
@@ -125,6 +126,17 @@ for (const field of infoFields) assert.equal(diagnosticMarkup.split(`data-stats-
 assert.match(diagnosticMarkup, /<summary>Picture &amp; sound<\/summary>/);
 assert.match(diagnosticMarkup, /<summary>Session &amp; history<\/summary>/);
 process.stdout.write("PASS playback information keeps unknown picture size and complete diagnostics\n");
+
+test("overview groups dropped and total frames with buffer and interruptions", () => {
+  for (const [frames, expected] of [["2 / 1234 frames", "2 / 1234 frames"], ["0 / 0 frames", "0 / 0 frames"], [null, "Not reported"]]) {
+    const markup = info.playbackInfoOverview({client_loaded: "12.0 s", stalls: "1", frames});
+    const metrics = markup.slice(markup.indexOf('<div class="pi-metrics">'));
+    assert.match(metrics, /Buffered on this device[^]*?<strong>12.0 s<\/strong>/);
+    assert.match(metrics, /Buffering interruptions[^]*?<strong>1<\/strong>/);
+    assert.ok(metrics.includes(`Frame drops / total</span><strong>${expected}</strong>`));
+    assert.equal((metrics.match(/class="pi-fact"/g) || []).length, 3);
+  }
+});
 
 const originalAudio = info.playbackInfoOverview({method: "Transcode", source_audio: "DTS · 5.1"});
 assert.match(originalAudio, /Stream audio track[^]*?<strong>Not reported<\/strong>/);
