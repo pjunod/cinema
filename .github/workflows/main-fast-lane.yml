@@ -143,9 +143,10 @@ jobs:
     # pinned ffmpeg 6 environment used by this lane, while the host label keeps
     # the job on the high-CPU pool.
     container: ubuntu:24.04
-    # Cold builds plus the complete unit lane measured just over 30 minutes
-    # on the shared runner. Keep bounded headroom without dropping tests.
-    timeout-minutes: 35
+    # A cold shared-runner build used 12 minutes before tests, and the core
+    # and SQLite suites used another 17. Allow the daemon and restart suites
+    # to finish as well, with bounded headroom for shared-runner contention.
+    timeout-minutes: 60
     steps:
       - name: Install Rust gate prerequisites
         run: |
