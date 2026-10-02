@@ -344,6 +344,16 @@ exists, so each client can adopt `?size=` in its own PR
 trackers). The web grid (`layouts/library-grids.js`, W9's "`?w=` variants")
 is the first consumer and is a separate small PR after M2 lands.
 
+**2026-10-02 grid consumer continuation.** Shared grid and Home-folder cards
+now explicitly request `size=w300` only for a poster whose DTO advertises
+that closed bucket. The selector preserves revision/query identity and the
+existing authenticated URL appender; absent or unsupported availability,
+explicit size choices and unknown image routes keep the original. The
+default `artHtml` call, detail/hero/backdrop art and photos are unchanged.
+One focused Node control exercises the actual card/helper/token path; this
+is source coverage, not Chrome cold/warm byte, fleet load or native-device
+qualification. Sections 6.2–6.4 remain open.
+
 **Metric.** `plurx_artwork_derivatives_total{bucket, outcome="served|
 generated|fallback_original|refused"}` (3 × 4 label values).
 
@@ -511,6 +521,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | gpt-6.1-sol | agent:/root/a05_current_remaining_sol61 | First web grid consumer | pending | Current effort continuation owns only the shared poster selector and grid/Home-folder opt-in callers. Advertised `w300`, original/default/photo fallbacks and revision/auth identity are covered by one new focused Node control; review/gate and original §6.2–§6.4 runtime qualification remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Identity-bound digest cache, separate local-byte/peer-fetch permits, authenticated 304, strong ETag and bounded metrics implemented; `cargo test -p plurxd http::images -- --test-threads=1` passed 25 tests. Lab and device observations remain pending. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Closed `size` buckets, digest-keyed derivatives, two-child/timeout/output bounds, single-flight, original fallback, conservative orphan cleanup, DTO readiness and fixed-cardinality metrics implemented. The existing job-owned bounded-file child was used instead of widening the probe-only output helper. Focused image tests pass; §6.2-§6.4 fleet, browser and device observations remain pending. |
