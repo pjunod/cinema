@@ -9620,7 +9620,6 @@ pub(crate) fn unix_seconds() -> i64 {
 #[cfg(test)]
 mod atsc_audio_tests;
 
-#[path = "live_tv/caption_audit_tests.rs"]
 mod caption_probe;
 
 #[cfg(test)]

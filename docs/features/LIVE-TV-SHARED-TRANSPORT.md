@@ -334,7 +334,7 @@ Where each correction lives (`live_tv.rs`, `live_tv/dvr.rs`):
   binary media fixtures (every existing live-TV media test synthesises its
   input, e.g. `videotoolbox_tests.rs:36-128`, `atsc_audio_tests.rs`), so the
   10 s 1080i MPEG-2 fixture is built at test time by
-  `live_tv/caption_audit_tests.rs` (`captioned_fixture`), with its ground
+  `live_tv/caption_probe.rs` (`captioned_fixture`), with its ground
   truth in code. `PLURX_CAPTION_FIXTURE_OUT=<path>` writes a copy for use
   outside the tests.
 - **C3 — the existing VideoToolbox fixture proves survival, not captions.**
@@ -594,7 +594,7 @@ first two have a recorded result per graph.
    whichever the builder can reproduce; the generator command is committed
    beside the fixture). Its ground truth is the caption text per second.
    **As built (§2.4 C2):** generated at test time by
-   `live_tv/caption_audit_tests.rs`, not committed as a binary.
+   `live_tv/caption_probe.rs`, not committed as a binary.
 2. **Audit per graph.** For each `Encoder` the fleet enables (x264, QSV on
    `media1`, VAAPI where present, VideoToolbox on `maca`/`macb`, NVENC if
    any node has it) and for the copy route: run
@@ -723,7 +723,7 @@ the fixture green; a device pass per the GPT prompt in §6.3.
 
 Files: `tests/fixtures/live-tv/captioned-608-708.ts` + generator script;
 `live_tv.rs` (`-sei +a53_cc` for VAAPI if the audit says so);
-**as built:** `live_tv/caption_audit_tests.rs` (generator, decoder, tests,
+**as built:** `live_tv/caption_probe.rs` (generator, decoder, tests,
 audit) and `scripts/live-tv-caption-audit` (the plan's
 `scripts/live_tv_caption_audit.sh`, named like the other `scripts/live-tv-*`
 tools); no `live_tv.rs` flag change — see §2.4 C6;
