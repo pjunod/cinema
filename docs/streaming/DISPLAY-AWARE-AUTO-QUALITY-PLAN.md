@@ -1512,3 +1512,21 @@ evaluation cadence and five-minute failure backoff remain unchanged. Current
 native source/test compilation and the two new focused boundary cases are being
 qualified before the single coherent review. This remains source work, not
 device startup-cost acceptance, shaped-network restoration or A-05 completion.
+
+### 9.14 Durable candidate-recovery storage milestone (2026-10-02 UTC)
+
+The storage slice separates authenticated exact-recipe fault observations from
+the one decoder quality-response admission in a playback recovery lifetime.
+Current pointer, incarnation, owner, recipe and source-metadata predicates
+fence each fold; duplicate observations never refresh the original timestamp
+or rearm admission. SQLite92 and Hiqlite68 append after the existing COPY
+migrations. SQLite-to-Hiqlite import must retain both the session recovery
+epoch and rejected/spent candidate rows; older sources without that epoch
+remain explicitly empty rather than receiving an invented lifetime.
+
+The Store API trusts its caller to reconstruct credential, physical source
+version and full recipe from authenticated incumbent facts. This milestone
+does not yet wire that caller, the native typed-cause senders or sustained
+incumbent decode-pressure behavior. Those remain source work, alongside the
+original decoder/recovery and shaped-network physical acceptance. It does not
+close A-05 or restore the superseded numeric-height controller.
