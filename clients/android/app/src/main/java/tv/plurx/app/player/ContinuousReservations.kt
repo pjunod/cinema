@@ -1,7 +1,6 @@
 package tv.plurx.app.player
 
 import java.io.IOException
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.*
@@ -25,6 +24,9 @@ internal class ContinuousReservations(
     data class Retained(val failedRow: JsonObject, val request: Long)
     private data class Previous(val row: JsonObject, val automatic: Boolean, val request: Long)
     private var optionalPrevious: Previous? = null
+    private data class FailedChange(val row: JsonObject, val previous: Previous, val through: Long,
+        val transaction: String?, val wasPresented: Boolean)
+    private var failedChange: FailedChange? = null
 
     suspend fun initial(through: Long, automatic: Boolean) = lock.withLock {
         this.automatic = automatic
@@ -43,6 +45,8 @@ internal class ContinuousReservations(
                 it.jsonObject.number("first_presented_tick") != null
         }
         optionalPrevious = null
+        failedChange = null
+        transaction = null
         try {
             prepare(next, through)
             wanted = next
@@ -51,20 +55,33 @@ internal class ContinuousReservations(
             if (next != previous && wasPresented) optionalPrevious = Previous(previous, previousAutomatic, request)
             true
         } catch (error: Exception) {
+            failedChange = FailedChange(next, Previous(previous, previousAutomatic, request), through, transaction, wasPresented)
             wanted = previous
             this.automatic = previousAutomatic
-            // A lost acknowledgement remains pending. Replaying it before the
-            // restorative prepare fences any late optional target admission.
             transaction = null
-            if (error !is CancellationException) {
-                try { prepare(previous, through); reserveWindow(through) }
-                catch (restoration: Exception) {
-                    if (restoration is CancellationException) throw restoration
-                    error.addSuppressed(restoration)
-                }
-            }
+            // The attachment pump owns restoration after caller cancellation;
+            // it must replay the uncertain request before a higher intent.
             throw error
         }
+    }
+
+    suspend fun recoverFailedChange(): Retained? = lock.withLock {
+        val failed = failedChange ?: return@withLock null
+        protocol.settlePending()
+        protocol.snapshot()
+        val tx = protocol.ledger?.get("transactions")?.jsonArray.orEmpty().map { it.jsonObject }
+            .singleOrNull { it.text("transaction_id") == failed.transaction }
+        val proof = tx ?: buildJsonObject {
+            put("target_rendition_id", failed.row.getValue("rendition_id")); put("reserved", JsonArray(emptyList()))
+        }
+        val unexposed = failed.wasPresented && (tx == null || tx["ever_appended"]?.wireBoolean() == false &&
+            tx.getValue("appended").jsonArray.isEmpty()) && cancelUnexposed(failed.transaction.orEmpty(), proof)
+        if (unexposed && tx != null && tx["cancel_requested"]?.wireBoolean() != true) protocol.transition(requireNotNull(failed.transaction),
+            buildJsonObject { put("kind", "cancel_unappended"); put("completed", JsonArray(emptyList())) })
+        prepare(failed.previous.row, failed.through)
+        reserveWindow(failed.through)
+        failedChange = null
+        if (unexposed) Retained(failed.row, failed.previous.request) else null
     }
 
     suspend fun reserve(resource: ContinuousQualityMedia.Resource, bytes: ByteArray?) = lock.withLock {
@@ -121,10 +138,10 @@ internal class ContinuousReservations(
         val revision = requireNotNull(protocol.ledger?.number("latest_intent_revision"))
         if (revision == ContinuousQualityWire.MAX_SAFE_INTEGER) throw IOException("Continuous intent revision bound")
         val id = ContinuousQualityWire.newId()
+        transaction = id
         protocol.transition(id, buildJsonObject {
             put("kind", "prepare"); put("intent_revision", revision + 1); put("target_rendition_id", requireNotNull(row.text("rendition_id")))
         }, frontier(row, through))
-        transaction = id
         return current().also { requireLive(it) }
     }
 

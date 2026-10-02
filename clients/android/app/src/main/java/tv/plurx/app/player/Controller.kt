@@ -350,7 +350,8 @@ class Controller internal constructor(
             } },
             retained = { row, request -> scope.launch {
                 if (continuousAttachment === attachment && player === continuousPlayer && playbackControlBootstrapFence.isActive()) {
-                    if (request < 0 && request == continuousAutoRequest && autoDesiredCandidate?.id == row.text("candidate_id")) {
+                    if (request < 0 && request == continuousAutoRequest && continuousAutoEpoch == mediaMutationEpoch &&
+                        playbackIntent.desiredQuality == PlaybackQuality.Auto && autoDesiredCandidate?.id == row.text("candidate_id")) {
                         failAutoPreparation()
                     } else directedChange?.takeIf { it.pending?.sequence == request }?.let { change ->
                         val pending = change.pending
@@ -814,6 +815,7 @@ class Controller internal constructor(
      */
     private var autoCatalog = plan.qualityCandidates
     private var continuousAutoRequest = 0L
+    private var continuousAutoEpoch = 0L
     private var autoDesiredCandidate: tv.plurx.app.data.QualityCandidate? = null
     private var autoActiveCandidateId: String? = plan.qualityCandidateId
     private var autoRouteProtocol: String? = plan.displayAwareAutoProtocol
@@ -1695,10 +1697,10 @@ class Controller internal constructor(
                     val applied = withTimeout(12_000) {
                         continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), quality == PlaybackQuality.Auto, pending.sequence)
                     }
-                    if (!applied) fallBackDirectedChange(change, "unsupported")
-                } catch (_: TimeoutCancellationException) { fallBackDirectedChange(change, "timed_out") }
+                    if (!applied) continuousChangeFailed(change, retained = true)
+                } catch (_: TimeoutCancellationException) { continuousChangeFailed(change, retained = false) }
                 catch (error: CancellationException) { throw error }
-                catch (_: Exception) { fallBackDirectedChange(change, "fallback") }
+                catch (_: Exception) { continuousChangeFailed(change, retained = false) }
                 return@launch
             }
             when (val step = playbackControl.awaitPreparedOffer(tappedAtMs)) {
@@ -1759,6 +1761,23 @@ class Controller internal constructor(
             },
             publish = playbackControl::reportIntent,
         )
+    }
+
+    private fun continuousChangeFailed(change: DirectedChange, retained: Boolean) {
+        if (directedChange !== change || change.isSettled || change.epoch != mediaMutationEpoch) return
+        retainedQualityRequest = change.quality
+        if (retained) {
+            val pending = change.pending ?: return
+            val incumbent = change.incumbentSelection ?: return
+            if (!playbackIntent.retainQualityChange(pending, null)) return
+            change.settleFailureOnce(mediaMutationEpoch, true, retain = {
+                if (playbackIntent.retainFailedQuality(pending, incumbent)) logQualitySwitch("retained_current", change.quality)
+            }, reopen = {})
+            raiseDegradedNotice("This quality could not be selected continuously. Playback continues. Retry or apply with restart in Playback settings.")
+        } else {
+            raiseDegradedNotice("Quality change could not be confirmed. Playback continues while its outcome is checked. Retry or apply with restart in Playback settings.")
+        }
+        playbackControl.reportEvidence()
     }
 
     /**
@@ -3350,6 +3369,7 @@ class Controller internal constructor(
         val epoch = mediaMutationEpoch
         val incumbent = player
         val continuousRequest = --continuousAutoRequest
+        continuousAutoEpoch = epoch
         scope.launch {
             playbackControl.reportIntent()
             val continuous = continuousAttachment?.takeIf { player === continuousPlayer }
@@ -3360,9 +3380,13 @@ class Controller internal constructor(
                     if (!withTimeout(12_000) {
                         continuous.change(row, baseMs + maxOf(player.bufferedPosition, player.currentPosition).coerceAtLeast(0), true, continuousRequest)
                     }) failAutoPreparation()
-                } catch (_: TimeoutCancellationException) { failAutoPreparation() }
+                } catch (_: TimeoutCancellationException) {
+                    continuousAutoUncertain(continuousRequest, epoch, chosen.id)
+                }
                 catch (error: CancellationException) { throw error }
-                catch (_: Exception) { failAutoPreparation() }
+                catch (_: Exception) {
+                    continuousAutoUncertain(continuousRequest, epoch, chosen.id)
+                }
                 return@launch
             }
             when (val step = playbackControl.awaitPreparedOffer(now)) {
@@ -3376,6 +3400,12 @@ class Controller internal constructor(
                 else -> failAutoPreparation()
             }
         }
+    }
+
+    private fun continuousAutoUncertain(request: Long, epoch: Long, candidate: String) {
+        if (request != continuousAutoRequest || epoch != mediaMutationEpoch ||
+            playbackIntent.desiredQuality != PlaybackQuality.Auto || autoDesiredCandidate?.id != candidate) return
+        raiseDegradedNotice("Auto quality change could not be confirmed. Playback continues while its outcome is checked.")
     }
 
     private fun failAutoPreparation() {

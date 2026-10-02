@@ -1,6 +1,6 @@
 package tv.plurx.app.player
 
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.*
 import kotlinx.serialization.json.*
 import org.junit.Assert.*
 import org.junit.Test
@@ -25,10 +25,18 @@ class ContinuousReservationsTest {
         var ledgerRevision = 0L
         var tx: JsonObject? = null
         var failedTargetCalls = 0
+        var blockOptional = false
+        val optionalEntered = CompletableDeferred<Unit>()
+        val optionalBlocked = CompletableDeferred<Unit>()
         val protocol = ContinuousQualityProtocol(identity, { request ->
             requests += request
             val transition = request.obj("transition")
             val operation = transition?.obj("operation")
+            if (blockOptional && operation?.text("kind") == "prepare" && operation.text("target_rendition_id") == "b".repeat(64)) {
+                blockOptional = false
+                optionalEntered.complete(Unit)
+                optionalBlocked.await()
+            }
             if (failedTargetCalls > 0 && operation?.text("kind") == "prepare" && operation.text("target_rendition_id") == "b".repeat(64)) {
                 failedTargetCalls--
                 throw java.io.IOException("lost optional target acknowledgement")
@@ -89,11 +97,32 @@ class ContinuousReservationsTest {
         assertTrue(reservations.change("c".repeat(64), 48, true, setOf("b".repeat(64), "c".repeat(64))))
         failedTargetCalls = 2
         assertTrue(runCatching { reservations.change("b".repeat(64), 96, false, setOf("b".repeat(64), "c".repeat(64))) }.isFailure)
+        reservations.recoverFailedChange()
         // Replay the uncertain low target first, then restore high using a
         // newer intent; its actual scheduled choice remains usable.
         assertEquals(6L, protocol.ledger?.number("latest_intent_revision"))
         assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
         assertTrue(selection.publishReserved(96, true))
         assertTrue(runCatching { reservations.reserve(ContinuousQualityMedia.Resource("video", low, false, 2), null) }.isFailure)
+        tx = JsonObject(requireNotNull(tx) + mapOf("first_presented_tick" to JsonPrimitive(96),
+            "first_presented_at_ms" to JsonPrimitive(1), "ever_appended" to JsonPrimitive(true),
+            "appended" to requireNotNull(tx).getValue("reserved"), "state" to JsonPrimitive("presented")))
+        protocol.snapshot()
+        blockOptional = true
+        val cancelled = launch(start = CoroutineStart.UNDISPATCHED) {
+            reservations.change("b".repeat(64), 144, false, setOf("b".repeat(64), "c".repeat(64)), 42)
+        }
+        optionalEntered.await()
+        cancelled.cancelAndJoin()
+        val cancellationRecovery = requests.size
+        val recovered = reservations.recoverFailedChange()
+        assertEquals(low, recovered?.failedRow)
+        assertEquals(42L, recovered?.request)
+        assertEquals(listOf("prepare", "cancel_unappended", "prepare", "scheduled"), requests.drop(cancellationRecovery).mapNotNull {
+            it.obj("transition")?.obj("operation")?.text("kind")
+        })
+        assertEquals(8L, protocol.ledger?.number("latest_intent_revision"))
+        assertEquals("c".repeat(64), protocol.ledger?.get("transactions")?.jsonArray?.single()?.jsonObject?.text("target_rendition_id"))
+
     }
 }

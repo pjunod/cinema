@@ -3312,3 +3312,30 @@ provides formatting, all-target Clippy and served-JavaScript syntax evidence.
 Unit execution, adversarial review, exact-source production replay and physical
 native qualification remain pending. No runtime receipt from the older Linux
 binary qualifies this merged source.
+
+
+### 10.107 Caller cancellation cannot reopen an optional continuous change
+
+Continuous manual control failure no longer enters the generic prepared-change
+reopen path when the incumbent is buffering or its health is unknown. An
+unsupported target retains immediately because it issued no target prepare. An
+uncertain control result preserves the pending request, offers Retry or explicit
+restart, and leaves genuine playback failure to the existing recovery owner.
+Auto uncertainty retains its pending candidate rather than restaging every tick.
+Late notices and settlement require the matching request and media epoch.
+
+The attachment scope owns restorative work after caller cancellation. It
+replays the exact pending request, refreshes the ledger, checks zero exposure
+and absence of any queued target-rendition alias, then cancels eligible target
+work and reserves the previous choice through a higher intent. Only a durably
+presented incumbent and proven-unexposed target produce retained-current. An
+uncertain or committed target cannot borrow that label. Recovery survives the
+caller's twelve-second timeout and remains bounded by owned transport requests;
+End still closes the attachment's scope and captured transport.
+
+The reservation regression now cancels an in-flight target prepare, verifies
+exact replay before cancellation and restoration, and checks the original
+request token. Production and test sources compile in thirteen seconds. Unit
+execution remains deferred to the final main-ready fast lane. Read-only ADB
+inventory still has no physical devices. Runtime ordering, pressure, display,
+audio, and terminal cleanup qualification remain unmeasured on this exact tree.

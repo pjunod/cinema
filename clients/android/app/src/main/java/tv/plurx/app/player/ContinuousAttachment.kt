@@ -43,11 +43,12 @@ internal class ContinuousAttachment(
     private val selection = ContinuousVideoSelection(start.family, protocol)
     private val exposure = ContinuousExposure()
     private val reservations = ContinuousReservations(start.family, protocol, selection, start.primaryRendition) { id, tx ->
-        exposure.cancelUnexposed(id) {
-            queues.queuedArtifacts().none { load ->
-                load.resource.role == "video" && tx.getValue("reserved").jsonArray.any { it.jsonObject == load.authorized.interval }
-            }
+        val absent = {
+            queues.queuedArtifacts().none { load -> load.resource.role == "video" &&
+                (load.resource.rendition == tx.text("target_rendition_id") ||
+                    tx.getValue("reserved").jsonArray.any { it.jsonObject == load.authorized.interval }) }
         }
+        if (id.isEmpty()) absent() else exposure.cancelUnexposed(id, absent)
     }
     private val media = ContinuousQualityMedia(profile.origin, start.schedulePath, start.family, protocol)
     private val videoReleaseEpoch = AtomicLong()
@@ -131,10 +132,10 @@ internal class ContinuousAttachment(
     /** Call with the current buffered frontier, never the old tap position. */
     suspend fun change(row: JsonObject, positionMs: Long, automatic: Boolean, request: Long = 0): Boolean {
         if (closed.get() || row !in rows) return false
-        val changed = reservations.change(requireNotNull(row.text("rendition_id")), frontier(row, positionMs),
-            automatic, selection.supportedRenditions(), request)
-        wake.trySend(Unit)
-        return changed
+        try {
+            return reservations.change(requireNotNull(row.text("rendition_id")), frontier(row, positionMs),
+                automatic, selection.supportedRenditions(), request)
+        } finally { wake.trySend(Unit) }
     }
 
     fun playback(positionMs: Long, rate: Double, active: Boolean, nowMs: Long) {
@@ -163,6 +164,7 @@ internal class ContinuousAttachment(
 
     private suspend fun flushFacts() {
         protocol.settlePending()
+        reservations.recoverFailedChange()?.let { retained(it.failedRow, it.request) }
         loads.whenQuiescent { exposure.retain(transactions().mapNotNull { it.text("transaction_id") }.toSet()) }
         finishDisposals()
         queues.observeResets()
