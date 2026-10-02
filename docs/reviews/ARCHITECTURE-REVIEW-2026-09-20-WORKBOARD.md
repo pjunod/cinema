@@ -99,6 +99,24 @@ runtime expiry. Fifteen internal NAL contexts and original media1/public/
 film/closed-GOP/device/fidelity qualification remain open; counts remain
 16 internal /4 synthetic /0 original fully-qualified public cells.
 
+**S-11 retained-header continuation, 2026-10-02 (gpt-6.1-sol,
+agent:/root/s11_next_cell_sol61):** the
+[additive ledger](S11-RETAINED-NAL-CONTINUATION-20261002.md) records16/16
+header contexts: three retained Grain successes plus thirteen new Linux
+passes, each35 first IDRs/1680AUs/actual rung geometry/exact3750tick grid.
+Only Grain720 has TWO extras; original #737 snapshots remain unchanged.
+Linux per-process limits/export/independent exact leaf-PID cleanup are not
+relabeled historical Docker/current-product qualification. Failed route/
+local/prelaunch and actual H264360/PQ4K360 pressure refusals remain separate,
+with no invented remote absence or pressure sample; later separately admitted
+successes did not replay passing contexts or waive thresholds/caps. All
+retained header contexts are measured; raw bundles stay privately retained
+with direct local reviewer access, not portable raw evidence. Original
+film/public/closed-GOP/native/device/fidelity bars remain open. Counts remain
+16 internal /4 synthetic /0 original fully-qualified public cells.
+Evidence-only continuation: independent review/gate separate, no measured
+context/control/unit replay or qualification waiver.
+
 **Integration override, 2026-09-30 (user instruction):** remaining plan PRs
 branch from the current `effort/architecture-review-2026-09-20` and target
 that effort. Existing merged history is preserved. Each task needs one formal
