@@ -1237,6 +1237,7 @@ pub(crate) async fn resolve_plan(
                 let reason =
                     candidate_refusal_reason(&catalog, requested, body.height, authority_refused);
                 tracing::warn!(
+                    target: "plurxd::http::hls",
                     reason,
                     requested_route = if body.copy == Some(true) {
                         "copy"
