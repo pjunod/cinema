@@ -2679,3 +2679,32 @@ physical qualification remain deferred.
 
 The status page was condensed to current milestone rows. Historical CQ0
 mechanics remain explicitly separate from failed production replay receipts.
+
+
+### 10.84 Continuous quality does not dispatch a legacy prepared successor
+
+The local-client diagnostic checked installation at startup but login then
+reloaded and discarded that replacement. Its actual playback therefore used
+the existing `6462b41e3` server and client. Both selections reached actual target
+presentation on the same element, Hls instance, MediaSource and buffers with
+no removals. The run remains failed: its first gap was 516.7 ms and the durable
+census counted two VOD attachments. This older-source run cannot qualify the
+landing tree. Both attempted local replacements remain failed diagnostic
+evidence; neither proves the new delayed retry. The diagnostic now reinstalls
+the client after every reload and records active-code identity in each sample.
+
+Read-only inspection of the isolated database confirmed the extra attachment
+was an active ordinary recipe with one legacy preparation row, alongside the
+controlled family parent. Ordinary control's SelectionChange dispatcher now
+recognizes verified controlled-family video intent and leaves it to the
+rendition ledger. Other recipe axes, out-of-family choices and planned
+relocation retain their existing owner. The authored route regression requires
+no staging response, pending candidate or durable prepared successor, while
+out-of-family height and audio changes retain the legacy path.
+
+Apple's final layer-readiness wait also uses the original remaining overlap,
+rather than another fresh four-second allowance. Pinned all-target source
+compilation and iOS production/test compilation passed. Exact-tree replay
+remains required. Source transfer to nuc3 is pending explicit destination
+authorization requested after automatic approval review rejected it; no new
+private source was sent there. Unit execution stays deferred until final review.

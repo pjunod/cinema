@@ -2167,6 +2167,56 @@ pub(super) async fn control_local_inner(
     .await
 }
 
+/// A verified controlled family owns its in-family video intent. Legacy
+/// control still owns transport, other recipe axes and planned relocation.
+pub(super) fn continuous_family_owns_quality(
+    recipe: &RemoteStartRequest,
+    selection: &crate::playback_control::ClientSelection,
+) -> bool {
+    use crate::playback_control::{
+        CodecPolicy, DynamicRangePolicy, QualitySelection, SubtitleMode,
+    };
+    let Some(media) = recipe.request.continuous_media.as_ref() else {
+        return false;
+    };
+    let Some(family) = media.family_descriptor.as_ref() else {
+        return false;
+    };
+    if !media.controlled
+        || media.role != crate::transcode::ContinuousMediaRole::Video
+        || family.mode != "controlled"
+        || !family.valid()
+        || selection.audio_track != recipe.request.audio_index
+        || selection.audio_offset_ms != recipe.request.audio_offset_ms
+        || !matches!(selection.codec, CodecPolicy::Auto | CodecPolicy::H264)
+        || !matches!(
+            selection.dynamic_range,
+            DynamicRangePolicy::Auto | DynamicRangePolicy::Sdr
+        )
+        || (if selection.subtitle.mode == SubtitleMode::Burn {
+            selection.subtitle.track
+        } else {
+            None
+        }) != recipe.request.subtitle_burn
+    {
+        return false;
+    }
+    match selection.quality {
+        QualitySelection::Original => false,
+        QualitySelection::Manual { height } => family
+            .video
+            .iter()
+            .any(|row| i64::from(row.height) == height),
+        QualitySelection::Auto {
+            height,
+            candidate_id,
+        } => family.video.iter().any(|row| {
+            height.is_none_or(|height| i64::from(row.height) == height)
+                && candidate_id.is_none_or(|candidate| row.candidate_id == candidate)
+        }),
+    }
+}
+
 pub(super) async fn control_local_with_settlement_capacity(
     state: &AppState,
     route: &MediaSessionRoute,
@@ -2846,6 +2896,7 @@ pub(super) async fn control_local_with_settlement_capacity(
                         .selection
                         .dispatch_preparation
                         .then_some(PreparationPurpose::SelectionChange)
+                        .filter(|_| !continuous_family_owns_quality(&recipe, &request.selection))
                 })
         })
         .flatten();

@@ -10712,7 +10712,7 @@ extension PlayerController: PreparedSuccessorHost {
         // all. The seek is issued while the item is still attached to its own
         // player, which is where AVFoundation will honour one.
         let layerReady = await awaitBoundedValue(
-            boundMs: PreparedReplacementBounds.alignmentMs,
+            boundMs: min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs),
             pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },

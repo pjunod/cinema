@@ -2582,3 +2582,45 @@
             .expect("the refusal is logged");
         assert_eq!(refused.target, "plurxd::http::hls");
     }
+
+
+    #[tokio::test]
+    async fn continuous_family_quality_does_not_stage_a_legacy_successor() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("continuous-single-owner");
+        let (fixture, _, mut route) = staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+        let mut recipe: RemoteStartRequest = serde_json::from_str(&route.recipe_json).expect("fixture recipe");
+        let video = [(720, 1280, "a", "1"), (1080, 1920, "b", "2")].map(|(height,width,digest,candidate)| {
+            serde_json::json!({"candidate_id":candidate.repeat(32),"rendition_id":digest.repeat(64),
+                "init_id":"c".repeat(64),"width":width,"height":height,"codec":"avc1.640032",
+                "timescale":24,"frame_ticks":1,"segment_ticks":48,"peak_bps":1000000,
+                "playlist":format!("video/{}/index.m3u8",digest.repeat(64))})
+        });
+        recipe.request.continuous_media = Some(Box::new(serde_json::from_value(serde_json::json!({
+            "version":1,"controlled":true,"family_generation":route.incarnation_id,
+            "role":"video","family_descriptor":{"version":1,"family_id":"d".repeat(64),
+                "mode":"controlled","master":"master.m3u8","video":video,"audio":null}
+        })).expect("continuous fixture media")));
+        route.recipe_json = serde_json::to_string(&recipe).expect("fixture recipe serialization");
+        let mut request = preparing_control_request(&route);
+        request.selection.audio_track = recipe.request.audio_index;
+        request.selection.audio_offset_ms = recipe.request.audio_offset_ms;
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&opening), "none");
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let selected = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&selected), "none", "the rendition transaction owns this switch");
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+        assert!(fixture.state.store.staged_media_session_for_playback(route.user_id, &playback_id)
+            .await.expect("prepared ledger").is_none());
+        assert!(super::continuous_family_owns_quality(&recipe, &request.selection));
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 2160 };
+        assert!(!super::continuous_family_owns_quality(&recipe, &request.selection));
+        request.selection.quality = crate::playback_control::QualitySelection::Manual { height: 720 };
+        request.selection.audio_offset_ms += 100;
+        assert!(!super::continuous_family_owns_quality(&recipe, &request.selection));
+    }
