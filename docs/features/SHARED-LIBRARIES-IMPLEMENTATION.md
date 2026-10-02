@@ -1636,12 +1636,36 @@ make spike-lock-check
 python3 -m unittest discover -s tests/operations -p test_docs_index.py
 ```
 
-**Still owed:** a restart and lost-response pairing exercise with the real
-pinned transport; complete per-node availability and deployment diagnostics;
+**Pinned transport receipt:** local checkpoint `6c5f7b8d7` passed the explicitly
+invoked `sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart`
+case: one test, zero ignored, 0.55 seconds. An internal-only Docker CGNAT
+network supplied the numeric fixture address; no ports were published and
+no production Tailscale setting was changed. The production endpoint
+validator, DNS fallback, pin/identity checks and HTTP client handled source
+commits whose responses were deliberately lost. Recreated recipient managers
+recovered the exact claim despite a recipient rename, observed approval,
+and settled a committed rotation through the old status-only credential.
+The SQLite stores remain in the test process; this is not an actual daemon
+process restart or a two-NAT/Tailscale receipt.
+
+The source-only compiler verified Rust 1.97.1. Linux core Clippy, formatting
+and workspace compilation passed on `3dfdf1a15`; the Linux-only fixture
+subsequently type-checked. Its initial ARM test build required `+fp16` for the
+existing GEMM dependency, and a two-job build was killed by the disposable
+VM. The successful run used one job, `RUSTFLAGS='-C target-feature=+fp16'`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `--locked --offline`, and the exact committed
+archive. These flags provide functional component evidence, not resource
+qualification.
+
+```sh
+PLURX_SHARING_FIXTURE_IP=100.127.88.2 cargo test --locked --offline -p plurxd --bin plurxd http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart -- --ignored --exact --nocapture
+```
+
+**Still owed:** actual daemon process restart; complete per-node availability
+and deployment diagnostics;
 shared-machine raw TCP Serve, two NATs, Docker bridge egress/isolation and
 startup ordering; the final task gate. The current listener refuses unqualified
 non-loopback profiles. S3–S8, native playback and promotion remain unfinished.
-
 
 ### 16.4 Implementation progress — S3, 2026-10-02
 

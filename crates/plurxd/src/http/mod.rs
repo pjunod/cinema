@@ -12278,6 +12278,45 @@ mod tests {
             call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
             "sharing_disabled"
         );
+        let invitation = plurx_core::sharing::Invitation {
+            identity: plurx_core::sharing::SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                created_at_ms: crate::state::clock_ms(),
+            },
+            name: "Unreachable synthetic source".into(),
+            endpoints: vec![plurx_core::sharing::Endpoint {
+                ipv4: "100.101.102.103"
+                    .parse()
+                    .expect("synthetic tailnet address"),
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: 32443,
+                spki_sha256: "a".repeat(64),
+            }],
+            id: uuid::Uuid::new_v4(),
+            secret: plurx_core::sharing::new_secret().expect("synthetic invitation"),
+            expires_at_ms: crate::state::clock_ms() + 60_000,
+        }
+        .encode()
+        .expect("bounded invitation");
+        let refused = call(
+            &app,
+            post(
+                "/api/v1/sharing/imports",
+                Some(&admin),
+                json!({"invitation":invitation.expose()}),
+            ),
+        )
+        .await;
+        assert_eq!(refused.0, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.1["code"], "sharing_disabled");
+        assert!(state
+            .store
+            .sharing_imports()
+            .await
+            .expect("off cannot reserve an import")
+            .is_empty());
         assert_eq!(
             call(
                 &app,

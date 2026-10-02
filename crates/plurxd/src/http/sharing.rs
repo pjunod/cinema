@@ -800,6 +800,12 @@ async fn verified_import(
     import_id: Uuid,
 ) -> Result<NewImport, ApiError> {
     use plurx_core::secrets::SharingSecretPurpose;
+    if !crate::sharing::enabled(state.store.as_ref())
+        .await
+        .map_err(authority)?
+    {
+        return Err(failure(StatusCode::SERVICE_UNAVAILABLE, "sharing_disabled"));
+    }
     let mut invitation = Invitation::parse(&request.invitation).map_err(|_| invalid())?;
     let now = clock_ms();
     if invitation.expires_at_ms <= now {
