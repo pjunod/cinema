@@ -361,6 +361,14 @@ pub(crate) struct ChildMediaRequest {
 }
 
 impl ChildMediaRequest {
+    pub(crate) fn valid_identity(role: &str, rendition: &str) -> bool {
+        matches!(role, "video" | "audio")
+            && rendition.len() == 64
+            && rendition
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }
+
     pub(crate) fn is_valid(&self) -> bool {
         let hash = |value: &str| {
             value.len() == 64
@@ -368,8 +376,7 @@ impl ChildMediaRequest {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         };
-        matches!(self.role.as_str(), "video" | "audio")
-            && hash(&self.rendition)
+        Self::valid_identity(&self.role, &self.rendition)
             && match self.kind.as_str() {
                 "init" => self.object.strip_suffix(".mp4").is_some_and(hash),
                 "segment" => self.object.strip_suffix(".m4s").is_some_and(|digits| {

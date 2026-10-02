@@ -396,6 +396,132 @@ impl VodServe {
         self.segment_before(session_id, name, None).await
     }
 
+    pub(crate) async fn child_playlist_before(
+        &self,
+        session_id: &str,
+        role: &str,
+        rendition_id: &str,
+        deadline: Instant,
+    ) -> Option<VodPublication<Option<Vec<u8>>>> {
+        if !ChildMediaRequest::valid_identity(role, rendition_id) {
+            return None;
+        }
+        let publication = self
+            .session_media_rendition(session_id, Some(rendition_id))
+            .await?;
+        let owner = publication.owner;
+        let result = async {
+            let Some(found) = publication.result? else {
+                return Ok(None);
+            };
+            let Some(encoding) = found.rendition.recipe.encoding.as_ref() else {
+                return Ok(None);
+            };
+            if (role == "audio") != encoding.shared_audio.is_some() {
+                return Ok(None);
+            }
+            let expected = found
+                .rendition
+                .identity
+                .lock()
+                .await
+                .identity
+                .as_ref()
+                .map(|identity| identity.served_init.clone());
+            let Some(expected) = expected else {
+                return Ok(None);
+            };
+            let budget = found
+                .block_budget
+                .min(deadline.saturating_duration_since(Instant::now()));
+            let mut ready = self
+                .serve_init(&found.rendition, budget, found.delivery)
+                .await?;
+            let Some(bytes) = read_child_init(&mut ready, &expected).await? else {
+                return Ok(None);
+            };
+            let mut reader = FragmentReader::new();
+            reader.push(&bytes);
+            let init = match reader.next_unit() {
+                Ok(Some(Unit::Init(init))) if reader.buffered() == 0 => init,
+                _ => {
+                    return Err(VodError::ProducerFailed(
+                        "continuous child init is not one verified record".into(),
+                    ))
+                }
+            };
+            let shared_audio_recipe = if role == "video"
+                && !found.rendition.recipe.file.audio_streams.is_empty()
+            {
+                let sessions = self.shared.sessions.lock().await;
+                let Some(session) = sessions.get(session_id) else {
+                    return Ok(None);
+                };
+                if !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
+                    || !session.owns_response_media(&owner)
+                {
+                    return Ok(None);
+                }
+                let mut matching = session.children.iter().filter_map(|child| {
+                    let audio_encoding = child.rendition.recipe.encoding.as_ref()?;
+                    let audio = audio_encoding.shared_audio.as_ref()?;
+                    (audio_encoding.source_object_version == encoding.source_object_version
+                        && child.rendition.recipe.file.id == found.rendition.recipe.file.id
+                        && child.rendition.recipe.audio_index == found.rendition.recipe.audio_index)
+                        .then(|| audio.digest().to_owned())
+                });
+                let Some(recipe) = matching.next() else {
+                    return Ok(None);
+                };
+                if matching.next().is_some() {
+                    return Ok(None);
+                }
+                Some(recipe)
+            } else {
+                None
+            };
+            let playlist = if let Some(audio) = encoding.shared_audio.as_ref() {
+                plurx_core::transcode::VodSharedAudioRendition::from_verified_init(
+                    &encoding.plan,
+                    audio,
+                    &init,
+                    &found.rendition.key,
+                    &encoding.source_object_version,
+                )
+                .and_then(|audio| audio.media_playlist(&found.rendition.plan))
+            } else {
+                plurx_core::transcode::VodVideoRung::from_verified_init(
+                    &found.rendition.recipe.file,
+                    &encoding.plan,
+                    &init,
+                    encoding.grid,
+                    &found.rendition.key,
+                    &encoding.source_object_version,
+                    shared_audio_recipe.as_deref(),
+                )
+                .and_then(|video| video.media_playlist(&found.rendition.plan))
+            }
+            .map_err(|error| VodError::ProducerFailed(error.to_string()))?;
+            if self.source_changed(&found.rendition)
+                || found
+                    .rendition
+                    .identity
+                    .lock()
+                    .await
+                    .identity
+                    .as_ref()
+                    .is_none_or(|identity| identity.served_init != expected)
+            {
+                return Err(VodError::ProducerFailed(
+                    "continuous child source or init changed during playlist verification".into(),
+                ));
+            }
+            Ok(Some(playlist.into_bytes()))
+        }
+        .await;
+        Some(VodPublication { result, owner })
+    }
+
     /// Resolve media through one exact parent's private reader. Role and init
     /// identity are checked before any demand can reach the producer.
     pub(crate) async fn child_segment_before(
@@ -480,36 +606,20 @@ impl VodServe {
                         .as_ref()
                         .is_some_and(|identity| identity.served_init == expected)
                     {
-                        if ready.len > 256 * 1024 {
-                            return Some(VodPublication {
-                                result: Ok(None),
-                                owner,
-                            });
-                        }
-                        let mut bytes = Vec::new();
-                        let read = (&mut ready.file)
-                            .take(256 * 1024 + 1)
-                            .read_to_end(&mut bytes)
-                            .await;
-                        if let Err(error) = read {
-                            return Some(VodPublication {
-                                result: Err(VodError::Io(error)),
-                                owner,
-                            });
-                        }
-                        if bytes.len() as u64 != ready.len
-                            || format!("{:x}", Sha256::digest(&bytes)) != expected
-                        {
-                            return Some(VodPublication {
-                                result: Ok(None),
-                                owner,
-                            });
-                        }
-                        if let Err(error) = ready.file.seek(std::io::SeekFrom::Start(0)).await {
-                            return Some(VodPublication {
-                                result: Err(VodError::Io(error)),
-                                owner,
-                            });
+                        match read_child_init(&mut ready, expected).await {
+                            Ok(Some(_)) => {}
+                            Ok(None) => {
+                                return Some(VodPublication {
+                                    result: Ok(None),
+                                    owner,
+                                })
+                            }
+                            Err(error) => {
+                                return Some(VodPublication {
+                                    result: Err(error),
+                                    owner,
+                                })
+                            }
                         }
                         ready.etag = expected.to_owned();
                         Ok(Some(ready))
@@ -597,4 +707,29 @@ impl VodServe {
             owner,
         })
     }
+}
+
+/// Validate the opened init, retaining the same descriptor for HTTP streaming.
+async fn read_child_init(
+    ready: &mut SegmentReady,
+    expected: &str,
+) -> Result<Option<Vec<u8>>, VodError> {
+    if ready.len > 256 * 1024 {
+        return Ok(None);
+    }
+    let mut bytes = Vec::new();
+    (&mut ready.file)
+        .take(256 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(VodError::Io)?;
+    if bytes.len() as u64 != ready.len || format!("{:x}", Sha256::digest(&bytes)) != expected {
+        return Ok(None);
+    }
+    ready
+        .file
+        .seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(VodError::Io)?;
+    Ok(Some(bytes))
 }

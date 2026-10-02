@@ -1415,6 +1415,22 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_child_playlist_before(
+        &self,
+        session_id: &str,
+        role: &str,
+        rendition_id: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<Vec<u8>>>> {
+        self.vod
+            .child_playlist_before(session_id, role, rendition_id, deadline)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
     pub(crate) async fn vod_child_segment_before(
         &self,
         session_id: &str,

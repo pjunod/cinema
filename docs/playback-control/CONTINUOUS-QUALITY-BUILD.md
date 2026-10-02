@@ -1763,3 +1763,20 @@ the parent's child waits. The authored regression covers shared caps, another
 parent's independent allowance, exact retirement, and capacity release after
 notification/cancellation. The real child HTTP serving path supplies both
 identities. Pinned compilation and normal hooks apply; no unit execution.
+
+### 10.42 Verified child playlist delivery
+
+Child playlists now have parent-capability HTTP and typed peer relay routes.
+The server verifies the opened init against its frozen SHA, checks the actual
+AVC or AAC sample entry against the executable recipe, and renders the exact
+immutable role plan. Video from a source with sound requires one unambiguous
+parent-owned AAC recipe with the same source object and selected track;
+missing or conflicting children cannot produce a soundless family playlist.
+Header/status/completion authorization keeps the private response owner.
+Init byte verification is shared with child media delivery. The existing
+relay regression now covers child playlist identity and role validation. The
+existing actual AAC fixture also exercises private playlist delivery, exact
+init bytes/ETag, wrong-role refusal and cross-parent refusal without creating
+another media fixture campaign.
+Pinned compilation and normal hooks apply; no unit execution. Parent family
+construction, admission and durable restoration still precede master exposure.

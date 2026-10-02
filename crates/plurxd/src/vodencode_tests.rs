@@ -289,6 +289,45 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("bounded audio policy");
     let serve = bare_serve(&base.path().join("shared-audio-cache"));
     let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
+    let soundtrack = serve.shared.renditions.lock().await.values()
+        .find(|rendition| rendition.recipe.encoding.as_ref().is_some_and(|encoding| encoding.shared_audio.is_some()))
+        .cloned().expect("cached real soundtrack");
+    let parent = uuid::Uuid::new_v4().to_string();
+    let other = uuid::Uuid::new_v4().to_string();
+    insert_control_session(&serve, &parent, Arc::clone(&soundtrack), Instant::now()).await;
+    insert_control_session(&serve, &other, Arc::clone(&soundtrack), Instant::now()).await;
+    let private_id = uuid::Uuid::new_v4().to_string();
+    soundtrack.attach_reader(&private_id, 0).await;
+    serve.shared.sessions.lock().await.get_mut(&parent).expect("parent").children.push(
+        ParentMediaReader { reader_id: private_id, rendition: Arc::clone(&soundtrack), _reservation: None });
+    let deadline = || Instant::now() + Duration::from_secs(5);
+    let playlist = serve.child_playlist_before(&parent, "audio", &soundtrack.key, deadline()).await
+        .expect("parent").result.expect("actual AAC playlist").expect("owned audio");
+    let playlist = String::from_utf8(playlist).expect("playlist UTF-8");
+    let init_sha = hex::encode(Sha256::digest(&cached_init));
+    assert!(playlist.contains(&format!("init/{init_sha}.mp4")));
+    assert!(playlist.contains("#EXTINF:2.005333,\nsegment/0.m4s"));
+    assert!(playlist.ends_with("#EXT-X-ENDLIST\n"));
+    assert!(serve.child_playlist_before(&other, "audio", &soundtrack.key, deadline()).await
+        .expect("other parent").result.expect("lookup").is_none());
+    assert!(serve.child_playlist_before(&parent, "video", &soundtrack.key, deadline()).await
+        .expect("parent").result.expect("role refusal").is_none());
+    let mut request = ChildMediaRequest { role: "audio".into(), rendition: soundtrack.key.clone(),
+        kind: "init".into(), object: format!("{init_sha}.mp4") };
+    let publication = serve.child_segment_before(&parent, &request, deadline()).await.expect("parent");
+    let mut ready = publication.result.expect("init ready").expect("exact init");
+    assert_eq!(ready.etag, init_sha);
+    let mut child_init = Vec::new();
+    ready.file.read_to_end(&mut child_init).await.expect("verified open descriptor");
+    assert_eq!(child_init, cached_init);
+    assert!(serve.commit_resolved_media(&parent, &publication.owner, None).await);
+    request.object = format!("{}.mp4", "0".repeat(64));
+    assert!(serve.child_segment_before(&parent, &request, deadline()).await
+        .expect("parent").result.expect("wrong init identity").is_none());
+    assert!(serve.end(&parent, Terminal::Deleted).await);
+    assert!(serve.end(&other, Terminal::Deleted).await);
+    soundtrack.gen_epoch.fetch_add(1, Relaxed);
+    let _ = soundtrack.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;
     let mut cached_reader = FragmentReader::new();
     cached_reader.push(&cached_init);
     let Some(Unit::Init(cached)) = cached_reader.next_unit().expect("cached AAC init") else { panic!("init first"); };

@@ -364,6 +364,7 @@ fn http_route_group(path: &str) -> usize {
         | "/api/v1/hls/{session}"
         | "/api/v1/hls/{session}/{segment}"
         | "/api/v1/hls/{session}/{role}/{rendition}/{kind}/{object}"
+        | "/api/v1/hls/{session}/{role}/{rendition}/index.m3u8"
         | "/api/v1/live-tv/readiness"
         | "/api/v1/live-tv/readiness/refresh"
         | "/api/v1/live-tv/channels"
@@ -1722,6 +1723,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/hls/{session}/{role}/{rendition}/{kind}/{object}",
             get(hls::child_segment),
+        )
+        .route(
+            "/hls/{session}/{role}/{rendition}/index.m3u8",
+            get(hls::child_playlist),
         )
         .route("/images/{filename}", get(images::serve));
 

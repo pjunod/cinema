@@ -1538,6 +1538,10 @@ pub(crate) enum RelayResource {
     Segment {
         segment: String,
     },
+    ChildPlaylist {
+        role: String,
+        rendition: String,
+    },
     ChildSegment {
         child: crate::vodserve::ChildMediaRequest,
     },
@@ -1638,6 +1642,9 @@ impl RelayResource {
             }
             Self::Segment { segment } => valid_resource_name(segment),
             Self::ChildSegment { child } => child.is_valid(),
+            Self::ChildPlaylist { role, rendition } => {
+                crate::vodserve::ChildMediaRequest::valid_identity(role, rendition)
+            }
         }
     }
 
@@ -1646,7 +1653,8 @@ impl RelayResource {
             Self::Playlist { .. }
             | Self::Master { .. }
             | Self::VideoPlaylist
-            | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
+            | Self::SubtitlePlaylist { .. }
+            | Self::ChildPlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
             Self::Segment { .. } | Self::ChildSegment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
             Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
         }
@@ -6087,6 +6095,21 @@ mod tests {
         };
         assert!(RelayResource::ChildSegment {
             child: child.clone()
+        }
+        .is_valid());
+        assert!(RelayResource::ChildPlaylist {
+            role: "audio".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "subtitle".into(),
+            rendition: child.rendition.clone()
+        }
+        .is_valid());
+        assert!(!RelayResource::ChildPlaylist {
+            role: "video".into(),
+            rendition: "../cached".into()
         }
         .is_valid());
         assert_eq!(child.media_name().as_deref(), Some("seg00012.m4s"));

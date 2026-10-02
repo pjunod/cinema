@@ -30,6 +30,98 @@ pub async fn segment(
     .await
 }
 
+pub async fn child_playlist(
+    State(state): State<AppState>,
+    AxPath((session, role, rendition)): AxPath<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if !crate::vodserve::ChildMediaRequest::valid_identity(&role, &rendition) {
+        return Err(ApiError::NotFound("playlist"));
+    }
+    let (_, deadline) = playlist_request_deadlines(&state);
+    if let Some(response) = relay_if_remote(
+        &state,
+        &session,
+        RelayResource::ChildPlaylist {
+            role: role.clone(),
+            rendition: rendition.clone(),
+        },
+        RelayHeaders::from_http(&headers),
+        deadline,
+    )
+    .await?
+    {
+        return Ok(response);
+    }
+    child_playlist_local_before(&state, &session, &role, &rendition, deadline).await
+}
+
+pub(super) async fn child_playlist_local_before(
+    state: &AppState,
+    session: &str,
+    role: &str,
+    rendition: &str,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let (media_deadline, _) = playlist_request_deadlines_before(state, deadline);
+    let answer = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(media_deadline),
+        state
+            .transcode
+            .vod_child_playlist_before(session, role, rendition, media_deadline),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let Some(answer) = answer else {
+        return Err(
+            match vod_resurrected_before(state, session, media_deadline).await {
+                VodResurrection::Absent => ApiError::NotFound("session"),
+                VodResurrection::Ended => media_session_ended(),
+                VodResurrection::OwnerLost(resume) => media_owner_lost(resume),
+                VodResurrection::Unavailable | VodResurrection::Resurrected => {
+                    vod_resurrection_unavailable()
+                }
+            },
+        );
+    };
+    let publication_deadline = response_publication_deadline_before(deadline);
+    let object = format!("{role}/{rendition}/index.m3u8");
+    let (bytes, owner) = admitted_vod_publication(
+        state,
+        session,
+        answer,
+        "continuous-child-playlist",
+        Some(&object),
+        publication_deadline,
+    )
+    .await?;
+    let Some(bytes) = bytes else {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "continuous-child-playlist",
+            Some(&object),
+            publication_deadline,
+        )
+        .await?;
+        return Err(ApiError::NotFound("playlist"));
+    };
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "continuous-child-playlist",
+            Some(&object),
+        ),
+        true,
+        playlist_response(bytes),
+        publication_deadline,
+    )
+    .await
+}
+
 /// Child media retains the public parent's capability and response fences.
 pub async fn child_segment(
     State(state): State<AppState>,

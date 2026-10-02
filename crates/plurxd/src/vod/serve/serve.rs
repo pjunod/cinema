@@ -920,7 +920,7 @@ impl VodServe {
         }
     }
 
-    fn source_changed(&self, rendition: &Rendition) -> bool {
+    pub(super) fn source_changed(&self, rendition: &Rendition) -> bool {
         rendition
             .source
             .as_ref()
