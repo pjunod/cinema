@@ -7,7 +7,7 @@
     /// already retryable, and a takeover for the player still waits on the
     /// gate. The worker is published as the guard's own incarnation at owner
     /// epoch 1, so the cleanup's owner-fenced abort reaches it.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         let dir = crate::test_tempdir().expect("state dir");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
@@ -119,6 +119,11 @@
             .await
             .expect("settle retry claim"));
 
+        // SQLite uses real blocking work. Keep time running through those
+        // awaits above so an idle runtime cannot advance background timers
+        // while the cleanup's wall-clock safety hold is counting down.
+        // Only the gate-wait assertion needs a controlled clock.
+        tokio::time::pause();
         let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
         let blocked = tokio::spawn({
             let state = fixture.state.clone();
@@ -154,6 +159,7 @@
             blocked.await.expect("replacement waiter task").is_err(),
             "cleanup must retain the replacement gate"
         );
+        tokio::time::resume();
 
         held.release();
         released_rx
