@@ -67,6 +67,21 @@ public cells: original media1/public-route/film/NAL, applicable GPU/native/
 physical/fidelity and whole-S11 acceptance remain open. No passing unit,
 source or cell replay, production GOP change or qualification/gate waiver.
 
+**S-11 retained NAL evidence, 2026-10-02 (gpt-6.1-sol,
+agent:/root/s11_next_cell_sol61):** the
+[Grain720 header ledger](S11-GRAIN720-NAL-EVIDENCE-20261002.md) adds one
+offline retained-byte context: 35 first type-5 IDRs, 1,680 AUD/picture/PTS
+matches and 37 total IDRs, including the same two old internal extras.
+Nine new tiny syntax controls and one bounded corpus attempt passed once;
+no encoder, probe, decoder, old test or cell replay. Historical source
+fb436/binary656/runtimeb7bc stays historical. Exact source/process/cgroup,
+export identity and successful inventory-based terminal cleanup are review
+snapshots; sanitized provenance is not exact raw-result replay. Private PR
+audit bytes have a distinct durable retention owner, not extended source or
+runtime expiry. Fifteen internal NAL contexts and original media1/public/
+film/closed-GOP/device/fidelity qualification remain open; counts remain
+16 internal /4 synthetic /0 original fully-qualified public cells.
+
 **Integration override, 2026-09-30 (user instruction):** remaining plan PRs
 branch from the current `effort/architecture-review-2026-09-20` and target
 that effort. Existing merged history is preserved. Each task needs one formal
