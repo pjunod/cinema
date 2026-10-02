@@ -3829,7 +3829,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # Queued-publication regression: the test owns one finite sleep child,
 # uses exec to avoid descendants, enables kill-on-drop, and verifies run_part
 # terminated and reaped it for foreground, download, ownership and deadline yields.
-expected_occurrences = 201
+# 201 -> 200 with PR #707: pipeprobe's separate FFmpeg and FFprobe
+# constructors now share Spawn::command so both inherit the playback cache.
+# Both existing Tools calls still await output_job_owned, which retains the
+# child job and enables kill-on-drop. The HOME=/ regression uses this same
+# constructor and awaits its finite shell child; no new detached owner exists.
+expected_occurrences = 200
 
 [[module_structures]]
 id = "process-capable-launch-method"
