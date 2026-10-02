@@ -2397,7 +2397,7 @@ lane. Owner, time, cancellation and immutable media predicates are preserved.
 
 Pinned compilation and the normal hook apply before repeating the isolated
 handoff probe. Unit execution remains deferred. Retain the failed production
-receipt at `target/playback-lab/reports/continuous-chrome-partial.json`; it
+receipt at `target/playback-lab/reports/continuous-chrome-partial-before-sql.json`; it
 contains no successful playback or native qualification claim.
 
 
@@ -2411,3 +2411,27 @@ The exact prior-ledger comparison and terminal owner predicates remain intact;
 this cannot create a reservation after End. Existing cross-backend late-fact
 regressions and the expanded placeholder census cover the landing candidate.
 Pinned all-target compilation applies without executing the unit lane.
+
+
+### 10.71 Isolated Linux runtime for production browser qualification
+
+The repeated macOS probe completed fixture indexing but refused normalized
+continuous preparation because production decoder identity deliberately accepts
+only a self-contained Linux ELF. The macOS FFprobe is not that artifact; no
+identity or geometry check was relaxed. The failed receipt is retained as
+`target/playback-lab/reports/continuous-chrome-partial-macos-probe.json`.
+
+The documented deploy key authorizes `pjunod` on nuc3. An isolated temporary
+source extraction there receives `git archive` of committed `cd9bb38ad`, never
+Git history or repository credentials. Its verified compiler is Rust 1.97.1
+`8bab26f4f`. A static FFprobe is copied from the existing daemon image through
+a stopped disposable container; no running service or production data changes.
+The build uses two jobs and no debug information to bound temporary resources.
+The synthetic 210-second fixture supports an initial two-handoff investigation
+only; the full twenty-switch and physical audiovisual qualification remain open.
+
+The existing playback lab remains the acceptance oracle. A temporary launcher
+uses its server dependency injection to own a remote daemon, isolated data and
+three ephemeral listeners, with Chrome on the Mac connected through an SSH
+tunnel. Its bootstrap uses the same setup, scan and index API sequence. No
+unit suite has run; final review and the single-pass fast lane remain deferred.
