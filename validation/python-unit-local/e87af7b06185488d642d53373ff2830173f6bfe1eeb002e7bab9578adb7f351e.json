@@ -1,0 +1,22 @@
+{
+  "branch": "codex/python-unit-receipt-applicability",
+  "command": "PYTHONPATH=tests/validation python3 -m unittest -v test_python_unit_receipts.PythonReceiptCase.test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates",
+  "output": "test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates (test_python_unit_receipts.PythonReceiptCase.test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates)\nONE fake-source control; never execute the repository test inventory. ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.026s\n\nOK\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=c99f70d48d2d5a14ed17b04c57076aa5fc9d7d8337a8a610ca6043ec571c104c\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=af48429aca40c009e614ea2a51902bf7d7905c5b97d8ac32d8c16c17ecb62486\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=1324a6d1a3fff135fd60a4bfead7e8bb29ea66c65dc865660cd03030144d4af4\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=9dcde828bf596ccfea3da885ae1c14576596ee9dc41252afbc943d64e670c351\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\nUnit applicability changed: validation:test_fixture.Case.test_changed; prior=3e4ee927d9f08546522f27b87eb7e2a3e48f36a50d759932f3fa4d30336b3177; current=fa71440e1cad7f25fdb5ac0188ad99f3001733cbb2bb55d62f30fb30270225cd\n",
+  "repository": 1,
+  "result": {
+    "count": 1,
+    "errors": 0,
+    "expected_failures": 0,
+    "failed": 0,
+    "skipped": 0,
+    "unexpected_successes": 0
+  },
+  "source_commit": "50db1dc43ac937ad696f0fbc47ae4b8dc80c9c25",
+  "suite": "validation",
+  "test_file": "tests/validation/test_python_unit_receipts.py",
+  "test_file_sha256": "715d404be6384e6aba4b61ed15f6b0f50bbf3930b3199417680d9f1af81021c4",
+  "test_ids": [
+    "test_python_unit_receipts.PythonReceiptCase.test_current_applicability_rejects_changed_bodies_and_retains_bound_candidates"
+  ],
+  "version": 1
+}
