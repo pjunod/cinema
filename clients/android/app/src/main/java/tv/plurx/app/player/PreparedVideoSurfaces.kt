@@ -109,6 +109,9 @@ internal class PreparedVideoSurfaces private constructor() {
             receipts.ready(output, positionMs) && output.width > 0 && output.height > 0
     }
 
+    fun alignmentWindowMs(player: ExoPlayer): Double? =
+        outputs[player]?.let(receipts::alignmentWindowMs)
+
     /** Visibility changes only; neither decoder receives a new Surface. */
     fun expose(player: ExoPlayer, presented: () -> Unit): Boolean {
         if (!ready(player)) return false

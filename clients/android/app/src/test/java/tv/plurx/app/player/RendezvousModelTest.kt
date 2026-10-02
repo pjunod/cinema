@@ -263,4 +263,33 @@ class RendezvousModelTest {
         assertEquals(RENDEZVOUS_PAUSED_POLL_MS, hold.delayMs(0, 0.0))
         assertEquals(RENDEZVOUS_PAUSED_POLL_MS, hold.delayMs(0, Double.NaN))
     }
+    @Test
+    fun decodedFrameWindowReparksInsteadOfAcceptingQuarterSecondLateArrival() {
+        val frameMs = 1000.0 / 24
+        val hold = RendezvousHold()
+        val parked = hold.park(0, 10_000)
+        hold.ready(300)
+        val early = hold.fire(1400, parked.rendezvousFilmMs - 100,
+            parked.rendezvousFilmMs, true, 1.0, frameMs)
+        assertTrue(early is RendezvousHold.Step.Wait)
+        val onFrame = hold.fire(1500, parked.rendezvousFilmMs + 41,
+            parked.rendezvousFilmMs, true, 1.0, frameMs)
+        assertTrue(onFrame is RendezvousHold.Step.Commit)
+        val missed = hold.fire(1600, parked.rendezvousFilmMs + 100,
+            parked.rendezvousFilmMs, true, 1.0, frameMs)
+        assertTrue(missed is RendezvousHold.Step.Repark)
+        assertEquals(false, missed.park.playWhenReady)
+    }
+
+    @Test
+    fun invalidDecodedCadenceCannotAuthorizeARendezvous() {
+        for (window in listOf(Double.NaN, Double.POSITIVE_INFINITY, 0.0, -1.0)) {
+            val hold = RendezvousHold()
+            val parked = hold.park(0, 10_000)
+            hold.ready(300)
+            assertTrue(hold.fire(1500, parked.rendezvousFilmMs, parked.rendezvousFilmMs,
+                true, 1.0, window) is RendezvousHold.Step.Abandon)
+        }
+    }
+
 }

@@ -2834,3 +2834,22 @@ currently requests the bundled codec renderer. No new decoder or permanent
 audio graph is added. Android production and test-source compilation passed.
 This is implemented timestamp integration, not physical presentation proof.
 No phone/TV appears in ADB or its mDNS inventory; device qualification remains.
+
+
+### 10.90 Android rendezvous waits for decoded readiness and stays live after a miss
+
+Seek completion and contiguous buffered media can precede the parked output's
+first-render callback. Warm-output rendezvous readiness now requires that
+actual output frame at the intended film instant. Once ready, the meeting
+window is bounded by its decoded frame duration rather than the older
+quarter-second scheduling allowance. The final check reads the incumbent
+again. A refused final check leaves the bounded rendezvous coroutine running,
+so it can observe or repark instead of leaving the preparation idle until its
+overlap deadline. The original physical deadline still bounds every attempt.
+
+Authored regressions distinguish an early observation, an accepted one-frame
+arrival and a 100 ms miss at 24 fps, and reject invalid cadence. Android
+production and test-source compilation passed (`compileDebugKotlin` and
+`compileDebugUnitTestKotlin`, 13 seconds). No unit test was executed. This
+repairs the prepared path; the continuous adapter and physical qualification
+remain unfinished.

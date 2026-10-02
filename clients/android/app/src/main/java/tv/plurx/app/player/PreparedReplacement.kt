@@ -353,13 +353,17 @@ internal class RendezvousHold(
         successorFilmMs: Long,
         successorReady: Boolean,
         speed: Double,
+        alignmentWindowMs: Double = slackMs.toDouble(),
     ): Step {
         val target = rendezvousFilmMs ?: return Step.Repark(repark(nowMs, incumbentFilmMs))
         // Short of the rendezvous: the incumbent is still on its way, or it is
         // paused and will resume. Neither is a miss; recompute and wait.
-        if (incumbentFilmMs < target - slackMs) return Step.Wait(delayMs(incumbentFilmMs, speed))
-        val aligned = kotlin.math.abs(incumbentFilmMs - target) <= slackMs &&
-            kotlin.math.abs(successorFilmMs - incumbentFilmMs) <= slackMs
+        val window = alignmentWindowMs.takeIf { it.isFinite() && it > 0 }
+            ?.coerceAtMost(slackMs.toDouble())
+            ?: return Step.Abandon("invalid_frame_window")
+        if (incumbentFilmMs.toDouble() < target.toDouble() - window) return Step.Wait(delayMs(incumbentFilmMs, speed))
+        val aligned = kotlin.math.abs(incumbentFilmMs.toDouble() - target.toDouble()) <= window &&
+            kotlin.math.abs(successorFilmMs.toDouble() - incumbentFilmMs.toDouble()) <= window
         if (aligned && successorReady) return Step.Commit(incumbentFilmMs)
         // At or past the rendezvous without a successor waiting there: a seek
         // that took longer than the lead, a forward seek, or a rate change.

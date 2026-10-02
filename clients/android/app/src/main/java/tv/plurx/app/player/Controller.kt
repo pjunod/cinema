@@ -4132,6 +4132,11 @@ class Controller internal constructor(
                     val bufferedThrough =
                         successorFilmPositionMs(originMs, successor.bufferedPosition)
                     if (!successorIsBuffered(bufferedThrough, target)) continue
+                    // Buffering and seek completion can precede the decoder's
+                    // first-frame callback. Keep the rendezvous alive until
+                    // this exact parked output has proved its picture.
+                    if (preparedVideoSurfaces != null &&
+                        !preparedVideoSurfaces.ready(successor, (target - originMs).coerceAtLeast(0))) continue
                     hold.ready(monotonicNowMs())
                     publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
                     continue
@@ -4145,6 +4150,8 @@ class Controller internal constructor(
                     successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition),
                     successorReady = hold.isReady,
                     speed = player.playbackParameters.speed.toDouble(),
+                    alignmentWindowMs = preparedVideoSurfaces?.alignmentWindowMs(successor)
+                        ?: PREPARED_ALIGNMENT_SLACK_MS.toDouble(),
                 )
                 when (step) {
                     is RendezvousHold.Step.Commit -> {
@@ -4152,8 +4159,11 @@ class Controller internal constructor(
                         // incumbent's own transport intent, which is what
                         // starts it: it has been parked with `playWhenReady`
                         // false since the moment it was seeked here.
-                        commitPreparedReplacement(step.filmMs)
-                        return@launch
+                        if (commitPreparedReplacement(step.filmMs)) return@launch
+                        // A fresh final reading can miss a frame boundary
+                        // after fire(). Retry the bounded hold; do not leave
+                        // the preparation without a rendezvous coroutine.
+                        delay(8)
                     }
                     // Short of the meeting point — still on its way, or paused.
                     // The loop recomputes the delay from the new reading.
@@ -4188,13 +4198,13 @@ class Controller internal constructor(
      * incarnation to the staged one, so the predecessor's session is retired by
      * that CAS rather than by an `endHlsSession` from here.
      */
-    private fun commitPreparedReplacement(commitFilmMs: Long) {
-        val successor = preparedPlayer ?: return
-        val action = preparedLedger.action ?: return
-        val originMs = action.mediaOriginMs ?: return
+    private fun commitPreparedReplacement(commitFilmMs: Long): Boolean {
+        val successor = preparedPlayer ?: return false
+        val action = preparedLedger.action ?: return false
+        val originMs = action.mediaOriginMs ?: return false
         if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
             abandonPreparedReplacement(failed = true)
-            return
+            return false
         }
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
@@ -4202,31 +4212,31 @@ class Controller internal constructor(
                 playbackIntent.desiredQuality == PlaybackQuality.Auto && tv.plurx.app.data.Session.autoAbr,
                 player.isPlaying && presentationForeground, playbackIntent.pendingSeek != null)) {
             abandonPreparedReplacement(failed = true)
-            return
+            return false
         }
         val desired = autoDesiredCandidate
         if (autoPreparing && autoVoluntary && desired != null) {
             if (desired.route == "encode" && !desired.complete_cache &&
                 !autoStagedEncodeProof(autoStagedStatus, autoStagedStatusObservedMs, monotonicNowMs(),
-                    action.sessionId ?: return, desired.id)) return
+                    action.sessionId ?: return false, desired.id)) return false
             if (desired.route != "encode" && desired.peak_bps == null &&
                 !autoOriginalTransferMarginProven(autoTransfersByPlayer[successor]?.recent().orEmpty(),
-                    action.sessionId ?: return, monotonicNowMs())) return
+                    action.sessionId ?: return false, monotonicNowMs())) return false
         }
         val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
         val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
         if (kotlin.math.abs(successorFilmMs - commitFilmMs) > PREPARED_ALIGNMENT_SLACK_MS ||
             !successorIsBuffered(bufferedThrough, commitFilmMs)
-        ) return
+        ) return false
         // A warm output must have rendered before changing visibility. No
         // prepared output or callback from an old Surface can satisfy this.
-        if (preparedVideoSurfaces != null && !preparedVideoSurfaces.ready(successor, (commitFilmMs - originMs).coerceAtLeast(0))) return
+        if (preparedVideoSurfaces != null && !preparedVideoSurfaces.ready(successor, (realPosition() - originMs).coerceAtLeast(0))) return false
         // The ledger enters its unabortable state before anything moves. From
         // here the viewer is looking at this pipeline, so a Back press or a
         // seek in the seconds before its first frame must settle the commit
         // rather than publish an `aborted` for the staging the server is about
         // to move its pointer to.
-        if (!preparedLedger.switched()) return
+        if (!preparedLedger.switched()) return false
         // Armed here rather than at the end of this function. `switched()` is
         // what makes an abandon settle instead of abort, and the settle is
         // gated on this clock — so any window where one is set and the other is
@@ -4368,6 +4378,7 @@ class Controller internal constructor(
         // The ordinary older-platform path still waits for the successor's
         // onRenderedFirstFrame after PlayerView moves its surface. Both paths
         // keep the finite first-frame and physical-overlap budgets.
+        return true
     }
 
     /**

@@ -30,6 +30,9 @@ internal class PreparedSurfaceReceipts<T : Any> {
             kotlin.math.abs(frame.positionUs.toDouble() - positionMs.toDouble() * 1000) <= duration
     }
 
+    fun alignmentWindowMs(output: T): Double? = frames[output]?.frameDurationUs
+        ?.takeIf { it.isFinite() && it > 0 && it <= 1_000_000 }?.div(1000)
+
     fun expose(output: T): Exposure<T>? {
         val frame = frames[output] ?: return null
         return Exposure(output, frame, ++revision).also { exposure = it }
