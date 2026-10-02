@@ -528,6 +528,105 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "hiqlite-store")]
+    fn k06_removal_directory_pins_uuid_raft_origin_and_original_time() {
+        struct Source(ClockMembershipIdentity);
+        impl ClockMembershipSource for Source {
+            fn current(&self) -> Option<ClockMembershipIdentity> {
+                Some(self.0.clone())
+            }
+        }
+        let identity = ClockMembershipIdentity {
+            local_node: 1,
+            log: (2, 1, 7),
+            members: BTreeSet::from([1, 2, 3]),
+            voters: BTreeSet::from([1, 2]),
+        };
+        let guard = ClusterClockGuard::with_membership_source(Arc::new(Source(identity.clone())));
+        let target = "00000000-0000-0000-0000-000000000002";
+        let survivor = "00000000-0000-0000-0000-000000000003";
+        let mut roster = super::super::membership::ClockPeerRoster {
+            membership: Some(identity.clone()),
+            peers: vec![
+                super::super::membership::ActivityPeer {
+                    node_id: target.into(),
+                    raft_id: 2,
+                    http_base: Some("http://target:80/".into()),
+                    reachable: false,
+                },
+                super::super::membership::ActivityPeer {
+                    node_id: survivor.into(),
+                    raft_id: 3,
+                    http_base: Some("https://survivor:443".into()),
+                    reachable: true,
+                },
+            ],
+        };
+        let ids = vec![target.into(), survivor.into()];
+        guard
+            .roster_for_membership(&ids, Some(&identity))
+            .expect("generic roster");
+        assert!(matches!(
+            guard.capture_removal_raft(2),
+            Err(ClockRefusal::Unknown)
+        ));
+        let round = guard
+            .roster_for_peer_directory(&roster)
+            .expect("exact directory");
+        assert!(guard.publish(
+            round,
+            BTreeMap::from([
+                (target.into(), PeerClockOffset::Unknown),
+                (
+                    survivor.into(),
+                    PeerClockOffset::Bounded {
+                        offset_us: 0,
+                        uncertainty_us: 1,
+                        observed_at: Instant::now()
+                    }
+                ),
+            ])
+        ));
+        let capture = guard
+            .capture_removal_raft(2)
+            .expect("target may remain Unknown");
+        let original_time = capture.now_ms();
+        assert!(guard
+            .revalidate_removal_directory(&capture, &roster, target, 2, "local")
+            .is_ok());
+        roster.peers[0].http_base = Some("http://target".into());
+        assert!(guard
+            .revalidate_removal_directory(&capture, &roster, target, 2, "local")
+            .is_ok());
+        roster.peers[0].raft_id = 3;
+        roster.peers[1].raft_id = 2;
+        assert_eq!(
+            guard.revalidate_removal_directory(&capture, &roster, target, 2, "local"),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        roster.peers[0].raft_id = 2;
+        roster.peers[1].raft_id = 3;
+        roster.peers[1].http_base = Some("https://different-survivor".into());
+        assert_eq!(
+            guard.revalidate_removal_directory(&capture, &roster, target, 2, "local"),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        guard
+            .roster_for_peer_directory(&roster)
+            .expect("new directory");
+        assert_eq!(
+            guard.revalidate_removal_capture(&capture),
+            Err(ClockRefusal::GenerationChanged)
+        );
+        assert!(guard
+            .snapshot()
+            .peers
+            .values()
+            .all(|peer| matches!(peer, PeerClockOffset::Unknown)));
+        assert_eq!(capture.now_ms(), original_time);
+    }
+
+    #[test]
     fn applied_membership_watch_invalidates_aba_proofs_without_a_probe_tick() {
         struct Source(Mutex<Option<ClockMembershipIdentity>>);
         impl ClockMembershipSource for Source {
@@ -718,6 +817,7 @@ pub struct ClockRemovalCapture<'guard> {
     decision: ClockDecisionTicket,
     membership: ClockMembershipIdentity,
     peers: BTreeMap<String, PeerClockOffset>,
+    directory: BTreeMap<String, (u64, String)>,
     target: RemovalTarget,
     captured_at: Instant,
     reachability_stable: bool,
@@ -828,6 +928,7 @@ struct ClockInner {
     roster_observed_at: Option<Instant>,
     membership: Option<ClockMembershipIdentity>,
     last_discontinuity: Option<Instant>,
+    peer_directory: Option<BTreeMap<String, (u64, String)>>,
 }
 
 pub struct ClusterClockGuard {
@@ -876,6 +977,7 @@ impl ClusterClockGuard {
                 roster_observed_at: None,
                 membership: None,
                 last_discontinuity: None,
+                peer_directory: None,
             }),
         }
     }
@@ -898,6 +1000,7 @@ impl ClusterClockGuard {
         if current != inner.membership || (current.is_none() && inner.roster_proved) {
             inner.membership = current;
             inner.roster_proved = false;
+            inner.peer_directory = None;
             inner.roster_observed_at = None;
             inner.snapshot.state_generation += 1;
             inner.snapshot.readiness = ClockReadiness::default();
@@ -984,6 +1087,7 @@ impl ClusterClockGuard {
             return Err(ClockRefusal::LocalDiscontinuity);
         }
         let membership = inner.membership.clone().ok_or(ClockRefusal::Unknown)?;
+        let directory = inner.peer_directory.clone().ok_or(ClockRefusal::Unknown)?;
         if !inner.roster_proved
             || membership.members.len() > 64
             || !membership.members.contains(&membership.local_node)
@@ -1001,6 +1105,7 @@ impl ClusterClockGuard {
             decision,
             membership,
             peers: inner.snapshot.peers.clone(),
+            directory,
             target,
             captured_at: before,
             reachability_stable,
@@ -1027,6 +1132,7 @@ impl ClusterClockGuard {
         }
         if current.state_generation != captured.decision.state_generation
             || inner.membership.as_ref() != Some(&captured.membership)
+            || inner.peer_directory.as_ref() != Some(&captured.directory)
         {
             return Err(ClockRefusal::GenerationChanged);
         }
@@ -1310,6 +1416,86 @@ impl ClusterClockGuard {
         peers: &[String],
         membership: Option<&ClockMembershipIdentity>,
     ) -> Result<ClockDecisionTicket, ClockRefusal> {
+        self.roster_with_directory(peers, membership, None)
+    }
+
+    /// Bind a complete measured round to the exact applied peer directory.
+    /// A changed address/UUID/Raft mapping discards old samples, not their age.
+    #[cfg(feature = "hiqlite-store")]
+    pub fn roster_for_peer_directory(
+        &self,
+        roster: &super::membership::ClockPeerRoster,
+    ) -> Result<ClockDecisionTicket, ClockRefusal> {
+        let directory = Self::peer_directory(roster).inspect_err(|_| self.roster_failed())?;
+        let peers: Vec<_> = directory.keys().cloned().collect();
+        self.roster_with_directory(&peers, roster.membership.as_ref(), Some(directory))
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    fn peer_directory(
+        roster: &super::membership::ClockPeerRoster,
+    ) -> Result<BTreeMap<String, (u64, String)>, ClockRefusal> {
+        let membership = roster.membership.as_ref().ok_or(ClockRefusal::Unknown)?;
+        if membership.members.len() > 64
+            || !membership.members.contains(&membership.local_node)
+            || roster.peers.len() != membership.members.len().saturating_sub(1)
+        {
+            return Err(ClockRefusal::Unknown);
+        }
+        let mut directory = BTreeMap::new();
+        let mut raft_ids = BTreeSet::new();
+        for peer in &roster.peers {
+            let origin = peer
+                .http_base
+                .as_deref()
+                .filter(|value| value.len() <= 2048)
+                .and_then(super::membership::normalize_internal_http_base)
+                .ok_or(ClockRefusal::Unknown)?;
+            if peer.node_id.len() != 36
+                || uuid::Uuid::parse_str(&peer.node_id)
+                    .ok()
+                    .is_none_or(|id| id.to_string() != peer.node_id)
+                || peer.raft_id == membership.local_node
+                || !membership.members.contains(&peer.raft_id)
+                || !raft_ids.insert(peer.raft_id)
+                || directory
+                    .insert(peer.node_id.clone(), (peer.raft_id, origin))
+                    .is_some()
+            {
+                return Err(ClockRefusal::Unknown);
+            }
+        }
+        Ok(directory)
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn revalidate_removal_directory(
+        &self,
+        captured: &ClockRemovalCapture<'_>,
+        roster: &super::membership::ClockPeerRoster,
+        target_node: &str,
+        target_raft: u64,
+        local_node: &str,
+    ) -> Result<(), ClockRefusal> {
+        if roster.membership.as_ref() != Some(&captured.membership)
+            || Self::peer_directory(roster)? != captured.directory
+            || if target_raft == captured.membership.local_node {
+                target_node != local_node
+            } else {
+                captured.directory.get(target_node).map(|entry| entry.0) != Some(target_raft)
+            }
+        {
+            return Err(ClockRefusal::GenerationChanged);
+        }
+        self.revalidate_removal_capture(captured)
+    }
+
+    fn roster_with_directory(
+        &self,
+        peers: &[String],
+        membership: Option<&ClockMembershipIdentity>,
+        directory: Option<BTreeMap<String, (u64, String)>>,
+    ) -> Result<ClockDecisionTicket, ClockRefusal> {
         let mut inner = self
             .inner
             .lock()
@@ -1334,8 +1520,15 @@ impl ClusterClockGuard {
         {
             return Err(ClockRefusal::Unknown);
         }
-        let changed = !inner.roster_proved || inner.snapshot.peers.keys().ne(peers.iter());
+        let directory_changed = inner.peer_directory != directory;
+        let changed = !inner.roster_proved
+            || directory_changed
+            || inner.snapshot.peers.keys().ne(peers.iter());
         if changed {
+            if directory_changed {
+                inner.snapshot.peers.clear();
+            }
+            inner.peer_directory = directory;
             inner.snapshot.peers.retain(|id, _| peers.contains(id));
             for id in peers {
                 inner
@@ -1426,6 +1619,7 @@ impl ClusterClockGuard {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.roster_proved = false;
         inner.roster_observed_at = None;
+        inner.peer_directory = None;
         inner.snapshot.readiness = ClockReadiness::default();
         for peer in inner.snapshot.peers.values_mut() {
             *peer = PeerClockOffset::Unknown;
