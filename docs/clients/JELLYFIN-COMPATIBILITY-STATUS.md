@@ -38,7 +38,7 @@ are established separately from interoperability:
 | Reference server | Jellyfin 10.11.11, upstream commit `1fbd8739292cce610231be93daf43368733edf63`; official container index digest and arm64 image ID in manifest | Disposable synthetic library; not a Plurx deployment |
 | Schema | OpenAPI served by that container under `/jellyfin`, 315 paths; SHA-256 in manifest | Raw hash includes the served origin; separate canonical hash removes only `servers` |
 | Infuse | Installed 8.5.6 / 8.5.5763 on connected physical AppleTV14,1, tvOS 27.0 / 24J361 | App/device inventory measured; client flows not tested |
-| Android TV | Installed official release 0.19.10 / 191099, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | Physical Google TV Streamer connected; Android 14 / API 34 / UTTK.260317.003 measured; player backend not measured |
+| Android TV | Installed official release 0.19.10 / 191099, source commit `984181a3d6ab14e9a6d2dcc850c582e1c138bd95`; released APK SHA-256 in manifest | Physical Google TV Streamer connected; Android 14 / API 34 / UTTK.260317.003 measured; Media3 ExoPlayer 1.8.0 measured from current app runtime logs |
 | Android TV dependencies | Kotlin SDK 1.7.1, Media3 1.8.0 from pinned `gradle/libs.versions.toml` | Source provenance, not device capability evidence |
 
 Server provenance is [the official released tag](https://github.com/jellyfin/jellyfin/releases/tag/v10.11.11).
@@ -53,7 +53,7 @@ SRT cues at 1, 120 and 330 seconds; one local poster. The manifest records file
 hashes and sizes. This corpus supports direct, remux, forced bitrate encode,
 track selection and a pause longer than 300 seconds; it does not satisfy the
 HDR/DV acceptance row. Two episode aliases of the same synthetic MP4 now form the TV corpus without
-duplicating source bytes; their library scan/browse remains untested. Multiple
+duplicating source bytes; their reference library scan is prepared; physical episode browse remains untested. Multiple
 pages and the HDR corpus remain to be prepared. The MKV was regenerated after
 a disk-space cleanup; the current manifest records its new container hash.
 
@@ -73,14 +73,14 @@ scratch after retaining minimized fixtures and findings.
 | Harness authentication | 200; dedicated account authenticated | Reference account only |
 | Harness movie projection | Eleven-minute movie, one media source | Reference library preparation only |
 | Infuse connect/browse/direct/seek/transcode | Not tested | Required J0 client gate |
-| Android TV connect/browse/HLS/remux | App installed and manual connection attempted; reference Docker runtime failed before bootstrap completed; browse/playback not tested | Required J0 client gate |
-| Both clients' image/subtitle/media credential carriers and version-implied calls | Not measured | Required policy/design evidence before J2 |
-| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Not tested | Required lifecycle evidence before advancing J0 |
+| Android TV connect/browse/HLS/remux | Connect, password login, movie details/artwork, direct MKV and 720 Kbit/s encoded HLS rendered on physical TV; 332.6-second pause/resume, forward/backward seek and app-kill replacement measured | Required J0 client gate |
+| Both clients' image/subtitle/media credential carriers and version-implied calls | Android: anonymous artwork/direct media; ApiKey on SRT and HLS; MediaSegments and Intros observed. Infuse unmeasured | Required policy/design evidence before J2 |
+| Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Native VOD reap/background and Infuse untested | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
 | Missing duration, first-minute engine attestation, long-pause real-client resurrection and VOD-only worker/relay propagation | Not exercised through the prototype | Required J0 hard-seam experiments |
 
-### Physical Android TV — connected; first attempt blocked by reference infrastructure
+### Physical Android TV — reference recovered; direct and encoded HLS rendered
 
 Paul made an idle Android TV available. It is a **Google TV Streamer**, not
 the separate TCL 9445X from the earlier fleet inventory. Its IP responded,
@@ -94,14 +94,57 @@ reference URL. Its actual request retained `/jellyfin/System/Info/Public`
 and supplied MediaBrowser client/device metadata. This is one observed
 bootstrap request, not proof of all base-path or credential behavior.
 
-The [sanitized connection observation](jellyfin/androidtv-connection-observation.json)
-records the request and upstream `ECONNREFUSED`. Docker's guest VM had stopped
-and Desktop remained stuck in `stopping`; a normal restart timed out. The
-client displayed unable to connect. Classify this as **reference environment
-blocked**, not a Jellyfin-client incompatibility or successful playback.
-Automatic approval review rejected terminating the stuck shared Docker
-processes because other local builds/containers could be affected. Explicit
-user approval for that recovery is pending; no process kill was performed.
+The [sanitized connection and playback observation](jellyfin/androidtv-connection-observation.json)
+retains the initial upstream `ECONNREFUSED` and the later successful flow.
+Docker's guest VM had stopped and Desktop remained stuck in `stopping`;
+a normal restart timed out. Automatic approval review initially rejected
+terminating the stuck shared Docker processes. Paul then explicitly approved
+force-close recovery. Verified Docker Desktop processes were terminated,
+Desktop restarted, and the existing reference container and data recovered.
+The engine reported 29.7.2; server bootstrap returned Jellyfin 10.11.11.
+
+The client connected, offered Quick Connect and password authentication,
+authenticated the dedicated account by password, and displayed the synthetic
+movie details and artwork. The MKV rendered visible test-pattern frames and
+reported `DirectPlay`. Selecting 720 Kbit/s sent `Stopped` for the direct play,
+then negotiated a new play at the current source position and rendered
+encoded HLS. The negotiated profile declares MPEG-TS (`ts`) HLS; actual
+requests use `master.m3u8`, `main.m3u8` and `/hls1/main/<segment>.ts`.
+Current-app `ExoPlayerImpl` initialization logs identify AndroidX Media3 1.8.0.
+This proves reference-server playback only, not Plurx adapter acceptance.
+
+The physical trace changes two pending design questions: the client requests
+`Stream.subrip`, and its default HLS profile selects TS rather than fMP4.
+A controlled VTT/fMP4 negotiation probe or explicitly named additional
+support is required before freezing the subset. Do not silently equate this
+successful TS reference flow with acceptance of the planned native fMP4
+aliases. Image GETs and static direct-media GETs carried neither header nor
+query credentials in the observed run; subtitle and HLS requests carried
+`ApiKey` in the query. API calls carried MediaBrowser `Authorization`.
+The client requests `MediaSegments` and `Intros`; semantic empty results
+remain part of the candidate subset. These are observations for this pinned
+client, not universal Jellyfin policy. Response JSON was initially gzip and
+omitted by the capture parser; the corrected bounded decompressor now retains
+sanitized negotiation responses. Repeated-ID relationships are scoped to
+each proxy capture session.
+
+The encoded HLS play remained paused for **332.632 seconds** between the
+first paused and first resumed progress reports. Twenty-three paused reports
+retained one position; resume kept the PlaySessionId and rendered moving
+frames. Jellyfin was not forced to reap this producer. Continued paused
+heartbeats mean this is external-client timing evidence, not proof of the
+native VOD reader-resurrection path. Forward seek advanced from approximately
+80 to 200 source seconds and rendered a 214-second test-pattern timestamp.
+
+Abruptly force-stopping and relaunching the client emitted no `Stopped` for
+the old play. The client resumed from 230.198 source seconds with a new
+PlaySessionId and rendered a 234.708-second frame. DeviceId remained stable
+within this capture session. Directional backward seek then rendered an
+approximately 185.567-second frame, with a corresponding decrease in progress
+position. These observations support the planned stable-player/new-delivery
+identity and source-position translation rules. Native replacement/retirement,
+terminal stop, forced idle reap and background behavior still need adapter
+experiments. Playback was stopped after the probe.
 
 ## 3. Compiler loop — available before Rust changes
 
@@ -144,8 +187,8 @@ syntax passed through the normal tracked hook.
 | J5 | Waiting on J4 | Track, subtitle and observed ancillary completion |
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
-The Android TV is now physically connected. Its reference runtime needs
-recovery before playback testing; the Infuse flow still needs a device run.
+The Android TV reference flow now renders direct and encoded HLS playback.
+Its remaining lifecycle/transport probes and the Infuse device flow remain open.
 Unperformed operations remain **not tested**. Do not mark
 J0 complete, start the full facade route build or reduce the required client
 matrix to compensate. No compatibility release, setting graduation or fleet

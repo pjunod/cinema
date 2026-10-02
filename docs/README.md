@@ -449,9 +449,9 @@ player obeys, subtitles and overlays, layouts and themes.
 | [JELLYFIN-COMPATIBILITY-REVIEW.md](clients/JELLYFIN-COMPATIBILITY-REVIEW.md) | Sanitized first Opus review and historical author disposition; amended by the re-review. | done |
 | [JELLYFIN-COMPATIBILITY-REREVIEW.md](clients/JELLYFIN-COMPATIBILITY-REREVIEW.md) | Opus approvals and R1–R8 / S1–S4 dispositions: duration, restart attestation, cold-node artwork and trigger coverage. | done |
 | [JELLYFIN-COMPATIBILITY-STATUS.md](clients/JELLYFIN-COMPATIBILITY-STATUS.md) | J0 execution evidence: docs gate, pinned reference/schema/client provenance, compiler loop and untested physical/design gates. | open |
-| [J0 baseline manifest](clients/jellyfin/baseline-manifest.json) | Pinned server/schema/client provenance and synthetic fixture hashes; physical flows explicitly untested. | open |
+| [J0 baseline manifest](clients/jellyfin/baseline-manifest.json) | Pinned server/schema/client provenance and synthetic fixture hashes; physical acceptance tracked separately. | open |
 | [Docs publication evidence](clients/jellyfin/docs-publication-receipt.json) | PR #744 exact-head/base docs fast-lane outcomes; not implementation or final release qualification. | done |
-| [Android TV connection observation](clients/jellyfin/androidtv-connection-observation.json) | Installed physical Google TV Streamer provenance and sanitized bootstrap attempt, blocked by the stopped reference runtime; no playback acceptance. | open |
+| [Android TV connection observation](clients/jellyfin/androidtv-connection-observation.json) | Installed physical Google TV Streamer provenance and sanitized initial runtime failure and recovered reference playback; no Plurx acceptance. | open |
 | [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-five files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
 | [WEB-SHELL-SPLIT-PLAN.md](clients/WEB-SHELL-SPLIT-PLAN.md) | How the 23,901-line web `index.html` became a multi-file app with no build step, and the byte-identity gate that proved nothing else changed. | built |
 | [WEB_LAYOUT_CONTAINMENT_STATUS.md](clients/WEB_LAYOUT_CONTAINMENT_STATUS.md) | Live delivery status of web layout containment. | open |
