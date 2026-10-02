@@ -18,7 +18,7 @@ use crate::store::{
 };
 
 const JOINED_CONVERSION_COLS: &str = "d.file_id, d.state, d.el_type, d.original_path,
-    d.bytes_before, d.bytes_after, d.error, d.queued_at_ms, d.finished_at_ms,
+    d.bytes_before, d.bytes_after, d.error, d.queued_at_ms, d.finished_at_ms, d.requested_manually,
     d.recovery_guard_id, g.guard_id, g.file_id, g.library_id, g.source_path,
     g.recovery_path, g.state, g.created_at_ms, g.updated_at_ms";
 
@@ -75,22 +75,23 @@ fn conversion_from_row(row: &Row<'_>) -> rusqlite::Result<DvConversion> {
         error: row.get(6)?,
         queued_at_ms: row.get(7)?,
         finished_at_ms: row.get(8)?,
+        requested_manually: row.get(9)?,
         recovery_guard: None,
     })
 }
 
 fn joined_conversion_from_row(row: &Row<'_>) -> rusqlite::Result<DvConversion> {
     let mut conversion = conversion_from_row(row)?;
-    if let Some(guard_id) = row.get::<_, Option<String>>(9)? {
-        let joined_guard_id = row.get::<_, Option<String>>(10)?.ok_or_else(|| {
+    if let Some(guard_id) = row.get::<_, Option<String>>(10)? {
+        let joined_guard_id = row.get::<_, Option<String>>(11)?.ok_or_else(|| {
             rusqlite::Error::FromSqlConversionFailure(
-                10,
+                11,
                 Type::Null,
                 format!("Dolby Vision conversion links missing recovery guard `{guard_id}`").into(),
             )
         })?;
         debug_assert_eq!(guard_id, joined_guard_id);
-        conversion.recovery_guard = Some(guard_from_row_at(row, 10)?);
+        conversion.recovery_guard = Some(guard_from_row_at(row, 11)?);
     }
     Ok(conversion)
 }
@@ -251,8 +252,8 @@ impl DvConversionStore for SqliteStore {
             let queued = tx
                 .query_row(
                     "INSERT INTO dv_conversions
-                   (file_id, state, queued_at_ms)
-                 SELECT f.id, 'queued', ?2
+                   (file_id, state, queued_at_ms, requested_manually)
+                 SELECT f.id, 'queued', ?2, 1
                    FROM files f
                    JOIN items i ON i.id = f.item_id
                    JOIN settings s ON s.key = ?3
@@ -266,10 +267,10 @@ impl DvConversionStore for SqliteStore {
                    state = 'queued', el_type = NULL, original_path = NULL,
                    bytes_before = NULL, bytes_after = NULL, error = NULL,
                    queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
-                   recovery_guard_id = NULL
+                   recovery_guard_id = NULL, requested_manually = 1
                  WHERE dv_conversions.state = 'failed'
                  RETURNING file_id, state, el_type, original_path, bytes_before,
-                           bytes_after, error, queued_at_ms, finished_at_ms",
+                           bytes_after, error, queued_at_ms, finished_at_ms, requested_manually",
                     params![file_id, queued_at_ms, keys::LIBRARY_DV_DISK_CONVERT],
                     conversion_from_row,
                 )
@@ -303,6 +304,7 @@ impl DvConversionStore for SqliteStore {
         queued_at_ms: i64,
         retry_failed: bool,
         limit: i64,
+        requested_manually: bool,
     ) -> Result<DvConversionQueueBatch, StoreError> {
         let limit = limit.clamp(0, DV_CONVERSION_QUEUE_BATCH_MAX);
         if limit == 0 {
@@ -343,14 +345,21 @@ impl DvConversionStore for SqliteStore {
                    ORDER BY CASE WHEN d.file_id IS NULL THEN 0 ELSE 1 END, f.id
                    LIMIT ?4
                  )
-                 INSERT INTO dv_conversions (file_id, state, queued_at_ms)
-                 SELECT file_id, 'queued', ?2 FROM candidates WHERE true
+                 INSERT INTO dv_conversions (file_id, state, queued_at_ms, requested_manually)
+                 SELECT file_id, 'queued', ?2, ?5 FROM candidates WHERE true
                  ON CONFLICT(file_id) DO UPDATE SET
                    state = 'queued', el_type = NULL, original_path = NULL,
                    bytes_before = NULL, bytes_after = NULL, error = NULL,
-                   queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL
+                   queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+                   requested_manually = excluded.requested_manually
                  WHERE ?3 AND dv_conversions.state = 'failed'",
-                params![library_id, queued_at_ms, retry_failed, limit],
+                params![
+                    library_id,
+                    queued_at_ms,
+                    retry_failed,
+                    limit,
+                    requested_manually
+                ],
             )?;
             tx.commit()?;
             Ok(DvConversionQueueBatch {
@@ -1123,6 +1132,30 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
+    fn sqlite_v90_provenance_upgrade_recovers_an_interrupted_version_stamp() {
+        let dir = tempfile::tempdir().expect("create migration directory");
+        let path = dir.path().join("v89.db");
+        let connection = rusqlite::Connection::open(&path).expect("open predecessor fixture");
+        SqliteStore::apply_migrations_for_test(&connection, 89).expect("create v89 schema");
+        connection
+            .execute_batch(crate::store::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN)
+            .expect("apply v90 DDL without stamp");
+        // Reproduce the crash after DDL commits but before user_version advances.
+        drop(connection);
+        drop(SqliteStore::open(&path).expect("resume v90 after interrupted stamp"));
+        let connection = rusqlite::Connection::open(&path).expect("inspect migrated database");
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("read schema version");
+        assert_eq!(version, crate::store::SQLITE_SCHEMA_VERSION);
+        assert!(
+            SqliteStore::dv_request_provenance_column_exists(&connection)
+                .expect("inspect provenance column shape")
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
     fn sqlite_v42_fixture_migrates_conversion_and_guard_ledgers_once() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("v42.db");
@@ -1164,7 +1197,7 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("conversion columns");
-        assert_eq!(columns, 10);
+        assert_eq!(columns, 11);
     }
 
     #[cfg(feature = "hiqlite-store")]
@@ -1435,7 +1468,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 45] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 46] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1522,6 +1555,7 @@ mod tests {
             // Both fixtures drop background_jobs through the shared helper,
             // which also removes v89's source-scoped preparation index.
             "CREATE INDEX IF NOT EXISTS background_jobs_file_source",
+            "ADD COLUMN requested_manually",
         ];
 
         assert!(

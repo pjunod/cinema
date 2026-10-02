@@ -132,6 +132,8 @@ pub mod offline_expiry;
 pub mod replicated;
 pub mod watched_drain;
 
+#[cfg(feature = "hiqlite-contract-tests")]
+pub use dv_conversion::validation_pre_provenance_admission_trigger;
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
