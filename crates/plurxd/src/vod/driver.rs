@@ -784,10 +784,16 @@ pub(super) fn playback_demands(
             .or_insert(request.arrival_order);
         *first = (*first).min(request.arrival_order);
         if let Some(reader) = readers.get(&request.session).filter(|reader| {
-            reader.control_sequence.is_some()
-                && reader_window(reader, rendition.seconds_per_segment).covers(request.index)
+            let mut window = reader_window(reader, rendition.seconds_per_segment);
+            if let Some(frontier) = reader.preparation_frontier {
+                window.playhead = frontier;
+                window.frontier = frontier.saturating_add(1);
+            }
+            (reader.control_sequence.is_some() || reader.preparation_frontier.is_some())
+                && window.covers(request.index)
         }) {
-            let distance = request.index.abs_diff(reader.frontier);
+            let frontier = reader.preparation_frontier.unwrap_or(reader.frontier);
+            let distance = request.index.abs_diff(frontier);
             let closest = nearest.entry(&request.session).or_insert(distance);
             *closest = (*closest).min(distance);
         }
@@ -800,8 +806,12 @@ pub(super) fn playback_demands(
             demand.foreground = match (readers.get(&blocked.session), nearest.get(&blocked.session))
             {
                 (Some(reader), Some(nearest)) => {
-                    blocked.index.abs_diff(reader.frontier) == *nearest
+                    blocked
+                        .index
+                        .abs_diff(reader.preparation_frontier.unwrap_or(reader.frontier))
+                        == *nearest
                 }
+                (Some(reader), None) if reader.preparation_frontier.is_some() => false,
                 _ => oldest.get(&blocked.session) == Some(&blocked.arrival_order),
             };
             demand
@@ -811,7 +821,20 @@ pub(super) fn playback_demands(
         readers
             .values()
             .filter(|reader| !reader.authority_only)
-            .map(|reader| Demand::idle_at(reader.preparation_frontier.unwrap_or(reader.frontier))),
+            .map(|reader| match reader.preparation_frontier {
+                Some(frontier) => {
+                    // Admission records an actual bounded Prepare request,
+                    // which is already waiting for these bytes. Publish its
+                    // demand before waking the producer: registering the
+                    // later segment wait must not leave a stale GET in charge.
+                    // This ranks work within the reader, without changing its
+                    // speculative capacity or another viewer's arrival order.
+                    let mut demand = Demand::waiting_on(frontier);
+                    demand.foreground = true;
+                    demand
+                }
+                None => Demand::idle_at(reader.frontier),
+            }),
     );
     demands
 }

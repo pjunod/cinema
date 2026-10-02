@@ -3759,3 +3759,37 @@ and refuses observation gaps` drives the actual observer through 300 completed
 removals, checks the journal remains bounded, and covers missed sampling,
 future removal and replacement. Syntax checks passed; no unit test executed.
 The mixed qualification will use this sampled proof on its fresh retry.
+
+
+### 10.125 Admitted preparation demand precedes stale materialization waits
+
+The fresh `f67d99aa4` Chrome run retained 720p on the return to 1080p and
+failed before reaching its Auto phase. Its target frontier was 1152
+(film time 48 s / plan index 24), while the target producer restarted at
+index 7. This is a real preparation failure, separate from the sampled
+removal-evidence repair. The failed receipt and bounded daemon log remain
+in ignored reports.
+
+The scheduler ranked existing blocked GETs at the reader's ordinary playback
+anchor before its idle preparation hint. Waking an admitted target before
+its later segment waiter registered could therefore restart at an older
+request; registering the new waiter afterwards still ranked it behind that
+old anchor. Cached-init and retained-credit repairs alone did not cover
+this interval.
+
+An admitted, bounded Prepare now publishes its actual waiting demand before
+the producer wakes. Blocked requests belonging to that reader are ranked
+against the preparation anchor while it is active; their old obligations
+remain retained. Ordinary playback reporting and eviction windows are
+unchanged. Preparation retains speculative capacity and does not overtake
+another viewer's ordered foreground GET. Settling preparation returns the
+reader to ordinary demand.
+
+Authored regression
+`admitted_preparation_outranks_its_stale_get_before_target_wait_registration`
+checks the actual wait pool and production decision before a target segment
+GET exists, another viewer's priority, and return to the original request
+after preparation settles. The earlier heartbeat regression now expects an
+active preparation wait rather than an idle hint. Pinned all-target Rust
+compilation passed in 15.83 s; no unit tests executed. Runtime qualification
+of this scheduling repair remains open.

@@ -51,7 +51,8 @@ pub const REPOSITION_GAP_SECONDS: u32 = 60;
 /// One attached reader's demand, in plan indexes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Demand {
-    /// The segment this reader's in-flight GET is waiting on, if it has one.
+    /// The segment this reader's in-flight GET or admitted, bounded quality
+    /// preparation request is waiting on, if it has one.
     ///
     /// This is a *request*, not a guess about what it might want: the
     /// connection is open, the response has not started, and the client's
@@ -62,8 +63,8 @@ pub struct Demand {
     /// The reader's current playback anchor. Accepted control owns this
     /// position; GET order and speculative prefetch do not advance it.
     pub frontier: u32,
-    /// This admitted GET is nearest to the reader's accepted playback anchor
-    /// inside its current buffer window.
+    /// This admitted request is nearest to the reader's accepted playback or
+    /// preparation anchor inside its current buffer window.
     /// Other admitted GETs remain owed, but cannot make an abandoned seek
     /// destination outrank the one the viewer has just selected.
     pub foreground: bool,

@@ -1364,13 +1364,60 @@
         target.accept_control(7, 11);
         let manifest = rendition.manifest.lock().await;
         let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
-        assert!(demands.iter().any(|demand| demand.frontier == 36 && demand.blocked_on.is_none()));
+        assert!(demands.iter().any(|demand| demand.frontier == 36 && demand.blocked_on == Some(36) && demand.foreground));
         assert_eq!(readers["target"].frontier, 11, "ordinary control still owns playback position");
         assert_eq!(readers["target"].control_sequence, Some(7));
         readers.get_mut("target").expect("target").preparation_frontier = None;
         let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
         assert!(demands.iter().any(|demand| demand.frontier == 11));
         assert!(!demands.iter().any(|demand| demand.frontier == 36));
+    }
+
+    #[tokio::test]
+    async fn admitted_preparation_outranks_its_stale_get_before_target_wait_registration() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        rendition.attach_reader("target", 7).await;
+        {
+            let mut readers = rendition.readers.lock().await;
+            let target = readers.get_mut("target").expect("target");
+            target.accept_control(1, 7);
+            target.preparation_frontier = Some(24);
+        }
+        let old = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 7,
+        }, "target").expect("old GET admitted");
+        let position = Position {
+            produced_through: None, positioned_at: None,
+            seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false, working_set: WorkingSet::default(),
+        };
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 24 });
+            assert!(demands.iter().any(|demand| demand.blocked_on == Some(7) && !demand.foreground), "the old obligation is retained");
+            assert_eq!(readers["target"].frontier, 7, "ordinary playback reporting does not move");
+        }
+        rendition.attach_reader("other-viewer", 3).await;
+        let other = serve.shared.pool.register(WaitKey {
+            rendition: rendition.key.clone(), index: 3,
+        }, "other-viewer").expect("foreground viewer admitted");
+        {
+            let readers = rendition.readers.lock().await;
+            let manifest = rendition.manifest.lock().await;
+            let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+            assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 3 }, "preparation does not displace another viewer's ordered GET");
+        }
+        drop(other);
+        rendition.readers.lock().await.get_mut("target").expect("target").preparation_frontier = None;
+        let readers = rendition.readers.lock().await;
+        let manifest = rendition.manifest.lock().await;
+        let demands = playback_demands(&serve.shared.pool, &rendition, &readers, &manifest);
+        assert_eq!(decide(&manifest, &demands, position, &[]), Action::Reposition { to: 7 });
+        drop(old);
     }
 
     #[tokio::test]
