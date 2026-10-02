@@ -2368,7 +2368,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local|_for_test)?\\s*\\("
 # +1 native-startup delayed-init fixture: one tokio::spawn writes the exact
 # generated init after six seconds. The test awaits its JoinHandle before
 # teardown; it adds no production task or child process.
-expected_occurrences = 685
+# 684 -> 683 with #722: the cleanup-gate regression polls and awaits its
+# replacement waiter in the test task instead of spawning a joined task.
+# This removes a test-only owner; production cleanup ownership is unchanged.
+# Combined native fixture addition and main cleanup fixture removal.
+expected_occurrences = 684
 # E1 plus S-14 M8: both ownership sets retained and counted on the merged source.
 # 643 -> 647 with S-14 M8 (`plan/S-14-5`: `Encoding`, `RollingFlowSync`, `TerminalCleanup`,
 # `HeadChildOwner`, `VodServingAdmission` behind per-owner hooks), measured by
@@ -3513,7 +3517,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 native-startup delayed-init fixture: its joined writer owns one bounded
 # six-second sleep, under the test request's unchanged twelve-second deadline.
 # No production timer or recovery clock is added.
-expected_occurrences = 1128
+# 1127 -> 1126 with #722: the same regression removes its one-second timeout
+# wrapper and directly checks Pending before releasing cleanup. The real
+# gate future retains its production deadline; no production timer changed.
+# Combined native fixture addition and main cleanup fixture removal.
+expected_occurrences = 1127
 
 [[module_structures]]
 id = "bare-time-constructor"
