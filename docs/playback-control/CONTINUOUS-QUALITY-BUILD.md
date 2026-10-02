@@ -3339,3 +3339,20 @@ request token. Production and test sources compile in thirteen seconds. Unit
 execution remains deferred to the final main-ready fast lane. Read-only ADB
 inventory still has no physical devices. Runtime ordering, pressure, display,
 audio, and terminal cleanup qualification remain unmeasured on this exact tree.
+
+
+### 10.108 Mobile release counters and compilation match integrated main
+
+Android versionCode is 143, above main's 142. Apple CURRENT_PROJECT_VERSION
+is 205, above main's 204, shared by iOS and tvOS. Semantic version remains
+0.3.0. The ignored Xcode project was regenerated from the tracked project.yml
+in the independent clone. Android production/test sources compile in nineteen
+seconds; iOS build-for-testing and tvOS production build both succeed. These
+commands compile test sources but execute no unit tests and install no apps.
+
+The merge-target counter validator reads committed HEAD in changed-from mode,
+so its precommit invocation correctly still saw the old counters. It is checked
+again after this commit against origin/main. Physical app and output evidence
+remain separate from compilation. The local ADB inventory is empty and the
+read-only node inventory found no existing ADB service; no remote ADB service
+was started and no source was transferred.
