@@ -126,16 +126,16 @@ pub(crate) fn encode(
 // recipes remain byte-for-byte equivalent JSON values. Replays cannot replace
 // an existing description, even under a later owner epoch.
 pub(crate) const BIND: &str = "UPDATE media_sessions SET recipe_json =
-    json_set(recipe_json, '$.request.continuous_media.family_descriptor', json($4))
-    WHERE incarnation_id = $1 AND owner_node_id = $2 AND owner_epoch = $3
+    json_set(recipe_json, '$.request.continuous_media.family_descriptor', json($1))
+    WHERE incarnation_id = $2 AND owner_node_id = $3 AND owner_epoch = $4
       AND state = 'active' AND lease_expires_at_ms > $5 AND json_valid(recipe_json)
       AND json_extract(recipe_json, '$.request.continuous_media.version') = 1
       AND json_extract(recipe_json, '$.request.continuous_media.role') = 'video'
       AND json_extract(recipe_json, '$.candidate_id') IN
-          (SELECT json_extract(value, '$.candidate_id') FROM json_each($4, '$.video'))
+          (SELECT json_extract(value, '$.candidate_id') FROM json_each($1, '$.video'))
       AND json_extract(recipe_json, '$.request.continuous_media.autonomous_companion') IN
-          (SELECT json_extract(value, '$.candidate_id') FROM json_each($4, '$.video'))
+          (SELECT json_extract(value, '$.candidate_id') FROM json_each($1, '$.video'))
       AND json_extract(recipe_json, '$.candidate_id') !=
           json_extract(recipe_json, '$.request.continuous_media.autonomous_companion')
       AND (json_type(recipe_json, '$.request.continuous_media.family_descriptor') IS NULL
-          OR json_extract(recipe_json, '$.request.continuous_media.family_descriptor') = $4)";
+          OR json_extract(recipe_json, '$.request.continuous_media.family_descriptor') = $1)";

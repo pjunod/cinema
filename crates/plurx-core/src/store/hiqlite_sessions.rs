@@ -3468,7 +3468,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         )?;
         let applied = timeout_store(self.client().execute(
             crate::store::continuous_family::BIND,
-            params!(generation, owner_node_id, owner_epoch, json, now_ms),
+            params!(json, generation, owner_node_id, owner_epoch, now_ms),
         ))
         .await?;
         Ok(applied == 1)
@@ -3633,12 +3633,12 @@ impl MediaSessionStore for HiqliteAuthStore {
         owner_epoch: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
-        timeout_store(self.client().execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = $4
-            WHERE receipt_key = $1 AND owner_node_id = $2 AND owner_epoch = $3 AND state = 'requested' AND created_at_ms <= $4
+        timeout_store(self.client().execute("UPDATE quality_cancellation_receipts SET state = 'settled', updated_at_ms = $1
+            WHERE receipt_key = $2 AND owner_node_id = $3 AND owner_epoch = $4 AND state = 'requested' AND created_at_ms <= $1
                 AND NOT EXISTS (SELECT 1 FROM quality_preparation_owners owner
                     JOIN media_sessions child ON child.incarnation_id = owner.staged_incarnation_id
-                    WHERE owner.cancellation_key = $1 AND child.state = 'active')",
-            params!(receipt_key, owner_node_id, owner_epoch, now_ms))).await?;
+                    WHERE owner.cancellation_key = $2 AND child.state = 'active')",
+            params!(now_ms, receipt_key, owner_node_id, owner_epoch))).await?;
         Ok(self
             .quality_cancellation_receipt(receipt_key)
             .await?
@@ -4462,15 +4462,15 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
                       WHERE state = 'ended' AND updated_at_ms < $4)
+                    OR EXISTS (SELECT 1 FROM quality_cancellation_receipts receipt
+                      WHERE receipt.updated_at_ms < $5 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
+                        WHERE parent.incarnation_id = receipt.generation AND parent.state = 'active'))
                     OR EXISTS (SELECT 1 FROM continuous_quality_ledgers ledger
                       WHERE ledger.updated_at_ms < $6 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
                         WHERE parent.incarnation_id = ledger.generation AND parent.state = 'active'))
                     OR EXISTS (SELECT 1 FROM quality_preparation_owners owner
                       WHERE NOT EXISTS (SELECT 1 FROM media_sessions child
                         WHERE child.incarnation_id = owner.staged_incarnation_id))
-                    OR EXISTS (SELECT 1 FROM quality_cancellation_receipts receipt
-                      WHERE receipt.updated_at_ms < $5 AND NOT EXISTS (SELECT 1 FROM media_sessions parent
-                        WHERE parent.incarnation_id = receipt.generation AND parent.state = 'active'))
                     OR EXISTS (SELECT 1 FROM media_session_terminal_acks acknowledgement
                       WHERE acknowledgement.expires_at_ms <= $2
                          OR NOT EXISTS (SELECT 1 FROM media_sessions session

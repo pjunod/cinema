@@ -154,6 +154,12 @@ const SHARED_CONSTANT_SOURCES: &[(&str, &str)] = &[
         "downloaded_subtitles.rs",
         include_str!("downloaded_subtitles.rs"),
     ),
+    ("continuous_family.rs", include_str!("continuous_family.rs")),
+    (
+        "quality_cancellation.rs",
+        include_str!("quality_cancellation.rs"),
+    ),
+    ("quality_ledger.rs", include_str!("quality_ledger.rs")),
     ("dv_conversion.rs", include_str!("dv_conversion.rs")),
     ("fragindex.rs", include_str!("fragindex.rs")),
     (

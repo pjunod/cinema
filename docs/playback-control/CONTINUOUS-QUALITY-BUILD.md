@@ -2378,3 +2378,24 @@ passed. The authored rendezvous regression covers exact/tolerance-edge times,
 stale/nonfinite timestamps and missing rasters. Unit execution remains
 deferred. Device audiovisual qualification and native continuous adapters
 remain open.
+
+
+### 10.69 Production startup exposes the replicated placeholder contract
+
+The isolated Chrome production probe completed fixture indexing but could not
+create playback: the maintenance query introduced `$6` before `$5`, which the
+replicated Store correctly refuses before I/O. This is a failed integration
+receipt, not continuity evidence. The same inspection found first-appearance
+ordering mistakes in cancellation settlement and verified family binding.
+
+All three statements now introduce placeholders in order with their bindings
+reordered accordingly. The common family statement also uses that binding
+order in SQLite, where `$N` is a named parameter rather than a numeric index.
+The existing placeholder census now includes the shared family, cancellation
+and ledger SQL constants so those statements cannot escape the final fast
+lane. Owner, time, cancellation and immutable media predicates are preserved.
+
+Pinned compilation and the normal hook apply before repeating the isolated
+handoff probe. Unit execution remains deferred. Retain the failed production
+receipt at `target/playback-lab/reports/continuous-chrome-partial.json`; it
+contains no successful playback or native qualification claim.

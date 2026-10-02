@@ -2765,7 +2765,7 @@ impl MediaSessionStore for SqliteStore {
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 crate::store::continuous_family::BIND,
-                params![generation, owner, owner_epoch, json, now_ms],
+                params![json, generation, owner, owner_epoch, now_ms],
             )? == 1)
         })
         .await
