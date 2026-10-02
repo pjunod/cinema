@@ -190,6 +190,19 @@ function browserOutputChannels(){
     return Number.isFinite(channels)&&channels>0?channels:2;
   }catch(e){ return 2; }
 }
+// Read when a caps document is first built for a request (after the viewer
+// has interacted, so no autoplay warning at page load) and again after an
+// output device change, never on every document.
+let BROWSER_OUTPUT_CHANNELS=null;
+function browserOutputChannelsCached(){
+  if(BROWSER_OUTPUT_CHANNELS===null) BROWSER_OUTPUT_CHANNELS=browserOutputChannels();
+  return BROWSER_OUTPUT_CHANNELS;
+}
+try{
+  if(navigator.mediaDevices&&navigator.mediaDevices.addEventListener){
+    navigator.mediaDevices.addEventListener("devicechange",()=>{ BROWSER_OUTPUT_CHANNELS=null; });
+  }
+}catch(e){}
 // The route claim the server negotiates audio from (AUDIO-RESOLVED-
 // INDEPENDENTLY.md §3.1). A browser decodes every codec it lists itself and
 // never passes a bitstream through, so each decoded codec reaches exactly the
@@ -254,8 +267,7 @@ function buildPlayCaps(hevc){
     // H.264 and AV1 too. Absent is today's behaviour and stays the answer for
     // every browser that was never going to be sent HEVC anyway.
     maxheight:hevc.maxheight||null,
-    hdr10t:(hevc.pq10&&hdrDisplay)?1:0,
-    audioSinks:browserAudioSinks(ac.join(","), browserOutputChannels())};
+    hdr10t:(hevc.pq10&&hdrDisplay)?1:0};
 }
 // The boot-time answer, from the synchronous ladder so that CAPS_Q exists
 // before anything can ask for it. MediaCapabilities refines it below.
@@ -430,7 +442,9 @@ function measuredPresentationTarget(){
   return {...PRESENTATION_TARGET_RECT};
 }
 function currentCapsDocument(){
-  const caps=capsDocument(PLAY_CAPS, decodeLimits());
+  const sinks=browserAudioSinks(PLAY_CAPS.acodec, browserOutputChannelsCached());
+  const caps=capsDocument(sinks.length?Object.assign({}, PLAY_CAPS, {audioSinks:sinks}):PLAY_CAPS,
+    decodeLimits());
   const target=measuredPresentationTarget();
   if(SERVER&&SERVER.playback_display_aware_auto&&target){
     Object.assign(caps.display,{presentation_target:target});
