@@ -3486,3 +3486,40 @@ and verifies it reaches the deliberately denied capacity result, preserving
 the incumbent, rather than failing recipe validation. Its source is compiled
 by the normal hook; unit execution remains deferred to final review. The next
 probe starts a fresh fully identified series after the source rebuild.
+
+
+### 10.114 Current-code playback exposed inherited-wait and physical-pin bounds
+
+Linux build fea65d8fa compiled in 121 seconds. The fresh twenty-switch Chrome
+series created one VOD parent, started its first frame and recorded a 720p
+target presentation at film tick 240. Its next 1080p request retained current
+and the series failed. Repeated later transitions reached Capacity. The failed
+receipt remains continuous-chrome-full-linux-fea65d8fa.json; a target
+presentation alone is not continuity or physical display/audio qualification.
+
+Private preparation inherited up to twelve seconds but each child wait was
+capped by the ordinary eight-second media-request budget. Preparation now
+spends only its inherited remaining allowance across both video and AAC;
+ordinary HTTP media retains the configured cap. A bounded reason records
+Pending, deadline, capacity, source or owner/media refusal without raw errors.
+
+Physical dependency accounting now counts an exact immutable interval once
+across logical intent owners. Conflicting interval facts for one rendition/hash
+are rejected. The 128 dependency and 256 MiB physical limits remain unchanged.
+Each intent still retains its own reservation and append/disposal facts. Replay
+records retain a SHA-256 digest of the entire canonical transition request
+instead of duplicating operation interval arrays. Exact replay restores the
+original acknowledgment; a changed payload is a conflicting replay. The count,
+ninety-second horizon and 128 KiB serialized ledger bounds remain unchanged.
+
+Authored regression covers two logical owners of 64 video plus 64 AAC objects,
+one physical budget, persistence and exact lost-ACK replay, altered payload
+rejection, conflicting immutable facts and a genuinely excessive new dependency.
+Source compilation and normal commit checks precede the next Linux rebuild;
+unit execution remains deferred to final main-ready review and fast lane.
+
+The production harness now ends a continuity series immediately on an explicit
+retained-current result instead of waiting another ninety seconds for a frame
+that the failed optional request cannot produce. This remains a failed series;
+healthy playback continuing does not qualify the requested change. JavaScript
+syntax is checked without executing the unit suite.

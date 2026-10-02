@@ -911,7 +911,7 @@ impl VodServe {
                     object: format!("{}.m4s", entry.index),
                 };
                 let mut ready = self
-                    .child_segment_before(session_id, &request, deadline)
+                    .child_segment_with_wait_before(session_id, &request, deadline, true)
                     .await
                     .ok_or("preparation parent disappeared")?
                     .result
@@ -978,7 +978,7 @@ impl VodServe {
                             object: format!("{index}.m4s"),
                         };
                         let mut ready = self
-                            .child_segment_before(session_id, &request, deadline)
+                            .child_segment_with_wait_before(session_id, &request, deadline, true)
                             .await
                             .ok_or("soundtrack parent disappeared")?
                             .result
@@ -1054,6 +1054,17 @@ impl VodServe {
         request: &ChildMediaRequest,
         deadline: Instant,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.child_segment_with_wait_before(session_id, request, deadline, false)
+            .await
+    }
+
+    async fn child_segment_with_wait_before(
+        &self,
+        session_id: &str,
+        request: &ChildMediaRequest,
+        deadline: Instant,
+        preparing: bool,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
         let name = request.media_name()?;
         let publication = self
             .session_media_rendition(session_id, Some(&request.rendition))
@@ -1095,9 +1106,14 @@ impl VodServe {
                 owner,
             });
         }
-        let budget = found
-            .block_budget
-            .min(deadline.saturating_duration_since(Instant::now()));
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        // Optional preparation spends its inherited allowance once across
+        // video and AAC. Ordinary media requests retain their configured cap.
+        let budget = if preparing {
+            remaining
+        } else {
+            found.block_budget.min(remaining)
+        };
         if name == INIT_NAME {
             let expected = request.object.strip_suffix(".mp4")?;
             let matches_init = found

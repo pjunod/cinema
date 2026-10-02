@@ -592,9 +592,24 @@ impl VodServe {
                             Ok(intervals) => candidate
                                 .ready(&transition.transaction_id, intervals.clone())
                                 .map_err(|error| error.to_string())?,
-                            Err(_) => candidate
-                                .refuse_preparation(&transition.transaction_id)
-                                .map_err(|error| error.to_string())?,
+                            Err(error) => {
+                                let reason = if error == "Pending" {
+                                    "media_wait_pending"
+                                } else if error.contains("deadline") {
+                                    "preparation_deadline"
+                                } else if error.contains("capacity") || error.contains("credit") {
+                                    "capacity"
+                                } else if error.contains("source") {
+                                    "source_changed"
+                                } else {
+                                    "media_or_owner_unavailable"
+                                };
+                                tracing::debug!(session = %session_id, rendition = %target_rendition_id,
+                                    reason, frontier = binding.through_tick, "continuous preparation retained current");
+                                candidate
+                                    .refuse_preparation(&transition.transaction_id)
+                                    .map_err(|error| error.to_string())?;
+                            }
                         }
                         if self
                             .publish_quality_candidate(QualityCandidatePublication {

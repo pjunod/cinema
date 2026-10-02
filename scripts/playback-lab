@@ -2522,6 +2522,7 @@ async function performOperation(driver, testCase, start) {
         timeline.push(sampleFrom(state, performance.now() - transitionOrigin));
         const selected = await driver.eval("playQuality()");
         if (state.video.error) return state;
+        if (testCase.require_continuous && state.continuous?.observation === "Continuous target retained current") return state;
         if (selected !== quality || !state.started || state.video.seeking
             || state.video.ready_state < 2 || state.video.current_time <= 0.05) return null;
         const targetState = (!spec.expected_method || (state.decided_method === spec.expected_method
@@ -2548,6 +2549,9 @@ async function performOperation(driver, testCase, start) {
             || state.continuous.transaction.first_presented_at_ms < before.sampled_unix_ms)) return null;
         return state;
       }, Number(testCase.switch_wait_timeout_seconds || 30) * 1000, `committed quality switch to ${quality}`, 50);
+      if (testCase.require_continuous && committed.continuous?.observation === "Continuous target retained current") {
+        throw new Error(`quality target ${quality} retained current playback; the continuity series failed`);
+      }
       const targetFrame = committed.frame_probe?.supported ? committed.frame_probe.last_frame : null;
       const readyAtMs = Number(targetFrame?.at_ms ?? committed.sampled_at_ms);
       const landedPosition = Number(targetFrame?.absolute_time ?? committed.video.absolute_time);

@@ -300,22 +300,32 @@ impl QualityTransitionReceipt {
 struct ReplayReceipt {
     sequence: u64,
     transaction_id: String,
-    operation: QualityOperation,
+    request_digest: String,
     transaction: QualityTransaction,
     accepted_at_ms: i64,
 }
 
 impl ReplayReceipt {
-    fn request(&self, ledger: &QualityLedger) -> QualityTransitionRequest {
-        QualityTransitionRequest {
-            version: CONTINUOUS_QUALITY_VERSION,
+    fn valid_for_ledger(&self, ledger: &QualityLedger) -> bool {
+        let candidate = QualityLedger {
+            version: ledger.version,
             generation: ledger.generation.clone(),
             control_epoch: ledger.control_epoch,
             attachment: ledger.attachment.clone(),
-            sequence: self.sequence,
-            transaction_id: self.transaction_id.clone(),
-            operation: self.operation.clone(),
-        }
+            latest_intent_revision: self.transaction.intent_revision,
+            accepted_sequence: self.sequence,
+            transactions: vec![self.transaction.clone()],
+            shared_audio_rendition_id: None,
+            shared_audio_reserved: vec![],
+            receipts: vec![],
+        };
+        valid_artifact(&self.request_digest)
+            && self.transaction_id == self.transaction.transaction_id
+            && candidate.valid()
+            && (!matches!(
+                self.transaction.state,
+                QualityState::RetainedCurrent | QualityState::Superseded
+            ) || !self.transaction.ever_appended)
     }
 
     fn response(&self, ledger: &QualityLedger) -> QualityTransitionReceipt {
@@ -383,6 +393,14 @@ impl std::fmt::Display for QualityTransitionError {
 }
 impl std::error::Error for QualityTransitionError {}
 
+fn quality_request_digest(
+    request: &QualityTransitionRequest,
+) -> Result<String, QualityTransitionError> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(request).map_err(|_| QualityTransitionError::Invalid)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
 impl QualityLedger {
     pub fn new(
         generation: String,
@@ -437,8 +455,6 @@ impl QualityLedger {
         {
             return false;
         }
-        let mut count = self.shared_audio_reserved.len();
-        let mut bytes = 0_u64;
         for interval in &self.shared_audio_reserved {
             if !interval.valid()
                 || interval.timescale != crate::transcode::VOD_AUDIO_RATE
@@ -451,10 +467,6 @@ impl QualityLedger {
             {
                 return false;
             }
-            let Some(sum) = bytes.checked_add(interval.byte_length) else {
-                return false;
-            };
-            bytes = sum;
         }
         for tx in &self.transactions {
             if !valid_uuid(&tx.transaction_id)
@@ -492,26 +504,19 @@ impl QualityLedger {
             {
                 return false;
             }
-            count = count.saturating_add(tx.reserved.len());
-            for interval in &tx.reserved {
-                let Some(sum) = bytes.checked_add(interval.byte_length) else {
-                    return false;
-                };
-                bytes = sum;
-            }
         }
-        count <= MAX_QUALITY_INTERVALS
-            && bytes <= MAX_QUALITY_PINNED_BYTES
-            && self.receipts.iter().all(|receipt| {
-                receipt.sequence > 0
-                    && receipt.sequence <= self.accepted_sequence
-                    && receipt.accepted_at_ms > 0
-                    && receipt.transaction.ready.is_empty()
-                    && receipt.transaction.reserved.is_empty()
-                    && receipt.transaction.appended.is_empty()
-                    && receipt.transaction.disposed.is_empty()
-                    && receipt.response(self).valid_for(&receipt.request(self))
-            })
+        self.pinned_dependency_usage().is_ok_and(|(count, bytes)| {
+            count <= MAX_QUALITY_INTERVALS && bytes <= MAX_QUALITY_PINNED_BYTES
+        }) && self.receipts.iter().all(|receipt| {
+            receipt.sequence > 0
+                && receipt.sequence <= self.accepted_sequence
+                && receipt.accepted_at_ms > 0
+                && receipt.transaction.ready.is_empty()
+                && receipt.transaction.reserved.is_empty()
+                && receipt.transaction.appended.is_empty()
+                && receipt.transaction.disposed.is_empty()
+                && receipt.valid_for_ledger(self)
+        })
     }
 
     /// A Store-fenced takeover changes command authority, never media facts.
@@ -603,7 +608,7 @@ impl QualityLedger {
             .iter()
             .find(|receipt| receipt.sequence == request.sequence)
         {
-            return if receipt.request(self) == *request {
+            return if receipt.request_digest == quality_request_digest(request)? {
                 Ok(receipt.response(self))
             } else {
                 Err(QualityTransitionError::ConflictingReplay)
@@ -644,7 +649,7 @@ impl QualityLedger {
         next.receipts.push(ReplayReceipt {
             sequence: request.sequence,
             transaction_id: request.transaction_id.clone(),
-            operation: request.operation.clone(),
+            request_digest: quality_request_digest(request)?,
             transaction: response.transaction.clone(),
             accepted_at_ms: now_ms,
         });
@@ -847,19 +852,37 @@ impl QualityLedger {
             }
             QualityOperation::Prepare { .. } => unreachable!("handled above"),
         }
-        let mut reserved = self
-            .transactions
-            .iter()
-            .flat_map(|tx| &tx.reserved)
-            .chain(&self.shared_audio_reserved);
-        let count = reserved.clone().count();
-        let bytes = reserved
-            .try_fold(0_u64, |sum, interval| sum.checked_add(interval.byte_length))
-            .ok_or(QualityTransitionError::Capacity)?;
+        let (count, bytes) = self.pinned_dependency_usage()?;
         if count > MAX_QUALITY_INTERVALS || bytes > MAX_QUALITY_PINNED_BYTES {
             return Err(QualityTransitionError::Capacity);
         }
         Ok(())
+    }
+
+    /// Logical intent owners can share one immutable physical dependency.
+    /// The same identity with changed interval facts is never an alias.
+    fn pinned_dependency_usage(&self) -> Result<(usize, u64), QualityTransitionError> {
+        let mut unique = std::collections::BTreeMap::new();
+        let mut bytes = 0_u64;
+        for interval in self
+            .transactions
+            .iter()
+            .flat_map(|tx| &tx.reserved)
+            .chain(&self.shared_audio_reserved)
+        {
+            let key = (&interval.rendition_id, &interval.artifact_id);
+            if let Some(previous) = unique.get(&key) {
+                if *previous != interval {
+                    return Err(QualityTransitionError::Invalid);
+                }
+            } else {
+                bytes = bytes
+                    .checked_add(interval.byte_length)
+                    .ok_or(QualityTransitionError::Capacity)?;
+                unique.insert(key, interval);
+            }
+        }
+        Ok((unique.len(), bytes))
     }
 
     fn record_appended(
@@ -1090,6 +1113,112 @@ mod tests {
             operation,
         }
     }
+    #[test]
+    fn immutable_pin_aliases_keep_one_physical_budget_and_exact_replay_after_restore() {
+        let mut ledger = ledger();
+        let videos: Vec<_> = (0..64_u64)
+            .map(|i| QualityInterval {
+                artifact_id: format!("{:064x}", i + 1),
+                rendition_id: "c".repeat(64),
+                timescale: 24_000,
+                from_tick: i * 48_000,
+                through_tick: (i + 1) * 48_000,
+                byte_length: 500_000,
+            })
+            .collect();
+        let audio: Vec<_> = (0..64_u64)
+            .map(|i| QualityInterval {
+                artifact_id: format!("{:064x}", i + 100),
+                rendition_id: "e".repeat(64),
+                timescale: 48_000,
+                from_tick: i * 96_000,
+                through_tick: (i + 1) * 96_000,
+                byte_length: 40_000,
+            })
+            .collect();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: "c".repeat(64),
+            },
+        );
+        ledger.apply(&prepare, 1000).expect("first owner");
+        ledger
+            .ready(TRANSACTION, videos.clone())
+            .expect("first ready");
+        ledger
+            .reserve_shared_audio(&audio)
+            .expect("one physical AAC budget");
+        let scheduled = request(
+            &ledger,
+            2,
+            QualityOperation::Scheduled {
+                intervals: videos.clone(),
+            },
+        );
+        let canonical = ledger
+            .apply(&scheduled, 1100)
+            .expect("first physical reservation");
+        let second = "00000000-0000-4000-8000-00000000ca06";
+        let mut prepare = request(
+            &ledger,
+            3,
+            QualityOperation::Prepare {
+                intent_revision: 2,
+                target_rendition_id: "c".repeat(64),
+            },
+        );
+        prepare.transaction_id = second.into();
+        ledger.apply(&prepare, 1200).expect("new logical owner");
+        ledger
+            .ready(second, videos.clone())
+            .expect("same retained immutable media");
+        let mut alias = request(
+            &ledger,
+            4,
+            QualityOperation::Scheduled { intervals: videos },
+        );
+        alias.transaction_id = second.into();
+        ledger
+            .apply(&alias, 1300)
+            .expect("logical aliases do not double physical demand");
+        assert_eq!(ledger.pinned_dependency_usage(), Ok((128, 64 * 540_000)));
+        let encoded = serde_json::to_vec(&ledger).expect("durable owner facts");
+        assert!(encoded.len() < MAX_QUALITY_LEDGER_BYTES);
+        let mut restored: QualityLedger = serde_json::from_slice(&encoded).expect("restore");
+        assert_eq!(
+            restored
+                .apply(&scheduled, 1400)
+                .expect("lost ACK exact replay"),
+            canonical
+        );
+        let mut conflict = scheduled.clone();
+        if let QualityOperation::Scheduled { intervals } = &mut conflict.operation {
+            intervals[0].byte_length += 1;
+        }
+        assert_eq!(
+            restored.apply(&conflict, 1500),
+            Err(QualityTransitionError::ConflictingReplay)
+        );
+        restored.transactions[1].reserved[0].through_tick += 1000;
+        assert!(
+            !restored.valid(),
+            "an immutable identity cannot alias changed interval facts"
+        );
+        let extra = QualityInterval {
+            artifact_id: "f".repeat(64),
+            from_tick: 64 * 96_000,
+            through_tick: 65 * 96_000,
+            ..audio[0].clone()
+        };
+        assert_eq!(
+            ledger.reserve_shared_audio(&[extra]),
+            Err(QualityTransitionError::Capacity)
+        );
+    }
+
     fn scheduled() -> QualityLedger {
         let mut ledger = ledger();
         let prepare = request(
