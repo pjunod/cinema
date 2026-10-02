@@ -2872,13 +2872,13 @@ impl MediaSessionStore for SqliteStore {
             let applied = conn.execute(
                 crate::store::quality_ledger::TERMINAL_WRITE,
                 params![
-                    generation,
                     owner,
                     reduced.epoch,
                     revision,
-                    attachment,
                     reduced.json,
                     now_ms,
+                    generation,
+                    attachment,
                     reduced.previous_json
                 ],
             )?;

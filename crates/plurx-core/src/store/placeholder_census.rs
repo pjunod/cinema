@@ -1018,11 +1018,18 @@ fn every_replicated_placeholder_is_introduced_in_order() {
     let mut offenders = Vec::new();
     let mut fragments = Vec::new();
     let mut scanned = 0_usize;
-    for (name, source) in STORE_SOURCES.iter().chain(
-        SHARED_CONSTANT_SOURCES
-            .iter()
-            .filter(|(name, _)| *name == "../live_tv_resource.rs"),
-    ) {
+    for (name, source) in STORE_SOURCES
+        .iter()
+        .chain(SHARED_CONSTANT_SOURCES.iter().filter(|(name, _)| {
+            matches!(
+                *name,
+                "../live_tv_resource.rs"
+                    | "continuous_family.rs"
+                    | "quality_cancellation.rs"
+                    | "quality_ledger.rs"
+            )
+        }))
+    {
         let (literals, is_code) = literals_and_code_mask(source);
         let test_ranges = test_item_ranges(source, &is_code);
         let constants = constants_for(name, source, &literals);

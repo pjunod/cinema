@@ -30,11 +30,11 @@ pub(crate) const WRITE: &str = "INSERT INTO continuous_quality_ledgers
       AND continuous_quality_ledgers.owner_epoch <= $3";
 
 pub(crate) const TERMINAL_WRITE: &str = "UPDATE continuous_quality_ledgers SET
-    owner_node_id = $2, owner_epoch = $3, revision = $4 + 1, ledger_json = $6, updated_at_ms = $7
-    WHERE generation = $1 AND revision = $4 AND attachment_id = $5 AND owner_epoch <= $3
+    owner_node_id = $1, owner_epoch = $2, revision = $3 + 1, ledger_json = $4, updated_at_ms = $5
+    WHERE generation = $6 AND revision = $3 AND attachment_id = $7 AND owner_epoch <= $2
       AND ledger_json = $8
-      AND EXISTS (SELECT 1 FROM media_sessions parent WHERE parent.incarnation_id = $1
-        AND parent.owner_node_id = $2 AND parent.owner_epoch = $3 AND parent.state = 'ended')";
+      AND EXISTS (SELECT 1 FROM media_sessions parent WHERE parent.incarnation_id = $6
+        AND parent.owner_node_id = $1 AND parent.owner_epoch = $2 AND parent.state = 'ended')";
 
 pub(crate) struct TerminalQualityWrite {
     pub json: String,

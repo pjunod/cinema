@@ -3564,13 +3564,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         let applied = timeout_store(self.client().execute(
             crate::store::quality_ledger::TERMINAL_WRITE,
             params!(
-                request.generation.as_str(),
                 owner_node_id,
                 reduced.epoch,
                 expected.revision,
-                request.attachment.attachment_id.as_str(),
                 reduced.json,
                 now_ms,
+                request.generation.as_str(),
+                request.attachment.attachment_id.as_str(),
                 reduced.previous_json
             ),
         ))

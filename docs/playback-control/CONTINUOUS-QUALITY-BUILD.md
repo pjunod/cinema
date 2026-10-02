@@ -2399,3 +2399,15 @@ Pinned compilation and the normal hook apply before repeating the isolated
 handoff probe. Unit execution remains deferred. Retain the failed production
 receipt at `target/playback-lab/reports/continuous-chrome-partial.json`; it
 contains no successful playback or native qualification claim.
+
+
+### 10.70 Terminal shared-ledger SQL uses the same binding contract
+
+The follow-through inspection of the newly censused shared constants found
+one additional named-parameter ordering mistake in the post-End ledger write.
+That statement and both Store callers now bind owner, epoch, revision, JSON,
+time, generation, attachment and old JSON in their first-appearance order.
+The exact prior-ledger comparison and terminal owner predicates remain intact;
+this cannot create a reservation after End. Existing cross-backend late-fact
+regressions and the expanded placeholder census cover the landing candidate.
+Pinned all-target compilation applies without executing the unit lane.
