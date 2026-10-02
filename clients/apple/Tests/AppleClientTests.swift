@@ -8152,6 +8152,54 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(noHEVCJSON["progressive_hevc_sample_entries"])
     }
 
+    func testAudioSinkClaimFollowsTheRouteAndPassesThroughOnlyToAMultichannelReceiver() throws {
+        let receiver = Caps.audioSinks(route: AudioRouteFacts(outputChannels: 8, hdmi: true))
+        let byCodec = Dictionary(uniqueKeysWithValues: receiver.map { ($0.codec, $0) })
+        XCTAssertEqual(byCodec["aac"]?.maxChannels, 8)
+        XCTAssertEqual(byCodec["aac"]?.passthrough, false)
+        XCTAssertEqual(byCodec["eac3"]?.maxChannels, 8)
+        XCTAssertEqual(byCodec["eac3"]?.passthrough, true)
+        XCTAssertEqual(byCodec["ac3"]?.maxChannels, 6)
+        XCTAssertEqual(byCodec["ac3"]?.passthrough, true)
+        XCTAssertTrue(byCodec["aac"]?.sampleRatesHz.contains(48_000) == true)
+        XCTAssertTrue(byCodec["eac3"]?.sampleRatesHz.contains(48_000) == true)
+
+        // A television's own speakers over HDMI are a stereo route: no
+        // receiver to take a bitstream.
+        let speakers = Caps.audioSinks(route: AudioRouteFacts(outputChannels: 2, hdmi: true))
+        XCTAssertTrue(speakers.allSatisfy { $0.maxChannels <= 2 && !$0.passthrough })
+
+        // Headphones, AirPlay and a phone speaker; an unreadable route floors
+        // at stereo, never a guessed surround claim.
+        for channels in [2, 1, 0] {
+            let route = Caps.audioSinks(route: AudioRouteFacts(outputChannels: channels, hdmi: false))
+            XCTAssertTrue(route.allSatisfy { $0.maxChannels == 2 && !$0.passthrough }, "\(channels)")
+        }
+        XCTAssertEqual(
+            Caps.audioSinks(route: AudioRouteFacts(outputChannels: 16, hdmi: true))
+                .first { $0.codec == "aac" }?.maxChannels,
+            8
+        )
+
+        // The claim rides the v2 document as `audio_sinks`; no route means the
+        // legacy contract.
+        let document = Caps.capsDocument(
+            hevc: true, av1: false, displayHDR: false, dolbyVision: false,
+            audioRoute: AudioRouteFacts(outputChannels: 6, hdmi: true)
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(document)) as? [String: Any]
+        )
+        let sinks = try XCTUnwrap(json["audio_sinks"] as? [[String: Any]])
+        XCTAssertEqual(sinks.count, 5)
+        XCTAssertEqual(sinks.first?["max_channels"] as? Int, 6)
+        XCTAssertNotNil(sinks.first?["sample_rates_hz"] as? [Int])
+        let legacy = Caps.capsDocument(hevc: true, av1: false, displayHDR: false, dolbyVision: false)
+        XCTAssertTrue(legacy.audioSinks.isEmpty)
+    }
+
     func testDeliveryRequiresHLSDecodesAndDefaultsForOldResponses() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
