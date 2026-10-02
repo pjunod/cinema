@@ -414,22 +414,54 @@ async fn probe_first_frame_luminance(
         crate::process::ChildWork::background(purpose),
     )
     .await
-    .map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => ProbeError::Spawn(error.to_string()),
-        _ => ProbeError::Transient {
-            path: path.display().to_string(),
-            reason: error.to_string(),
-        },
-    })?;
+    .map_err(|error| frame_read_io_failure(path, &error))?;
     if !output.status.success() {
-        return Err(ProbeError::Failed {
-            path: path.display().to_string(),
-            code: output.status.code(),
-            reason: probe_failure_reason(&output.stderr),
-        });
+        return Err(frame_read_exit_failure(
+            path,
+            output.status.code(),
+            &output.stderr,
+        ));
     }
     serde_json::from_slice(&output.stdout)
         .map_err(|error| ProbeError::Parse(format!("ffprobe frame json: {error}")))
+}
+
+/// The bounded launcher's own error: it either never started the child or
+/// stopped it. A wall-time or cancellation stop is `Transient`; anything
+/// else came from starting it (not found, permission, exec format) and is
+/// `Spawn`. Neither is a verdict on the file.
+fn frame_read_io_failure(path: &Path, error: &std::io::Error) -> ProbeError {
+    match error.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted => ProbeError::Transient {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        },
+        _ => ProbeError::Spawn(error.to_string()),
+    }
+}
+
+/// A non-zero exit. 126 and 127 are the exec convention for "found but not
+/// executable" and "not found" — what a wrapper or launcher in front of
+/// ffprobe reports when ffprobe itself never ran — so they are `Spawn`, the
+/// missing-binary root cause. No exit code means a signal ended the child
+/// (the OOM killer, an operator), which is `Transient`. Any other code is
+/// ffprobe's refusal of this input: `Failed`.
+fn frame_read_exit_failure(path: &Path, code: Option<i32>, stderr: &[u8]) -> ProbeError {
+    let reason = probe_failure_reason(stderr);
+    match code {
+        Some(code @ (126 | 127)) => ProbeError::Spawn(format!(
+            "ffprobe could not be executed (exit {code}): {reason}"
+        )),
+        None => ProbeError::Transient {
+            path: path.display().to_string(),
+            reason: format!("ffprobe was killed by a signal: {reason}"),
+        },
+        code => ProbeError::Failed {
+            path: path.display().to_string(),
+            code,
+            reason,
+        },
+    }
 }
 
 /// Pure parser over ffprobe JSON — unit-testable without spawning anything.
@@ -1202,6 +1234,39 @@ pub(crate) mod tests {
         assert_eq!(result.max_cll, Some(1000));
         assert_eq!(result.max_fall, Some(400));
         assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn a_frame_read_failure_is_a_file_verdict_only_when_ffprobe_ran() {
+        let path = Path::new("/media/title.mkv");
+        let refused = frame_read_exit_failure(path, Some(1), b"Invalid data found");
+        assert!(matches!(refused, ProbeError::Failed { code: Some(1), .. }));
+        assert!(refused.is_file_verdict());
+        for code in [126, 127] {
+            let unrunnable = frame_read_exit_failure(path, Some(code), b"");
+            assert!(matches!(unrunnable, ProbeError::Spawn(_)), "exit {code}");
+            assert!(!unrunnable.is_file_verdict());
+        }
+        let killed = frame_read_exit_failure(path, None, b"");
+        assert!(matches!(killed, ProbeError::Transient { .. }));
+        assert!(!killed.is_file_verdict());
+
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Other,
+        ] {
+            let error = frame_read_io_failure(path, &Error::new(kind, "spawn"));
+            assert!(matches!(error, ProbeError::Spawn(_)), "{kind:?}");
+            assert!(!error.is_file_verdict());
+        }
+        for kind in [ErrorKind::TimedOut, ErrorKind::Interrupted] {
+            let error = frame_read_io_failure(path, &Error::new(kind, "stopped"));
+            assert!(matches!(error, ProbeError::Transient { .. }), "{kind:?}");
+            assert!(!error.is_file_verdict());
+        }
+        assert!(ProbeError::Parse("truncated".into()).is_file_verdict());
     }
 
     #[test]

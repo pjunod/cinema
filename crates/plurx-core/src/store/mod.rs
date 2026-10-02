@@ -2080,8 +2080,11 @@ pub mod keys {
     pub const JOB_LUMINANCE_BACKFILL_DONE: &str = "jobs.luminance_backfilled";
     pub const JOB_LUMINANCE_BACKFILL_CURSOR: &str = "jobs.luminance_backfill_cursor";
     /// Set after every HDR row the stored-document backfill left `none` has
-    /// had one bounded first-frame read. Runs only after
-    /// [`JOB_LUMINANCE_BACKFILL_DONE`], so no `none` row appears behind it.
+    /// been considered for one bounded first-frame read. The walk starts only
+    /// after [`JOB_LUMINANCE_BACKFILL_DONE`], so no row that walk classifies
+    /// lands behind its cursor. A later rescan can still write `none` under a
+    /// passed id, but only after attempting the same frame read itself; such
+    /// a row waits for the file's next change.
     pub const JOB_LUMINANCE_FRAME_BACKFILL_DONE: &str = "jobs.luminance_frame_backfilled";
     /// Node-local strictly-after cursor for the first-frame luminance walk.
     pub const JOB_LUMINANCE_FRAME_BACKFILL_CURSOR: &str = "jobs.luminance_frame_backfill_cursor";
