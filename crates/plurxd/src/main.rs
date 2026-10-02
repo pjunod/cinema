@@ -100,7 +100,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
-    connect_activated_store, select_daemon_store, SelectedBackend,
+    connect_activated_store, select_daemon_store_observing, SelectedBackend, StartupClockObserver,
 };
 use plurx_core::config::{Config, StorageConfig};
 use plurx_core::domain::LibraryKind;
@@ -1696,9 +1696,16 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
 
-    let selected = select_daemon_store(&config)
-        .await
-        .with_context(|| format!("selecting store in {}", config.storage.data_dir.display()))?;
+    let observation = Arc::new(StartupObservationHttp::new(config.server.bind));
+    let selected = match select_daemon_store_observing(&config, Some(observation.as_ref())).await {
+        Ok(selected) => selected,
+        Err(error) => {
+            observation.stop_and_drain().await;
+            return Err(error).with_context(|| {
+                format!("selecting store in {}", config.storage.data_dir.display())
+            });
+        }
+    };
     // Which backend is serving is not otherwise observable. A recovery boot
     // binds and serves normally on unreplicated SQLite, so a persistently
     // failing activation otherwise looks only like a flapping container, with
@@ -1755,9 +1762,17 @@ async fn run(config: Config) -> anyhow::Result<()> {
             system,
             logs,
         };
-        boot(config, parts, start_mdns_advertiser, shutdown.signalled()).await
+        boot_observing(
+            config,
+            parts,
+            start_mdns_advertiser,
+            shutdown.signalled(),
+            Some(Arc::clone(&observation)),
+        )
+        .await
     };
     let result = serving.await;
+    observation.stop_and_drain().await;
     let shutdown = selected
         .shutdown()
         .await
@@ -1782,6 +1797,168 @@ struct Boot {
     logs: logbuf::LogBuffers,
 }
 
+/// One public socket owner spanning clock-only observation and normal HTTP.
+/// Routing is selected per request, so already-open keepalive connections
+/// cannot retain the pending router after activation.
+struct StartupObservationHttp {
+    bind: SocketAddr,
+    router: Arc<std::sync::RwLock<axum::Router>>,
+    tasks: tokio::sync::Mutex<Option<StartupObservationTasks>>,
+    stop: tokio_util::sync::CancellationToken,
+}
+
+struct StartupObservationTasks {
+    server: tokio::task::JoinHandle<anyhow::Result<()>>,
+    probe: Option<tokio::task::JoinHandle<()>>,
+    probe_stop: tokio_util::sync::CancellationToken,
+}
+
+impl StartupObservationHttp {
+    fn new(bind: SocketAddr) -> Self {
+        Self {
+            bind,
+            router: Arc::new(std::sync::RwLock::new(axum::Router::new())),
+            tasks: tokio::sync::Mutex::new(None),
+            stop: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    async fn stop_probe(&self) {
+        let mut tasks = self.tasks.lock().await;
+        if let Some(tasks) = tasks.as_mut() {
+            tasks.probe_stop.cancel();
+            if let Some(mut probe) = tasks.probe.take() {
+                if tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, &mut probe)
+                    .await
+                    .is_err()
+                {
+                    probe.abort();
+                    let _ = probe.await;
+                }
+            }
+        }
+    }
+
+    async fn stop_and_drain(&self) {
+        self.stop.cancel();
+        self.stop_probe().await;
+        if let Some(mut tasks) = self.tasks.lock().await.take() {
+            if tokio::time::timeout(
+                SHUTDOWN_DRAIN_TIMEOUT + Duration::from_secs(1),
+                &mut tasks.server,
+            )
+            .await
+            .is_err()
+            {
+                tasks.server.abort();
+                let _ = tasks.server.await;
+            }
+        }
+    }
+
+    async fn serve_normal(
+        &self,
+        app: axum::Router,
+        shutdown: impl std::future::Future<Output = ()> + Send,
+    ) -> anyhow::Result<()> {
+        *self
+            .router
+            .write()
+            .map_err(|_| anyhow::anyhow!("startup router ownership poisoned"))? = app;
+        self.stop_probe().await;
+        let mut tasks = self
+            .tasks
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup observation socket was not installed"))?;
+        tokio::pin!(shutdown);
+        tokio::select! {
+            result = &mut tasks.server => result.context("startup HTTP task")?,
+            () = &mut shutdown => {
+                self.stop.cancel();
+                tasks.server.await.context("startup HTTP task")?
+            }
+        }
+    }
+}
+
+impl Drop for StartupObservationHttp {
+    fn drop(&mut self) {
+        self.stop.cancel();
+    }
+}
+
+impl StartupClockObserver for StartupObservationHttp {
+    fn start(
+        &self,
+        membership: plurx_core::cluster::membership::MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>> + Send + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let mut tasks = self.tasks.lock().await;
+            if tasks.is_some() {
+                return Err(plurx_core::error::StoreError::Database(
+                    "clock observation socket already owned".into(),
+                ));
+            }
+            let listener = bind_listener(self.bind)
+                .await
+                .map_err(|error| plurx_core::error::StoreError::Database(error.to_string()))?;
+            let pending = axum::Router::new()
+                .route(
+                    http::internal_clock::PATH,
+                    axum::routing::get(http::internal_clock::observation_snapshot),
+                )
+                .with_state(http::internal_clock::ObservationContext {
+                    membership: membership.clone(),
+                    node_id,
+                });
+            *self.router.write().map_err(|_| {
+                plurx_core::error::StoreError::Database("startup router ownership poisoned".into())
+            })? = pending;
+            let router = Arc::clone(&self.router);
+            let dispatch = axum::Router::new().fallback(axum::routing::any(
+                move |request: axum::http::Request<axum::body::Body>| {
+                    let router = Arc::clone(&router);
+                    async move {
+                        let app = router
+                            .read()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .clone();
+                        match tower::ServiceExt::oneshot(app, request).await {
+                            Ok(response) => response,
+                            Err(never) => match never {},
+                        }
+                    }
+                },
+            ));
+            let stop = self.stop.clone();
+            let server = tokio::spawn(serve_http(
+                listener,
+                dispatch,
+                async move { stop.cancelled().await },
+                HTTP_TIMEOUTS,
+            ));
+            let probe_stop = self.stop.child_token();
+            let probe = tokio::spawn(crate::clock_offset::run_membership(
+                membership,
+                probe_stop.clone(),
+            ));
+            *tasks = Some(StartupObservationTasks {
+                server,
+                probe: Some(probe),
+                probe_stop,
+            });
+            Ok(())
+        })
+    }
+}
+
 /// Everything from a measured node to a served, drained shutdown.
 ///
 /// Separated from [`run`] at exactly the line where startup stops reaching
@@ -1789,12 +1966,27 @@ struct Boot {
 /// is wiring. Taking the shutdown future and the advertiser rather than
 /// installing a signal handler and registering on the LAN is what lets the
 /// whole sequence run in a test, on a temporary directory and a loopback port.
+#[cfg(test)]
 async fn boot(
-    mut config: Config,
+    config: Config,
     parts: Boot,
     advertiser: MdnsAdvertiser,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
+    boot_observing(config, parts, advertiser, shutdown, None).await
+}
+
+async fn boot_observing(
+    mut config: Config,
+    parts: Boot,
+    advertiser: MdnsAdvertiser,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    observation: Option<Arc<StartupObservationHttp>>,
+) -> anyhow::Result<()> {
+    let observation = match observation {
+        Some(owner) if owner.tasks.lock().await.is_some() => Some(owner),
+        _ => None,
+    };
     let Boot {
         store,
         replication,
@@ -1861,6 +2053,9 @@ async fn boot(
         .await
         .context("seed playback telemetry settings")?;
     let background_loops = BackgroundLoopGuard::new();
+    if let Some(owner) = &observation {
+        owner.stop_probe().await;
+    }
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
@@ -1872,7 +2067,11 @@ async fn boot(
     tokio::task::spawn_blocking(http::web::warm_static_assets)
         .await
         .context("precompute embedded web assets")?;
-    let listener = bind_listener(config.server.bind).await?;
+    let listener = if observation.is_none() {
+        Some(bind_listener(config.server.bind).await?)
+    } else {
+        None
+    };
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
@@ -1880,7 +2079,7 @@ async fn boot(
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
     let mdns = start_discovery(&config, &instance_id, discovery_node_id, advertiser);
 
-    serve(listener, app, progress, mdns, async move {
+    let shutdown = async move {
         tokio::select! {
             () = shutdown => {}
             () = leave_shutdown.cancelled() => {
@@ -1901,8 +2100,20 @@ async fn boot(
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }
-    })
-    .await
+    };
+    if let Some(owner) = observation {
+        owner.serve_normal(app, shutdown).await?;
+        drain_serving_state(progress, mdns).await
+    } else {
+        serve(
+            listener.expect("normal startup owns its listener"),
+            app,
+            progress,
+            mdns,
+            shutdown,
+        )
+        .await
+    }
 }
 
 /// How a Bonjour record gets published. A parameter rather than a direct call
@@ -2984,6 +3195,13 @@ async fn serve(
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
+    drain_serving_state(progress, mdns).await
+}
+
+async fn drain_serving_state(
+    progress: Arc<crate::progress::ProgressCoalescer>,
+    mdns: Option<mdns_sd::ServiceDaemon>,
+) -> anyhow::Result<()> {
     match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
@@ -4075,6 +4293,315 @@ mod startup_tests {
             accept_error_backoff: Duration::from_millis(20),
             shutdown_drain: Duration::from_millis(200),
         }
+    }
+
+    /// Real pending listener boundary and in-place transfer, not proof that
+    /// a learner has completed clock observation or voter promotion.
+    #[tokio::test]
+    async fn k06_clock_only_socket_denies_application_and_transfers_existing_keepalive() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        async fn request(stream: &mut BufReader<tokio::net::TcpStream>, path: &str) -> String {
+            stream
+                .get_mut()
+                .write_all(format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").as_bytes())
+                .await
+                .expect("request");
+            let mut status = String::new();
+            stream.read_line(&mut status).await.expect("status");
+            let mut bytes = 0;
+            loop {
+                let mut line = String::new();
+                stream.read_line(&mut line).await.expect("header");
+                assert!(!line.is_empty(), "response must not close before headers");
+                if line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    bytes = value.trim().parse::<usize>().expect("length");
+                }
+            }
+            let mut body = vec![0; bytes];
+            stream.read_exact(&mut body).await.expect("body");
+            status
+        }
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve");
+        let address = reservation.local_addr().expect("address");
+        drop(reservation);
+        let owner = Arc::new(StartupObservationHttp::new(address));
+        owner
+            .start(
+                plurx_core::cluster::membership::MembershipManager::unavailable(),
+                "pending-node".into(),
+            )
+            .await
+            .expect("pending socket");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "pending phase owns the one bound socket"
+        );
+        let mut stream = BufReader::new(
+            tokio::net::TcpStream::connect(address)
+                .await
+                .expect("connect"),
+        );
+        assert!(
+            request(&mut stream, "/_internal/v1/clock")
+                .await
+                .contains("401"),
+            "unsigned observation refuses"
+        );
+        assert!(
+            request(&mut stream, "/active").await.contains("404"),
+            "no application route while pending"
+        );
+        let (shutdown, stopped) = tokio::sync::oneshot::channel();
+        let normal_owner = Arc::clone(&owner);
+        let normal = tokio::spawn(async move {
+            normal_owner
+                .serve_normal(
+                    axum::Router::new().route("/active", axum::routing::get(|| async { "active" })),
+                    async move {
+                        let _ = stopped.await;
+                    },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if request(&mut stream, "/active").await.contains("200") {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("same keepalive observes transferred router");
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_err(),
+            "activation did not release/rebind the socket"
+        );
+        shutdown.send(()).expect("shutdown");
+        drop(stream);
+        tokio::time::timeout(Duration::from_secs(2), normal)
+            .await
+            .expect("drain budget")
+            .expect("task")
+            .expect("normal drain");
+        assert!(
+            owner.tasks.lock().await.is_none(),
+            "server/probe ownership consumed exactly once"
+        );
+        assert!(
+            tokio::net::TcpListener::bind(address).await.is_ok(),
+            "drained listener releases the port"
+        );
+    }
+
+    /// Real learner/catchup -> authenticated observation -> committed vote.
+    /// This is not a physical restart/qualification receipt.
+    #[cfg(feature = "cluster-integration-tests")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn k06_actual_voter_join_observes_committed_learner_before_promotion() {
+        use axum::{extract::State, response::IntoResponse, Json};
+        use plurx_core::cluster::membership::{
+            FinalizeJoinRequest, MembershipManager, RedeemJoinRequest,
+        };
+        use plurx_core::cluster::migration::select_daemon_store_observing;
+        fn config(root: &std::path::Path) -> Config {
+            let listeners: Vec<_> = (0..3)
+                .map(|_| std::net::TcpListener::bind("127.0.0.1:0").expect("port"))
+                .collect();
+            let addresses: Vec<_> = listeners
+                .iter()
+                .map(|listener| listener.local_addr().expect("address"))
+                .collect();
+            let mut config = Config::default();
+            config.storage.data_dir = root.into();
+            config.server.bind = addresses[0];
+            config.cluster.raft_bind = addresses[1];
+            config.cluster.api_bind = addresses[2];
+            config.cluster.advertise_host = "localhost".into();
+            config.cluster.join_url = format!("http://{}", config.server.bind);
+            config.cluster.artwork_url = config.cluster.join_url.clone();
+            config
+        }
+        async fn redeem(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<RedeemJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.redeem(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        async fn finalize(
+            State(manager): State<MembershipManager>,
+            Json(request): Json<FinalizeJoinRequest>,
+        ) -> axum::response::Response {
+            match manager.finalize(&request).await {
+                Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+                Err(error) => (
+                    axum::http::StatusCode::CONFLICT,
+                    Json(serde_json::json!({"code":error.code(),"message":error.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        struct AuditObserver {
+            owner: Arc<StartupObservationHttp>,
+            source: MembershipManager,
+            raft_id: u64,
+            observed: Arc<AtomicBool>,
+            origin: String,
+        }
+        impl StartupClockObserver for AuditObserver {
+            fn start(
+                &self,
+                membership: MembershipManager,
+                node_id: String,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn std::future::Future<Output = Result<(), plurx_core::error::StoreError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async move {
+                    let roster = membership
+                        .clock_peers()
+                        .await
+                        .map_err(|error| {
+                            plurx_core::error::StoreError::Database(error.to_string())
+                        })?
+                        .membership
+                        .expect("actual applied startup roster");
+                    assert!(roster.members.contains(&self.raft_id));
+                    assert!(
+                        !roster.voters.contains(&self.raft_id),
+                        "desired voter must still be a committed learner at observation entry"
+                    );
+                    self.owner.start(membership, node_id.clone()).await?;
+                    let response =
+                        crate::http::peer_transport::PeerTransport::new(self.source.clone())
+                            .clock_request(&node_id, &self.origin)
+                            .await
+                            .map_err(|error| {
+                                plurx_core::error::StoreError::Database(format!("{error:?}"))
+                            })?;
+                    assert_eq!(
+                        response.status,
+                        reqwest::StatusCode::OK,
+                        "pending learner serves authenticated clock observation before promotion"
+                    );
+                    self.observed.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+        let source_root = crate::test_tempdir().expect("source");
+        let source_config = config(source_root.path());
+        drop(
+            plurx_core::store::SqliteStore::open(&source_root.path().join("plurx.db"))
+                .expect("SQLite source"),
+        );
+        let source_owner = Arc::new(StartupObservationHttp::new(source_config.server.bind));
+        let source = select_daemon_store_observing(&source_config, Some(source_owner.as_ref()))
+            .await
+            .expect("source activation");
+        let manager = source.membership_manager();
+        let clock = axum::Router::new()
+            .route(
+                http::internal_clock::PATH,
+                axum::routing::get(http::internal_clock::observation_snapshot),
+            )
+            .with_state(http::internal_clock::ObservationContext {
+                membership: manager.clone(),
+                node_id: source.identity.node_id.clone(),
+            });
+        let app = axum::Router::new()
+            .route("/api/v1/cluster/join/redeem", axum::routing::post(redeem))
+            .route(
+                "/api/v1/cluster/join/finalize",
+                axum::routing::post(finalize),
+            )
+            .with_state(manager.clone())
+            .merge(clock);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let source_http = Arc::clone(&source_owner);
+        let server = tokio::spawn(async move {
+            source_http
+                .serve_normal(app, async move {
+                    let _ = stopped.await;
+                })
+                .await
+        });
+        source_owner.stop_probe().await;
+        let probe_stop = tokio_util::sync::CancellationToken::new();
+        let probe = tokio::spawn(crate::clock_offset::run_membership(
+            manager.clone(),
+            probe_stop.clone(),
+        ));
+        let original = manager
+            .clock_guard()
+            .acquire_owned_for(plurx_core::cluster::clock::ClockDecision::MembershipChange)
+            .expect("actual singleton clock proof");
+        let token = manager
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("voter intent");
+        let joining_root = crate::test_tempdir().expect("joiner");
+        let mut joining_config = config(joining_root.path());
+        let token_path = joining_root.path().join("join.token");
+        std::fs::write(&token_path, format!("{}\n", token.token)).expect("test token");
+        joining_config.cluster.join_token_file = token_path.clone();
+        let joining_owner = Arc::new(StartupObservationHttp::new(joining_config.server.bind));
+        let observed = Arc::new(AtomicBool::new(false));
+        let observer = AuditObserver {
+            owner: Arc::clone(&joining_owner),
+            source: manager.clone(),
+            raft_id: token.raft_id,
+            observed: Arc::clone(&observed),
+            origin: joining_config.cluster.artwork_url.clone(),
+        };
+        let joined = tokio::time::timeout(
+            Duration::from_secs(90),
+            select_daemon_store_observing(&joining_config, Some(&observer)),
+        )
+        .await
+        .expect("bounded actual join")
+        .expect("joined voter");
+        assert!(observed.load(Ordering::SeqCst));
+        let applied = joined
+            .local_client()
+            .expect("local client")
+            .local_db_raft_metrics()
+            .expect("watch")
+            .membership_snapshot();
+        assert!(applied.committed && applied.voters.contains(&token.raft_id));
+        assert!(
+            original.revalidate().is_err(),
+            "actual member/promotion changes invalidate the original singleton proof"
+        );
+        assert!(
+            !token_path.exists(),
+            "finalization follows actual applied vote"
+        );
+        assert!(
+            joining_root.path().join("hiqlite/activation.json").exists(),
+            "activation must be published after vote"
+        );
+        joining_owner.stop_and_drain().await;
+        let joined_shutdown = joined.shutdown().await;
+        probe_stop.cancel();
+        let _ = probe.await;
+        stop.send(()).expect("source stop");
+        server.await.expect("HTTP task").expect("HTTP drain");
+        source.shutdown().await.expect("source Raft drain");
+        joined_shutdown.expect("joined Raft drain");
     }
 
     struct FailFirstAccept {

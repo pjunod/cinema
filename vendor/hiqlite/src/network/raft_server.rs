@@ -802,13 +802,13 @@ async fn execute_raft_request(
             let metrics = helpers::get_raft_metrics(state, &RaftType::Cache).await;
             let members = metrics.membership_config;
             let mut nodes_set = BTreeSet::new();
-            for (id, _node) in members.nodes() {
-                if *id != node_id {
-                    nodes_set.insert(*id);
+            for id in members.voter_ids() {
+                if id != node_id {
+                    nodes_set.insert(id);
                 }
             }
             if let Err(err) =
-                helpers::change_membership(state, &RaftType::Cache, nodes_set, false).await
+                helpers::change_membership(state, &RaftType::Cache, nodes_set, false, None).await
             {
                 error!("Error removing remote Cache Member: {:?}", err);
             }

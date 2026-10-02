@@ -379,6 +379,112 @@ impl ActivationFailpoint {
 /// of a caller that awaits it overflowed a 2 MiB test thread's stack.
 #[cfg(feature = "hiqlite-store")]
 pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, StoreError> {
+    select_daemon_store_observing(config, None).await
+}
+
+/// Own the authenticated clock-only transport during pending startup. The
+/// callback receives the same manager later activated for normal service;
+/// it must not publish general application readiness or replace its guard.
+#[cfg(feature = "hiqlite-store")]
+pub trait StartupClockObserver: Send + Sync {
+    fn start(
+        &self,
+        membership: MembershipManager,
+        node_id: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), StoreError>> + Send + '_>>;
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn complete_startup_observation(
+    client: &Client,
+    membership: MembershipManager,
+    identity: &super::ClusterIdentity,
+    role: ClusterRole,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<(MembershipManager, super::clock::OwnedClockAcquisitionTicket), StoreError> {
+    let observer = observer.ok_or_else(|| {
+        StoreError::Database(
+            "this startup consumer has no authenticated clock-observation transport; \
+         pending membership cannot be activated"
+                .into(),
+        )
+    })?;
+    let installed = client
+        .local_membership_admission()
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    let deadline = installed
+        .as_any()
+        .downcast_ref::<super::membership::StartupMembershipAdmission>()
+        .and_then(super::membership::StartupMembershipAdmission::startup_deadline)
+        .ok_or_else(|| {
+            StoreError::Database("clock observation has no original startup deadline".into())
+        })?;
+    tokio::time::timeout_at(
+        deadline,
+        observer.start(membership.clone(), identity.node_id.clone()),
+    )
+    .await
+    .map_err(|_| StoreError::Database("clock observation startup budget expired".into()))??;
+    let guard = membership.clock_guard();
+    // Readiness is not a proposal: no ticket is carried across this wait and
+    // no production refusal is counted. The actual operation below captures
+    // its own original proof only after observation becomes available.
+    wait_startup_clock_readiness(&guard, deadline).await?;
+    if role == ClusterRole::Voter {
+        client
+            .promote_after_clock_observation(deadline)
+            .await
+            .map_err(|error| StoreError::Database(format!("startup promotion: {error}")))?;
+        loop {
+            let snapshot = client
+                .local_db_raft_metrics()
+                .map_err(|error| StoreError::Database(error.to_string()))?
+                .membership_snapshot();
+            if snapshot.running && snapshot.committed && snapshot.voters.contains(&identity.raft_id)
+            {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(StoreError::Database(
+                    "startup promotion is not applied before original deadline".into(),
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Promotion changes the authoritative roster generation. It must be
+        // observed again; the learner-era proof cannot activate voter service.
+        wait_startup_clock_readiness(&guard, deadline).await?;
+    }
+    membership
+        .finish_clock_observation()
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn wait_startup_clock_readiness(
+    guard: &super::clock::ClusterClockGuard,
+    deadline: tokio::time::Instant,
+) -> Result<(), StoreError> {
+    loop {
+        if guard.acquire().is_ok() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(StoreError::Database(
+                "authenticated startup clock evidence is unavailable before original deadline"
+                    .into(),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+pub async fn select_daemon_store_observing(
+    config: &Config,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<SelectedStore, StoreError> {
     install_default_crypto_provider();
     std::fs::create_dir_all(&config.storage.data_dir)
         .map_err(|error| migration_io("creating", &config.storage.data_dir, error))?;
@@ -391,10 +497,10 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
             && path_exists(&config.cluster.join_token_file)?
             && !path_exists(&active.join(ACTIVATION_MARKER_FILENAME))?;
         if pending_join {
-            return Box::pin(join_fresh_store(config, daemon_lock)).await;
+            return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
         }
         readdress_single_voter_if_needed(config)?;
-        let selected = Box::pin(open_active_store(config, daemon_lock)).await?;
+        let selected = Box::pin(open_active_store(config, daemon_lock, observer)).await?;
         Box::pin(finalize_pending_join_best_effort(config, &selected)).await;
         // A crash immediately after rename may expose the target before its
         // parent-directory entry is durable. Observing it on recovery lets us
@@ -429,7 +535,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
     }
 
     if !config.cluster.join_token_file.as_os_str().is_empty() {
-        return Box::pin(join_fresh_store(config, daemon_lock)).await;
+        return Box::pin(join_fresh_store(config, daemon_lock, observer)).await;
     }
 
     ensure_sqlite_source(&config.storage.data_dir)?;
@@ -479,6 +585,7 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
         daemon_lock,
         identity,
         credential_key,
+        observer,
     ))
     .await
     {
@@ -488,7 +595,11 @@ pub async fn select_daemon_store(config: &Config) -> Result<SelectedStore, Store
 }
 
 #[cfg(feature = "hiqlite-store")]
-async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<SelectedStore, StoreError> {
+async fn join_fresh_store(
+    config: &Config,
+    daemon_lock: File,
+    observer: Option<&dyn StartupClockObserver>,
+) -> Result<SelectedStore, StoreError> {
     let source = config.storage.data_dir.join(SQLITE_FILENAME);
     if path_exists(&source)? {
         return Err(StoreError::Migration(format!(
@@ -644,20 +755,13 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         Some(&membership),
         true,
         false,
+        true,
     )
     .await?;
     let store = open_joined_store(client.clone(), &active.join("telemetry.db")).await?;
     verify_store_identity(&store, payload.cluster_id()).await?;
     let mut activation_marker = payload.activation_marker().clone();
     activation_marker.admitted_role = Some(role);
-    publish_join_activation(
-        &config.storage.data_dir,
-        &active,
-        &activation_marker,
-        &membership,
-        JoinActivationFailpoint::None,
-    )?;
-    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
 
     // Keep the caught-up voter alive. Fully-TLS Hiqlite listeners have no
     // graceful-shutdown handle, and no stop/rebind boundary is needed because
@@ -677,7 +781,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         config.cluster.bounded_replica_reads,
         config.cluster.bounded_replica_max_lag_entries,
     );
-    let membership_manager = MembershipManager::replicated(
+    let membership_manager = MembershipManager::clock_observation(
         client.clone(),
         replication.clone(),
         Arc::clone(&store),
@@ -693,12 +797,34 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             )?,
         },
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        activation_marker,
+        activation_marker.clone(),
         role,
         config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
+    let (membership_manager, activation_admission) =
+        complete_startup_observation(&client, membership_manager, &identity, role, observer)
+            .await?;
+    activation_admission
+        .revalidate()
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+    publish_join_activation(
+        &config.storage.data_dir,
+        &active,
+        &activation_marker,
+        &membership,
+        JoinActivationFailpoint::None,
+    )?;
+    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
+    if role == ClusterRole::Voter {
+        activation_admission
+            .revalidate()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        client
+            .finish_clock_observation()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+    }
     let selected = SelectedStore {
         store,
         identity,
@@ -758,7 +884,7 @@ async fn open_joined_store(
                 return Err(StoreError::Database(format!(
                     "joined voter did not regain startup quorum within {:?}",
                     REPLICATED_LEADER_RECOVERY_BUDGET
-                )))
+                )));
             }
         }
     }
@@ -1103,6 +1229,7 @@ async fn activate_fresh_store(
     daemon_lock: File,
     identity: super::ClusterIdentity,
     credential_key: Arc<CredentialKey>,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
     write_activation_attempt(&config.storage.data_dir)?;
     ActivationFailpoint::crash_if(failpoint, ActivationFailpoint::Quiescence);
@@ -1126,7 +1253,10 @@ async fn activate_fresh_store(
     // pre-M3 activation failpoints and lets cleartext staging shut down cleanly.
     // Once the atomic active target exists, the closed-store readdress path
     // below rebuilds sole-voter metadata with an explicitly advertised address.
-    let client = match start_voter(config, &incoming, &secrets, &identity, None, false, true).await
+    let client = match start_voter(
+        config, &incoming, &secrets, &identity, None, false, true, false,
+    )
+    .await
     {
         Ok((client, _)) => client,
         Err(error) => {
@@ -1192,7 +1322,8 @@ async fn activate_fresh_store(
     remove_activation_attempt(&config.storage.data_dir)?;
 
     readdress_single_voter_if_needed(config)?;
-    let selected = open_active_store_with_key(config, daemon_lock, Some(credential_key)).await?;
+    let selected =
+        open_active_store_with_key(config, daemon_lock, Some(credential_key), observer).await?;
     finish_readdress(&config.storage.data_dir)?;
     Ok(selected)
 }
@@ -2454,8 +2585,9 @@ fn snapshot_sqlite_file(source: &Path, target: &Path) -> Result<(), StoreError> 
 async fn open_active_store(
     config: &Config,
     daemon_lock: File,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
-    open_active_store_with_key(config, daemon_lock, None).await
+    open_active_store_with_key(config, daemon_lock, None, observer).await
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2463,6 +2595,7 @@ async fn open_active_store_with_key(
     config: &Config,
     daemon_lock: File,
     credential_key: Option<Arc<CredentialKey>>,
+    observer: Option<&dyn StartupClockObserver>,
 ) -> Result<SelectedStore, StoreError> {
     let active = config.storage.data_dir.join(HIQLITE_ACTIVE_DIRNAME);
     require_real_directory(&active)?;
@@ -2501,31 +2634,31 @@ async fn open_active_store_with_key(
         local_membership.as_ref(),
         true,
         force_loopback,
+        true,
     )
     .await?;
     let cleanup_client = client.clone();
     let result = async move {
         let telemetry = active.join("telemetry.db");
-        let store = open_store_for_role(role, client.clone(), &telemetry).await?;
-        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
-            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
-            write_activation_marker(&active, &marker)?;
-            sync_directory(&active)?;
-        }
+        let applied = client
+            .local_db_raft_metrics()
+            .map_err(|error| StoreError::Database(error.to_string()))?
+            .membership_snapshot();
+        let actual_voter =
+            applied.running && applied.committed && applied.voters.contains(&identity.raft_id);
+        let opening_role = if role == ClusterRole::Voter && actual_voter {
+            ClusterRole::Voter
+        } else {
+            ClusterRole::Learner
+        };
+        let store = open_store_for_role(opening_role, client.clone(), &telemetry).await?;
         if let Err(error) = verify_store_identity(&store, &marker.cluster_id).await {
             drop(store);
             return Err(error);
         }
-        if read_readdress_record(&config.storage.data_dir)?.is_some() {
-            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
-        }
         // Written here rather than beside the rename so a crash in between still
         // converges: any boot that successfully opens an active target re-asserts
         // it, and this is the only place that can be reached without one.
-        if let Err(error) = ensure_activated_source_record(&config.storage.data_dir, &marker) {
-            drop(store);
-            return Err(error);
-        }
         let credential_key = match credential_key {
             Some(key) => key,
             None => match open_active_credential_key(config, &store).await {
@@ -2593,7 +2726,7 @@ async fn open_active_store_with_key(
         };
         let credential_key_secret =
             read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
-        let membership = MembershipManager::replicated(
+        let membership = MembershipManager::clock_observation(
             client.clone(),
             replication.clone(),
             Arc::clone(&store),
@@ -2607,12 +2740,45 @@ async fn open_active_store_with_key(
                 credential_key: credential_key_secret,
             },
             load_or_create_activity_signing_key(&config.storage.data_dir)?,
-            marker,
+            marker.clone(),
             role,
             config.storage.data_dir.clone(),
         )
         .await
         .map_err(|error| StoreError::Database(error.to_string()))?;
+        let (membership, activation_admission) =
+            complete_startup_observation(&client, membership, &identity, role, observer).await?;
+        if role == ClusterRole::Voter {
+            // A desired voter that booted as a learner cannot migrate until
+            // the actual local watch has proved its committed promotion.
+            if !actual_voter {
+                activation_admission
+                    .revalidate()
+                    .map_err(|error| StoreError::Database(error.to_string()))?;
+                drop(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?);
+            }
+            activation_admission
+                .revalidate()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            client
+                .finish_clock_observation()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+        }
+        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
+            activation_admission
+                .revalidate()
+                .map_err(|error| StoreError::Database(error.to_string()))?;
+            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
+            write_activation_marker(&active, &marker)?;
+            sync_directory(&active)?;
+        }
+        if read_readdress_record(&config.storage.data_dir)?.is_some() {
+            materialize_readdress_join_snapshot(&client, &identity.node_id).await?;
+        }
+        activation_admission
+            .revalidate()
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        ensure_activated_source_record(&config.storage.data_dir, &marker)?;
         Ok(SelectedStore {
             store,
             identity,
@@ -2990,6 +3156,7 @@ async fn open_store_for_role(
 }
 
 #[cfg(feature = "hiqlite-store")]
+#[allow(clippy::too_many_arguments)]
 async fn start_voter(
     config: &Config,
     target: &Path,
@@ -2998,6 +3165,7 @@ async fn start_voter(
     local_membership: Option<&LocalMembership>,
     active_transport: bool,
     force_loopback: bool,
+    observation_only: bool,
 ) -> Result<(Client, ClusterPeer), StoreError> {
     let raft_bind = if force_loopback {
         local_client_address(config.cluster.raft_bind)
@@ -3078,9 +3246,30 @@ async fn start_voter(
         learner_only: role.is_learner(),
         ..production_hiqlite_defaults(config)
     };
-    let client = hiqlite::start_node(node_config)
+    // The phased membership budget starts before vendor startup, not after
+    // its potentially waiting join future returns. Never replenish it for
+    // the subsequent applied-membership reconciliation.
+    let phased_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
+    let admission = Arc::new(if observation_only {
+        super::membership::StartupMembershipAdmission::with_startup_deadline(phased_deadline)
+    } else {
+        super::membership::StartupMembershipAdmission::default()
+    });
+    let client = if observation_only {
+        tokio::time::timeout_at(
+            phased_deadline,
+            hiqlite::start_node_for_clock_observation(node_config, admission),
+        )
         .await
-        .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
+        .map_err(|_| {
+            StoreError::Database(
+                "Hiqlite clock-observation startup exceeded original membership budget".into(),
+            )
+        })?
+    } else {
+        hiqlite::start_node_with_membership_admission(node_config, admission).await
+    }
+    .map_err(|error| StoreError::Database(format!("starting Hiqlite voter: {error}")))?;
     if tokio::time::timeout(HIQLITE_HEALTH_TIMEOUT, client.wait_until_healthy_db())
         .await
         .is_err()
@@ -3095,25 +3284,24 @@ async fn start_voter(
     // role waits for has to be exactly what admission means for it. A voter
     // waits for its vote. A learner waits to be a committed member, and must
     // never wait for a promotion it was admitted specifically not to receive.
-    let admission_deadline = tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT;
+    let admission_deadline = if observation_only {
+        phased_deadline
+    } else {
+        tokio::time::Instant::now() + MEMBERSHIP_ADMISSION_TIMEOUT
+    };
     loop {
         let metrics = client
-            .metrics_db()
-            .await
-            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?;
-        let is_voter = metrics
-            .membership_config
-            .voter_ids()
-            .any(|raft_id| raft_id == identity.raft_id);
-        let is_member = metrics
-            .membership_config
-            .nodes()
-            .any(|(raft_id, _)| *raft_id == identity.raft_id);
+            .local_db_raft_metrics()
+            .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?
+            .membership_snapshot();
+        let is_voter = metrics.voters.contains(&identity.raft_id);
+        let is_member = metrics.members.contains(&identity.raft_id);
         let admitted = match role {
+            _ if observation_only => is_member,
             ClusterRole::Voter => is_voter,
             ClusterRole::Learner => is_member,
         };
-        if admitted {
+        if metrics.running && metrics.committed && admitted {
             break;
         }
         if tokio::time::Instant::now() >= admission_deadline {

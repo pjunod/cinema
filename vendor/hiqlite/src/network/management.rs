@@ -67,6 +67,15 @@ pub(crate) async fn add_learner(
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
 
+    let LearnerReq {
+        node_id,
+        addr_api,
+        addr_raft,
+    } = get_payload(&headers, body)?;
+    let admission = state.membership_admission.as_ref().map(|policy| {
+        policy.prepare(crate::membership_admission::MembershipAcquisition::AddLearner { node_id })
+    });
+
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
     {
@@ -74,11 +83,6 @@ pub(crate) async fn add_learner(
     }
     are_we_leader(&state, &raft_type).await?;
 
-    let LearnerReq {
-        node_id,
-        addr_api,
-        addr_raft,
-    } = get_payload(&headers, body)?;
     let node = Node {
         id: node_id,
         addr_raft,
@@ -87,7 +91,7 @@ pub(crate) async fn add_learner(
     info!("{:?} requests to be added as {:?} Learner", node, raft_type);
     let lock = state.raft_lock.lock().await;
     let nid = node.id;
-    let res = helpers::add_new_learner(&state, &raft_type, node).await;
+    let res = helpers::add_new_learner(&state, &raft_type, node, admission.as_deref()).await;
     match res {
         Ok(_) => {
             let mut metrics = helpers::get_raft_metrics(&state, &raft_type).await;
@@ -95,7 +99,8 @@ pub(crate) async fn add_learner(
                 .membership_config
                 .membership()
                 .get_node(&nid)
-                .is_some();
+                .is_some()
+                && helpers::membership_is_applied(&metrics);
             while !is_member {
                 info!("Waiting for node {nid} to become a committed learner");
                 time::sleep(Duration::from_millis(500)).await;
@@ -104,7 +109,8 @@ pub(crate) async fn add_learner(
                     .membership_config
                     .membership()
                     .get_node(&nid)
-                    .is_some();
+                    .is_some()
+                    && helpers::membership_is_applied(&metrics);
             }
 
             // give it a second to sync before dropping the lock
@@ -129,6 +135,14 @@ pub(crate) async fn become_member(
     body: body::Bytes,
 ) -> Result<Response, Error> {
     validate_secret(&state, &headers)?;
+    let payload = get_payload::<LearnerReq>(&headers, body)?;
+    let admission = state.membership_admission.as_ref().map(|policy| {
+        policy.prepare(
+            crate::membership_admission::MembershipAcquisition::Promote {
+                node_id: payload.node_id,
+            },
+        )
+    });
 
     if helpers::is_raft_stopped(&state, &raft_type)
         || !helpers::is_raft_initialized(&state, &raft_type).await?
@@ -138,7 +152,6 @@ pub(crate) async fn become_member(
     are_we_leader(&state, &raft_type).await?;
 
     let lock = state.raft_lock.lock().await;
-    let payload = get_payload::<LearnerReq>(&headers, body)?;
     info!("{:?} Node membership request: {:?}", raft_type, payload);
 
     let mut metrics = helpers::get_raft_metrics(&state, &raft_type).await;
@@ -149,6 +162,21 @@ pub(crate) async fn become_member(
         .voter_ids()
         .any(|id| id == payload.node_id);
     if is_voter {
+        // An effective vote may be an already submitted, ambiguous proposal.
+        // Reconcile its application; do not acquire or submit another vote.
+        while !helpers::membership_is_applied(&metrics) {
+            time::sleep(Duration::from_millis(500)).await;
+            metrics = helpers::get_raft_metrics(&state, &raft_type).await;
+            if !metrics
+                .membership_config
+                .voter_ids()
+                .any(|id| id == payload.node_id)
+            {
+                return Err(Error::LeaderChange(
+                    "pending voter membership changed during reconciliation".into(),
+                ));
+            }
+        }
         info!(
             "Node {} is a voter already - nothing left to do",
             payload.node_id
@@ -162,7 +190,9 @@ pub(crate) async fn become_member(
         .collect::<BTreeSet<u64>>();
     nodes_set.insert(payload.node_id);
 
-    match helpers::change_membership(&state, &raft_type, nodes_set, true).await {
+    match helpers::change_membership(&state, &raft_type, nodes_set, true, admission.as_deref())
+        .await
+    {
         Ok(_) => {
             metrics = helpers::get_raft_metrics(&state, &raft_type).await;
             let mut is_voter = metrics
