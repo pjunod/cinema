@@ -1,0 +1,27 @@
+{
+  "argv": [
+    "/opt/playwright-venv/bin/python",
+    "-I",
+    "-B",
+    "/input/parser.py",
+    "--root",
+    "/input/census",
+    "--receipt-sha256",
+    "6039c85c357b7a6d2129b69677e8f5881a8489d214cef71b455f17bb2c88a18f",
+    "--output",
+    "/results/nal-result.json",
+    "--uid",
+    "501",
+    "--deadline-seconds",
+    "60"
+  ],
+  "argv_nul_sha256": "e3ef75705467829072bbf111faf8887432e96361b5e510f1e37195f083a87ac1",
+  "exe": "/usr/bin/python3.11",
+  "held_source_fd": 3,
+  "parent_pid": 1,
+  "pid": 7,
+  "proc_stat": "7 (python) R 1 7 7 0 -1 4194304 31 0 0 0 0 0 0 0 20 0 1 0 179 10129408 144 18446744073709551615 4194304 9524080 281474270979616 0 0 0 0 0 0 0 0 0 17 13 0 0 0 0 0 9633184 10873680 67198976 281474270981638 281474270981862 281474270981862 281474270982104 0\n",
+  "source_dev": 65025,
+  "source_inode": 8519847,
+  "source_sha256": "56825d98839fa31757112bbc7ebeba731e8266cf3bc8ea93ec15cb45af689c80"
+}
