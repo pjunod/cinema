@@ -1207,6 +1207,7 @@ pub struct ArtifactViewerInterest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnalysisPreparationObservation {
+    pub has_live_viewer: bool,
     pub shared_io_eligible: bool,
     pub artifact_job_id: Option<String>,
     pub artifact_state: Option<String>,
@@ -1663,9 +1664,13 @@ impl<T: QueueSql> BackgroundJobStore for T {
         let capacity = super::fragment_index_cluster::analysis_source_capacity_clause(
             "json_extract($1, '$.now_ms')",
         );
+        let viewer = super::fragment_index_cluster::analysis_live_viewer_clause(
+            "json_extract($1, '$.now_ms')",
+        );
         let statement = format!(
             r#"
 SELECT json_object(
+  'has_live_viewer', CASE WHEN {viewer} THEN json('true') ELSE json('false') END,
   'shared_io_eligible', CASE WHEN {capacity} THEN json('true') ELSE json('false') END,
   'artifact_job_id', (SELECT waiter.job_id FROM background_job_waiters waiter
       WHERE waiter.request_scope = 'analysis' AND waiter.request_id = analysis_requests.request_id),

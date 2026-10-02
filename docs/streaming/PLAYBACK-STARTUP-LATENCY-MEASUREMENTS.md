@@ -308,3 +308,85 @@ not describe the production buffer policy. Daemon/resource-path, HEVC/DV,
 resume/GOP, rate/remote-transfer and physical device evidence remains absent;
 those classes receive no smaller production gate. The couple-second target
 is still unmet. No production deployment or live film acceptance occurred.
+
+## Wicked on nynuc, 2026-10-02 — preparation blocked by its viewer
+
+A fresh live capture on `v0.3.0-5476-g9a719fcb7` matches the reported Safari
+web playback of Wicked (file 120), resumed at 3519.601 seconds. This attempt
+used native HLS, copy-video HEVC/Dolby Vision and TrueHD-to-AAC audio.
+The client reported **11,019 ms to first frame**. UTC phase evidence:
+
+| Phase | Time | What it establishes |
+|---|---|---|
+| Play, inferred from first-frame telemetry | 19:16:21.276 | Start of the client interval |
+| Decision | 19:16:21.684 | Initial route selection |
+| Index miss | 19:16:23.499 | Rolling fallback, exact preparation requested |
+| Producer spawn | 19:16:23.961 | 90-second initial burst, subsequent 2× read rate |
+| First complete segment | 19:16:24.777 | 3.170-second segment, 546 ms writer elapsed |
+| Writer's 12-second gate | 19:16:26.055 | 15.891 seconds produced |
+| First served snapshot | 19:16:29.823 | 52.970 seconds produced, conservative 48-second bootstrap |
+| Native attachment | 19:16:30.012 | Browser receives playable presentation |
+| First frame | 19:16:32.295 | 9.4 seconds of client runway |
+
+The snapshot required 3,574 ms after the gated inventory. The reported
+5,158 ms init-inspection interval includes readiness waiting; actual init
+validation was 11 ms. Treating that entire interval as parser cost would
+misdiagnose the delay. An adjacent Avatar: Fire and Ash attempt used the
+same conservative path and reported 9,688 ms to first frame.
+
+The live Store snapshot supplies a new preparation defect beyond the earlier
+census. Wicked's exact current-engine/recipe request remained queued with
+zero charged attempts and `foreground_preempted`; its playback-analysis
+waiter was live during the captured playback. Avatar showed the same
+preemption. Both titles had indexes for older engine identities, which are
+correctly ineligible. Playback had durably requested preparation, but the
+daemon's unconditional idle check prevented its own busy node from attesting
+the source. Store viewer admission alone could not make that worker run.
+
+The correction admits fragment-index source attestation on a busy node only
+while that exact request has an unexpired pending playback waiter. Candidate
+selection and fenced claim both check interest. The source read retains its
+existing bounded source-I/O reservation. While playback keeps the node busy,
+it stops when viewer interest ends; lease loss and disabling indexing also
+stop the read. Ordinary maintenance stays
+idle-only. Artifact production still uses its separate encoder/resource
+admission; this correction does not relax that admission or digest identity.
+
+`busy_analysis_worker_claims_only_live_viewers_without_spending_maintenance_attempts`
+passed against SQLite and three-voter Hiqlite using pinned Rust 1.97.1. It
+covers maintenance deferral, compatible-engine filtering, viewer admission,
+interest expiry and subsequent idle maintenance. The live source logs and
+user-approved three-minute private sample remain in the local temporary
+evidence directory, outside Git. This diagnosis does not establish a new
+production first-frame result; the 48-second policy remains unchanged.
+
+The daemon wake regression `playback_preparation_wakes_busy_analysis_only_for_its_live_viewer`
+and the existing idle-worker wake regression pass. The new test observes the
+claim fence, because an incompatible local media engine legitimately refunds
+its charged attempt after admission, and verifies viewer cancellation ends
+the busy-node source selector. The existing
+`analysis_hash_stop_signal_observes_foreground_playback` test also passes.
+
+### Local real-media baseline
+
+With the user's approval, a stream-copy excerpt of the next 180 seconds at
+Wicked's reported resume point was transferred to this Mac's temporary test
+folder. An isolated daemon bound only to loopback scanned that sample; Safari
+used the shipped web client and native HLS, preserving HEVC and converting
+Dolby Vision P7 to P8.1 plus TrueHD to AAC. The lab enabled the same unverified
+HEVC rolling fallback used by the reported attempt. No production setting
+was changed.
+
+The unchanged conservative policy reported **3,580 ms to first frame**,
+306 ms to the first completed segment, 843 ms to the writer gate and 1,260 ms
+from gated inventory to the first served snapshot. The create handler took
+59 ms with 29 local reads and three mutations, versus 2,520 ms with 33 local
+reads and six mutations on nynuc. Safari reached 3:00 of 3:00; no post-start
+stall/error was reported in that capture. These are real daemon/client
+measurements, not the earlier generated-media fixture.
+
+This is a different machine, local source storage, FFmpeg 9.0.1 rather than
+nynuc's pinned 8.1.3, and a remuxed excerpt whose start is the original resume
+point. It does not reproduce full-file seeking costs or qualify fleet-wide
+latency. The fresh lab initially refused unverified HEVC until its settings
+were matched; that refusal is excluded from the successful baseline.
