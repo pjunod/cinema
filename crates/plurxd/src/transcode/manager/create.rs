@@ -1558,6 +1558,18 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_quality_schedule_before(
+        &self,
+        session_id: &str,
+        owner_node_id: &str,
+        request: &crate::vodserve::QualityScheduleRequest,
+        deadline: Instant,
+    ) -> Result<crate::vodserve::QualityScheduleResponse, String> {
+        self.vod
+            .quality_schedule_before(session_id, owner_node_id, request, deadline)
+            .await
+    }
+
     pub(crate) async fn vod_continuous_family_description_before(
         &self,
         session_id: &str,

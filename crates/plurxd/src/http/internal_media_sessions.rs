@@ -1077,6 +1077,32 @@ pub(crate) async fn control_authorized(
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }
 
+pub(crate) async fn quality_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, super::hls::QUALITY_SCHEDULE_PATH, &body).await
+    {
+        return status.into_response();
+    }
+    let Ok(request) = serde_json::from_slice::<super::hls::QualityScheduleRelayRequest>(&body)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if !request.request.valid() || request.expected_owner_node_id != state.node_id {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    super::hls::quality_schedule_admitted(
+        state,
+        request.session_id,
+        request.request,
+        Some(request.expected_owner_node_id),
+        request.deadline_unix_ms,
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

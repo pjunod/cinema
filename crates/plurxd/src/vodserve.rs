@@ -1114,3 +1114,8 @@ use init::*;
 #[path = "vod/tests.rs"]
 mod tests;
 // split: end vod-tests
+
+#[path = "vod/serve/quality.rs"]
+mod vod_serve_quality;
+
+pub(crate) use vod_serve_quality::{QualityScheduleRequest, QualityScheduleResponse};

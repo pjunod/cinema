@@ -1999,3 +1999,34 @@ The existing AAC campaign covers candidate mapping, two verified video rows
 and the exact shared soundtrack description. Pinned compilation and normal
 hooks apply; unit execution remains deferred. Schedule mutations, durable
 family descriptors and production client adoption remain unfinished.
+
+
+### 10.53 Owner-bound schedule delivery
+
+An independent bounded `quality-schedule` POST and exact-write-authenticated
+peer endpoint now connect the durable ledger to the production VOD owner.
+The autonomous family remains fully reserved for its attachment; Prepare
+creates no extra producer. It records Preparing before waiting, materializes
+at most two exact video entries and their shared AAC dependencies without
+holding build gates, and verifies actual init, payload hashes and sample
+intervals. A preparation refusal retains current playback. Canonical command
+receipts remain separate from the current ledger snapshot.
+
+The original append frontier and preparation deadline are durable and cannot
+be moved or extended by replay. A fixed 64-owner pool bounds detached cleanup
+ownership across HTTP disconnects. Later exchanges settle expired Preparing
+rows; cancelled or superseded preparation cannot publish Ready. Scheduled
+writes invoke the physical reservation publisher and derive shared AAC pins
+in the same CAS. Exact parent lifetime and build guards survive any submitted
+Store write until its settlement. Disposal and completed append facts can
+still reduce existing reservations after a source or producer failure.
+
+Targeted regressions cover immutable frontiers, owner refusal, HTTP body and
+peer-auth bounds, and the actual autonomous campaign from preparation through
+shared reservations, lost-append cancellation and named disposal. The correct
+campaign name is `shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track`;
+this is the regression for the family metadata added in §10.52 as well.
+Pinned all-target compilation and normal hooks apply without unit execution.
+This delivers the autonomous-family writer, not controlled cold-rung admission
+or production client switching. Durable family reconstruction, shared-consumer
+accounting and native qualification remain unfinished.

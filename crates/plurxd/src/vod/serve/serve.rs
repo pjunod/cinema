@@ -12,6 +12,44 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
         now_ms: i64,
         deadline: Instant,
     ) -> Result<bool, String> {
+        self.commit_quality_reservations_bound(
+            QualityReservationCommit {
+                owner_node_id,
+                expected,
+                candidate,
+                family,
+                now_ms,
+                deadline,
+            },
+            None,
+        )
+        .await
+    }
+}
+
+pub(super) struct QualityReservationCommit<'a> {
+    pub owner_node_id: &'a str,
+    pub expected: &'a plurx_core::store::QualityLedgerSnapshot,
+    pub candidate: &'a plurx_core::playback::continuous_quality::QualityLedger,
+    pub family: &'a plurx_core::transcode::VodPresentationFamily,
+    pub now_ms: i64,
+    pub deadline: Instant,
+}
+
+impl VodServe {
+    pub(super) async fn commit_quality_reservations_bound(
+        &self,
+        commit: QualityReservationCommit<'_>,
+        parent: Option<(&str, &ResponseOwner)>,
+    ) -> Result<bool, String> {
+        let QualityReservationCommit {
+            owner_node_id,
+            expected,
+            candidate,
+            family,
+            now_ms,
+            deadline,
+        } = commit;
         let commit = async {
             if !candidate.valid()
                 || !expected.ledger.valid()
@@ -228,6 +266,20 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
                     }
                 }
             }
+            let lifecycle = if let Some((session_id, response_owner)) = parent {
+                let guard = Arc::clone(&response_owner.lifecycle).lock_owned().await;
+                let sessions = self.shared.sessions.lock().await;
+                if sessions.get(session_id).is_none_or(|session| {
+                    session.tombstone.is_some()
+                        || !Arc::ptr_eq(&session.incarnation, &response_owner.incarnation)
+                        || !session.owns_response_media(response_owner)
+                }) {
+                    return Err("quality reservation parent attachment changed".into());
+                }
+                Some(guard)
+            } else {
+                None
+            };
             let store = Arc::clone(&self.shared.store);
             let mut candidate = candidate.clone();
             candidate
@@ -243,6 +295,7 @@ impl plurx_core::playback::continuous_quality::QualityReservationPublisher for V
                     .write_quality_ledger(&candidate, &owner, revision, submitted_at_ms)
                     .await
                     .map_err(|error| format!("publishing continuous reservations: {error}"));
+                drop(lifecycle);
                 drop(guards);
                 result
             });
@@ -928,7 +981,7 @@ impl VodServe {
     }
 }
 
-async fn read_quality_artifact(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
+pub(super) async fn read_quality_artifact(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
     let file = tokio::fs::File::open(path)
         .await
         .map_err(|error| error.to_string())?;

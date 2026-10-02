@@ -1717,6 +1717,11 @@ pub fn router(state: AppState) -> Router {
             "/hls/{session}/quality-control",
             post(hls::quality_control).layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
         )
+        .route(
+            "/hls/{session}/quality-schedule",
+            post(hls::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
@@ -1954,6 +1959,11 @@ pub fn router(state: AppState) -> Router {
             hls::QUALITY_CONTROL_PATH,
             post(internal_media_sessions::quality_control)
                 .layer(DefaultBodyLimit::max(hls::QUALITY_CONTROL_MAX_BYTES)),
+        )
+        .route(
+            hls::QUALITY_SCHEDULE_PATH,
+            post(internal_media_sessions::quality_schedule)
+                .layer(DefaultBodyLimit::max(hls::QUALITY_SCHEDULE_MAX_BYTES)),
         )
         .route(
             crate::media_sessions::CONTROL_PATH,
@@ -4237,6 +4247,40 @@ mod tests {
                 .await
                 .expect("quality control test request or response")
                 .status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn quality_schedule_routes_bound_bodies_and_require_peer_auth() {
+        let app = test_app();
+        for path in [
+            format!("/api/v1/hls/{}/quality-schedule", uuid::Uuid::new_v4()),
+            hls::QUALITY_SCHEDULE_PATH.to_owned(),
+        ] {
+            let request = Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from(vec![b'x'; hls::QUALITY_SCHEDULE_MAX_BYTES + 1]))
+                .expect("oversized schedule");
+            assert_eq!(
+                app.clone()
+                    .oneshot(request)
+                    .await
+                    .expect("response")
+                    .status(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+        let unsigned = Request::builder()
+            .method("POST")
+            .uri(hls::QUALITY_SCHEDULE_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("unsigned schedule");
+        assert_eq!(
+            app.oneshot(unsigned).await.expect("response").status(),
             StatusCode::UNAUTHORIZED
         );
     }

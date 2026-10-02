@@ -797,6 +797,193 @@ impl VodServe {
         Some(VodPublication { result, owner })
     }
 
+    /// Materialize at most two exact video entries at or after the client's
+    /// append frontier, together with their shared AAC dependencies. Downloads
+    /// use private demand identities and never move the parent's playhead.
+    pub(crate) async fn quality_ready_before(
+        &self,
+        session_id: &str,
+        family: &plurx_core::transcode::VodPresentationFamily,
+        rendition_id: &str,
+        timescale: u32,
+        frontier: u64,
+        deadline: Instant,
+    ) -> Result<Vec<plurx_core::playback::continuous_quality::QualityInterval>, String> {
+        let work = async {
+            let rung = family
+                .video()
+                .rungs()
+                .iter()
+                .find(|rung| rung.rendition_id() == rendition_id)
+                .ok_or("preparation target is outside the verified family")?;
+            if timescale != rung.grid().numerator {
+                return Err("append frontier clock changed".into());
+            }
+            let publication = self
+                .session_media_rendition(session_id, Some(rendition_id))
+                .await
+                .ok_or("preparation parent is not attached")?;
+            let owner = publication.owner;
+            let found = publication
+                .result
+                .map_err(|error| format!("{error:?}"))?
+                .ok_or("preparation target is not a private child")?;
+            let selected = found
+                .rendition
+                .plan
+                .entries
+                .iter()
+                .filter(|entry| entry.start_ticks >= frontier)
+                .take(2)
+                .cloned()
+                .collect::<Vec<_>>();
+            if selected.is_empty() {
+                return Err("append frontier is beyond the film".into());
+            }
+            let mut intervals = Vec::new();
+            for entry in selected {
+                let request = ChildMediaRequest {
+                    role: "video".into(),
+                    rendition: rendition_id.into(),
+                    kind: "segment".into(),
+                    object: format!("{}.m4s", entry.index),
+                };
+                let mut ready = self
+                    .child_segment_before(session_id, &request, deadline)
+                    .await
+                    .ok_or("preparation parent disappeared")?
+                    .result
+                    .map_err(|error| format!("{error:?}"))?
+                    .ok_or("preparation fragment disappeared")?;
+                if ready.len == 0 || ready.len > 16 * 1024 * 1024 {
+                    return Err("preparation fragment exceeds its bounded inspection".into());
+                }
+                let mut media = Vec::new();
+                (&mut ready.file)
+                    .take(ready.len + 1)
+                    .read_to_end(&mut media)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                if media.len() as u64 != ready.len {
+                    return Err("preparation fragment length changed".into());
+                }
+                let interval = plurx_core::playback::continuous_quality::QualityInterval {
+                    artifact_id: hex::encode(Sha256::digest(&media)),
+                    rendition_id: rendition_id.into(),
+                    timescale,
+                    from_tick: entry.start_ticks,
+                    through_tick: entry.end_ticks(),
+                    byte_length: ready.len,
+                };
+                // Build gates protect the verification snapshot, not producer
+                // waits: publication itself needs these same gates.
+                let _gate = self
+                    .shared
+                    .rendition_build_gate(rendition_id)
+                    .lock_owned()
+                    .await;
+                let init = super::vod_serve_serve::read_quality_artifact(
+                    &found.rendition.dir.path().join(INIT_NAME),
+                    256 * 1024,
+                )
+                .await?;
+                super::vod_serve_serve::verify_cached_quality_interval(
+                    &init, &media, rung, &interval,
+                )?;
+                drop(_gate);
+                if let Some(audio) = family.audio() {
+                    let audio_lookup = self
+                        .session_media_rendition(session_id, Some(audio.rendition_id()))
+                        .await
+                        .ok_or("soundtrack parent disappeared")?;
+                    let soundtrack = audio_lookup
+                        .result
+                        .map_err(|error| format!("{error:?}"))?
+                        .ok_or("soundtrack child disappeared")?;
+                    let dependencies = family
+                        .shared_audio_dependencies(
+                            rendition_id,
+                            &found.rendition.plan,
+                            entry.index,
+                            Some(&soundtrack.rendition.plan),
+                        )
+                        .map_err(|error| error.to_string())?;
+                    for index in dependencies {
+                        let request = ChildMediaRequest {
+                            role: "audio".into(),
+                            rendition: audio.rendition_id().into(),
+                            kind: "segment".into(),
+                            object: format!("{index}.m4s"),
+                        };
+                        let mut ready = self
+                            .child_segment_before(session_id, &request, deadline)
+                            .await
+                            .ok_or("soundtrack parent disappeared")?
+                            .result
+                            .map_err(|error| format!("{error:?}"))?
+                            .ok_or("soundtrack dependency disappeared")?;
+                        if ready.len == 0 || ready.len > 16 * 1024 * 1024 {
+                            return Err("soundtrack inspection is oversized".into());
+                        }
+                        let mut bytes = Vec::new();
+                        (&mut ready.file)
+                            .take(ready.len + 1)
+                            .read_to_end(&mut bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        if bytes.len() as u64 != ready.len {
+                            return Err("soundtrack length changed".into());
+                        }
+                        let _gate = self
+                            .shared
+                            .rendition_build_gate(audio.rendition_id())
+                            .lock_owned()
+                            .await;
+                        let init = super::vod_serve_serve::read_quality_artifact(
+                            &soundtrack.rendition.dir.path().join(INIT_NAME),
+                            256 * 1024,
+                        )
+                        .await?;
+                        let entry = soundtrack
+                            .rendition
+                            .plan
+                            .entry(index)
+                            .ok_or("soundtrack plan changed")?;
+                        let dependency =
+                            plurx_core::playback::continuous_quality::QualityInterval {
+                                artifact_id: hex::encode(Sha256::digest(&bytes)),
+                                rendition_id: audio.rendition_id().into(),
+                                timescale: soundtrack.rendition.timescale,
+                                from_tick: entry.start_ticks,
+                                through_tick: entry.end_ticks(),
+                                byte_length: ready.len,
+                            };
+                        super::vod_serve_serve::verify_cached_shared_audio_interval(
+                            &init,
+                            &bytes,
+                            audio,
+                            &dependency,
+                            index as usize + 1 == soundtrack.rendition.plan.len(),
+                        )?;
+                        if self.source_changed(&soundtrack.rendition) {
+                            return Err("soundtrack source changed".into());
+                        }
+                    }
+                }
+                intervals.push(interval);
+            }
+            if self.source_changed(&found.rendition)
+                || !self.response_owner_is_live(session_id, &owner).await
+            {
+                return Err("preparation owner or source changed".into());
+            }
+            Ok(intervals)
+        };
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), work)
+            .await
+            .map_err(|_| "quality preparation exceeded its inherited deadline".to_owned())?
+    }
+
     /// Resolve media through one exact parent's private reader. Role and init
     /// identity are checked before any demand can reach the producer.
     pub(crate) async fn child_segment_before(

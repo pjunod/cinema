@@ -288,7 +288,8 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
     encoding.store.put_setting(plurx_core::store::keys::SW_POOL_THREADS, "3").await.expect("bounded audio policy");
-    let serve = bare_serve(&base.path().join("shared-audio-cache"));
+    let schedule_store = Arc::new(SqliteStore::open_in_memory().expect("schedule store"));
+    let serve = local_serve(base.path().join("shared-audio-cache"), schedule_store.clone());
     let (cached_init, first, second) = encoded_pair(&serve, &file, &encoding, 0).await;
     let soundtrack = serve.shared.renditions.lock().await.values()
         .find(|rendition| rendition.recipe.encoding.as_ref().is_some_and(|encoding| encoding.shared_audio.is_some()))
@@ -423,9 +424,60 @@ async fn shared_audio_vod_reserves_cpu_only_and_publishes_one_audio_track() {
     assert!(description["video"].as_array().expect("rungs").iter().any(|rung| rung["candidate_id"] == companion_id.to_hex()));
     assert!(description["video"].as_array().expect("rungs").iter().all(|rung| rung["candidate_id"].is_string()));
     assert_eq!(description["audio"]["rendition_id"], soundtrack.key);
+    let verified = serve.verified_continuous_family_before(&parent, Instant::now() + Duration::from_secs(5)).await
+        .expect("private family").result.expect("verified facts").expect("family");
+    let rung = verified.family.video().rungs().iter().find(|rung| verified.candidates.get(rung.rendition_id()) == Some(&companion_id)).expect("companion catalog provenance");
+    let intervals = serve.quality_ready_before(&parent, &verified.family, rung.rendition_id(), rung.grid().numerator,
+        0, Instant::now() + Duration::from_secs(30)).await.expect("actual video and AAC readiness");
+    assert_eq!(intervals.len(), 2);
+    assert_eq!(intervals[0].through_tick, intervals[1].from_tick);
+    assert!(intervals.iter().all(|interval| interval.valid() && interval.rendition_id == rung.rendition_id()));
+    use plurx_core::playback::continuous_quality::{QualityAttachment, QualityOperation, QualityState, QualityTransitionRequest};
+    let generation = uuid::Uuid::new_v4().to_string();
+    activate_control_route(schedule_store.as_ref(), &parent, &generation).await;
+    let attachment = QualityAttachment { client_instance_id: uuid::Uuid::new_v4().to_string(), lifetime_id: "movie".into(),
+        attachment_id: uuid::Uuid::new_v4().to_string(), family_id: verified.family.id().to_owned() };
+    let transaction_id = uuid::Uuid::new_v4().to_string();
+    let prepare = QualityTransitionRequest { version: 1, generation: generation.clone(), control_epoch: 1, sequence: 1,
+        attachment: attachment.clone(), transaction_id: transaction_id.clone(), operation: QualityOperation::Prepare {
+            intent_revision: 1, target_rendition_id: rung.rendition_id().into() } };
+    let mut schedule = super::vod_serve_quality::QualityScheduleRequest { version: 1, generation: generation.clone(), control_epoch: 1,
+        attachment, transition: Some(prepare.clone()), frontier: Some(super::vod_serve_quality::QualityAppendFrontier {
+            timescale: rung.grid().numerator, through_tick: 0 }) };
+    let prepared = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await
+        .expect("owner prepares actual family");
+    assert_eq!(prepared.ledger.transactions[0].state, QualityState::Ready);
+    let replay = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("prepare replay");
+    assert_eq!(prepared.receipt, replay.receipt);
+    assert_eq!(prepared.ledger.transactions[0].preparation, replay.ledger.transactions[0].preparation);
+    schedule.frontier = None;
+    let mut transition = prepare.clone(); transition.sequence = 2;
+    transition.operation = QualityOperation::Scheduled { intervals: prepared.ledger.transactions[0].ready.clone() };
+    schedule.transition = Some(transition.clone());
+    let reserved = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("physical reservation CAS");
+    assert_eq!(reserved.ledger.transactions[0].state, QualityState::Scheduled);
+    assert!(!reserved.ledger.shared_audio_reserved().is_empty(), "same CAS pins verified AAC dependencies");
+    assert_eq!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("durable video pins"), reserved.ledger.transactions[0].reserved);
+    transition.sequence = 3;
+    transition.operation = QualityOperation::CancelUnappended { completed: reserved.ledger.transactions[0].reserved.clone() };
+    schedule.transition = Some(transition.clone());
+    let cancelled = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("lost append cancellation");
+    assert_eq!(cancelled.ledger.transactions[0].state, QualityState::Appended);
+    assert_eq!(cancelled.ledger.transactions[0].reserved, reserved.ledger.transactions[0].reserved);
+    assert_eq!(cancelled.ledger.shared_audio_reserved(), reserved.ledger.shared_audio_reserved());
+    transition.sequence = 4;
+    transition.operation = QualityOperation::Disposed { artifacts: cancelled.ledger.transactions[0].reserved.iter()
+        .chain(cancelled.ledger.shared_audio_reserved()).map(|interval| interval.artifact_id.clone()).collect() };
+    schedule.transition = Some(transition);
+    let disposed = serve.quality_schedule_before(&parent, "node-a", &schedule, Instant::now() + Duration::from_secs(12)).await.expect("named completed disposal");
+    assert!(disposed.ledger.transactions[0].reserved.is_empty());
+    assert!(disposed.ledger.shared_audio_reserved().is_empty());
+    assert!(schedule_store.quality_reserved_intervals(rung.rendition_id()).await.expect("released pins").is_empty());
     assert!(serve.commit_resolved_media(&parent, &master.owner, None).await);
     assert!(serve.end(&parent, Terminal::Deleted).await);
     assert!(!serve.commit_resolved_media(&parent, &master.owner, None).await, "ended master cannot commit");
+    assert!(serve.quality_ready_before(&parent, &verified.family, rung.rendition_id(), rung.grid().numerator,
+        0, Instant::now() + Duration::from_secs(1)).await.is_err(), "End refuses preparation");
     for rendition in owned {
         rendition.gen_epoch.fetch_add(1, Relaxed);
         let _ = rendition.slot.perform(Step::Terminate { why: Termination::Idle }, || {}).await;

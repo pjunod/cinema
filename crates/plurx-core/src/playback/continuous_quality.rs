@@ -97,6 +97,21 @@ pub enum QualityState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct QualityPreparationBinding {
+    pub timescale: u32,
+    pub through_tick: u64,
+    pub deadline_ms: i64,
+}
+impl QualityPreparationBinding {
+    fn valid(&self) -> bool {
+        (1..=1_000_000).contains(&self.timescale)
+            && self.through_tick <= JS_MAX_INTEGER
+            && self.deadline_ms > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QualityTransaction {
     pub transaction_id: String,
     pub intent_revision: u64,
@@ -104,6 +119,8 @@ pub struct QualityTransaction {
     pub state: QualityState,
     pub intent_superseded: bool,
     pub cancel_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<QualityPreparationBinding>,
     pub ready: Vec<QualityInterval>,
     pub reserved: Vec<QualityInterval>,
     pub appended: Vec<QualityInterval>,
@@ -416,6 +433,10 @@ impl QualityLedger {
                 || tx.intent_revision == 0
                 || tx.intent_revision > self.latest_intent_revision
                 || !valid_artifact(&tx.target_rendition_id)
+                || tx
+                    .preparation
+                    .as_ref()
+                    .is_some_and(|binding| !binding.valid())
                 || tx.ready.len() > MAX_QUALITY_INTERVALS
                 || tx.appended.len() > MAX_QUALITY_INTERVALS
                 || tx.disposed.len() > MAX_QUALITY_INTERVALS
@@ -659,6 +680,7 @@ impl QualityLedger {
                 state: QualityState::Preparing,
                 intent_superseded: false,
                 cancel_requested: false,
+                preparation: None,
                 ready: Vec::new(),
                 reserved: Vec::new(),
                 appended: Vec::new(),
@@ -828,6 +850,36 @@ impl QualityLedger {
         Ok(())
     }
 
+    /// Bind the first owner's append frontier durably. A replay may not move
+    /// the requested boundary or extend its original preparation deadline.
+    pub fn bind_preparation(
+        &mut self,
+        transaction_id: &str,
+        binding: QualityPreparationBinding,
+    ) -> Result<(), QualityTransitionError> {
+        if !binding.valid() {
+            return Err(QualityTransitionError::Invalid);
+        }
+        let tx = self
+            .transactions
+            .iter_mut()
+            .find(|tx| tx.transaction_id == transaction_id)
+            .ok_or(QualityTransitionError::UnknownTransaction)?;
+        if let Some(old) = &tx.preparation {
+            return if old.timescale == binding.timescale && old.through_tick == binding.through_tick
+            {
+                Ok(())
+            } else {
+                Err(QualityTransitionError::ConflictingReplay)
+            };
+        }
+        if tx.state != QualityState::Preparing || tx.cancel_requested || tx.intent_superseded {
+            return Err(QualityTransitionError::InvalidTransition);
+        }
+        tx.preparation = Some(binding);
+        Ok(())
+    }
+
     /// Producer-only readiness, after immutable artifact/sample verification.
     pub fn ready(
         &mut self,
@@ -892,6 +944,41 @@ impl QualityLedger {
         if tx.reserved.is_empty() {
             tx.state = QualityState::Ready;
         }
+        Ok(())
+    }
+
+    /// Owner refusal before any transport reservation. This cannot erase
+    /// scheduled or appended facts, and leaves canonical command receipts intact.
+    pub fn refuse_preparation(
+        &mut self,
+        transaction_id: &str,
+    ) -> Result<(), QualityTransitionError> {
+        let tx = self
+            .transactions
+            .iter_mut()
+            .find(|tx| tx.transaction_id == transaction_id)
+            .ok_or(QualityTransitionError::UnknownTransaction)?;
+        if matches!(
+            tx.state,
+            QualityState::RetainedCurrent | QualityState::Superseded
+        ) {
+            return Ok(());
+        }
+        if !tx.reserved.is_empty()
+            || tx.ever_appended
+            || !matches!(
+                tx.state,
+                QualityState::Preparing | QualityState::Ready | QualityState::Cancelling
+            )
+        {
+            return Err(QualityTransitionError::InvalidTransition);
+        }
+        tx.ready.clear();
+        tx.state = if tx.intent_superseded {
+            QualityState::Superseded
+        } else {
+            QualityState::RetainedCurrent
+        };
         Ok(())
     }
 
@@ -990,6 +1077,74 @@ mod tests {
         ledger.apply(&schedule, 1100).expect("schedule");
         ledger
     }
+    #[test]
+    fn preparation_replay_cannot_move_frontier_or_extend_deadline() {
+        let mut ledger = ledger();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: interval().rendition_id,
+            },
+        );
+        ledger.apply(&prepare, 1000).expect("prepare");
+        let binding = QualityPreparationBinding {
+            timescale: 24000,
+            through_tick: 240240,
+            deadline_ms: 9000,
+        };
+        ledger
+            .bind_preparation(TRANSACTION, binding.clone())
+            .expect("first frontier");
+        let mut replay = binding.clone();
+        replay.deadline_ms = 19000;
+        ledger
+            .bind_preparation(TRANSACTION, replay.clone())
+            .expect("same frontier");
+        assert_eq!(ledger.transactions[0].preparation, Some(binding));
+        let before = ledger.clone();
+        replay.through_tick += 1;
+        assert_eq!(
+            ledger.bind_preparation(TRANSACTION, replay),
+            Err(QualityTransitionError::ConflictingReplay)
+        );
+        assert_eq!(ledger, before);
+        assert!(ledger.valid());
+    }
+
+    #[test]
+    fn owner_refusal_preserves_replay_and_cannot_erase_scheduled_media() {
+        let mut ledger = ledger();
+        let prepare = request(
+            &ledger,
+            1,
+            QualityOperation::Prepare {
+                intent_revision: 1,
+                target_rendition_id: interval().rendition_id,
+            },
+        );
+        let receipt = ledger.apply(&prepare, 1000).expect("prepare");
+        ledger.ready(TRANSACTION, vec![interval()]).expect("ready");
+        ledger
+            .refuse_preparation(TRANSACTION)
+            .expect("retain incumbent");
+        assert_eq!(ledger.transactions[0].state, QualityState::RetainedCurrent);
+        assert!(ledger.transactions[0].ready.is_empty());
+        assert_eq!(
+            ledger.apply(&prepare, 1100).expect("canonical replay"),
+            receipt
+        );
+        assert!(ledger.valid());
+        let mut scheduled = scheduled();
+        let before = scheduled.clone();
+        assert_eq!(
+            scheduled.refuse_preparation(TRANSACTION),
+            Err(QualityTransitionError::InvalidTransition)
+        );
+        assert_eq!(scheduled, before);
+    }
+
     #[test]
     fn shared_audio_pins_survive_video_disposal_and_owner_takeover() {
         let mut ledger = scheduled();

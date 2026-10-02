@@ -2822,6 +2822,51 @@ impl MediaSessionCoordinator {
         relay_response(response)
     }
 
+    pub(crate) async fn quality_schedule(
+        &self,
+        owner_node_id: &str,
+        request: &crate::http::hls::QualityScheduleRelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::http::hls::QUALITY_SCHEDULE_MAX_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let remaining = request
+            .deadline_unix_ms
+            .saturating_sub(unix_ms())
+            .min(12_000);
+        if remaining <= 0 {
+            return Err(PeerTransportError::TimedOut);
+        }
+        let deadline = deadline_after(Duration::from_millis(remaining as u64));
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                crate::http::hls::QUALITY_SCHEDULE_PATH,
+                body,
+                deadline,
+                crate::http::hls::QUALITY_SCHEDULE_MAX_RESPONSE_BYTES,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if response.status.is_success() {
+            serde_json::from_slice::<crate::vodserve::QualityScheduleResponse>(&response.body)
+                .ok()
+                .filter(|reply| reply.valid_for(&request.request))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        }
+        Response::builder()
+            .status(response.status.as_u16())
+            .header(header::CACHE_CONTROL, "no-store")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(response.body))
+            .map_err(|_| PeerTransportError::InvalidResponse)
+    }
+
     pub(crate) async fn quality_control(
         &self,
         owner_node_id: &str,
