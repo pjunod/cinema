@@ -1465,11 +1465,11 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 # so a JS syntax error in it compiles, links, passes every Rust test, and then
 # serves a blank page; and the theme tables are data, so a token pair that
 # fails contrast is not a type error anywhere. Run this on any web change.
-.PHONY: web-check
 .PHONY: media-preparation-browser-check
 media-preparation-browser-check: ## Focused media-info browser regression (PLAYWRIGHT_MODULE may name an installed Playwright)
 	@node --test tests/web/media-preparation.browser.cjs
 
+.PHONY: web-check
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
 	@node --test tests/playback/web-media-recovery.test.js
