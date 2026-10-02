@@ -1144,3 +1144,38 @@ final class PreparedRefusedCommitTests: XCTestCase {
         )
     }
 }
+
+final class ManualQualityRetentionTests: XCTestCase {
+    func testRetainsExactStandingRecipeOnceAndRejectsStaleFailure() {
+        var state = ManualQualityRetention()
+        let wire = QualitySelection.autoCandidate(height: 720, candidateId: String(repeating: "a", count: 32))
+        state.begin(.init(viewerEpoch: 4, incumbent: wire, seekGeneration: 7,
+            carryingSeek: true, incumbentRecipeAttached: true))
+        XCTAssertNil(state.retain(viewerEpoch: 5, incumbentHealthy: true))
+        XCTAssertNil(state.retain(viewerEpoch: 4, incumbentHealthy: false))
+        XCTAssertEqual(state.retain(viewerEpoch: 4, incumbentHealthy: true)?.incumbent, wire)
+        XCTAssertNil(state.retain(viewerEpoch: 4, incumbentHealthy: true))
+        XCTAssertEqual(state.retained?.seekGeneration, 7)
+        XCTAssertEqual(state.retained?.carryingSeek, true)
+        state.begin(.init(viewerEpoch: 5, incumbent: wire, seekGeneration: 8,
+            carryingSeek: false, incumbentRecipeAttached: true))
+        XCTAssertNil(state.retained)
+        XCTAssertNil(state.retain(viewerEpoch: 4, incumbentHealthy: true))
+        XCTAssertNotNil(state.retain(viewerEpoch: 5, incumbentHealthy: true))
+        state.begin(.init(viewerEpoch: 6, incumbent: wire, seekGeneration: 9,
+            carryingSeek: false, incumbentRecipeAttached: true))
+        state.didAttach()
+        XCTAssertNil(state.retain(viewerEpoch: 6, incumbentHealthy: true))
+        state.clear()
+        XCTAssertNil(state.pending)
+        XCTAssertNil(state.retained)
+    }
+
+    func testUnattachedRecipeCannotBeDeclaredRetained() {
+        var state = ManualQualityRetention()
+        state.begin(.init(viewerEpoch: 4, incumbent: .original, seekGeneration: 7,
+            carryingSeek: false, incumbentRecipeAttached: false))
+        XCTAssertNil(state.retain(viewerEpoch: 4, incumbentHealthy: true))
+        XCTAssertNil(state.retained)
+    }
+}

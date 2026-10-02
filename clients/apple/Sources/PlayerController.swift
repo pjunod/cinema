@@ -2187,6 +2187,9 @@ final class PlayerController: ObservableObject {
     /// no-encode choice distinct so control and replacement bodies do not
     /// silently grant adaptation authority.
     @Published private(set) var selectedQualityIsOriginal = false
+    @Published private(set) var qualityChangeRetained = false
+    private var manualQualityRetention = ManualQualityRetention()
+    private weak var unprovenPreparedItem: AVPlayerItem?
     @Published private(set) var encoder: String?
     /// The dynamic range of the bytes this playback is actually receiving —
     /// `"dolby_vision" | "hdr10" | "hlg" | "sdr"`, or nil against a server that
@@ -3190,6 +3193,7 @@ final class PlayerController: ObservableObject {
             bindResumeRepairSuccessor(item, generation: generation)
         }
         recipeRevision.didAttach(requestedRecipeRevision)
+        if requestedRecipeRevision == recipeRevision.desired { manualQualityRetention.didAttach() }
         playbackAttemptId = attemptId
         baseMs = 0
         player.play()
@@ -4230,11 +4234,13 @@ final class PlayerController: ObservableObject {
     }
 
     func selectQuality(_ height: Int?) {
+        let incumbentQuality = playbackControlSelection().quality
+        let incumbentRecipeAttached = !recipeRevision.needsReopen
         resetAutoQualityBudgetForViewer()
         autoDesiredCandidate = nil
         let cold = started && decision == nil
         let requestedQuality = height.map { Self.initialQuality(height: $0) } ?? .auto
-        guard height != selectedHeight || selectedQualityIsOriginal
+        guard height != selectedHeight || selectedQualityIsOriginal || qualityChangeRetained
                 || (cold && (initialDecisionRequest.quality != requestedQuality
                     || initialDecisionRequest.explicitHeight != height))
         else { return }
@@ -4251,6 +4257,10 @@ final class PlayerController: ObservableObject {
             durationMs: knownDurationMs
         )
         currentMs = destination.target
+        manualQualityRetention.begin(.init(viewerEpoch: actionEpoch, incumbent: incumbentQuality,
+            seekGeneration: destination.generation, carryingSeek: carryingASeek,
+            incumbentRecipeAttached: incumbentRecipeAttached))
+        qualityChangeRetained = false
         selectedHeight = height
         selectedQualityIsOriginal = false
         recipeRevision.change()
@@ -4270,6 +4280,7 @@ final class PlayerController: ObservableObject {
             // successor or fall back to exactly the reopen below. Doing both
             // would change the stream twice for one tap.
             guard !prepared else { return }
+            if retainManualQualityFailure() { return }
             // Sampled here, not at the tap — and nil when a viewer seek has
             // taken the position meanwhile, because that seek carries the new
             // selection already and owns where the film lands.
@@ -4286,6 +4297,57 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    private var hasHealthyQualityIncumbent: Bool {
+        started && !isChangingStream && attachmentRecovery.establishedPlayback
+            && player.currentItem?.status == .readyToPlay && player.currentItem?.error == nil
+            && player.currentItem !== unprovenPreparedItem
+    }
+
+    @discardableResult
+    private func retainManualQualityFailure() -> Bool {
+        if qualityChangeRetained,
+           manualQualityRetention.retained?.viewerEpoch == viewerActionEpoch { return true }
+        guard let retained = manualQualityRetention.retain(viewerEpoch: viewerActionEpoch,
+            incumbentHealthy: hasHealthyQualityIncumbent) else { return false }
+        qualityChangeRetained = true
+        // Desired selection stays saved; the revision now names the restored
+        // standing wire recipe, which is still attached to this exact item.
+        recipeRevision.didAttach(recipeRevision.desired)
+        if seekState.generation == retained.seekGeneration {
+            if retained.carryingSeek, let target = seekState.pendingMs {
+                issueSeek(to: target, generation: retained.seekGeneration,
+                    owningActionEpoch: viewerActionEpoch)
+            } else {
+                seekState.clear()
+                currentMs = realPositionMs()
+            }
+        }
+        Caps.PreparedHandoffTelemetry.shared.note(outcome: "retained current")
+        showPlaybackNotice("Quality change did not complete. Playback continues. Retry or apply with restart in Quality.")
+        playbackControl.reportEvidence()
+        return true
+    }
+
+    func retryRetainedQuality() {
+        guard qualityChangeRetained else { return }
+        if selectedQualityIsOriginal { selectOriginalQuality() }
+        else { selectQuality(selectedHeight) }
+    }
+
+    func applyRetainedQualityWithRestart() {
+        guard qualityChangeRetained else { return }
+        let actionEpoch = beginViewerAction()
+        manualQualityRetention.clear()
+        qualityChangeRetained = false
+        recipeRevision.change()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.retainControlSequence(await self.playbackControl.reportIntent())
+            guard self.started, self.viewerActionEpoch == actionEpoch else { return }
+            await self.reopen(at: self.positionForPlaybackIntent())
+        }
+    }
+
     /// The incumbent's own clock, or nil when it cannot honestly be read —
     /// nothing attached, or a replacement already in flight.
     ///
@@ -4299,7 +4361,9 @@ final class PlayerController: ObservableObject {
     }
 
     func selectOriginalQuality() {
-        guard selectedHeight != nil || !selectedQualityIsOriginal else { return }
+        guard selectedHeight != nil || !selectedQualityIsOriginal || qualityChangeRetained else { return }
+        let incumbentQuality = playbackControlSelection().quality
+        let incumbentRecipeAttached = !recipeRevision.needsReopen
         let actionEpoch = beginViewerAction()
         let carryingASeek = seekState.pendingMs != nil
         let destination = seekState.absolute(
@@ -4307,6 +4371,10 @@ final class PlayerController: ObservableObject {
             durationMs: knownDurationMs
         )
         currentMs = destination.target
+        manualQualityRetention.begin(.init(viewerEpoch: actionEpoch, incumbent: incumbentQuality,
+            seekGeneration: destination.generation, carryingSeek: carryingASeek,
+            incumbentRecipeAttached: incumbentRecipeAttached))
+        qualityChangeRetained = false
         selectedHeight = nil
         selectedQualityIsOriginal = true
         recipeRevision.change()
@@ -4323,6 +4391,7 @@ final class PlayerController: ObservableObject {
                   selectedQualityIsOriginal
             else { return }
             guard !prepared else { return }
+            if retainManualQualityFailure() { return }
             guard let target = QualityChangeReopen.target(
                 seekGenerationAtTap: destination.generation,
                 seekGenerationNow: seekState.generation,
@@ -4548,6 +4617,9 @@ final class PlayerController: ObservableObject {
         resetSurface()
         surfaceLifecycleObservation.removeAll()
         let wasStarted = started
+        manualQualityRetention.clear()
+        qualityChangeRetained = false
+        unprovenPreparedItem = nil
         started = false
         lifecycleGeneration &+= 1
         loadingTask?.cancel()
@@ -4965,8 +5037,14 @@ final class PlayerController: ObservableObject {
         let generation = openGeneration
         let requestedRecipeRevision = recipeRevision.desired
         let seekOwner = seekPreparationOwner(at: startMs)
-        let requestedHeight = selectedHeight
-        let requestedOriginal = selectedQualityIsOriginal
+        let requestedHeight: Int?
+        let requestedOriginal: Bool
+        switch manualQualityRetention.retained?.incumbent {
+        case .manual(let height): requestedHeight = height; requestedOriginal = false
+        case .original: requestedHeight = nil; requestedOriginal = true
+        case .auto, .autoCandidate: requestedHeight = nil; requestedOriginal = false
+        case nil: requestedHeight = selectedHeight; requestedOriginal = selectedQualityIsOriginal
+        }
         let requestedAudioOverride = audioOverride
         // A fresh stream starts at the head of the node list. Without this,
         // one film's failover leaves the index advanced for every film after
@@ -5321,6 +5399,7 @@ final class PlayerController: ObservableObject {
             bindResumeRepairSuccessor(item, generation: generation)
         }
         recipeRevision.didAttach(requestedRecipeRevision)
+        if requestedRecipeRevision == recipeRevision.desired { manualQualityRetention.didAttach() }
         playbackAttemptId = attemptId
         // Publish the new local-to-film mapping only once the new item is the
         // one whose clock `realPositionMs()` reads. Updating it during session
@@ -9989,7 +10068,7 @@ extension PlayerController {
     func playbackControlSelection() -> ClientSelection {
         let mode = playbackControlSubtitleMode()
         return ClientSelection(
-            quality: selectedHeight.map { .manual(height: $0) }
+            quality: manualQualityRetention.retained?.incumbent ?? selectedHeight.map { .manual(height: $0) }
                 ?? (selectedQualityIsOriginal ? .original :
                     (model?.displayAwareAuto == true &&
                      model?.displayAwareAutoProtocol == "route-v1" && autoRouteProtocol == "route-v1" ? autoDesiredCandidate : nil)
@@ -10377,6 +10456,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// session and its pointer are exactly as they were — so this raises the
     /// one source that maps to no class and draws nothing.
     func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        if !autoPreparing { retainManualQualityFailure() }
         if autoPreparing {
             if let candidate = autoDesiredCandidate {
                 autoBlockedUntil[candidate.id] = PlaybackControlSession.monotonicMs() + 300_000
@@ -10532,6 +10612,7 @@ extension PlayerController: PreparedSuccessorHost {
         _ action: PreparedReplacementAction
     ) async -> PreparedCommitOutcome {
         let automaticTrial = autoPreparing
+        let commitViewerEpoch = viewerActionEpoch
         if automaticTrial && !autoTrialAllowsExposure(action) { return .failedWithoutReopen }
         guard autoStagedProductionAllowsCommit(action) else { return .refused }
         guard autoStagedOriginalAllowsCommit(action) else { return .refused }
@@ -10543,8 +10624,8 @@ extension PlayerController: PreparedSuccessorHost {
               // clock does not advance at rate zero, so a switch made while
               // paused could only ever time out — and timing out after the
               // swap means telling the server to abort a session the viewer is
-              // looking at. A quality change made while paused takes the
-              // in-place path, which costs a paused viewer nothing.
+              // looking at. A failed optional change retains the healthy
+              // paused incumbent until Retry or explicit Apply with restart.
               wantsPlayback,
               !isChangingStream
         else { return .refused }
@@ -10597,6 +10678,7 @@ extension PlayerController: PreparedSuccessorHost {
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
         // released item to the incumbent would be worse than refusing.
+        guard viewerActionEpoch == commitViewerEpoch, wantsPlayback else { return .failedWithoutReopen }
         guard preparedItem === item, preparedPlayer === successor,
               started, player.currentItem != nil,
               !automaticTrial || autoTrialAllowsExposure(action)
@@ -10633,6 +10715,7 @@ extension PlayerController: PreparedSuccessorHost {
         // own first frame able to satisfy it at all.
         let boundaryMs = rendezvous.filmPositionMs
         let incumbent = player.currentItem
+        let incumbentHealthy = hasHealthyQualityIncumbent
         let incumbentState = (sessionId: sessionId, baseMs: baseMs, path: activeMediaPath,
             authenticated: activeMediaAuthenticated, height: sessionHeight, direct: isDirectPlayback,
             status: sessionStatus, diagnostic: diagnosticSessionStatus, observedAt: diagnosticSessionStatusObservedAt)
@@ -10653,6 +10736,7 @@ extension PlayerController: PreparedSuccessorHost {
         // changed. Two synchronous log reads on either side of the swap, so the
         // window has an endpoint at the commit rather than at the nearest poll.
         sampleThePreparedSwitch()
+        unprovenPreparedItem = item
         player.replaceCurrentItem(with: item)
         installItemObserver(for: item)
         preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
@@ -10686,8 +10770,7 @@ extension PlayerController: PreparedSuccessorHost {
         }
         applyDisplayCriteria(for: item, generation: openGeneration)
         startRecoveryEvidencePoll()
-        player.play()
-        if !wantsPlayback { player.pause() }
+        if wantsPlayback { player.playImmediately(atRate: preferredRate) } else { player.pause() }
         isPlaying = wantsPlayback
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
@@ -10699,7 +10782,7 @@ extension PlayerController: PreparedSuccessorHost {
         // exact route that CAS is bound to, so even a visibly successful
         // switch could never settle durably.
         guard let firstFrameUnixMs else {
-            guard automaticTrial else { return .switchedWithoutAFrame }
+            guard automaticTrial || incumbentHealthy else { return .switchedWithoutAFrame }
             // Keep the exact incumbent item alive until the new picture is proved.
             // A newer user/lifecycle owner must never be overwritten by rollback.
             if let incumbent, started,
@@ -10708,6 +10791,7 @@ extension PlayerController: PreparedSuccessorHost {
                 stopStatusPolling()
                 retireItemObserver()
                 player.replaceCurrentItem(with: incumbent)
+                unprovenPreparedItem = nil
                 sessionId = incumbentState.sessionId
                 baseMs = incumbentState.baseMs
                 activeMediaPath = incumbentState.path
@@ -10747,6 +10831,12 @@ extension PlayerController: PreparedSuccessorHost {
         preparedSwitch.note(firstFrameUnixMs: firstFrameUnixMs)
         sampleThePreparedSwitch()
         Caps.PreparedHandoffTelemetry.shared.note(switch: preparedSwitch.reading())
+        if player.currentItem === item { unprovenPreparedItem = nil }
+        if !automaticTrial, viewerActionEpoch == commitViewerEpoch {
+            manualQualityRetention.clear()
+            qualityChangeRetained = false
+            recipeRevision.didAttach(recipeRevision.desired)
+        }
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
     }
 
@@ -10852,6 +10942,7 @@ extension PlayerController: PreparedSuccessorHost {
     /// slot, which M5.5 did not rule out — and it has to be as ordinary as the
     /// path it replaces.
     func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction) {
+        if retainManualQualityFailure() { return }
         if action.effectiveSelection.qualityAuto, action.effectiveSelection.candidateId != nil,
            selectedHeight == nil, !selectedQualityIsOriginal, !autoExposed {
             notePreparedSuccessorAbandoned(.failed)

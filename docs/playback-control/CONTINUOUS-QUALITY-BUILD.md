@@ -1851,3 +1851,26 @@ settlement, stale epochs, standing-wire versus saved-preference separation,
 Pause retention, later seeks, retry and stale failure receipts. Android
 production and unit-test sources are compiled without unit execution. Native
 warm-surface exposure and device qualification remain unfinished.
+
+### 10.47 Apple manual failure and rollback retain the standing recipe
+
+Apple now separates a failed saved choice from the exact incumbent wire
+quality. Manual offer/preparation failure retains an established, ready,
+error-free incumbent whose recipe was attached before the request. Retry and
+explicit Apply with restart are available in the Quality menu on iOS/tvOS.
+Apply publishes its latest intent before reopening; subsequent unrelated
+media operations keep the standing quality until an explicit retry or apply.
+The failed optional destination is cleared, or a separately pending viewer
+seek is resumed against the retained recipe under its current owner.
+
+A failed exposed manual successor can restore the incumbent under the same
+exact-attempt fence used by Auto. An exposed item without first-frame proof
+cannot be mistaken for a healthy incumbent. Latest Pause/Play and speed
+remain authoritative; successful exposure also uses the preferred speed.
+A superseding viewer epoch refuses old pre-exposure work. Successful manual
+commit settles the recipe revision, so a later seek cannot reopen solely
+because of the already completed quality change. Pure retention regressions
+cover stale epochs, replay, attached-recipe eligibility and explicit retry.
+iOS production/test-source and tvOS production compilation apply; unit
+execution remains deferred. Warm player/layer ownership and actual device
+continuity evidence still remain unfinished.

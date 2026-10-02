@@ -1,5 +1,35 @@
 import Foundation
 
+/// One optional manual choice, separate from the standing media recipe.
+/// A stale failure cannot restore a recipe over a newer viewer command.
+struct ManualQualityRetention: Equatable {
+    struct Attempt: Equatable {
+        let viewerEpoch: Int
+        let incumbent: QualitySelection
+        let seekGeneration: Int
+        let carryingSeek: Bool
+        let incumbentRecipeAttached: Bool
+    }
+    private(set) var pending: Attempt?
+    private(set) var retained: Attempt?
+
+    mutating func begin(_ attempt: Attempt) {
+        pending = attempt
+        retained = nil
+    }
+
+    mutating func retain(viewerEpoch: Int, incumbentHealthy: Bool) -> Attempt? {
+        guard let pending, pending.viewerEpoch == viewerEpoch,
+              pending.incumbentRecipeAttached, incumbentHealthy else { return nil }
+        self.pending = nil
+        retained = pending
+        return pending
+    }
+
+    mutating func didAttach() { pending = nil }
+    mutating func clear() { pending = nil; retained = nil }
+}
+
 /// The client half of a prepared quality handoff.
 ///
 /// The server stages a whole second session — an incarnation, a durable row,
