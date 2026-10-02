@@ -86,6 +86,15 @@ same track from a selection-aware `/decision` preflight, so it reads that flag
 and states the cost outright; a preflight that fails claims nothing and leaves
 the disclosure to the in-player path.
 
+The web info page keeps each layout's poster and backdrop above a two-column
+preparation section: processing state on the left, this-playback choices and
+file facts on the right. It reads `/files/{id}/preparation` separately from
+track selection. Refresh joins the existing detail-page timer, runs only while
+recorded jobs are active, pauses in hidden tabs, and preserves selector values
+and the subtitle disclosure's keyboard focus. A failed read replaces stale green
+status with an unavailable message and a manual refresh action. Optional work
+is separate from core preparation and never gates the play button.
+
 **Clustered activity compatibility** — `GET /api/v1/activity/detail` keeps
 `sessions` as the exact node-local HLS array native clients already decode.
 Cross-node direct, remux, HLS-copy, and transcode rows live in the additive

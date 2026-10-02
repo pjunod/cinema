@@ -954,7 +954,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => mounts.get(id) || null },
@@ -988,7 +988,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => cappedMounts.get(id) || null },
@@ -1024,7 +1024,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => cappedMounts.get(id) || null },
@@ -1057,11 +1057,10 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   assert.match(tick, /paintDvConversionProgress\(snapshot\)/);
 
   const item = shippedSource("viewItem");
-  assert.match(item, /hydrateDvFileActions\(DV_FILE_PAGE_FILES\)\.then\(active=>/);
-  assert.match(item, /if\(active[\s\S]*armDvFilePoll/,
-    "the item timer starts only after an active ledger row is observed");
+  assert.match(item, /pollDvFileActions\(DV_FILE_PAGE_FILES,generation,true\)/);
+
   const poll = shippedSource("pollDvFileActions");
-  assert.match(poll, /if\(!active[\s\S]*clearInterval\(PAGE_TIMER\)/,
+  assert.match(poll, /results\.some\(Boolean\)[\s\S]*armDvFilePoll[\s\S]*clearInterval\(PAGE_TIMER\)/,
     "the item timer stops after the first all-terminal snapshot");
   const loadItem = shippedSource("loadItem");
   assert.match(loadItem, /f\.library_id=it\.library_id/,

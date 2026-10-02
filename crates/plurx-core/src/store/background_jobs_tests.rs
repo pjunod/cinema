@@ -1650,3 +1650,94 @@ async fn background_job_yield_reason_survives_reclaim_without_charging_failure()
     assert_eq!(latest.failed_attempts, 0);
     assert_eq!(latest.last_error_code, None);
 }
+
+#[tokio::test]
+async fn preparation_history_uses_source_identity_parent_metadata_and_published_copies() {
+    use super::{LibraryStore, MediaStore};
+    use crate::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+    let dir = tempfile::tempdir().expect("fixture");
+    let path = dir.path().join("preparation.db");
+    let store = SqliteStore::open(&path).expect("store");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Shows".into(),
+            kind: LibraryKind::Shows,
+            paths: vec!["/media".into()],
+            anime: false,
+        })
+        .await
+        .expect("preparation fixture");
+    let item = |kind, parent| NewItem {
+        library_id: library.id,
+        kind,
+        parent_id: parent,
+        title: "Example".into(),
+        year: None,
+        season_number: Some(1),
+        episode_number: Some(1),
+    };
+    let show = store
+        .insert_item(&item(ItemKind::Show, None))
+        .await
+        .expect("preparation fixture");
+    let season = store
+        .insert_item(&item(ItemKind::Season, Some(show)))
+        .await
+        .expect("preparation fixture");
+    let episode = store
+        .insert_item(&item(ItemKind::Episode, Some(season)))
+        .await
+        .expect("preparation fixture");
+    let file = store
+        .upsert_file(
+            episode,
+            "/media/episode.mkv",
+            100,
+            1,
+            &ProbeResult::default(),
+        )
+        .await
+        .expect("preparation fixture");
+    let conn = rusqlite::Connection::open(&path).expect("preparation fixture");
+    conn.execute("UPDATE items SET metadata_at=123 WHERE id=?1", [show])
+        .expect("preparation fixture");
+    conn.execute("INSERT INTO background_transcode_artifacts(recipe_hash,manifest_digest,file_id,source_size,source_mtime,recipe_version,built_by_node_id,built_at_ms) VALUES ('recipe','manifest',?1,100,1,1,'node-a',1)",[file]).expect("preparation fixture");
+    // A published manifest alone is not proof of any complete copy.
+    let first = store
+        .media_preparation_history(file)
+        .await
+        .expect("preparation fixture");
+    assert_eq!(first["metadata_at"], 123);
+    assert_eq!(first["copies"], 0);
+    assert_eq!(first["analysis"], serde_json::json!([]));
+    conn.execute("INSERT INTO transcode_cache_recipes(recipe_hash,file_id,recipe_version,created_at) VALUES ('recipe',?1,1,1)",[file]).expect("preparation fixture");
+    conn.execute("INSERT INTO transcode_cache_locations(recipe_hash,node_id,storage_class,relative_dir,bytes,complete,manifest_digest,last_used_at,last_seen_at,storage_id,generation_id) VALUES ('recipe','node-a','local','copy',100,1,'manifest',1,1,'node:node-a:cache','copy')",[]).expect("preparation fixture");
+    assert_eq!(
+        store
+            .media_preparation_history(file)
+            .await
+            .expect("preparation fixture")["copies"],
+        1
+    );
+    conn.execute(
+        "UPDATE background_transcode_artifacts SET source_mtime=2",
+        [],
+    )
+    .expect("preparation fixture");
+    assert_eq!(
+        store
+            .media_preparation_history(file)
+            .await
+            .expect("preparation fixture")["copies"],
+        0
+    );
+    let mut explain=conn.prepare("EXPLAIN QUERY PLAN SELECT state FROM background_jobs WHERE kind='transcode_prepare' AND json_extract(payload_json,'$.file_id')=?1 AND json_extract(payload_json,'$.source_size')=100 AND json_extract(payload_json,'$.source_mtime')=1 ORDER BY updated_at_ms DESC LIMIT 128").expect("preparation fixture");
+    let plan = explain
+        .query_map([file], |r| r.get::<_, String>(3))
+        .expect("preparation fixture")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("preparation fixture")
+        .join("\n");
+    assert!(plan.contains("background_jobs_file_source"), "{plan}");
+    assert!(!plan.contains("SCAN background_jobs"), "{plan}");
+}

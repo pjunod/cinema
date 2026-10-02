@@ -1185,6 +1185,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
     // v88: bounded fragment retention probes, including empty result keys.
     super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
+    // v89: file/source-indexed preparation status reads.
+    super::background_jobs::PREPARATION_INDEX_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2915,7 +2917,7 @@ mod tests {
         // expiring viewer interests through analysis and artifacts; v88 adds the
         // unconditional result-key/target/force index for bounded cleanup.
         assert_eq!(
-            version, 88,
+            version, 89,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

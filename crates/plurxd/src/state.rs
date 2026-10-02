@@ -7076,6 +7076,16 @@ impl JobManager {
             record_discard(Discard::SourceMoved);
             return None;
         }
+        // Persist the already verified observation, allowing read-only status
+        // to bind publication receipts to this object without rehashing media.
+        if let Err(error) = self
+            .store
+            .record_fragment_index_source(&attested.observation)
+            .await
+        {
+            tracing::warn!(file_id, %error, "recording subtitle source observation");
+            return None;
+        }
         let harvest = pending.judge().await;
         let verdicts: Vec<_> = harvest
             .outcomes()
@@ -8205,6 +8215,13 @@ impl JobManager {
             return Err(AnalysisResolutionError::ClaimLost);
         }
         let raw = raw.map_err(|_| AnalysisResolutionError::Terminal("stored_probe_invalid"))?;
+        self.store
+            .record_fragment_index_source(&attested.observation)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_write_failed",
+                charge_attempt: true,
+            })?;
         let tracks = crate::subtitle_ride_along::eligible_tracks_from_probe(&raw);
         let rows = self
             .store

@@ -494,7 +494,7 @@ fn preference_status(
     }
 }
 
-fn playback_defaults(
+pub(super) fn playback_defaults(
     audio: &[AudioStream],
     subtitles: &[SubtitleStream],
     prefs: &LangPrefs,

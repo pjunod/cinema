@@ -679,7 +679,7 @@ paths = [
   "crates/plurxd/src/dv_disk.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/reader_formats.rs",
-  "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,publication,reading,system}.rs",
+  "crates/plurxd/src/http/{analysis,developer,dto,error,extract,mod,network,preparation,publication,reading,system}.rs",
   "crates/plurxd/src/http/scan_identity.rs",
   "crates/plurxd/src/http/dv_disk.rs",
   # On-request chapter thumbnails: one bounded ffmpeg per chapter, node-local
