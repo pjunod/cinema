@@ -48,12 +48,25 @@ internal class ContinuousQueueOwnership(private val owner: Any) {
     /** Actual front removal is observed under the queue monitor. This is only
      * queue release: callers still owe rendered/sink ownership or an actual
      * pipeline release before they may send a disposed receipt. */
-    @Synchronized fun queueRetired(artifact: String): Boolean {
-        val record = records.values.singleOrNull { it.load.authorized.interval.text("artifact_id") == artifact } ?: return false
+    @Synchronized fun queueRetired(rendition: String, artifact: String): Boolean {
+        val record = records["$rendition:$artifact"] ?: return false
         return record.complete && record.spans.isNotEmpty() && record.spans.values.all { span ->
             synchronized(span.queue) { span.queue.firstIndex >= span.through && span.queue.writeIndex >= span.through }
         }
     }
+
+    @Synchronized fun queuedArtifacts(): List<ContinuousLoadContext.Verified> = records.values.map { it.load }
+
+    /** After admission is fenced and loaders are quiescent, queue reset may
+     * prove physical removal even for a partially extracted artifact. */
+    @Synchronized fun queuesEmpty(): Boolean = records.values.all { record ->
+        record.spans.values.all { span -> synchronized(span.queue) {
+            span.queue.firstIndex == span.queue.writeIndex && span.queue.readIndex == span.queue.writeIndex
+        } }
+    }
+
+    /** Forget provenance only after the caller has acknowledged actual disposal. */
+    @Synchronized fun disposed(rendition: String, artifact: String) { records.remove("$rendition:$artifact") }
 
     /** Call only after the source, renderers and audio sink actually release. */
     @Synchronized fun pipelineReleased(): List<ContinuousLoadContext.Verified> = records.values.map { it.load }.also { records.clear() }

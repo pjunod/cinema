@@ -38,6 +38,7 @@ internal class ContinuousReservedDataSource(
     family: JsonObject,
     private val media: ContinuousQualityMedia,
     private val reserve: suspend (ContinuousQualityMedia.Resource, ByteArray?) -> Unit,
+    private val loads: ContinuousLoads = ContinuousLoads(),
 ) : BaseDataSource(false) {
     private val origin = URI(origin)
     private val parent = schedulePath.removeSuffix("quality-schedule")
@@ -71,13 +72,14 @@ internal class ContinuousReservedDataSource(
         }
         val job = Job()
         if (!opening.compareAndSet(null, job)) throw IOException("Continuous media open already pending")
-        transferInitializing(dataSpec)
         try {
+            loads.opened(this)
+            transferInitializing(dataSpec)
             if (resource?.role == "video" && !resource.initialization) blocking(job) { reserve(resource, null) }
-            if (!job.isActive) throw IOException("Continuous media request cancelled")
+            if (!job.isActive || !loads.isAlive()) throw IOException("Continuous media request cancelled")
             val source = upstreamFactory.createDataSource()
             upstream.set(source)
-            if (!job.isActive) throw IOException("Continuous media request cancelled")
+            if (!job.isActive || !loads.isAlive()) throw IOException("Continuous media request cancelled")
             // Always request the whole immutable resource, even on Media3 retry.
             val whole = dataSpec.buildUpon().setPosition(0).setLength(C.LENGTH_UNSET.toLong())
                 .setHttpRequestHeaders(dataSpec.httpRequestHeaders.filterKeys { !it.equals("Range", true) && !it.equals("If-Range", true) }).build()
@@ -87,7 +89,7 @@ internal class ContinuousReservedDataSource(
             val bytes = ByteArrayOutputStream()
             val buffer = ByteArray(8192)
             while (true) {
-                if (!job.isActive) throw IOException("Continuous media request cancelled")
+                if (!job.isActive || !loads.isAlive()) throw IOException("Continuous media request cancelled")
                 val count = source.read(buffer, 0, buffer.size)
                 if (count == C.RESULT_END_OF_INPUT) break
                 if (count <= 0) throw IOException("Continuous media read made no progress")
@@ -102,7 +104,7 @@ internal class ContinuousReservedDataSource(
             val authorization = resource?.let { media.authorize(it, retained) }
             val slice = ContinuousVerifiedRange.resolve(retained.size, dataSpec.position, dataSpec.length)
             synchronized(lifetime) {
-                if (!job.isActive || opening.get() !== job) throw IOException("Continuous media request cancelled")
+                if (!job.isActive || !loads.isAlive() || opening.get() !== job) throw IOException("Continuous media request cancelled")
                 payload = retained
                 position = slice.first
                 end = slice.second
@@ -123,6 +125,7 @@ internal class ContinuousReservedDataSource(
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         if (length == 0) return 0
+        if (!loads.isAlive()) throw IOException("Continuous attachment closed")
         val bytes = payload ?: throw IOException("Continuous media source not open")
         if (position == end) return C.RESULT_END_OF_INPUT
         val count = minOf(length, end - position)
@@ -133,18 +136,27 @@ internal class ContinuousReservedDataSource(
     }
     override fun getUri(): Uri? = uri
     override fun getResponseHeaders(): Map<String, List<String>> = headers
+    /** May run on the attachment thread. It fences I/O without retiring the
+     * loader-thread lease or clearing that thread's extraction provenance. */
+    fun cancelPending() {
+        synchronized(lifetime) { opening.get()?.cancel() }
+        try { upstream.getAndSet(null)?.close() } catch (_: Exception) { /* Loader finally still owns retirement. */ }
+    }
+
     override fun close() {
-        synchronized(lifetime) { opening.getAndSet(null)?.cancel() }
-        val source = upstream.getAndSet(null)
-        try { source?.close() } finally {
-            ContinuousLoadContext.bind(null)
-            payload = null
-            uri = null
-            headers = emptyMap()
-            position = 0
-            end = 0
-            if (started) { started = false; transferEnded() }
-        }
+        try {
+            synchronized(lifetime) { opening.getAndSet(null)?.cancel() }
+            val source = upstream.getAndSet(null)
+            try { source?.close() } finally {
+                ContinuousLoadContext.bind(null)
+                payload = null
+                uri = null
+                headers = emptyMap()
+                position = 0
+                end = 0
+                if (started) { started = false; transferEnded() }
+            }
+        } finally { loads.closed(this) }
     }
     private fun <T> blocking(job: Job, action: suspend () -> T): T = try {
         runBlocking(job) { action() }

@@ -15,7 +15,7 @@ internal class ContinuousSourceRegistry {
     private val bindings = ConcurrentHashMap<MediaSource.MediaPeriodId, ContinuousVideoSelection>()
     fun binding(id: MediaSource.MediaPeriodId): ContinuousVideoSelection? = bindings[id]
 
-    fun source(delegate: MediaSource, selection: ContinuousVideoSelection, queueReleased: () -> Unit): MediaSource =
+    fun source(delegate: MediaSource, selection: ContinuousVideoSelection, periodReleaseRequested: () -> Unit): MediaSource =
         object : WrappingMediaSource(delegate) {
             private val periods = IdentityHashMap<MediaPeriod, MediaSource.MediaPeriodId>()
             override fun createPeriod(id: MediaSource.MediaPeriodId, allocator: Allocator, startPositionUs: Long): MediaPeriod {
@@ -27,7 +27,8 @@ internal class ContinuousSourceRegistry {
             override fun releasePeriod(mediaPeriod: MediaPeriod) {
                 val id = checkNotNull(periods.remove(mediaPeriod)) { "Continuous period release owner" }
                 try { mediaSource.releasePeriod(mediaPeriod) } finally { bindings.remove(id, selection) }
-                if (periods.isEmpty()) queueReleased()
+                // HLS queue release happens asynchronously after this request.
+                if (periods.isEmpty()) periodReleaseRequested()
             }
         }
 }

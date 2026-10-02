@@ -62,7 +62,7 @@ internal class ContinuousReservations(
         if (resource.role == "video") {
             val through = resource.videoFrontier()
             if (hasVideoPin(resource.rendition, through)) return@withLock
-            if (resource.rendition != wanted.text("rendition_id")) throw IOException("Unreserved superseded continuous video load")
+            if (resource.rendition != wanted.text("rendition_id")) throw ContinuousStaleVideoLoad()
             reserveWindow(through)
         } else {
             val payload = bytes ?: throw IOException("Continuous audio clock bytes missing")

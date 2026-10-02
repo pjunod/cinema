@@ -106,16 +106,28 @@ internal class ContinuousRenditionSelection(
     override fun getSelectionData(): Any = selected.transactionId
     override fun updateSelectedTrack(playbackPositionUs: Long, bufferedDurationUs: Long, availableDurationUs: Long,
         queue: MutableList<out MediaChunk>, mediaChunkIterators: Array<out MediaChunkIterator>) {
-        val next = reservedChoice() ?: return
-        if (next.intentRevision < selected.intentRevision) return
-        val track = renditions.entries.singleOrNull { it.value == next.renditionId }?.key ?: return
-        val index = indexOf(track)
-        if (index >= 0) { selectedIndex = index; selected = next }
+        applyReservedChoice()
     }
     override fun evaluateQueueSize(playbackPositionUs: Long, queue: MutableList<out MediaChunk>): Int = queue.size
     override fun shouldCancelChunkLoad(playbackPositionUs: Long, loadingChunk: Chunk, queue: MutableList<out MediaChunk>): Boolean = false
-    // Transport failures cannot silently select another unreserved rendition.
-    override fun excludeTrack(index: Int, exclusionDurationMs: Long): Boolean = false
+    // A zero-byte stale load may yield to an already reserved newer choice.
+    // No blacklist is installed: a later explicit reservation may return here.
+    override fun excludeTrack(index: Int, exclusionDurationMs: Long): Boolean {
+        if (index !in 0 until length) return false
+        if (!applyReservedChoice()) return false
+        return index != selectedIndex
+    }
+
+    private fun applyReservedChoice(): Boolean {
+        val next = reservedChoice() ?: return false
+        if (next.intentRevision < selected.intentRevision || next.intentRevision == selected.intentRevision && next != selected) return false
+        val track = renditions.entries.singleOrNull { it.value == next.renditionId }?.key ?: return false
+        val index = indexOf(track)
+        if (index < 0) return false
+        selectedIndex = index
+        selected = next
+        return true
+    }
 }
 
 internal class ContinuousTrackSelectionFactory(

@@ -58,6 +58,29 @@ class ContinuousVideoSelectionTest {
         assertEquals(720, selection.selectedFormat.height)
         assertEquals(C.SELECTION_REASON_MANUAL, selection.selectionReason)
     }
+    @Test fun staleColdLoadsYieldOnlyToTheBoundReservedChoiceWithoutBlacklisting() {
+        val group = TrackGroup(format(720, 1_000_000), format(1080, 2_000_000))
+        val current = AtomicReference<ReservedVideoChoice?>(choice("720", 1))
+        val selection = ContinuousRenditionSelection(group, intArrayOf(0, 1), 0,
+            mapOf(0 to "720", 1 to "1080"), requireNotNull(current.get()), current::get)
+        val stale = selection.selectedIndex
+        assertFalse(selection.excludeTrack(stale, 60_000))
+        current.set(choice("1080", 2))
+        assertTrue(selection.excludeTrack(stale, 60_000))
+        assertEquals(1080, selection.selectedFormat.height)
+        assertFalse(selection.excludeTrack(selection.selectedIndex, 60_000))
+        assertFalse(selection.excludeTrack(-1, 60_000))
+        for (unusable in listOf(null, choice("720", 1), choice("720", 2), choice("foreign", 3))) {
+            current.set(unusable)
+            assertFalse(selection.excludeTrack(stale, 60_000))
+            assertEquals(1080, selection.selectedFormat.height)
+        }
+        current.set(choice("720", 3))
+        selection.updateSelectedTrack(0, 0, C.TIME_UNSET, mutableListOf(), emptyArray())
+        assertEquals(720, selection.selectedFormat.height)
+        assertFalse(selection.isTrackExcluded(selection.selectedIndex, Long.MAX_VALUE))
+    }
+
     @Test fun aReadyTargetCannotChangeFutureLoadsUntilItsIntervalIsReserved() = runBlocking {
         fun row(height: Int, id: String, candidate: String) = buildJsonObject {
             put("candidate_id", candidate.repeat(32)); put("rendition_id", id.repeat(64)); put("init_id", "d".repeat(64))

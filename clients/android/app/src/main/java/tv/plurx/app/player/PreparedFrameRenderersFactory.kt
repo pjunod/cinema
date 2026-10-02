@@ -1,4 +1,5 @@
 @file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+@file:Suppress("DEPRECATION")
 
 package tv.plurx.app.player
 
@@ -10,6 +11,7 @@ import java.nio.ByteBuffer
 import androidx.media3.exoplayer.mediacodec.MediaCodecAdapter
 import androidx.media3.exoplayer.audio.AudioSink
 import androidx.media3.exoplayer.audio.ForwardingAudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
 import androidx.media3.common.C
 import androidx.media3.common.Format
 import androidx.media3.exoplayer.DefaultRenderersFactory
@@ -54,11 +56,24 @@ internal class PreparedFrameRenderersFactory(context: Context, private val conti
         out.add(PreparedFrameVideoRenderer(builder, continuousOutput))
     }
     override fun buildAudioSink(context: Context, enableFloatOutput: Boolean, enableAudioTrackPlaybackParams: Boolean): AudioSink? {
-        val sink = super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams) ?: return null
-        val evidence = continuousOutput ?: return sink
+        val evidence = continuousOutput ?: return super.buildAudioSink(context, enableFloatOutput, enableAudioTrackPlaybackParams)
+        val outputProvider = ContinuousAudioTrackProvider(evidence)
+        val sink = DefaultAudioSink.Builder(context)
+            .setEnableFloatOutput(enableFloatOutput)
+            .setEnableAudioOutputPlaybackParameters(enableAudioTrackPlaybackParams)
+            .setAudioTrackProvider(outputProvider)
+            .build()
         return object : ForwardingAudioSink(sink) {
             private var offsetUs = C.TIME_UNSET
             private var audioOwner: Any? = null
+            override fun setListener(listener: AudioSink.Listener) {
+                super.setListener(object : AudioSink.Listener by listener {
+                    override fun onAudioTrackReleased(config: AudioSink.AudioTrackConfig) {
+                        outputProvider.released()
+                        listener.onAudioTrackReleased(config)
+                    }
+                })
+            }
             override fun setOutputStreamOffsetUs(outputStreamOffsetUs: Long) {
                 super.setOutputStreamOffsetUs(outputStreamOffsetUs)
                 offsetUs = outputStreamOffsetUs

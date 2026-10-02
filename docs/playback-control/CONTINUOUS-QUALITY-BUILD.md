@@ -3053,3 +3053,41 @@ and physically qualified. No unit tests or final adversarial review ran.
 The inspected implementation is
 [MediaCodecRenderer 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/mediacodec/MediaCodecRenderer.java)
 and [MediaCodecVideoRenderer 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/video/MediaCodecVideoRenderer.java).
+
+
+### 10.98 Android bounds future loading and observes actual audio retirement
+
+Controlled periods retain Media3's existing allocator and byte budget while
+limiting new loading to eight seconds of playout at the current speed. Ordinary
+periods retain their original load control. This bounds future rendition-change
+latency without removing buffered media. The authored regression covers period
+ownership, playback-rate conversion and the allocator refusing further load.
+
+The audio provider preserves the pinned SDK's default track construction and
+captures its actual AudioTrack. Retirement requires STATE_UNINITIALIZED for
+every track belonging to that attachment. Media3's release notification is
+insufficient: its finally block can notify after a failed flush, and its posted
+callback can be lost after the playback looper stops. The attachment can poll
+the bounded ownership inventory independently. Authored regressions cover
+failed or unknown release state, multiple outputs and capacity recovery.
+
+A cold video load selected just before a reserved quality change now has a
+distinct pre-fetch refusal. The controlled-source error policy can request
+track fallback for that zero-byte failure. The retained selection accepts it
+only when a supported, valid reserved choice exists and differs from the
+failed track; it installs no blacklist that could obstruct a later explicit
+choice. The pinned HLS loader removes this failed chunk and keeps the previous
+queued chunks. The regression also rejects stale, conflicting and unsupported
+choices and verifies returning to the previous rendition.
+
+Attachment cancellation now closes admission and cancels owned I/O separately
+from loader retirement. The extraction lease survives cancellation until the
+loader's own close completes. Queue inventory keys include rendition and
+artifact, can observe actual empty queues after writers retire, and retains
+partial extractions until proven disposal. A media-period release callback is
+explicitly a release request, because HLS frees queues asynchronously.
+Production and test sources compile in 13 seconds; no unit tests ran.
+Controller adoption and terminal reconciliation remain unfinished. Relevant
+pinned implementations are
+[HlsSampleStreamWrapper 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer_hls/src/main/java/androidx/media3/exoplayer/hls/HlsSampleStreamWrapper.java)
+and [AudioTrackAudioOutput 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/audio/AudioTrackAudioOutput.java).
