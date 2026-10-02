@@ -1414,6 +1414,30 @@
     }
 
     #[test]
+    fn continuous_bootstrap_uses_durable_owner_without_legacy_control() {
+        let mut route = eligible_owner_loss_route();
+        route.state = "active".into();
+        route.response_json = "{}".into(); // No legacy control bootstrap.
+        route.lease_expires_at_ms = unix_ms().saturating_add(60_000);
+        let bootstrap = ContinuousQualityBootstrap::from_route(&route).expect("active owner");
+        assert_eq!(bootstrap.generation, route.incarnation_id);
+        assert_eq!(bootstrap.control_epoch, 3);
+        assert_eq!(bootstrap.schedule_url, format!("/api/v1/hls/{}/quality-schedule", route.session_id));
+        assert_eq!(bootstrap.family_url, format!("/api/v1/hls/{}/quality-family", route.session_id));
+        route.owner_epoch = 9_007_199_254_740_992;
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.owner_epoch = 3;
+        route.state = "ended".into();
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.state = "active".into();
+        route.lease_expires_at_ms = unix_ms() - 1;
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+        route.lease_expires_at_ms = unix_ms().saturating_add(60_000);
+        route.session_id = "malformed".into();
+        assert!(ContinuousQualityBootstrap::from_route(&route).is_err());
+    }
+
+    #[test]
     fn continuous_create_is_a_strict_separate_two_role_envelope() {
         let wire = serde_json::json!({"version":1,"family_generation":uuid::Uuid::new_v4().to_string(),
             "primary_candidate_id":"a".repeat(32),"companion_candidate_id":"b".repeat(32),

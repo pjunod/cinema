@@ -2088,3 +2088,19 @@ wrong-owner refusal, forged-snapshot refusal, exact replay and stale revision.
 This closes the acknowledgement race without interpreting End as absence of
 client media. Pinned compilation and normal hooks apply without unit execution.
 Client disposal and presentation acknowledgements remain unfinished.
+
+
+### 10.57 Independent client bootstrap
+
+The dedicated family creation response now wraps ordinary playback with the
+quality protocol's own durable parent generation, current owner epoch and
+schedule/metadata endpoints. It reads the active durable route after
+idempotent creation, with bounded storage lookup, and rejects expired, ended
+or malformed ownership. This negotiation does not depend on optional legacy
+M1 control. Ordinary and Library-channel response JSON remain unchanged.
+Retries retain the original start identity when the bootstrap read fails.
+
+The ownership regression covers a route without legacy control, exact endpoint
+binding, terminal/expired ownership and JavaScript-unsafe epochs. Source and
+normal-hook compilation apply; unit execution remains deferred. Production
+web append and presentation integration is the next step.

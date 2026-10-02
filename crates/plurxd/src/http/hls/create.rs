@@ -167,6 +167,45 @@ impl CreateContinuousFamily {
     }
 }
 
+/// Bootstrap for the independently negotiated family protocol. Its durable
+/// parent identity never depends on whether legacy M1 control is enabled.
+#[derive(Serialize)]
+pub struct CreateContinuousResponse {
+    pub version: u8,
+    pub playback: StartResponse,
+    pub quality: ContinuousQualityBootstrap,
+}
+
+#[derive(Serialize)]
+pub struct ContinuousQualityBootstrap {
+    pub generation: String,
+    pub control_epoch: u64,
+    pub schedule_url: String,
+    pub family_url: String,
+}
+
+impl ContinuousQualityBootstrap {
+    pub(super) fn from_route(route: &MediaSessionRoute) -> Result<Self, ApiError> {
+        let epoch = u64::try_from(route.owner_epoch)
+            .ok()
+            .filter(|epoch| (1..=9_007_199_254_740_991).contains(epoch));
+        if route.state != "active"
+            || route.lease_expires_at_ms <= unix_ms()
+            || uuid::Uuid::parse_str(&route.incarnation_id).is_err()
+            || uuid::Uuid::parse_str(&route.session_id).is_err()
+            || epoch.is_none()
+        {
+            return Err(ApiError::Conflict("continuous_family_owner_changed".into()));
+        }
+        Ok(Self {
+            generation: route.incarnation_id.clone(),
+            control_epoch: epoch.expect("validated epoch"),
+            schedule_url: format!("/api/v1/hls/{}/quality-schedule", route.session_id),
+            family_url: format!("/api/v1/hls/{}/quality-family", route.session_id),
+        })
+    }
+}
+
 #[derive(Clone)]
 struct ContinuousFamilyStart {
     family_generation: String,
@@ -1482,7 +1521,7 @@ pub async fn create_continuous(
     headers: HeaderMap,
     super::super::network::RemoteAddress(remote): super::super::network::RemoteAddress,
     Json(body): Json<CreateContinuousFamily>,
-) -> Result<Json<StartResponse>, ApiError> {
+) -> Result<Json<CreateContinuousResponse>, ApiError> {
     if !body.valid() {
         return Err(ApiError::BadRequest(
             "continuous_family_start_incompatible".into(),
@@ -1496,7 +1535,7 @@ pub async fn create_continuous(
     let (user_id, start_attempts) = (user.id, Arc::clone(&state.start_attempts));
     let created = create_with_purpose(
         user,
-        state,
+        state.clone(),
         id,
         headers,
         remote,
@@ -1507,7 +1546,21 @@ pub async fn create_continuous(
     if let Err(error) = &created {
         start_attempts.refused(user_id, id, None, error.code(), Instant::now());
     }
-    created
+    let Json(playback) = created?;
+    let route = tokio::time::timeout(
+        ACTIVATION_STORE_DEADLINE,
+        state.media_sessions.control_route(&playback.session_id),
+    )
+    .await
+    .map_err(|_| ApiError::ServiceUnavailable("continuous_family_owner_timeout".into()))?
+    .map_err(|error| ApiError::ServiceUnavailable(format!("reading family owner: {error}")))?
+    .ok_or_else(|| ApiError::Conflict("continuous_family_owner_missing".into()))?;
+    let quality = ContinuousQualityBootstrap::from_route(&route)?;
+    Ok(Json(CreateContinuousResponse {
+        version: 1,
+        playback,
+        quality,
+    }))
 }
 
 /// The finite-session application service used by Library channels after it
