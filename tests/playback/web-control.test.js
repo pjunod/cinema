@@ -7148,3 +7148,14 @@ test("terminal attachment fencing discards stale retried requests",async()=>{
     "successor capture wins over the obsolete ended retry");
   subject.stop();
 });
+
+test("continuous snapshots can decline prepared replacement without changing other actions", async () => {
+  const calls=[];const value=snapshot();
+  value.supported_actions=["hold","retry_resource","terminal","unknown_future_action"];
+  const reporter=new control.Reporter({bootstrap:bootstrap(),
+    clientInstanceId:"66666666-6666-4666-8666-666666666666",
+    capture:()=>captureSnapshot(value),send:async(_url,request)=>{calls.push(request);return response(request);}}).start();
+  await flush();reporter.stop();
+  assert.deepEqual(calls[0].supported_actions,["hold","retry_resource","terminal"]);
+  assert.deepEqual(control.SUPPORTED_ACTIONS,["hold","retry_resource","terminal","prepare_replacement"]);
+});

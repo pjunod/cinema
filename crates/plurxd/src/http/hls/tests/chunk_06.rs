@@ -1414,6 +1414,32 @@
     }
 
     #[test]
+    fn continuous_catalog_pairs_require_one_worker_and_distinct_actual_rasters() {
+        use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+        let candidate = |node: &str, seed: u8, target, width, height| crate::media_pool::WorkerQualityCandidate {
+            node_id: node.into(),
+            candidate: QualityCandidate {
+                id: CandidateId::for_recipe_digest([seed;32]), recipe_digest: [seed;32],
+                route: CandidateRoute::Encode, normalized_geometry: true, width, height,
+                target_height: target, average_bps: None, peak_bps: None,
+                grade: plurx_core::transcode::OutputGrade::Sdr,
+                decoder_compatible: true, complete_cache: false, sustainable: true,
+            },
+        };
+        let primary = candidate("one",1,1080,1920,1080);
+        let other_node = candidate("two",2,720,1280,720);
+        let alias = candidate("one",3,900,1920,1080);
+        assert!(continuous_candidates_from_workers(&[primary.clone(), other_node.clone(), alias.clone()]).pairs.is_empty());
+        let companion = candidate("one",4,720,1280,720);
+        let response = continuous_candidates_from_workers(&[primary.clone(),other_node,alias,companion.clone()]);
+        let pair = response.pairs.iter().find(|pair|pair.primary_candidate_id==primary.candidate.id).expect("same worker family");
+        assert_eq!(pair.companion_candidate_id,companion.candidate.id);
+        let mut unsupported = companion;
+        unsupported.candidate.normalized_geometry = false;
+        assert!(continuous_candidates_from_workers(&[primary, unsupported]).pairs.is_empty());
+    }
+
+    #[test]
     fn continuous_bootstrap_uses_durable_owner_without_legacy_control() {
         let mut route = eligible_owner_loss_route();
         route.state = "active".into();

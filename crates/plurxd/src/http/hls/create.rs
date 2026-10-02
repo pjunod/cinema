@@ -167,6 +167,149 @@ impl CreateContinuousFamily {
     }
 }
 
+/// Read-only negotiation for clients whose ordinary Auto catalog is absent.
+/// It reuses worker recipes and does not enable or choose an Auto policy.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContinuousCandidatesRequest {
+    pub version: u8,
+    pub start: CreateSession,
+}
+
+#[derive(Serialize)]
+pub struct ContinuousCandidatesResponse {
+    pub version: u8,
+    pub candidates: Vec<plurx_core::playback::candidate::QualityCandidate>,
+    pub pairs: Vec<ContinuousCandidatePair>,
+}
+#[derive(Serialize)]
+pub struct ContinuousCandidatePair {
+    pub primary_candidate_id: plurx_core::playback::candidate::CandidateId,
+    pub companion_candidate_id: plurx_core::playback::candidate::CandidateId,
+}
+
+pub async fn continuous_candidates(
+    AuthUser(_user): AuthUser,
+    State(state): State<AppState>,
+    AxPath(id): AxPath<i64>,
+    Json(body): Json<ContinuousCandidatesRequest>,
+) -> Result<Json<ContinuousCandidatesResponse>, ApiError> {
+    if body.version != 1
+        || body.start.copy == Some(true)
+        || body.start.hdr10 == Some(true)
+        || body.start.subtitle_burn.is_some()
+        || body
+            .start
+            .presentation
+            .as_deref()
+            .is_some_and(|value| value != "vod")
+    {
+        return Err(ApiError::BadRequest(
+            "continuous_catalog_incompatible".into(),
+        ));
+    }
+    let caps = body
+        .start
+        .caps
+        .as_ref()
+        .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
+        .ok_or_else(|| ApiError::BadRequest("continuous_catalog_requires_caps".into()))?;
+    static SLOTS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let _permit = SLOTS
+        .get_or_init(|| tokio::sync::Semaphore::new(32))
+        .try_acquire()
+        .map_err(|_| ApiError::ServiceUnavailable("continuous_catalog_busy".into()))?;
+    let source = state
+        .store
+        .get_file(id)
+        .await?
+        .ok_or(ApiError::NotFound("file"))?;
+    let audio_index = state
+        .transcode
+        .candidate_audio_index(&source, body.start.audio)
+        .await;
+    let workers = state
+        .media_pool
+        .quality_candidates(
+            &state,
+            crate::media_pool::QualityCatalogRequest {
+                copy_contract: None,
+                file_id: source.id,
+                source_size: source.size,
+                source_mtime: source.mtime,
+                caps: caps.clone(),
+                audio_index,
+                audio_offset_ms: body.start.audio_offset_ms.unwrap_or(0),
+                subtitle_burn: None,
+                presentation: crate::transcode::Presentation::Vod,
+            },
+        )
+        .await;
+    Ok(Json(continuous_candidates_from_workers(&workers)))
+}
+
+pub(super) fn continuous_candidates_from_workers(
+    workers: &[crate::media_pool::WorkerQualityCandidate],
+) -> ContinuousCandidatesResponse {
+    let compatible: Vec<_> = workers
+        .iter()
+        .filter(|entry| {
+            use plurx_core::playback::candidate::CandidateRoute;
+            entry.candidate.route == CandidateRoute::Encode
+                && entry.candidate.decoder_compatible
+                && entry.candidate.normalized_geometry
+                && entry.candidate.grade == plurx_core::transcode::OutputGrade::Sdr
+        })
+        .collect();
+    let mut candidates = Vec::new();
+    let mut pairs = Vec::new();
+    for primary in &compatible {
+        if candidates.iter().any(
+            |candidate: &plurx_core::playback::candidate::QualityCandidate| {
+                candidate.id == primary.candidate.id
+            },
+        ) {
+            continue;
+        }
+        let companion = compatible
+            .iter()
+            .filter(|other| {
+                other.node_id == primary.node_id
+                    && other.candidate.id != primary.candidate.id
+                    && other.candidate.target_height != primary.candidate.target_height
+                    && (other.candidate.width, other.candidate.height)
+                        != (primary.candidate.width, primary.candidate.height)
+            })
+            .min_by_key(|other| {
+                other
+                    .candidate
+                    .target_height
+                    .abs_diff(primary.candidate.target_height)
+            });
+        let Some(companion) = companion else {
+            continue;
+        };
+        candidates.push(primary.candidate.clone());
+        pairs.push(ContinuousCandidatePair {
+            primary_candidate_id: primary.candidate.id,
+            companion_candidate_id: companion.candidate.id,
+        });
+        if candidates.len() == 32 {
+            break;
+        }
+    }
+    pairs.retain(|pair| {
+        candidates
+            .iter()
+            .any(|candidate| candidate.id == pair.companion_candidate_id)
+    });
+    ContinuousCandidatesResponse {
+        version: 1,
+        candidates,
+        pairs,
+    }
+}
+
 /// Bootstrap for the independently negotiated family protocol. Its durable
 /// parent identity never depends on whether legacy M1 control is enabled.
 #[derive(Serialize)]

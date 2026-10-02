@@ -2140,3 +2140,43 @@ Regressions cover a lost receipt followed by newer work, immutable queued
 commands, contradictory append facts and wrong attachment/owner responses.
 Syntax and compiler checks apply without unit execution. Loader, completed
 append, disposal and decoded-frame observers remain in progress.
+
+
+### 10.60 Production web family enrollment and append ownership
+
+Cold compatible hls.js starts now negotiate a read-only catalog and a
+dedicated family session. The catalog reuses existing worker recipes and pairs
+only decoder-compatible normalized SDR encodes from one worker, with distinct
+actual rasters. It does not depend on the existing Auto setting or choose an
+Auto policy. The existing selected candidate or height owns the primary; the
+companion is a bounded adjacent family member. Ordinary, Original, native HLS
+and Library-channel paths retain their existing contracts. Unsupported route
+responses fall back to ordinary creation.
+
+The hls.js fragment loader withholds progressive bytes and success until init
+identity, actual sample clocks/payload/configuration and durable reservation
+match. Rolling owner readiness extends one choice. Quality changes select
+future video loads on the same player; shared audio stays attached. Completed
+SourceBuffer append and removal observations are captured before hls.js can
+start its next queued operation. Facts run in completion order even when
+hashing or acknowledgements lag. Only actual decoded-frame callbacks with
+matching raster and sample time publish presentation, separately from asking
+or appending. MediaSource transfer is explicitly not a disposal barrier.
+Unexposed aborted video reservations can settle; exposed media retains its
+owner until completed removal or full detach.
+
+Compatible continuous control snapshots decline prepared replacement while
+retaining ordinary transport/recovery actions. Other recipe changes still
+use the prepared path. Failed optional readiness restores future incumbent
+scheduling while retaining older media facts. LAN HTTP clients have a bounded
+software SHA-256 fallback; sample fingerprints include each timestamp,
+duration, length, elementary payload and decoder configuration.
+
+Regressions are authored for withheld loader data, append-versus-presentation,
+failed append, same-player quality selection, detach/transfer distinction,
+cryptographic fallback and action negotiation. Pinned all-target compilation
+and normal hooks apply; unit execution stays deferred. Browser/media-device
+qualification, lost-ack reconciliation across End, controlled cold-rung
+scheduling, shared-cache consumer accounting and native adapters remain
+unfinished. This implements the autonomous two-rung web path in source; it
+does not claim physical audiovisual qualification.

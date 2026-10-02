@@ -156,7 +156,7 @@ had to be edited.
 | 24 | [`detail/edit.js`](../../crates/plurxd/src/web/detail/edit.js) | Editing metadata and home libraries (admin), including the tag-chip field. | 6745–6854 |
 | 25 | [`player/player.js`](../../crates/plurxd/src/web/player/player.js) | `PLAYER`, opening and closing a stream, the play/pause transport core. | 6855–7714 |
 | 26 | [`player/continuous-media.js`](../../crates/plurxd/src/web/player/continuous-media.js) | Bounded actual AVC/AAC sample inspection and container-independent payload hashes for continuous quality receipts. | **Relocated.** New continuous media inspector. |
-| 27 | [`player/continuous-quality.js`](../../crates/plurxd/src/web/player/continuous-quality.js) | Versioned family validation, bounded protocol reads, serialized exact schedule receipts and retry ownership. | **Relocated.** New continuous quality protocol. |
+| 27 | [`player/continuous-quality.js`](../../crates/plurxd/src/web/player/continuous-quality.js) | Versioned family negotiation, exact schedule receipts, reserved fragment loading, completed append/disposal and decoded-frame observations. | **Relocated.** New continuous quality protocol. |
 | 28 | [`player/session.js`](../../crates/plurxd/src/web/player/session.js) | Session lifecycle: start, keepalive, teardown. | 7715–7949 |
 | 29 | [`player/prepared-replacement.js`](../../crates/plurxd/src/web/player/prepared-replacement.js) | The prepared successor: staging, commit, rollback. | 7950–8531 |
 | 30 | [`player/prepared-switch-measurement.js`](../../crates/plurxd/src/web/player/prepared-switch-measurement.js) | M3's measurement of the prepared switch — windows, silence gaps, samplers. | 8532–9156 |

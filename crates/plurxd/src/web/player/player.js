@@ -895,7 +895,12 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
+  const continuous=attachedPlayer.continuousQualityBootstrap
+    ?continuousQualityAdapter(attachedPlayer,video,startup.attachment,attachedPlayer.continuousQualityBootstrap):null;
+  attachedPlayer.continuousQuality=continuous;
   const hls=new Hls({
+    ...(continuous?{autoStartLoad:false,progressive:false,
+      fLoader:continuous.loader(createHlsStartupLoader(StockLoader,startup))}:{}),
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
@@ -942,6 +947,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   }
   startup.hls=hls;
   PLAYER.hls=hls;
+  if(continuous)continuous.bind(hls,startAt);
   hls.loadSource(playlistUrl);
   hls.attachMedia(video);
   return hls;

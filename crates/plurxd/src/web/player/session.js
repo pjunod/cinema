@@ -162,8 +162,9 @@ function playbackControlSelection(p,ownerBound=false){
   return {quality,audio_track:audioTrack,subtitle,
     audio_offset_ms:audioOffset,codec:"auto",dynamic_range:"auto"};
 }
-function qualityMediaIntent(p,wireSelection){
-  const independent=typeof qualityControlSupported==="function"&&qualityControlSupported(p);
+function qualityMediaIntent(p,wireSelection,independentlyNegotiated=false){
+  const independent=independentlyNegotiated||!!p?.continuousQualityBootstrap
+    ||typeof qualityControlSupported==="function"&&qualityControlSupported(p);
   if(!p||(!independent&&(!p.abr||!SERVER||SERVER.display_aware_auto_protocol!=='route-v1'
     ||!SERVER.playback_display_aware_auto))) return null;
   const wire=wireSelection||playbackControlSelection(p);
@@ -289,7 +290,9 @@ function playbackControlSnapshot(v,p){
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p,true),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
-  const intent=(p.qualityProtocol==='route-v1'||qualityControlSupported(p))?qualityMediaIntent(p,snapshot.selection):null;
+  if(p.continuousQuality&&continuousQualitySelectionCompatible(p,snapshot.selection))
+    snapshot.supported_actions=PlurxPlaybackControl.SUPPORTED_ACTIONS.filter(action=>action!==PlurxPlaybackControl.PREPARE_REPLACEMENT_ACTION);
+  const intent=(p.qualityProtocol==='route-v1'||qualityControlSupported(p)||p.continuousQualityBootstrap)?qualityMediaIntent(p,snapshot.selection):null;
   if(intent) Object.assign(snapshot,{intent});
   // A commit and terminal demand are both true, but the protocol deliberately
   // refuses them in one exchange: publishing the successor has to win before

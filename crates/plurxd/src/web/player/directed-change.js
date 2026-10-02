@@ -186,6 +186,19 @@ async function requestQualityChange(p,reason,fallback,autoMove,standingSelection
     fallback:fallback||null,autoMove:autoMove||null,commitTimer:null,
     outcome:null,outcomeAt:null};
   p.directedChange=change;
+  const selection=playbackControlSelection(p);
+  if(p.continuousQuality&&continuousQualitySelectionCompatible(p,selection)){
+    const candidate=continuousQualityCandidate(p,selection);
+    const outcome=await p.continuousQuality.choose(candidate.id,()=>p.directedChange===change
+      &&(p.controlIntentGeneration||0)===change.intentGeneration);
+    if(p.directedChange!==change)return "superseded";
+    if(outcome==="continuous"){
+      change.settled=true;change.outcome=outcome;change.outcomeAt=performance.now();
+      notifyPlaybackControl();return outcome;
+    }
+    if(outcome==="superseded")return outcome;
+    fallBackDirectedChange(p,change,outcome);return outcome;
+  }
   // Keep transport reports live while learning the owner's strict-reader
   // floor. Publish the new recipe only after this negotiation turn settles.
   if(previous) p.qualityNegotiatingSelection={change,selection:previous};
@@ -721,7 +734,9 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     PLAYER.libraryChannel=Object.assign({},following,result.library_channel);
     return result.playback;
   }
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
+  const continuous=body.transport==='hlsjs'&&!player?.sessionId
+    ?await openContinuousQualitySession(fileId,body,player,signal):null;
+  return continuous||api(`/files/${fileId}/hls/sessions`,{method:"POST",body,signal});
 }
 // A cancellable wait. The newer intent's abort is the same signal the create
 // itself is carrying, so a retry sleeping between attempts is cancelled by the
@@ -922,6 +937,7 @@ function attachSession(v, t, info, wantSec){
   // open — before the route is chosen and before the forced-burn override.
   // MEDIA-BADGES-PLAN.md requires the chip and the panel row to agree.
   if(t===PLAYER) renderPlayerInfo();
+  t.continuousQualityBootstrap=info.continuous_quality||null;
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
   t.controlPositionHintSec=(t.offset||0)+into;

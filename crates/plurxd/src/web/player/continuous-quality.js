@@ -149,3 +149,372 @@ function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQuali
     },
   };
 }
+
+function continuousQualityNewIdentity(){
+  const bytes=new Uint8Array(16);crypto.getRandomValues(bytes);bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+  const hex=Array.from(bytes,byte=>byte.toString(16).padStart(2,'0')).join('');
+  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
+function continuousQualityCandidate(player,selection){
+  const quality=selection?.quality;
+  if(!quality||quality.mode==='original')return null;
+  const catalog=player.qualityCandidates||[];
+  return quality.candidate_id?catalog.find(row=>row.id===quality.candidate_id):
+    catalog.find(row=>row.route==='encode'&&row.target_height===(quality.height||player.autoRequestedHeight||player.autoHeight));
+}
+function continuousQualitySelectionCompatible(player,selection){
+  const controller=player.continuousQuality,base=player.continuousQualityBootstrap?.selection;
+  if(!controller||controller.closed||!base)return false;
+  if(!['audio_track','audio_offset_ms','codec','dynamic_range'].every(key=>selection[key]===base[key])
+    ||JSON.stringify(selection.subtitle)!==JSON.stringify(base.subtitle))return false;
+  const candidate=continuousQualityCandidate(player,selection);
+  return !!candidate&&controller.family.video.some(row=>row.candidate_id===candidate.id);
+}
+async function openContinuousQualitySession(fileId,body,player,signal){
+  if(!player||player.sessionId||player.libraryChannel||body.transport!=='hlsjs'
+    ||body.copy===true||body.hdr10===true||body.subtitle_burn!=null||!body.caps
+    ||!window.Hls||!Hls.isSupported())return null;
+  if(playbackControlSelection(player).quality.mode==='original')return null;
+  let catalog;
+  try{catalog=await api(`/files/${fileId}/hls/continuous-candidates`,{method:'POST',body:{version:1,start:body},signal});}
+  catch(error){if(error.status===404||error.status===405)return null;throw error;}
+  if(catalog?.version!==1||!Array.isArray(catalog.candidates)||catalog.candidates.length>32
+    ||!Array.isArray(catalog.pairs)||catalog.pairs.length>32)throw new Error('Continuous candidate catalog shape');
+  const requested=body.intent?.selection?.quality?.candidate_id||player.abr?.requestedCandidateId||player.qualityCandidateId;
+  const candidate=catalog.candidates.find(row=>row.id===requested&&row.target_height===body.height)
+    ||catalog.candidates.find(row=>row.route==='encode'&&row.target_height===body.height);
+  if(!candidate)return null;
+  const pair=catalog.pairs.find(row=>row.primary_candidate_id===candidate.id);
+  if(!pair||!/^[0-9a-f]{32}$/.test(pair.primary_candidate_id)||!/^[0-9a-f]{32}$/.test(pair.companion_candidate_id)
+    ||pair.primary_candidate_id===pair.companion_candidate_id)return null;
+  const selection=playbackControlSelection(player);
+  selection.quality=selection.quality.mode==='manual'?{mode:'manual',height:candidate.target_height}:
+    {mode:'auto',height:candidate.target_height,candidate_id:candidate.id};
+  const start={...body,intent:qualityMediaIntent(player,selection,true),quality_auto:selection.quality.mode==='auto'};
+  const attemptKey=body.request_id;
+  const attempts=player.continuousQualityStarts||(player.continuousQualityStarts=new Map());
+  if(!attempts.has(attemptKey)){
+    if(attempts.size>=16)attempts.delete(attempts.keys().next().value);
+    attempts.set(attemptKey,continuousQualityNewIdentity());
+  }
+  let response;
+  try{response=await api(`/files/${fileId}/hls/continuous-sessions`,{method:'POST',signal,
+    body:{version:1,family_generation:attempts.get(attemptKey),...pair,start}});}
+  catch(error){if(error.status===404||error.status===405)return null;throw error;}
+  const playback=response?.playback,bootstrap=response?.quality;
+  try{
+    if(response.version!==1||!playback||!continuousQualityIdentity(playback.session_id)
+      ||!bootstrap||!continuousQualityIdentity(bootstrap.generation)||!continuousQualityInteger(bootstrap.control_epoch,1)
+      ||bootstrap.schedule_url!==`/api/v1/hls/${playback.session_id}/quality-schedule`
+      ||bootstrap.family_url!==`/api/v1/hls/${playback.session_id}/quality-family`)
+      throw new Error('Continuous family bootstrap shape');
+    const family=await continuousQualityFetch(bootstrap.family_url,null,{signal,limit:32768});
+    if(!continuousQualityFamily(family)||!family.video.some(row=>row.candidate_id===candidate.id)
+      ||!family.video.some(row=>row.candidate_id===pair.companion_candidate_id))throw new Error('Continuous family catalog binding');
+    return {...playback,quality_candidates:catalog.candidates,
+      continuous_quality:{...bootstrap,family,primary_candidate_id:candidate.id,selection}};
+  }catch(error){if(playback?.session_id)releaseSession(playback.session_id);throw error;}
+}
+// Attachment-owned hls.js adapter. Optional choices affect future loads only;
+// already exposed or appended bytes retain their fact/disposal owner.
+function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=continuousQualityFetch){
+  const family=bootstrap.family;
+  if(!continuousQualityFamily(family))throw new Error('Continuous quality family metadata');
+  const holder=player.abr||player;
+  const lifetime=holder.mediaIntent?.lifetimeId||newRequestId();
+  if(!holder.mediaIntent)holder.mediaIntent={lifetimeId:lifetime,recipeRevision:0,transportRevision:0};
+  const protocol=continuousQualityProtocol(bootstrap,{client_instance_id:CONTROL_CLIENT_ID,
+    lifetime_id:lifetime,attachment_id:continuousQualityNewIdentity(),family_id:family.family_id},exchange);
+  const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
+  let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
+  let work=Promise.resolve(),queued=0;
+  const current=()=>!closed&&attachment.current()&&player.continuousQuality===adapter;
+  let wanted=family.video.find(row=>row.candidate_id===bootstrap.primary_candidate_id);
+  if(!wanted)throw new Error('Continuous quality initial candidate');
+  const origin=new URL(bootstrap.schedule_url,location.href).origin;
+  const parentPath=new URL(bootstrap.schedule_url,location.href).pathname.replace(/quality-schedule$/,'');
+  function resource(url){
+    const parsed=new URL(url,location.href);
+    if(parsed.origin!==origin||!parsed.pathname.startsWith(parentPath))return null;
+    const match=/^(video|audio)\/([0-9a-f]{64})\/(?:init\/([0-9a-f]{64})\.mp4|segment\/(\d+)\.m4s)$/.exec(parsed.pathname.slice(parentPath.length));
+    if(!match)return null;
+    const row=match[1]==='video'?family.video.find(row=>row.rendition_id===match[2]):family.audio;
+    if(!row||row.rendition_id!==match[2]||(match[3]&&row.init_id!==match[3]))throw new Error('Continuous media outside family');
+    return {row,type:match[1],init:!!match[3]};
+  }
+  function serial(action){
+    if(queued>=32)return Promise.reject(new Error('Continuous media work queue bound'));
+    queued++;const result=work.then(action);work=result.catch(()=>{}).finally(()=>queued--);return result;
+  }
+  function note(error){
+    player.continuousQualityObservation=String(error?.message||error).slice(0,160);
+  }
+  function tx(id=transaction){return protocol.ledger?.transactions.find(row=>row.transaction_id===id);}
+  function pins(){return (protocol.ledger?.transactions||[]).flatMap(row=>row.reserved)
+    .concat(protocol.ledger?.shared_audio_reserved||[]);}
+  async function prepare(row,through){
+    transaction=continuousQualityNewIdentity();revision++;
+    const response=await protocol.transition(transaction,{kind:'prepare',intent_revision:revision,
+      target_rendition_id:row.rendition_id},{timescale:row.timescale,through_tick:through});
+    const ready=response.ledger.transactions.find(row=>row.transaction_id===transaction);
+    if(!ready||!ready.ready.length||ready.cancel_requested||ready.intent_superseded)throw new Error('Continuous target retained current');
+    return ready;
+  }
+  async function reserveWindow(through){
+    if(!transaction)await prepare(wanted,through);
+    let ready=tx();
+    if(!ready||ready.intent_superseded||ready.cancel_requested)throw new Error('Continuous target superseded');
+    if(!ready.ready.some(row=>row.from_tick<=through&&through<row.through_tick)){
+      await protocol.window(transaction,{timescale:wanted.timescale,through_tick:through});ready=tx();
+    }
+    if(!ready?.ready.length)throw new Error('Continuous target has no ready samples');
+    if(ready.ready.some(row=>ready.disposed.includes(row.artifact_id)))ready=await prepare(wanted,through);
+    const missing=ready.ready.filter(row=>!ready.reserved.some(pin=>continuousQualitySameInterval(pin,row)));
+    if(missing.length)await protocol.transition(transaction,{kind:'scheduled',intervals:missing});
+  }
+  async function authorize(found,data,loadTransaction){
+    if(!current())throw new Error('Continuous media attachment ended');
+    if(!(data instanceof ArrayBuffer)&&!ArrayBuffer.isView(data))throw new Error('Continuous media payload type');
+    const read=found.init?continuousMediaInspector():readers.get(found.row.rendition_id)||continuousMediaInspector();
+    const inspection=read(data);
+    if(found.init){
+      if(inspection.fragments.length||inspection.initializations.length!==1
+        ||await continuousMediaDigest(inspection.bytes)!==found.row.init_id)throw new Error('Continuous init identity');
+      const track=inspection.initializations[0];
+      if(track.timescale!==found.row.timescale||(found.type==='video'
+        ?track.type!=='vide'||track.width!==found.row.width||track.height!==found.row.height
+        :track.type!=='soun'||track.channels!==found.row.channels))throw new Error('Continuous init format');
+      readers.set(found.row.rendition_id,read);return null;
+    }
+    if(!readers.has(found.row.rendition_id))throw new Error('Continuous fragment before verified init');
+    const [facts,artifact]=await Promise.all([continuousSampleFacts(inspection),continuousMediaDigest(inspection.bytes)]);
+    if(facts.timescale!==found.row.timescale||(found.type==='video'
+      ?facts.type!=='vide'||facts.width!==found.row.width||facts.height!==found.row.height
+      :facts.type!=='soun'||facts.channels!==found.row.channels))throw new Error('Continuous fragment format');
+    let pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
+    if(!pin){
+      if(found.type==='video'){
+        if(found.row.rendition_id!==wanted.rendition_id)throw new Error('Unreserved superseded video load');
+        await reserveWindow(facts.from_tick);
+      }else{
+        // AAC intervals can cross a video boundary. Reserve the preceding
+        // video entry and its next neighbor through the owner's exact rational
+        // projection; only the returned immutable AAC hash grants delivery.
+        const tick=Math.floor(facts.from_tick*wanted.timescale/facts.timescale);
+        const entry=Math.floor(tick/wanted.segment_ticks)*wanted.segment_ticks;
+        await reserveWindow(Math.max(0,entry-wanted.segment_ticks));
+      }
+      pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
+    }
+    if(!pin||pin.byte_length!==inspection.bytes.length||pin.timescale!==facts.timescale
+      ||pin.from_tick!==facts.from_tick||pin.through_tick!==facts.through_tick)throw new Error('Continuous fragment is not reserved');
+    if(!current())throw new Error('Continuous media attachment ended');
+    const recordKey=`${pin.rendition_id}:${artifact}`;
+    let record=records.get(recordKey);
+    if(!record){
+      if(records.size>=64)throw new Error('Continuous media provenance bound');
+      record={interval:{...pin},facts,transactions:new Set(),type:found.type,
+        exposed:false,appended:false,presented:false,disposed:false};records.set(recordKey,record);
+    }
+    if(found.type==='video')for(const owner of protocol.ledger.transactions){
+      if(owner.reserved.some(row=>row.artifact_id===artifact))record.transactions.add(owner.transaction_id);
+    }
+    // A loader's captured transaction is never substituted for server facts.
+    if(loadTransaction&&found.type==='video'&&!record.transactions.size)throw new Error('Continuous fragment transaction lost');
+    return record;
+  }
+  function bindBuffer(buffer,type){
+    if(buffers.has(buffer))return;buffers.add(buffer);
+    let inspect=continuousMediaInspector();
+    const append=buffer.appendBuffer.bind(buffer),remove=buffer.remove.bind(buffer);
+    let pending=null;
+    const failed=()=>{if(pending)pending.failed=true;inspect=continuousMediaInspector();};
+    const completed=()=>{
+      const operation=pending;pending=null;if(!operation||operation.failed)return;
+      const completedRemoval=operation.kind==='remove'?Array.from(records.values()).filter(row=>!row.disposed&&row.exposed&&row.type===type
+        &&operation.from<=row.interval.from_tick/row.interval.timescale
+        &&operation.through>=row.interval.through_tick/row.interval.timescale):[];
+      if(operation.kind==='append')serial(async()=>{
+        const facts=await operation.facts;if(!facts)return;
+        const matches=Array.from(records.values()).filter(row=>!row.disposed&&row.exposed&&row.type===type
+          &&row.facts.fingerprint===facts.fingerprint&&row.facts.configuration_digest===facts.configuration_digest
+          &&row.facts.sample_count===facts.sample_count
+          &&row.facts.timescale===facts.timescale&&row.facts.from_tick===facts.from_tick
+          &&row.facts.through_tick===facts.through_tick&&row.facts.width===facts.width&&row.facts.height===facts.height);
+        if(matches.length!==1)throw new Error('Completed append has no exact reserved sample provenance');
+        const record=matches[0];record.appended=true;
+        if(type==='video'){
+          frontier=Math.max(frontier,record.interval.through_tick);
+          for(const owner of record.transactions)await protocol.transition(owner,{kind:'appended',intervals:[record.interval]});
+        }
+      }).catch(note);
+      else serial(async()=>{
+        await dispose(completedRemoval.filter(row=>row.appended&&!row.disposed));
+      }).catch(note);
+    };
+    buffer.addEventListener('error',failed,true);buffer.addEventListener('abort',failed,true);
+    // Observe completion before hls.js's ordinary updateend listener starts
+    // its next queued append and replaces our pending operation.
+    buffer.addEventListener('updateend',completed,true);
+    buffer.appendBuffer=data=>{
+      if(buffer.updating)return append(data);
+      let facts;
+      try{
+        if(data.byteLength>16*1024*1024)throw new Error('Continuous append payload bound');
+        const snapshot=new Uint8Array(data instanceof ArrayBuffer?data:new Uint8Array(data.buffer,data.byteOffset,data.byteLength)).slice();
+        const inspection=inspect(snapshot);
+        facts=inspection.fragments.length?continuousSampleFacts(inspection).catch(error=>{note(error);return null;}):Promise.resolve(null);
+      }catch(error){note(error);facts=Promise.resolve(null);}
+      const operation={kind:'append',facts,failed:false};pending=operation;
+      try{return append(data);}catch(error){if(pending===operation)pending=null;inspect=continuousMediaInspector();throw error;}
+    };
+    buffer.remove=(from,through)=>{
+      if(buffer.updating)return remove(from,through);
+      const operation={kind:'remove',from,through,failed:false};pending=operation;
+      try{return remove(from,through);}catch(error){if(pending===operation)pending=null;throw error;}
+    };
+  }
+  async function dispose(rows){
+    const videoRows=rows.filter(row=>row.type==='video'),audioRows=rows.filter(row=>row.type==='audio');
+    const owners=new Set(videoRows.flatMap(row=>Array.from(row.transactions)));
+    if(audioRows.length&&transaction)owners.add(transaction);
+    for(const owner of owners){
+      const artifacts=videoRows.filter(row=>row.transactions.has(owner)).map(row=>row.interval.artifact_id);
+      if(owner===transaction)artifacts.push(...audioRows.map(row=>row.interval.artifact_id));
+      if(artifacts.length)await protocol.transition(owner,{kind:'disposed',artifacts});
+    }
+    for(const row of rows){row.disposed=true;records.delete(`${row.interval.rendition_id}:${row.interval.artifact_id}`);}
+  }
+  function frames(){
+    if(closed||typeof video.requestVideoFrameCallback!=='function')return;
+    frameToken=video.requestVideoFrameCallback((wall,metadata)=>{
+      frameToken=null;if(!current()){frames();return;}
+      const width=metadata.width||video.videoWidth,height=metadata.height||video.videoHeight;
+      const matches=Array.from(records.values()).filter(row=>row.type==='video'&&row.appended&&!row.disposed&&!row.presented
+        &&row.facts.width===width&&row.facts.height===height
+        &&metadata.mediaTime*row.interval.timescale>=row.interval.from_tick
+        &&metadata.mediaTime*row.interval.timescale<row.interval.through_tick);
+      if(matches.length===1){
+        const record=matches[0],tick=Math.round(metadata.mediaTime*record.interval.timescale),observedAt=Date.now();
+        if(tick>=record.interval.from_tick&&tick<record.interval.through_tick){
+          record.presented=true;
+          serial(async()=>{
+            for(const owner of record.transactions)await protocol.transition(owner,{kind:'presented',artifact_id:record.interval.artifact_id,
+              film_tick:tick,observed_at_ms:observedAt});
+            if(current()){
+              const row=family.video.find(row=>row.rendition_id===record.interval.rendition_id);
+              player.qualityCandidateId=row.candidate_id;
+              const candidate=(player.qualityCandidates||[]).find(candidate=>candidate.id===row.candidate_id);
+              player.autoHeight=candidate?.target_height||row.height;
+              player.continuousQualityPresented={candidate_id:row.candidate_id,width,height,film_tick:tick,timescale:row.timescale};
+            }
+          }).catch(note);
+        }
+      }
+      frames();
+    });
+  }
+  const adapter={
+    protocol,family,get wanted(){return wanted;},get frontier(){return frontier;},get closed(){return closed;},
+    loader:Base=>class {
+      constructor(config){this.base=new Base(config);this.aborted=false;this.context=null;loaders.add(this);}
+      get stats(){return this.base.stats;}
+      load(context,config,callbacks){
+        this.context=context;const captured=transaction;
+        const guarded={...callbacks,onProgress:()=>{},onSuccess:(response,stats,ctx,network)=>{
+          let found;try{found=resource(ctx.url);}catch(error){callbacks.onError({code:0,text:error.message},ctx,network,stats);return;}
+          if(!found){if(!this.aborted)callbacks.onSuccess(response,stats,ctx,network);return;}
+          serial(()=>authorize(found,response.data,captured)).then(record=>{
+            if(this.aborted||!current())return;
+            if(record){record.exposed=true;if(found.type==='video')frontier=Math.max(frontier,record.interval.through_tick);}
+            callbacks.onSuccess(response,stats,ctx,network);
+          }).catch(error=>{note(error);if(!this.aborted&&current())callbacks.onError({code:0,text:error.message},ctx,network,stats);});
+        }};
+        this.base.load(context,config,guarded);
+      }
+      abort(){this.aborted=true;this.base.abort();}
+      destroy(){this.abort();loaders.delete(this);this.base.destroy();}
+      getCacheAge(){return this.base.getCacheAge?.()||null;}
+      getResponseHeader(name){return this.base.getResponseHeader?.(name)||null;}
+    },
+    bind(instance,startAt){
+      hls=instance;
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+        if(!current())return;
+        const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+wanted.playlist));
+        if(level<0){note(new Error('Continuous primary level missing'));return;}
+        hls.loadLevel=level;hls.startLoad(startAt>0?startAt:-1);
+      });
+      hls.on(Hls.Events.BUFFER_CREATED,(event,data)=>{
+        if(!current())return;
+        for(const [type,track] of Object.entries(data.tracks||{}))if((type==='video'||type==='audio')&&track.buffer)bindBuffer(track.buffer,type);
+      });
+      hls.on(Hls.Events.MEDIA_DETACHED,(event,data)=>{
+        if(data?.transferMedia)return; // A live transferred MediaSource is not disposal.
+        mediaDetached=true;adapter.detached();
+      });
+      frames();
+    },
+    choose(candidateId,live=()=>true){return serial(async()=>{
+      if(!current())return 'superseded';
+      const next=family.video.find(row=>row.candidate_id===candidateId);if(!next)return 'outside_family';
+      if(next.rendition_id===wanted.rendition_id)return 'continuous';
+      const previous=wanted,old=transaction;
+      try{
+        const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+next.playlist));
+        if(level<0)throw new Error('Continuous target level missing');
+        await prepare(next,frontier);
+        if(!current())return 'superseded';
+        if(!live()){
+          await protocol.transition(transaction,{kind:'cancel_unappended',completed:[]});
+          await prepare(previous,frontier);return 'superseded';
+        }
+        // Readiness succeeds before retiring optional old loaders. Payloads
+        // already delivered keep their own append and disposal ownership.
+        for(const loader of loaders){let found;try{found=resource(loader.context?.url||'');}catch(e){}
+          if(found?.type==='video'&&found.row.rendition_id===previous.rendition_id)loader.abort();}
+        wanted=next;hls.loadLevel=level;
+        if(old)try{
+          await protocol.transition(old,{kind:'cancel_unappended',completed:Array.from(records.values())
+            .filter(row=>row.appended&&row.transactions.has(old)).map(row=>row.interval)});
+          // Exact loader abort plus no onSuccess exposure is an absence
+          // barrier for these video objects. Shared audio never follows it.
+          const unexposed=(tx(old)?.reserved||[]).filter(pin=>!records.get(`${pin.rendition_id}:${pin.artifact_id}`)?.exposed);
+          if(unexposed.length){
+            await protocol.transition(old,{kind:'disposed',artifacts:unexposed.map(pin=>pin.artifact_id)});
+            for(const pin of unexposed)records.delete(`${pin.rendition_id}:${pin.artifact_id}`);
+          }
+        }catch(error){note(error);}
+        return 'continuous';
+      }catch(error){
+        note(error);wanted=previous;
+        // A failed Prepare may already supersede the old optional transaction.
+        // Restore future incumbent scheduling under a new revision, retaining
+        // the old reservations/facts rather than trying to revive its intent.
+        if(current()&&transaction!==old)try{await prepare(previous,frontier);}catch(restore){note(restore);}
+        else transaction=old;
+        return 'retained_current';
+      }
+    });},
+    detached(){
+      if(!mediaDetached)return Promise.reject(new Error('Continuous media disposal needs detach receipt'));
+      if(closed)return;closed=true;
+      if(frameToken!=null)try{video.cancelVideoFrameCallback(frameToken);}catch(e){}
+      for(const loader of loaders)loader.abort();loaders.clear();
+      // Called only after the hls.js MediaSource has detached. Include pins
+      // never delivered to the loader, but never use End as this barrier.
+      return serial(async()=>{
+        const ledger=protocol.ledger;if(!ledger)return;
+        const audio=(ledger.shared_audio_reserved||[]).map(row=>row.artifact_id);
+        const audioOwner=ledger.transactions.at(-1)?.transaction_id;
+        for(const owner of ledger.transactions){
+          const artifacts=owner.reserved.map(row=>row.artifact_id);
+          if(owner.transaction_id===audioOwner)artifacts.push(...audio);
+          if(artifacts.length)await protocol.transition(owner.transaction_id,{kind:'disposed',artifacts});
+        }
+        records.clear();buffers.clear();readers.clear();
+      }).catch(note);
+    },
+  };
+  return adapter;
+}
