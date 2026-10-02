@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "cases": [
+    {"id":"huge-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"9007199254740993"},"expected":"accepted","source_position_ms":0},
+    {"id":"noncanonical-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"01"},"expected":"invalid","source_position_ms":0},
+    {"id":"overflow-source-id","identity":{"server_id":"00000000-0000-4000-8000-000000000001","catalogue_epoch":"00000000-0000-4000-8000-000000000002"},"generations":{"scope":1,"credential":1,"catalogue":1},"input":{"source_id":"9223372036854775808"},"expected":"invalid","source_position_ms":0}
+  ]
+}

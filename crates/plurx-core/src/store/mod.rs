@@ -15,7 +15,11 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod sharing;
+pub use sharing::SharingStore;
 pub mod classification;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_sharing;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
@@ -5290,6 +5294,7 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
+    + SharingStore
     + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
@@ -5327,6 +5332,7 @@ pub trait Store:
 
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
+        + SharingStore
         + SettingsStore
         + BackgroundJobStore
         + DvConversionStore

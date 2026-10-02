@@ -156,7 +156,9 @@ const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
 const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
 const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
 const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
-pub const AUTH_SCHEMA_VERSION: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
+const SHARING_SCHEMA_VERSION: i64 = 70;
+const SHARING_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
+pub const AUTH_SCHEMA_VERSION: i64 = SHARING_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1641,6 +1643,9 @@ impl HiqliteAuthStore {
             .await
             .map_err(database_error)?;
 
+        for result in timeout_store(client.batch(super::sharing::SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
         // A fresh cluster starts on the oldest protocol this binary supports,
@@ -3141,6 +3146,21 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
                     Box::pin(self.migrate_playback_inputs()).await?;
                 }
+                SchemaMigrationAction::MigrateFrom(SHARING_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements: Vec<_> =
+                        super::hiqlite_library_channels::split_schema_statements(
+                            super::sharing::SCHEMA,
+                        )
+                        .into_iter()
+                        .map(|s| (s, params!()))
+                        .collect();
+                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".into(),
+                        params!(SHARING_SCHEMA_VERSION,now,SHARING_SCHEMA_MIGRATION_SOURCE)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(SHARING_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3450,6 +3470,20 @@ impl HiqliteAuthStore {
             ("DELETE FROM live_tv_resource_records".to_owned(), params!()),
             ("DELETE FROM dvr_recordings".to_owned(), params!()),
             ("DELETE FROM items".to_owned(), params!()),
+            ("DELETE FROM sharing_delivery_grants".into(), params!()),
+            ("DELETE FROM sharing_relay_upstream".into(), params!()),
+            ("DELETE FROM sharing_watch".into(), params!()),
+            ("DELETE FROM sharing_assignments".into(), params!()),
+            ("DELETE FROM sharing_viewers".into(), params!()),
+            ("DELETE FROM sharing_import_rotations".into(), params!()),
+            ("DELETE FROM sharing_imports".into(), params!()),
+            ("DELETE FROM sharing_rotations".into(), params!()),
+            ("DELETE FROM sharing_export_libraries".into(), params!()),
+            ("DELETE FROM sharing_exports".into(), params!()),
+            ("DELETE FROM sharing_invitations".into(), params!()),
+            ("DELETE FROM sharing_identity".into(), params!()),
+            ("DELETE FROM sharing_catalogue_revisions".into(), params!()),
+            ("DELETE FROM sharing_endpoint_manifest".into(), params!()),
             ("DELETE FROM libraries".to_owned(), params!()),
             (CREDENTIAL_MUTATION_INTENT_BEGIN_SQL.to_owned(), params!()),
             ("DELETE FROM tokens".to_owned(), params!()),
@@ -5207,7 +5241,8 @@ fn schema_migration_action(
         | ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE
         | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
         | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
-        | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE => {
+        | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
+        | SHARING_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

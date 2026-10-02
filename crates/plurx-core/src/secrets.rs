@@ -58,15 +58,15 @@ pub enum SecretError {
     KeyFile { path: PathBuf, message: String },
 
     #[error(
-        "credential key file {path} is missing, but {rows} stored Trakt credential(s) are \
-         encrypted under it; restore the key file or unlink Trakt — refusing to start without it"
+        "credential key file {path} is missing, but {rows} stored outbound credential(s) are \
+         encrypted under it; restore the key file or remove the affected sealed credentials — refusing to start without it"
     )]
     KeyMissingForWrappedRows { path: PathBuf, rows: usize },
 
     #[error(
-        "credential key file {path} holds key {held}, but {rows} stored Trakt credential(s) are \
+        "credential key file {path} holds key {held}, but {rows} stored outbound credential(s) are \
          sealed under key {wanted}; this is not the key that sealed this database — restore the \
-         matching key file or unlink Trakt, rather than starting with a key that opens nothing"
+         matching key file or remove the affected sealed credentials, rather than starting with a key that opens nothing"
     )]
     WrongKeyForStoredRows {
         path: PathBuf,
@@ -427,6 +427,10 @@ impl CredentialKey {
     /// sealed row to another user's `user_id` makes it fail to open rather than
     /// silently handing one household member another's Trakt account.
     pub fn seal_trakt(&self, user_id: i64, cleartext: &str) -> Result<SealedSecret, SecretError> {
+        self.seal_with_aad(trakt_aad(user_id).as_bytes(), cleartext)
+    }
+
+    fn seal_with_aad(&self, aad: &[u8], cleartext: &str) -> Result<SealedSecret, SecretError> {
         let mut nonce = [0u8; NONCE_LEN];
         getrandom::getrandom(&mut nonce).map_err(|error| {
             SecretError::Malformed(format!("no operating-system randomness: {error}"))
@@ -437,7 +441,7 @@ impl CredentialKey {
                 XNonce::from_slice(&nonce),
                 Payload {
                     msg: cleartext.as_bytes(),
-                    aad: trakt_aad(user_id).as_bytes(),
+                    aad,
                 },
             )
             .map_err(|_| SecretError::Undecryptable)?;
@@ -459,6 +463,32 @@ impl CredentialKey {
     /// contents, so a half-finished upgrade fails loudly instead of quietly
     /// continuing to use a plaintext secret.
     pub fn open_trakt(&self, user_id: i64, sealed: &SealedSecret) -> Result<Secret, SecretError> {
+        self.open_with_aad(trakt_aad(user_id).as_bytes(), sealed)
+    }
+
+    /// Seal sharing material, binding purpose and both local identities.
+    pub fn seal_sharing(
+        &self,
+        purpose: SharingSecretPurpose,
+        server: uuid::Uuid,
+        import: uuid::Uuid,
+        cleartext: &str,
+    ) -> Result<SealedSecret, SecretError> {
+        self.seal_with_aad(&sharing_aad(purpose, server, import), cleartext)
+    }
+
+    /// A ciphertext copied between imports, installations or purposes cannot open.
+    pub fn open_sharing(
+        &self,
+        purpose: SharingSecretPurpose,
+        server: uuid::Uuid,
+        import: uuid::Uuid,
+        sealed: &SealedSecret,
+    ) -> Result<Secret, SecretError> {
+        self.open_with_aad(&sharing_aad(purpose, server, import), sealed)
+    }
+
+    fn open_with_aad(&self, aad: &[u8], sealed: &SealedSecret) -> Result<Secret, SecretError> {
         let parsed = sealed.parse()?;
         if parsed.key_id != self.id {
             return Err(SecretError::WrongKey {
@@ -472,7 +502,7 @@ impl CredentialKey {
                 XNonce::from_slice(&parsed.nonce),
                 Payload {
                     msg: &parsed.ciphertext,
-                    aad: trakt_aad(user_id).as_bytes(),
+                    aad,
                 },
             )
             .map_err(|_| SecretError::Undecryptable)?;
@@ -494,6 +524,30 @@ impl Drop for CredentialKey {
     fn drop(&mut self) {
         self.key.zeroize();
     }
+}
+
+/// Distinct contexts prevent swapping claim, rotation and delivery material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SharingSecretPurpose {
+    Credential,
+    Claim,
+    Rotation,
+    Upstream,
+}
+
+fn sharing_aad(purpose: SharingSecretPurpose, server: uuid::Uuid, import: uuid::Uuid) -> Vec<u8> {
+    let tag = match purpose {
+        SharingSecretPurpose::Credential => b"credential".as_slice(),
+        SharingSecretPurpose::Claim => b"claim".as_slice(),
+        SharingSecretPurpose::Rotation => b"rotation".as_slice(),
+        SharingSecretPurpose::Upstream => b"upstream".as_slice(),
+    };
+    let mut aad = b"plurx.sharing.v1\0".to_vec();
+    aad.extend_from_slice(&(tag.len() as u32).to_be_bytes());
+    aad.extend_from_slice(tag);
+    aad.extend_from_slice(server.as_bytes());
+    aad.extend_from_slice(import.as_bytes());
+    aad
 }
 
 fn trakt_aad(user_id: i64) -> String {
@@ -531,8 +585,13 @@ impl SealedRowCensus {
     /// when only one is: a boot killed between the two columns leaves a mixed
     /// row that still needs the key that sealed the first half.
     pub fn observe_row(&mut self, access: &SealedSecret, refresh: &SealedSecret) {
+        self.observe_envelopes("trakt", &[access, refresh]);
+    }
+
+    /// Observe one row for any outbound-secret purpose, without decrypting it.
+    pub fn observe_envelopes(&mut self, _purpose: &str, values: &[&SealedSecret]) {
         let mut sealed = false;
-        for value in [access, refresh] {
+        for value in values {
             if !value.looks_wrapped() {
                 continue;
             }
@@ -544,6 +603,12 @@ impl SealedRowCensus {
         if sealed {
             self.rows += 1;
         }
+    }
+
+    /// Combine independent purpose inventories before startup key selection.
+    pub fn merge(&mut self, other: Self) {
+        self.rows += other.rows;
+        self.key_ids.extend(other.key_ids);
     }
 
     /// How many durable rows hold at least one sealed column.
@@ -1007,5 +1072,76 @@ mod tests {
                 "`{rejected}` must not reach a durable row"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sharing_tests {
+    use super::*;
+    use uuid::Uuid;
+    #[test]
+    fn sharing_ciphertext_binds_server_import_and_purpose_without_plaintext() {
+        let key = CredentialKey::from_bytes([7; 32]);
+        let server = Uuid::from_u128(1);
+        let import = Uuid::from_u128(2);
+        let sealed = key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                server,
+                import,
+                "synthetic-bearer",
+            )
+            .expect("synthetic secret fixture");
+        assert_eq!(
+            key.open_sharing(SharingSecretPurpose::Credential, server, import, &sealed)
+                .expect("synthetic secret fixture")
+                .expose(),
+            "synthetic-bearer"
+        );
+        assert!(!sealed.as_stored().contains("synthetic-bearer"));
+        for (purpose, s, i) in [
+            (SharingSecretPurpose::Claim, server, import),
+            (SharingSecretPurpose::Credential, Uuid::from_u128(3), import),
+            (SharingSecretPurpose::Credential, server, Uuid::from_u128(3)),
+        ] {
+            assert!(key.open_sharing(purpose, s, i, &sealed).is_err());
+        }
+        assert!(key.open_trakt(2, &sealed).is_err());
+        assert!(!format!("{sealed:?}").contains(sealed.as_stored()));
+    }
+    #[test]
+    fn sharing_and_trakt_census_both_refuse_missing_or_wrong_startup_key() {
+        let dir = tempfile::tempdir().expect("synthetic secret fixture");
+        let path = dir.path().join("credentials.key");
+        let key = CredentialKey::from_bytes([7; 32]);
+        let sealed = key
+            .seal_sharing(
+                SharingSecretPurpose::Upstream,
+                Uuid::from_u128(1),
+                Uuid::from_u128(2),
+                "synthetic",
+            )
+            .expect("synthetic secret fixture");
+        let mut census = SealedRowCensus::default();
+        census.observe_envelopes("sharing-upstream", &[&sealed]);
+        assert!(matches!(
+            open_credential_key(&path, &census),
+            Err(SecretError::KeyMissingForWrappedRows { .. })
+        ));
+        assert!(!path.exists());
+        let other = open_credential_key(&path, &SealedRowCensus::default())
+            .expect("synthetic secret fixture");
+        assert_ne!(other.id(), key.id());
+        assert!(matches!(
+            open_credential_key(&path, &census),
+            Err(SecretError::WrongKeyForStoredRows { .. })
+        ));
+        census.observe_row(
+            &key.seal_trakt(1, "access")
+                .expect("synthetic secret fixture"),
+            &key.seal_trakt(1, "refresh")
+                .expect("synthetic secret fixture"),
+        );
+        assert_eq!(census.sealed_rows(), 2);
     }
 }

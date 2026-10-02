@@ -1138,3 +1138,20 @@ paths = [
   "validation/**",
 ]
 checks = ["catalog-contract", "history-regressions", "operations-contract"]
+
+[[points]]
+id = "sharing.authority"
+title = "Cinema sharing authority and sealed peer credentials"
+contract = "Invitation consumption, export scope, credential rotation, receiver assignment and restore fences commit atomically on SQLite and replicated storage. Peer credentials remain sealed at rest; unreadable credentials refuse startup."
+paths = [
+  "crates/plurx-core/src/sharing.rs",
+  "crates/plurx-core/src/store/sharing.rs",
+  "crates/plurx-core/src/store/sharing_schema.sql",
+  "crates/plurx-core/src/store/hiqlite_sharing.rs",
+  "crates/plurx-core/src/store/sqlite/sharing.rs",
+  "crates/plurx-core/tests/store_contract/sharing.rs",
+  "tests/sharing/**",
+  "docs/features/SHARED-LIBRARIES-*.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "unit-core", "cluster-auth", "database-upgrades", "credential-encryption"]
+depends_on = ["identity.access", "cluster.auth", "persistence.upgrades"]

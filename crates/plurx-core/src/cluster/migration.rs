@@ -44,8 +44,9 @@ use crate::config::{
 use crate::secrets::{self, CredentialKey, SealedRowCensus};
 #[cfg(feature = "hiqlite-store")]
 use crate::store::{
-    CatalogueReader, HiqliteAuthStore, SettingsStore, SqliteImportReport, SqliteImportTableDigest,
-    SqliteStore, Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    CatalogueReader, HiqliteAuthStore, SettingsStore, SharingStore, SqliteImportReport,
+    SqliteImportTableDigest, SqliteStore, Store, TraktStore, AUTH_SCHEMA_MIGRATION_SOURCE,
+    AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 use hiqlite::tls::ServerTlsConfig;
@@ -1892,6 +1893,7 @@ pub async fn restore_cluster_backup_archive(
         )?;
         let (remapped_files, remapped_libraries, remapped_dvr_recordings) =
             apply_restore_image_changes(&mut connection, &manifest, remaps)?;
+        crate::store::sharing::fence_restored_sharing(&connection)?;
         drop(connection);
         File::open(&database)
             .and_then(|file| file.sync_all())
@@ -2134,6 +2136,35 @@ fn verify_backup_key(
                 &crate::secrets::SealedSecret::from_stored(access),
                 &crate::secrets::SealedSecret::from_stored(refresh),
             );
+        }
+    }
+    for (table, columns) in [
+        ("sharing_imports", "credential_envelope,claim_envelope"),
+        ("sharing_import_rotations", "credential_envelope"),
+        ("sharing_relay_upstream", "capability_envelope"),
+    ] {
+        let exists: i64 = connection.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            continue;
+        }
+        let mut statement = connection.prepare(&format!("SELECT {columns} FROM {table}"))?;
+        let count = statement.column_count();
+        let rows = statement.query_map([], |row| {
+            (0..count)
+                .map(|i| row.get::<_, Option<String>>(i))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?;
+        for row in rows {
+            let envelopes: Vec<_> = row?
+                .into_iter()
+                .flatten()
+                .map(crate::secrets::SealedSecret::from_stored)
+                .collect();
+            census.observe_envelopes(table, &envelopes.iter().collect::<Vec<_>>());
         }
     }
     let key = credential_key_override
@@ -2711,6 +2742,7 @@ async fn open_active_credential_key(
     for auth in store.list_trakt_auth().await? {
         census.observe_row(&auth.access_token, &auth.refresh_token);
     }
+    census.merge(store.sharing_sealed_census().await?);
     let path = config.cluster.credential_key_path(&config.storage.data_dir);
     let key = secrets::open_credential_key(&path, &census)
         .map_err(|error| StoreError::Identity(error.to_string()))?;

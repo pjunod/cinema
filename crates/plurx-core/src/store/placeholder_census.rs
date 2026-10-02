@@ -75,6 +75,7 @@ pub(super) const STORE_SOURCES: &[(&str, &str)] = &[
     ),
     ("hiqlite_reading.rs", include_str!("hiqlite_reading.rs")),
     ("hiqlite_sessions.rs", include_str!("hiqlite_sessions.rs")),
+    ("hiqlite_sharing.rs", include_str!("hiqlite_sharing.rs")),
     (
         "hiqlite_shared_cache.rs",
         include_str!("hiqlite_shared_cache.rs"),
@@ -129,6 +130,7 @@ const SQLITE_SOURCES: &[(&str, &str)] = &[
     ("reading.rs", include_str!("sqlite/reading.rs")),
     ("sessions.rs", include_str!("sqlite/sessions.rs")),
     ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
+    ("sharing.rs", include_str!("sqlite/sharing.rs")),
     ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
     (
         "timeline_annotations.rs",
