@@ -1183,6 +1183,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
+    // v88: bounded fragment retention probes, including empty result keys.
+    super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

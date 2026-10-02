@@ -12121,6 +12121,62 @@ fn schema_differences(
     differences
 }
 
+#[path = "support/fragment_prune_budget.rs"]
+mod fragment_prune_budget;
+
+#[cfg(feature = "hiqlite-contract-tests")]
+async fn assert_migrated_fragment_prune_budget(client: &Client) {
+    // Reconstruct all objects from the actual Raft-migrated schema, including
+    // triggers. The workload runs in a rollback-only local mirror; this does
+    // not pretend to measure cluster application or commits.
+    let rows: Vec<SchemaText> = client.query_consistent_map(
+        "SELECT sql AS value FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, name",
+        hiqlite::params!()).await.expect("read full migrated schema");
+    let conn = rusqlite::Connection::open_in_memory().expect("migrated schema mirror");
+    for row in rows {
+        conn.execute_batch(&row.value)
+            .expect("copy actual migrated schema object");
+    }
+    fragment_prune_budget::assert_plans_and_work(
+        &conn,
+        plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+        plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+    );
+}
+
+#[test]
+fn sqlite_fresh_and_upgrade_fragment_prune_plans_and_work_are_bounded() {
+    let directory = tempfile::tempdir().expect("upgrade fixture");
+    let path = directory.path().join("prune.db");
+    drop(SqliteStore::open(&path).expect("fresh full migration chain"));
+    {
+        let conn = rusqlite::Connection::open(&path).expect("fresh schema");
+        fragment_prune_budget::assert_plans_and_work(
+            &conn,
+            plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+            plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+        );
+        conn.execute_batch(include_str!("fixtures/fragment-prune-worst.sql"))
+            .expect("populated upgrade workload");
+        conn.execute_batch(
+            "DROP INDEX analysis_requests_result_target_force; PRAGMA user_version = 87;",
+        )
+        .expect("pre-index upgrade source");
+    }
+    let began = std::time::Instant::now();
+    drop(SqliteStore::open(&path).expect("production upgrade"));
+    eprintln!(
+        "SQLite populated v87→v88 production upgrade: {:?}",
+        began.elapsed()
+    );
+    let conn = rusqlite::Connection::open(&path).expect("upgraded schema");
+    fragment_prune_budget::assert_plans_and_work(
+        &conn,
+        plurx_core::store::FRAGMENT_PRUNE_CANDIDATES,
+        plurx_core::store::FRAGMENT_PRUNE_TERMINAL_JOBS,
+    );
+}
+
 /// Bootstrap installs every schema object directly and stamps
 /// `AUTH_SCHEMA_VERSION`; the daemon's `open_or_migrate` never reruns a step
 /// the stamp says has happened. So bootstrap is a second copy of the
@@ -12160,6 +12216,7 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             .await
             .expect("bootstrap current schema");
         drop(store);
+        assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
 
@@ -12214,6 +12271,7 @@ async fn fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree() {
             reached.iter().map(|row| row.value).collect::<Vec<_>>(),
             vec![AUTH_SCHEMA_VERSION]
         );
+        assert_migrated_fragment_prune_budget(&client).await;
         store_schema_snapshot(&client).await
     };
 
@@ -19731,6 +19789,241 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         assert_eq!(summary.ready, 1, "backend {backend}");
     })
     .await;
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fragment_prune_worst_case_keeps_three_voter_proofs_and_playback_mutations_available() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("cluster client");
+    let telemetry = cluster._root.path().join("prune-worst-telemetry.db");
+    drop(
+        HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("full replicated schema"),
+    );
+    for result in client
+        .batch(include_str!("fixtures/fragment-prune-worst.sql"))
+        .await
+        .expect("replicated workload")
+    {
+        result.expect("workload statement");
+    }
+    client
+        .txn(vec![
+            (
+                "DROP INDEX analysis_requests_result_target_force".to_owned(),
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 65 WHERE singleton = 1".to_owned(),
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("disposable populated v65 upgrade fixture");
+    let began = std::time::Instant::now();
+    let store = Arc::new(
+        HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+            .await
+            .expect("populated replicated upgrade"),
+    );
+    eprintln!(
+        "Hiqlite populated v65→v66 production upgrade: {:?}",
+        began.elapsed()
+    );
+    let user = store
+        .create_user("prune-viewer", "hash", false)
+        .await
+        .expect("viewer");
+    let activation = current_media_session(
+        store.as_ref(),
+        user.id,
+        "prune-playback",
+        "prune-incarnation",
+        "prune-session",
+        "quorum-prune",
+    )
+    .await;
+    let prune = async {
+        for _ in 0..8 {
+            assert!(store
+                .prune_cluster_fragment_indexes(100, 128)
+                .await
+                .expect("worst-case zero-row prune")
+                .is_empty());
+        }
+    };
+    let foreground = async {
+        for ordinal in 0..8 {
+            let began = std::time::Instant::now();
+            let renewed = store
+                .renew_media_sessions(
+                    &activation.owner_node_id,
+                    &[MediaSessionRenewal {
+                        incarnation_id: activation.incarnation_id.clone(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: ordinal * 1000,
+                        fetched_through_ms: ordinal * 1000,
+                        media_sequence: ordinal,
+                    }],
+                    2000 + ordinal,
+                    900_000 + ordinal,
+                )
+                .await
+                .expect("mutable playback renewal");
+            assert_eq!(renewed, vec![activation.incarnation_id.clone()]);
+            client
+                .db_quorum_watermark()
+                .await
+                .expect("proof refresh under prune");
+            assert!(
+                began.elapsed() < Duration::from_secs(1),
+                "prune/renew/proof exceeded the existing proof deadline"
+            );
+        }
+    };
+    tokio::join!(prune, foreground);
+    for key in ["retained-1", "retained-4000"] {
+        assert!(store
+            .cluster_fragment_index_job(key, "node")
+            .await
+            .expect("retained source")
+            .is_some());
+    }
+}
+
+const FRAGMENT_PRUNE_RETENTION_FIXTURE: &str =
+    include_str!("fixtures/fragment-prune-retention.sql");
+
+async fn assert_fragment_prune_semantics(store: Arc<dyn Store>) {
+    let removable = [
+        "",
+        "delete-cancelled",
+        "delete-forced",
+        "delete-obsolete",
+        "delete-ready",
+    ];
+    let retained = [
+        ("keep-current", "node"),
+        ("keep-wrong-force", "node"),
+        ("keep-recent", "node"),
+        ("keep-active", "node"),
+        ("keep-active-request", "node"),
+        ("keep-shared-active", "node"),
+        ("keep-shared-active", "other"),
+        ("keep-location", "node"),
+    ];
+    for expected_removed in [2, 4, 5] {
+        assert!(store
+            .prune_cluster_fragment_indexes(100, 2)
+            .await
+            .expect("production prune")
+            .is_empty());
+        let mut removed = 0;
+        for key in removable {
+            removed += usize::from(
+                store
+                    .cluster_fragment_index_job(key, "node")
+                    .await
+                    .expect("terminal row")
+                    .is_none(),
+            );
+        }
+        assert_eq!(
+            removed, expected_removed,
+            "deletion limit includes the empty-key forced retry"
+        );
+        for (key, node) in retained {
+            assert!(
+                store
+                    .cluster_fragment_index_job(key, node)
+                    .await
+                    .expect("retained row")
+                    .is_some(),
+                "{key}/{node}"
+            );
+        }
+    }
+    assert!(store
+        .cluster_fragment_index_artifact("keep-location")
+        .await
+        .expect("retained artifact")
+        .is_some());
+    assert_eq!(
+        store
+            .cluster_fragment_index_locations("keep-location")
+            .await
+            .expect("retained holder")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn fragment_prune_retains_guards_and_empty_key_semantics_through_both_stores() {
+    let directory = tempfile::tempdir().expect("SQLite fixture");
+    let path = directory.path().join("retention.db");
+    let store = SqliteStore::open(&path).expect("full SQLite schema");
+    rusqlite::Connection::open(&path)
+        .expect("seed connection")
+        .execute_batch(FRAGMENT_PRUNE_RETENTION_FIXTURE)
+        .expect("seed retention matrix");
+    assert_fragment_prune_semantics(Arc::new(store)).await;
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let _case = HIQLITE_CASE.lock().await;
+        let cluster = ContractCluster::start().await;
+        let client = Client::remote(
+            cluster.addresses.clone(),
+            true,
+            true,
+            CONTRACT_API_SECRET.to_owned(),
+            false,
+            None,
+        )
+        .await
+        .expect("cluster client");
+        let telemetry = cluster._root.path().join("prune-retention-telemetry.db");
+        let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+            .await
+            .expect("full replicated schema");
+        for result in client
+            .batch(FRAGMENT_PRUNE_RETENTION_FIXTURE)
+            .await
+            .expect("seed replicated retention")
+        {
+            result.expect("replicated fixture statement");
+        }
+        // Proof refresh and a mutable setting remain available during real
+        // replicated cleanup. No benchmark timing is inferred from the mirror.
+        let prune = assert_fragment_prune_semantics(Arc::new(store));
+        let foreground = async {
+            for ordinal in 0..8 {
+                let began = std::time::Instant::now();
+                client.execute("INSERT INTO settings(key,value,updated_at) VALUES ('prune.foreground',$1,1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",hiqlite::params!(ordinal.to_string())).await.expect("foreground write");
+                client
+                    .db_quorum_watermark()
+                    .await
+                    .expect("quorum proof during prune");
+                assert!(
+                    began.elapsed() < Duration::from_secs(1),
+                    "cleanup must fit inside the existing proof deadline"
+                );
+            }
+        };
+        tokio::join!(prune, foreground);
+    }
 }
 
 #[tokio::test]
