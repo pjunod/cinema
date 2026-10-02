@@ -2598,7 +2598,25 @@ only one remaining second even under Pause; an already exhausted deadline stays
 exhausted. iOS production and test sources, tvOS production, and Android
 production and test sources compile. No unit execution or physical device
 qualification is claimed. The public Apple SDK and official documentation
-still expose variant preferences and a preferred maximum resolution, not exact
-manual variant selection; the existing warm prepared path preserves exact
-manual semantics. Android's exact track overrides need matching runtime groups
-and device adaptation evidence before a continuous adapter can claim support.
+([variant preferences](https://developer.apple.com/documentation/avfoundation/avplayeritem/variantpreferences)
+and [maximum resolution](https://developer.apple.com/documentation/avfoundation/avplayeritem/preferredmaximumresolution))
+still expose preferences rather than exact manual variant selection; the existing warm prepared path preserves exact
+manual semantics. [Android's exact track overrides](https://developer.android.com/media/media3/exoplayer/track-selection)
+need matching runtime groups and device adaptation evidence before a continuous adapter can claim support.
+
+
+### 10.80 Current main test fixes integrate without changing production behavior
+
+Main advanced to `c63859963`: concurrent pretranscode claims now select by job
+identity, cleanup-gate assertions no longer depend on scheduler order, and the
+rolling producer fixture accounts for removed task/timer ownership. These
+three test files merged cleanly into this branch. The combined pinned all-target
+source compilation passed; no unit suite ran.
+
+The production Chrome replay currently uses the preceding committed candidate
+`6309c5d70` and remains diagnostic until its series completes. Although this
+integration changes no production source, final qualification must identify the
+actual landing tree. The standing user workflow defers unit execution until
+main readiness and adversarial review, retains each passing fast-lane test,
+and reruns only failed tests. That overrides the older document's whole-suite
+retry convention; no passing qualification receipt is fabricated for a new tree.

@@ -8773,6 +8773,11 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
             2,
             "{backend}: one maintenance reader per independent source domain"
         );
+        // The join results are in worker order, not claim order. Keep the
+        // primary-domain job first so completing the second claim releases
+        // the secondary domain needed by the remaining queued job.
+        claimed.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        assert_eq!(claimed[0].id, jobs[0].id, "{backend}: primary-domain claim");
         for job in &claimed {
             let staging = store
                 .pretranscode_staging_jobs(&job.owner_node_id)
@@ -8890,7 +8895,7 @@ async fn distributed_pretranscode_contract_runs_through_dyn_store() {
         assert_eq!(successor.fence, renewed_a.fence + 1, "{backend}");
         assert!(
             !store
-                .pretranscode_staging_jobs("node-a")
+                .pretranscode_staging_jobs(&renewed_a.owner_node_id)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: predecessor staging: {error}"))
                 .contains(&successor.id),
