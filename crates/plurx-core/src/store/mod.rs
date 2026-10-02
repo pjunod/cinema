@@ -20,7 +20,9 @@ pub use classification::ClassificationStore;
 mod downloaded_subtitles;
 mod dv_conversion;
 mod field_order_backfill;
-pub use field_order_backfill::{field_order_backfill_page, FieldOrderBackfillPage};
+pub use field_order_backfill::{
+    field_order_backfill_page, FieldOrderBackfillPage, FieldOrderBackfillPort,
+};
 mod file_grants;
 pub use downloaded_subtitles::{
     valid_downloaded_vtt, MAX_DOWNLOADED_SUBTITLES, MAX_DOWNLOADED_SUBTITLE_BYTES,
