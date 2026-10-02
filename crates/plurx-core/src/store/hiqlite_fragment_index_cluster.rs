@@ -2616,6 +2616,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     ) -> Result<Vec<AnalysisRequest>, StoreError> {
         Ok(self
             .client()
+            // authority: repair previews must include committed unfinished requests, not replica lag.
             .query_consistent_map::<RequestRow, _>(
                 format!(
                     "SELECT {REQUEST_COLS} FROM analysis_requests
@@ -2636,6 +2637,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
     ) -> Result<Option<AnalysisRequest>, StoreError> {
         Ok(self
             .client()
+            // authority: repair admission must see the committed owner of the unique forced slot.
             .query_consistent_map::<RequestRow, _>(
                 format!(
                     "SELECT {REQUEST_COLS} FROM analysis_requests
