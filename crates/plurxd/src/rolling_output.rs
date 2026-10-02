@@ -8,6 +8,14 @@ use sha2::{Digest, Sha256};
 const MAX_OBJECTS: usize = 8193;
 const MAX_PLAYLIST: usize = 1 << 20;
 
+/// Ordered full-mux metadata only, not a retained capability. The optional
+/// duration is absent solely for the actual fMP4 initialization object.
+pub(crate) type CompleteRollingInventory = (
+    CompleteOutputRates,
+    Vec<(String, CommittedObject, Option<WireDuration>)>,
+    uuid::Uuid,
+);
+
 #[derive(Clone, Debug)]
 pub(crate) struct CommittedObject {
     pub(crate) bytes: u64,
@@ -53,6 +61,14 @@ impl RollingOutputMeasurement {
     /// Caller must separately retain/revalidate the complete artifact before
     /// these observed numbers can become any frozen wire/candidate fact.
     pub(crate) fn complete(&self, playlist: &[u8]) -> Option<CompleteOutputRates> {
+        self.complete_inventory(playlist).map(|(rates, _, _)| rates)
+    }
+
+    /// Preserve exact ordered names and committed hashes for a separately
+    /// leased retention owner. Normal producer completion and physical body
+    /// ownership must still be established by the caller; this cannot mint
+    /// source, recipe, codec or new-attachment authority.
+    pub(crate) fn complete_inventory(&self, playlist: &[u8]) -> Option<CompleteRollingInventory> {
         if self.refused || playlist.len() > MAX_PLAYLIST {
             return None;
         }
@@ -65,9 +81,11 @@ impl RollingOutputMeasurement {
         let mut pending = None;
         let mut durations = Vec::new();
         let mut objects = Vec::new();
+        let mut names = Vec::new();
         let mut transport_stream = true;
         let mut fragmented_mp4 = true;
         let mut init = None;
+        let mut init_name = None;
         let mut ended = false;
         // A seek suffix is an output observation, never a complete-title cost.
         let mut next = Some(0);
@@ -100,6 +118,7 @@ impl RollingOutputMeasurement {
                 if init.replace(self.objects.get(name)?).is_some() {
                     return None;
                 }
+                init_name = Some(name);
             } else if line.starts_with("#EXT-X-MAP:")
                 || line.starts_with("#EXT-X-BYTERANGE:")
                 || line.starts_with("#EXT-X-KEY:")
@@ -120,6 +139,7 @@ impl RollingOutputMeasurement {
                 next = Some(index.checked_add(1)?);
                 durations.push(pending.take()?);
                 objects.push(self.objects.get(line)?);
+                names.push(line);
             }
         }
         if !ended
@@ -147,7 +167,21 @@ impl RollingOutputMeasurement {
         for (entry, object) in objects.iter().enumerate() {
             reducer.observe(identity, entry, object.bytes);
         }
-        reducer.rates(true).ok()
+        let rates = reducer.rates(true).ok()?;
+        let mut members = Vec::with_capacity(self.objects.len());
+        if let (Some(name), Some(object)) = (init_name, init) {
+            members.push((name.to_owned(), object.clone(), None));
+        }
+        members.extend(
+            names
+                .into_iter()
+                .zip(objects)
+                .zip(durations)
+                .map(|((name, object), duration)| {
+                    (name.to_owned(), object.clone(), Some(duration))
+                }),
+        );
+        Some((rates, members, self.nonce))
     }
 }
 
@@ -164,6 +198,46 @@ fn flat_name(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rolling_complete_inventory_preserves_actual_container_order_and_tail() {
+        let playlist = b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4.000000,\nseg00000.m4s\n#EXTINF:1.000000,\nseg00001.m4s\n#EXT-X-ENDLIST\n";
+        let mut observed = RollingOutputMeasurement::default();
+        for (name, bytes, digest) in [
+            ("seg00001.m4s", 200, [3; 32]),
+            ("init.mp4", 80, [1; 32]),
+            ("seg00000.m4s", 400, [2; 32]),
+        ] {
+            observed.committed(name, CommittedObject { bytes, digest });
+        }
+        let (rates, members, nonce) = observed.complete_inventory(playlist).expect("full mux");
+        assert_eq!(nonce, observed.nonce);
+        assert_eq!(rates.wire_bytes, 600, "init is not media-rate numerator");
+        assert_eq!(members.len(), 3);
+        assert_eq!(members[0].0, "init.mp4");
+        assert_eq!(members[0].1.digest, [1; 32]);
+        assert!(members[0].2.is_none());
+        assert_eq!(members[1].0, "seg00000.m4s");
+        assert_eq!(members[1].1.bytes, 400);
+        assert_eq!(members[2].0, "seg00001.m4s");
+        assert_eq!(members[2].1.digest, [3; 32]);
+        assert_eq!(members[2].2, WireDuration::parse("1.000000"));
+        assert!(observed
+            .complete_inventory(&playlist[..playlist.len() - b"#EXT-X-ENDLIST\n".len()])
+            .is_none());
+        let mut ts = RollingOutputMeasurement::default();
+        ts.committed(
+            "seg00000.ts",
+            CommittedObject {
+                bytes: 188,
+                digest: [4; 32],
+            },
+        );
+        let (_, members, _) = ts.complete_inventory(b"#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.000000,\nseg00000.ts\n#EXT-X-ENDLIST\n").expect("TS without fabricated init");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].0, "seg00000.ts");
+        assert!(members[0].2.is_some());
+    }
 
     #[test]
     fn rolling_actual_transport_stream_cost_requires_complete_unambiguous_container() {
