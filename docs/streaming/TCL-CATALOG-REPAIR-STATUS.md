@@ -19,8 +19,8 @@ is authorized by implementation. Integration uses `effort/tcl-catalog-repair`.
 |---|---|---|
 | Preserve RCA and source replay | done | Copied only this effort's three untracked files |
 | Pinned Rust loop | done | Rust 1.97.1; current-main all-target compile passed |
-| Typed diagnostics and accounting | building | Diagnostic commit retained before bound repair |
-| One catalog per create | pending | Canonical caps and recipe/worker identities retained |
+| Typed diagnostics and accounting | done | Diagnostic commit retained before bound repair |
+| One catalog per create | building | Canonical caps and recipe/worker identities retained |
 | Android compaction and shared contract | pending | No legacy blanket 400 |
 | Snapshot, generation and budgets | pending | Parameters recorded before dependent changes |
 | Partial selection through existing owners | pending | No new watchdog/retry owner |
@@ -40,3 +40,6 @@ TCL and Streamer wire counts on unchanged clients; a TCL count at or below 16
 falsifies B1 attribution. Deployment, cold/warm Auto first-frame and sustained
 playback, Safari fallback and settled-cluster p95/p99 remain outstanding until
 measured against recorded client/server revisions.
+
+Diagnostic milestone: `3bc3567a8`, compiled and Clippy-clean with Rust 1.97.1.
+Its 16-entry gate remains unchanged for the physical confirmation run.

@@ -1049,6 +1049,8 @@ pub(crate) async fn resolve_height(
 /// not grow a second resolver.** The drift would be invisible, because both
 /// sides would look correct in isolation.
 pub(crate) struct ResolvedPlan {
+    /// Canonical request-local evidence. Never reconstruct it from control caps.
+    pub quality_catalog: Option<crate::media_pool::QualityCatalogResult>,
     pub request: crate::transcode::SessionRequest,
     /// The height this plan resolved to, which is not always the one asked
     /// for.
@@ -1118,6 +1120,7 @@ pub(crate) async fn resolve_plan(
     let mut height =
         resolve_height(state, source, network_prior, hdr10_requested, body.height).await;
     let mut candidate_context = None;
+    let mut retained_catalog = None;
     let mut candidate_copy = false;
     if body.copy == Some(true) {
         if let (Some(source), Some(caps)) = (
@@ -1201,7 +1204,7 @@ pub(crate) async fn resolve_plan(
             tracing::info!(file_id, purpose = "selection", complete = catalogue_result.complete,
                 causes = ?catalogue_result.causes, "create catalog accounting");
             let authority_refused = catalogue_result.authority_refused;
-            let worker_catalog = catalogue_result.candidates;
+            let worker_catalog = &catalogue_result.candidates;
             let catalog: Vec<_> = worker_catalog
                 .iter()
                 .map(|entry| entry.candidate.clone())
@@ -1268,6 +1271,7 @@ pub(crate) async fn resolve_plan(
                 .find(|entry| entry.candidate.id == candidate.id)
                 .map(|entry| entry.node_id.clone());
             candidate_context = Some(context);
+            retained_catalog = Some(catalogue_result);
         }
     } else if body.intent.as_ref().is_some_and(|intent| {
         matches!(
@@ -1339,6 +1343,7 @@ pub(crate) async fn resolve_plan(
         };
     }
     Ok(ResolvedPlan {
+        quality_catalog: retained_catalog,
         request,
         height,
         intent_fingerprint: fingerprint,
@@ -1636,6 +1641,7 @@ async fn create_with_purpose(
         req,
     )
     .await?;
+    let mut quality_catalog = resolved.quality_catalog;
     let request = resolved.request;
     if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
@@ -1862,14 +1868,12 @@ async fn create_with_purpose(
         .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
         .await?
         .is_some_and(|value| value.trim() == "1");
-    let mut quality_owners = std::collections::HashSet::new();
-    if quality_enabled && candidate_decoder_caps.is_some() {
-        quality_owners.insert(state.node_id.clone());
+    if quality_enabled && candidate_decoder_caps.is_some() && quality_catalog.is_none() {
         if let (Some(source), Some(caps)) = (source.as_ref(), planning_caps.as_ref()) {
-            quality_owners.extend(
+            quality_catalog = Some(
                 state
                     .media_pool
-                    .quality_candidates(
+                    .quality_catalog(
                         &state,
                         crate::media_pool::QualityCatalogRequest {
                             copy_contract: request.kind.copy_contract(),
@@ -1883,19 +1887,25 @@ async fn create_with_purpose(
                             presentation: request.presentation,
                         },
                     )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.node_id),
+                    .await,
+            );
+            tracing::info!(
+                file_id = id,
+                purpose = "optional_metadata",
+                "create catalog accounting"
             );
         }
-        if let Some(owner) = request
-            .candidate_context
-            .as_ref()
-            .and_then(|context| context.owner_node_id.as_ref())
-        {
-            quality_owners.insert(owner.clone());
-        }
     }
+    let quality_owners: std::collections::HashSet<_> = if candidate_decoder_caps.is_some() {
+        quality_catalog
+            .as_ref()
+            .into_iter()
+            .flat_map(|result| result.candidates.iter())
+            .map(|entry| entry.node_id.clone())
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let predecessor_owner = if let Some(previous) = request.previous_session_id.as_deref() {
         state
             .store
@@ -2388,47 +2398,20 @@ async fn create_with_purpose(
     } else {
         info.playlist_url
     };
-    let display_aware_enabled = state
-        .store
-        .get_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO)
-        .await?
-        .is_some_and(|value| value.trim() == "1");
     let response = StartResponse {
         display_aware_auto_protocol: quality_negotiated.then(|| "route-v1".to_owned()),
         quality_candidate_id: request
             .candidate_context
             .as_ref()
             .map(|context| context.candidate_id),
-        quality_candidates: if let (true, Some(source), Some(caps)) = (
-            display_aware_enabled && quality_negotiated,
-            source.as_ref(),
-            candidate_decoder_caps.as_ref(),
-        ) {
-            Some(
-                state
-                    .media_pool
-                    .quality_candidates(
-                        &state,
-                        crate::media_pool::QualityCatalogRequest {
-                            copy_contract: request.kind.copy_contract(),
-                            file_id: source.id,
-                            source_size: source.size,
-                            source_mtime: source.mtime,
-                            caps: caps.device_caps(),
-                            audio_index: request.audio_index,
-                            audio_offset_ms: request.audio_offset_ms,
-                            subtitle_burn: request.subtitle_burn,
-                            presentation: request.presentation,
-                        },
-                    )
-                    .await
-                    .into_iter()
-                    .map(|entry| entry.candidate)
-                    .collect(),
-            )
-        } else {
-            None
-        },
+        quality_candidates: quality_negotiated.then(|| {
+            quality_catalog
+                .as_ref()
+                .into_iter()
+                .flat_map(|result| result.candidates.iter())
+                .map(|entry| entry.candidate.clone())
+                .collect()
+        }),
         session_id: info.session_id.clone(),
         playlist_url,
         duration_ms: info.duration_ms,
