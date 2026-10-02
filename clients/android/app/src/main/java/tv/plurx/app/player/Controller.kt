@@ -4794,6 +4794,7 @@ class Controller internal constructor(
             volume = previousVolume,
         )
 
+        handOverAudioFocus(previous.asAudioFocusOwner(), successor.asAudioFocusOwner())
         successor.volume = previousVolume
         successor.playbackParameters = previousPlaybackParameters
         successor.playWhenReady = previousPlayWhenReady
@@ -4970,6 +4971,7 @@ class Controller internal constructor(
         predecessor.sessionId?.let(::startStatusPolling) ?: clearStatusPolling()
         sessionStatus = predecessor.sessionStatus
         sessionStatusObservedAtMs = predecessor.sessionStatusObservedAtMs
+        handOverAudioFocus(failedSuccessor.asAudioFocusOwner(), predecessor.player.asAudioFocusOwner())
         predecessor.player.volume = predecessor.volume
         predecessor.player.playbackParameters = predecessor.playbackParameters
         predecessor.player.playWhenReady = predecessor.playWhenReady
@@ -5644,6 +5646,9 @@ fun buildSuccessorPlayer(context: Context, vm: AppViewModel, audioOnly: Boolean 
     // successor that is merely off-screen is still an audio stream.
     built.player.volume = 0f
     built.player.setVideoSurface(null)
+    // An audio-only successor is built in the Audio role, which holds focus
+    // for ordinary playback; a successor never does until its switch.
+    built.player.asAudioFocusOwner().ownAudioFocus(false)
     built.player.playWhenReady = true
     return built
 }

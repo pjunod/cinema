@@ -18,6 +18,41 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 /** The caller supplies the transport; the role selects only player behavior. */
 internal enum class PlayerRole { Finite, Successor, LiveTv, LibraryChannel, Offline, Audio }
 
+/** The attributes every plurx player plays under. */
+internal val PLURX_MEDIA_AUDIO_ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
+    .setUsage(C.USAGE_MEDIA)
+    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+    .build()
+
+/**
+ * Audio focus, and pausing when the output becomes noisy, belong to the one
+ * player the viewer hears. A prepared successor plays silently before its
+ * switch; if it requested focus, the platform would take focus away from the
+ * player on screen and Media3 would pause it — a quality change that freezes
+ * the picture it was meant to replace without a gap.
+ */
+internal fun handlesAudioFocus(role: PlayerRole): Boolean = role != PlayerRole.Successor
+
+/** The one player capability that focus ownership moves. */
+internal fun interface AudioFocusOwner {
+    fun ownAudioFocus(owns: Boolean)
+}
+
+internal fun ExoPlayer.asAudioFocusOwner(): AudioFocusOwner = AudioFocusOwner { owns ->
+    setAudioAttributes(PLURX_MEDIA_AUDIO_ATTRIBUTES, owns)
+    setHandleAudioBecomingNoisy(owns)
+}
+
+/**
+ * Move focus from the player going silent to the player becoming audible:
+ * release first, so the two never both hold it and the new owner's request
+ * cannot read as a loss to the old one.
+ */
+internal fun handOverAudioFocus(from: AudioFocusOwner, to: AudioFocusOwner) {
+    from.ownAudioFocus(false)
+    to.ownAudioFocus(true)
+}
+
 /**
  * One construction path for every player. In particular, Offline still has a
  * cache-only source with no account-bearing upstream, and only finite players
@@ -74,14 +109,8 @@ internal class PlurxPlayerBuilder(private val context: Context, private val role
             .setTrackSelector(selector)
             .setRenderersFactory(renderers)
             .setMediaSourceFactory(DefaultMediaSourceFactory(source))
-            .setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(C.USAGE_MEDIA)
-                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
-                    .build(),
-                /* handleAudioFocus = */ true,
-            )
-            .setHandleAudioBecomingNoisy(true)
+            .setAudioAttributes(PLURX_MEDIA_AUDIO_ATTRIBUTES, handlesAudioFocus(role))
+            .setHandleAudioBecomingNoisy(handlesAudioFocus(role))
             .build()
         if (role == PlayerRole.Audio) player.setWakeMode(C.WAKE_MODE_NETWORK)
         return player
