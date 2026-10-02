@@ -1,5 +1,32 @@
 use super::*;
 
+/// Classify a refused catalogue without changing candidate selection.
+fn candidate_refusal_reason(
+    catalog: &[plurx_core::playback::candidate::QualityCandidate],
+    requested: Option<plurx_core::playback::candidate::CandidateId>,
+    height: Option<i64>,
+    authority_refused: bool,
+) -> &'static str {
+    if catalog.is_empty() && authority_refused {
+        return "catalogue_authority_unavailable";
+    }
+    if let Some(id) = requested {
+        return match catalog.iter().find(|row| row.id == id) {
+            None if authority_refused => "catalogue_authority_unavailable",
+            None => "identity_absent",
+            Some(row) if !row.decoder_compatible => "decoder_incompatible",
+            Some(_) => "recipe_unavailable",
+        };
+    }
+    if catalog.iter().any(|row| {
+        height.is_none_or(|height| i64::from(row.target_height) == height)
+            && !row.decoder_compatible
+    }) {
+        return "decoder_incompatible";
+    }
+    "encode_route_unavailable"
+}
+
 /// Everything a client must say to open a stream.
 ///
 /// A body rather than a query string, and a POST rather than a GET, because
@@ -1154,9 +1181,9 @@ pub(crate) async fn resolve_plan(
                 .transcode
                 .candidate_audio_index(source, body.audio)
                 .await;
-            let worker_catalog = state
+            let catalogue_result = state
                 .media_pool
-                .quality_candidates(
+                .quality_catalog(
                     state,
                     crate::media_pool::QualityCatalogRequest {
                         copy_contract: None,
@@ -1171,6 +1198,8 @@ pub(crate) async fn resolve_plan(
                     },
                 )
                 .await;
+            let authority_refused = catalogue_result.authority_refused;
+            let worker_catalog = catalogue_result.candidates;
             let catalog: Vec<_> = worker_catalog
                 .iter()
                 .map(|entry| entry.candidate.clone())
@@ -1205,7 +1234,27 @@ pub(crate) async fn resolve_plan(
                 })
             };
             let candidate = picked.ok_or_else(|| {
-                ApiError::Conflict("candidate_recipe_changed_or_decoder_unavailable".to_owned())
+                let reason =
+                    candidate_refusal_reason(&catalog, requested, body.height, authority_refused);
+                tracing::warn!(
+                    reason,
+                    requested_route = if body.copy == Some(true) {
+                        "copy"
+                    } else {
+                        "encode_or_auto"
+                    },
+                    requested_height = body.height.unwrap_or(0).clamp(0, 2160),
+                    explicit_identity = requested.is_some(),
+                    candidate_count = catalog.len().min(256),
+                    "quality candidate refused at session creation"
+                );
+                if reason == "catalogue_authority_unavailable" {
+                    ApiError::ServiceUnavailable(
+                        "quality_candidate_authority_unavailable".to_owned(),
+                    )
+                } else {
+                    ApiError::Conflict(format!("candidate_{reason}"))
+                }
             })?;
             candidate_copy =
                 candidate.route != plurx_core::playback::candidate::CandidateRoute::Encode;
@@ -3782,4 +3831,54 @@ fn session_store_error(operation: &'static str, error: plurx_core::error::StoreE
         %error, operation, "media-session Store operation failed"
     );
     ApiError::ServiceUnavailable(format!("{operation}: {error}"))
+}
+
+#[cfg(test)]
+mod quorum_candidate_tests {
+    use super::candidate_refusal_reason;
+    use plurx_core::playback::candidate::{CandidateId, CandidateRoute, QualityCandidate};
+    #[test]
+    fn candidate_refusals_distinguish_authority_identity_decoder_and_route() {
+        let requested = CandidateId([1; 16]);
+        assert_eq!(
+            candidate_refusal_reason(&[], Some(requested), Some(1080), true),
+            "catalogue_authority_unavailable"
+        );
+        assert_eq!(
+            candidate_refusal_reason(&[], Some(requested), Some(1080), false),
+            "identity_absent"
+        );
+        assert_eq!(
+            candidate_refusal_reason(&[], None, Some(1080), false),
+            "encode_route_unavailable"
+        );
+        let row = QualityCandidate {
+            id: requested,
+            recipe_digest: [0; 32],
+            route: CandidateRoute::Encode,
+            normalized_geometry: true,
+            width: 1920,
+            height: 1080,
+            target_height: 1080,
+            average_bps: None,
+            peak_bps: None,
+            grade: Default::default(),
+            decoder_compatible: false,
+            complete_cache: false,
+            sustainable: true,
+        };
+        assert_eq!(
+            candidate_refusal_reason(
+                std::slice::from_ref(&row),
+                Some(requested),
+                Some(1080),
+                true
+            ),
+            "decoder_incompatible"
+        );
+        assert_eq!(
+            candidate_refusal_reason(&[row], Some(CandidateId([2; 16])), Some(1080), true),
+            "catalogue_authority_unavailable"
+        );
+    }
 }
