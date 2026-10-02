@@ -21,7 +21,7 @@ impl ReductionFenceReference {
         self.version == 1
             && self.barrier_index > 0
             && canonical_uuid(&self.target_node_id)
-            && (canonical_uuid(&self.attempt_id) || self.attempt_id == "internal.preexisting")
+            && canonical_uuid(&self.attempt_id)
     }
 }
 

@@ -1805,6 +1805,16 @@ impl HiqliteAuthStore {
         super::hiqlite_background_jobs::install_schema(&client).await?;
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
+        // Fresh bootstrap stamps the current marker without traversing the
+        // migration chain. Install its candidate memory table before that
+        // marker, just as the corresponding migration does.
+        client
+            .txn([(super::candidate_recovery::SCHEMA, params!())])
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         client
             .txn(super::hiqlite_live_tv_resource::schema_statements())
             .await
@@ -3684,98 +3694,118 @@ impl HiqliteAuthStore {
                 super::hiqlite_catalog::local_catalog_digest(self.client()),
             )
             .await
-            .map_err(|_| {
-                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
-            })??,
+            .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))??,
             durable_digest: tokio::time::timeout(
                 STORE_TIMEOUT,
                 super::hiqlite_durable::local_durable_digest(self.client()),
             )
             .await
-            .map_err(|_| {
-                StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())
-            })??,
-            cluster_meta: self.client().query_map(
-                "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
+            .map_err(|_| StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))??,
+            cluster_meta: self
+                .client()
+                .query_map(
+                    "SELECT singleton, schema_version, protocol_min, protocol_max, migrated_at \
                      FROM cluster_meta ORDER BY singleton",
-                params!(),
-            )
-            .await?,
-            settings: self.client().query_map(
-                "SELECT key, value, updated_at FROM settings ORDER BY key",
-                params!(),
-            )
-            .await?,
-            users: self.client().query_map(
-                "SELECT id, username, password_hash, is_admin, created_at \
+                    params!(),
+                )
+                .await?,
+            settings: self
+                .client()
+                .query_map(
+                    "SELECT key, value, updated_at FROM settings ORDER BY key",
+                    params!(),
+                )
+                .await?,
+            users: self
+                .client()
+                .query_map(
+                    "SELECT id, username, password_hash, is_admin, created_at \
                      FROM users ORDER BY id",
-                params!(),
-            )
-            .await?,
-            tokens: self.client().query_map(
-                "SELECT token_hash, user_id, device, created_at, last_seen_at \
+                    params!(),
+                )
+                .await?,
+            tokens: self
+                .client()
+                .query_map(
+                    "SELECT token_hash, user_id, device, created_at, last_seen_at \
                      FROM tokens ORDER BY token_hash",
-                params!(),
-            )
-            .await?,
-            api_keys: self.client().query_map(
-                "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
+                    params!(),
+                )
+                .await?,
+            api_keys: self
+                .client()
+                .query_map(
+                    "SELECT id, name, key_hash, scopes, created_at, last_used_at, disabled \
                      FROM api_keys ORDER BY id",
-                params!(),
-            )
-            .await?,
-            job_leases: self.client().query_map(
-                "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
+                    params!(),
+                )
+                .await?,
+            job_leases: self
+                .client()
+                .query_map(
+                    "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms \
                      FROM job_leases ORDER BY resource",
-                params!(),
-            )
-            .await?,
-            media_session_requests: self.client().query_map(
-                "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
+                    params!(),
+                )
+                .await?,
+            media_session_requests: self
+                .client()
+                .query_map(
+                    "SELECT user_id, request_id, request_fingerprint, playback_id, state, \
                         claim_expires_at_ms, incarnation_id, owner_node_id, response_json, \
                         updated_at_ms \
                    FROM media_session_requests ORDER BY user_id, request_id",
-                params!(),
-            )
-            .await?,
-            library_channel_session_recipes: self.client().query_map(
-                "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
+                    params!(),
+                )
+                .await?,
+            library_channel_session_recipes: self
+                .client()
+                .query_map(
+                    "SELECT user_id, request_id, incarnation_id, recipe_json, created_at_ms \
                    FROM library_channel_session_recipes ORDER BY user_id, request_id",
-                params!(),
-            )
-            .await?,
-            media_playback_pointers: self.client().query_map(
-                "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
+                    params!(),
+                )
+                .await?,
+            media_playback_pointers: self
+                .client()
+                .query_map(
+                    "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms \
                    FROM media_playback_pointers ORDER BY user_id, playback_id",
-                params!(),
-            )
-            .await?,
-            media_sessions: self.client().query_map(
-                "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
+                    params!(),
+                )
+                .await?,
+            media_sessions: self
+                .client()
+                .query_map(
+                    "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
                         owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
                         publication_ready_at_ms, recipe_json, response_json, \
                         produced_playable_through_ms, fetched_through_ms, \
                         media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms \
                    FROM media_sessions ORDER BY incarnation_id",
-                params!(),
-            )
-            .await?,
-            media_session_terminal_acks: self.client().query_map(
-                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
+                    params!(),
+                )
+                .await?,
+            media_session_terminal_acks: self
+                .client()
+                .query_map(
+                    "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
                         client_instance_id, sequence, request_fingerprint, response_json, \
                         expires_at_ms, updated_at_ms \
                    FROM media_session_terminal_acks ORDER BY session_id",
-                params!(),
-            )
-            .await?,
-            media_session_preparations: self.client().query_map(
-                "SELECT user_id, playback_id, staged_incarnation_id, \
+                    params!(),
+                )
+                .await?,
+            media_session_preparations: self
+                .client()
+                .query_map(
+                    "SELECT user_id, playback_id, staged_incarnation_id, \
                         expected_predecessor_incarnation_id, deadline_ms, \
                         created_at_ms, updated_at_ms \
                    FROM media_session_preparations ORDER BY user_id, playback_id",
-                params!(),
-            )
-            .await?,
+                    params!(),
+                )
+                .await?,
         })
     }
 
