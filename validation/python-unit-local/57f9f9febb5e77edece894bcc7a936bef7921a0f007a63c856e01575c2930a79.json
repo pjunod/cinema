@@ -1,0 +1,25 @@
+{
+  "branch": "codex/s11-retained-nal-sixteen-ledger",
+  "command": "PYTHONPATH=tests/operations PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed test_docs_index.DocsIndexTest.test_every_index_link_resolves test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve",
+  "output": "test_every_docs_markdown_file_is_listed (test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed) ... ok\ntest_every_index_link_resolves (test_docs_index.DocsIndexTest.test_every_index_link_resolves) ... ok\ntest_no_reference_points_at_a_missing_docs_path (test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path) ... ok\ntest_relative_links_between_documents_resolve (test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve) ... ok\n\n----------------------------------------------------------------------\nRan 4 tests in 2.093s\n\nOK\n",
+  "repository": 1,
+  "result": {
+    "count": 4,
+    "errors": 0,
+    "expected_failures": 0,
+    "failed": 0,
+    "skipped": 0,
+    "unexpected_successes": 0
+  },
+  "source_commit": "1455870ea50a8196d3ff6cfc338896a69d1576d5",
+  "suite": "operations",
+  "test_file": "tests/operations/test_docs_index.py",
+  "test_file_sha256": "1cb333314f478d19e257eaa245e563d5bfd559465c261500c592faede7a48162",
+  "test_ids": [
+    "test_docs_index.DocsIndexTest.test_every_docs_markdown_file_is_listed",
+    "test_docs_index.DocsIndexTest.test_every_index_link_resolves",
+    "test_docs_index.DocsIndexTest.test_no_reference_points_at_a_missing_docs_path",
+    "test_docs_index.DocsIndexTest.test_relative_links_between_documents_resolve"
+  ],
+  "version": 1
+}
