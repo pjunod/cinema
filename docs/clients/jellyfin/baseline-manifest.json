@@ -34,8 +34,8 @@
       "sdk_version": "1.7.1",
       "media3_version": "1.8.0",
       "inventory_status": "connected_physical_adb",
-      "flow_status": "blocked_reference_runtime",
-      "player_backend": "not_measured",
+      "flow_status": "reference_direct_encoded_hls_and_controlled_native_fmp4_rendered",
+      "player_backend": "AndroidX Media3 ExoPlayer 1.8.0 (physical runtime log)",
       "version": "0.19.10",
       "version_code": 191099,
       "device_model": "Google TV Streamer",
@@ -83,6 +83,6 @@
       "bytes": 400229792
     }
   ],
-  "evidence_boundary": "Installed physical Android TV build and bootstrap attempt measured; reference Docker runtime stopped before handshake completed. No physical playback acceptance. Infuse flow, client carriers and version-implied calls remain unmeasured.",
+  "evidence_boundary": "Reference playback and labeled controlled native delivery spike are measured; production compatibility adapter and Infuse physical flows remain untested.",
   "fixtures_revised_at_utc": "2026-10-02T20:47:44.046931+00:00"
 }

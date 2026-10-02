@@ -44,8 +44,8 @@ are established separately from interoperability:
 Server provenance is [the official released tag](https://github.com/jellyfin/jellyfin/releases/tag/v10.11.11).
 The Android candidate is [the official release](https://github.com/jellyfin/jellyfin-androidtv/releases/tag/v0.19.10).
 The pinned Android profile branches at server 10.11 for Dolby Vision range
-predicates and declares VTT external/HLS delivery. Actual negotiated predicates,
-requested formats and version-implied ancillary calls still need capture.
+predicates and declares VTT external/HLS delivery. Android negotiation and ancillary calls are captured below; Infuse remains
+unmeasured.
 
 **Synthetic corpus:** an eleven-minute 1280×720, 24 fps H.264/AAC MP4; a
 matching MKV with English/French AAC audio and an English SRT track; external
@@ -53,7 +53,7 @@ SRT cues at 1, 120 and 330 seconds; one local poster. The manifest records file
 hashes and sizes. This corpus supports direct, remux, forced bitrate encode,
 track selection and a pause longer than 300 seconds; it does not satisfy the
 HDR/DV acceptance row. Two episode aliases of the same synthetic MP4 now form the TV corpus without
-duplicating source bytes; their reference library scan is prepared; physical episode browse remains untested. Multiple
+duplicating source bytes; their reference library scan completed; physical episode browse remains untested. Multiple
 pages and the HDR corpus remain to be prepared. The MKV was regenerated after
 a disk-space cleanup; the current manifest records its new container hash.
 
@@ -78,7 +78,10 @@ scratch after retaining minimized fixtures and findings.
 | Client pause over 300 seconds, kill/background, renegotiation without old Stopped | Android reference HLS: 332.6-second same-play resume, abrupt kill then new play without old Stopped. Native VOD reap/background and Infuse untested | Required lifecycle evidence before advancing J0 |
 | Native encoded VOD without copy index; bounded capacity | Service regressions passed, including decoded GET bytes after forward/back restarts | Native seam evidence only; client activation and per-create policy pending |
 | Native unindexed HEVC copy and preparation deduplication | Service regression passed; refused copy and one preparation request, no incomplete VOD session | Native seam evidence only; facade immediate fallback pending |
-| Missing duration, first-minute engine attestation, long-pause real-client resurrection and VOD-only worker/relay propagation | Not exercised through the prototype | Required J0 hard-seam experiments |
+| Missing duration | New copy/encoded regression refuses absent, zero and negative durations without attaching sessions/renditions | Native prerequisite evidence; HTTP/client mapping pending |
+| Native prototype create with positive duration, missing index | Copy: immediate `vod_index_pending`; encoded: 200 in about 0.13 s, closed fMP4 playlist, physical Android renders native fragments | Single-fixture alias spike; production adapter and per-create policy pending |
+| First-minute engine attestation | Ready at 2.931 s; immediate encoded request returned 200 in 1.732 s; media-engine spawn attestation 0.048434 s | Isolated restart measured within first minute; transient/persistent fault outcomes below |
+| Long-pause real-client resurrection and VOD-only worker/relay propagation | Native idle reap measured; recovery fails with 410; worker envelope unproved | Required J0 hard-seam experiments |
 
 ### Physical Android TV — reference recovered; direct and encoded HLS rendered
 
@@ -113,12 +116,10 @@ requests use `master.m3u8`, `main.m3u8` and `/hls1/main/<segment>.ts`.
 Current-app `ExoPlayerImpl` initialization logs identify AndroidX Media3 1.8.0.
 This proves reference-server playback only, not Plurx adapter acceptance.
 
-The physical trace changes two pending design questions: the client requests
-`Stream.subrip`, and its default HLS profile selects TS rather than fMP4.
-A controlled VTT/fMP4 negotiation probe or explicitly named additional
-support is required before freezing the subset. Do not silently equate this
-successful TS reference flow with acceptance of the planned native fMP4
-aliases. Image GETs and static direct-media GETs carried neither header nor
+The default trace requests `Stream.subrip` and selects TS HLS. Controlled
+probes below establish that this pinned client can render VTT and normalized
+fMP4 when negotiation selects them. The default TS flow alone is not evidence
+for native fMP4 aliases. Image GETs and static direct-media GETs carried neither header nor
 query credentials in the observed run; subtitle and HLS requests carried
 `ApiKey` in the query. API calls carried MediaBrowser `Authorization`.
 The client requests `MediaSegments` and `Intros`; semantic empty results
@@ -146,6 +147,66 @@ identity and source-position translation rules. Native replacement/retirement,
 terminal stop, forced idle reap and background behavior still need adapter
 experiments. Playback was stopped after the probe.
 
+### Controlled VTT/fMP4 — native normalization matters
+
+A temporary proxy changed the upstream DeviceProfile, separately recording
+the original client body and the override. VTT-only negotiation over the
+reference TS stream rendered an English cue at the two-second test timestamp.
+The wider fMP4 override first produced an honest server 400: the original
+client's long audio-codec list exceeded the reference query validator's bound.
+Narrowing the probe to H.264/AAC produced valid HTTP 200 media, but Media3
+rejected the copied AAC fragment's negative `tfdt` with
+`readUnsignedLongToLong` / “Top bit not zero: -1008”.
+
+A labeled variant in the dedicated reference container changed only FFmpeg's
+`-avoid_negative_ts disabled` argument to `make_zero`, matching native
+`vodgen.rs` normalization. It rendered fMP4, forward/backward seeks, VTT and
+French audio; a pause lasting more than 325 seconds resumed the same
+PlaySessionId with advancing frames. The minimized observation retains the
+wrapper source/hash and exact probe boundaries. The original reference
+encoder, preset and transparent proxy behavior were restored afterward.
+This is a transport spike, not acceptance of unmodified Jellyfin fMP4 or of
+Plurx's unbuilt negotiation/profile translator.
+
+A second temporary alias forwarded one dedicated native session's exact
+playlist, init and fragment names. Every alias requires a fresh 30-minute
+capability; the proxy retains neither it nor the native credential. Only the
+negotiated PlaybackInfo response is overridden. Android appends the configured
+`/jellyfin` base prefix, so the returned media URL must omit that prefix rather
+than double it. Native H.264/AAC fMP4 rendered visible test-pattern frames.
+This deliberately uses reference identities/events and one native fixture;
+it proves delivery compatibility, not track mapping, auth or a full facade.
+The measured pause lasted **343.445 seconds**, with 22 paused progress reports.
+Operator activity showed the native reader gone, and the native log confirmed
+idle reaping. Resume plus a seek beyond the buffer requested native init and
+playlist bytes, which returned **410 `media_session_ended`**.
+
+This exposes a durable lifecycle gap: the owner lease loop classifies the
+idle-reaped VOD reader as a stale worker and terminalizes its route. Public
+resurrection requires an active durable route, so the existing isolated
+reader-transition regression does not cover the failing owner integration.
+No native control or progress-to-producer touch was synthesized in this
+probe. J0 must settle a bounded passive route-retention policy and update the
+contract before J4; raising the producer TTL would conceal this failure.
+
+### Engine attestation — restart and bounded fault experiment
+
+A warm-storage restart became ready at 2.931 seconds. The first encoded
+request was sent immediately and returned 200 in 1.732 seconds, within the
+first minute; its playlist was closed VOD. The engine histogram measured one
+media spawn attestation at 0.048434 seconds and two stat charges totaling
+0.000462 seconds.
+
+The fault experiment copied the configured encoder into owned scratch, then
+made only its directory temporarily unavailable after successful attestation.
+Four native creates refused with `vod_engine_unattested`; restoring the same
+executable allowed the same request identity to succeed at 4.062 seconds.
+Holding the path unavailable produced seven honest refusals and stopped at
+12.128 seconds under one 15-second deadline. The synchronous harness used a
+finite backoff schedule; it created no detached retry task. This proves the
+native refusal and recovery seam, not an already-built facade retry policy.
+The scratch encoder was restored and the isolated daemon stopped afterward.
+
 ## 3. Compiler loop — available before Rust changes
 
 The local toolchain resolves through `/Users/pjunod/.cargo/bin` with
@@ -168,7 +229,13 @@ one test executed and 3,137 filtered:
 | `encoded_vod_capacity_read_has_one_deadline_and_no_orphaned_wait` | Existing capacity policy has a bounded read deadline and no orphaned wait |
 | `first_play_queues_missing_source_preparation_with_discovery_off` | Missing HEVC copy preparation refuses; repeated first play queues one existing preparation request and attaches no incomplete VOD session |
 
-These are existing native tests, not a new compatibility adapter or a proof
+A new regression,
+`copy_and_encoded_vod_refuse_missing_or_nonpositive_duration_without_attachment`,
+passed with one test executed and 3,138 filtered. It checks absent, zero and
+negative duration on valid copy and encoded recipes, typed
+`vod_source_unsupported`, and no attached sessions or renditions.
+
+The preceding tests are native service evidence, not a new compatibility adapter or a proof
 that an external client will request the resurrection path. The per-create
 VOD-only policy and client-side timing remain unbuilt/unmeasured. Test linking
 reported the macOS compact-unwind size warning; execution passed. Workspace
@@ -188,7 +255,9 @@ syntax passed through the normal tracked hook.
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
 The Android TV reference flow now renders direct and encoded HLS playback.
-Its remaining lifecycle/transport probes and the Infuse device flow remain open.
+Native idle recovery and the Infuse device flow remain open. The Apple TV
+was awakened through its existing Companion pairing and Infuse launched;
+connect/playback remain unproved.
 Unperformed operations remain **not tested**. Do not mark
 J0 complete, start the full facade route build or reduce the required client
 matrix to compensate. No compatibility release, setting graduation or fleet

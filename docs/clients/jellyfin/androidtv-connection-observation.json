@@ -3226,5 +3226,1264 @@
       }
     ],
     "reference_scope_limit": "No idle reap was forced in Jellyfin; paused heartbeats continued. This is external-client timing evidence, not proof of native VOD reader resurrection."
+  },
+  "controlled_negotiation_probes": {
+    "source_tree": "9c5d6bc981de9a85a36b54562e4df11becb20167",
+    "mutations": "Disposable proxy changes only upstream PlaybackInfo profile; normalized variant wraps reference ffmpeg replacing -avoid_negative_ts disabled with make_zero. Official APK unchanged. Encoder preset ultrafast recorded.",
+    "wrapper_sha256": "5b4a944e313c539919f1fea27d98d2fd0473605e4cb6781ee53535e11a9f8e7a",
+    "wrapper_source": "#!/usr/bin/bash\nargs=()\nprevious=''\nfor argument in \"$@\"; do\n  if [[ \"$previous\" == '-avoid_negative_ts' && \"$argument\" == 'disabled' ]]; then\n    args+=('make_zero')\n  else\n    args+=(\"$argument\")\n  fi\n  previous=\"$argument\"\ndone\nexec /usr/lib/jellyfin-ffmpeg/ffmpeg-j0-original \"${args[@]}\"\n",
+    "native_normalization_source": "crates/plurxd/src/vodgen.rs:813",
+    "vtt_rendering": "Visible one-second cue at source frame 2.833s; visible two-minute cue after backward fMP4 seek.",
+    "fmp4_rendering": "Visible moving frames at 15.208s and after forward seek at 145.708s; backward seek rendered 120.292s. Audio switched from index 2 (English) to index 3 (French).",
+    "probes": [
+      {
+        "label": "original_long_audio_codec_csv_rejected",
+        "capture_session": "cef1fefb-f27a-43d2-ab53-79a5e7c34111",
+        "negotiation_request_id": 2,
+        "media_sample": null,
+        "sample_response": null,
+        "error": "audioCodec query length >40",
+        "classification": "controlled reference variant failure; not a universal fMP4 capability verdict"
+      },
+      {
+        "label": "fmp4_negative_tfdt_refused_by_media3",
+        "capture_session": "87fa0532-c81f-436b-995e-0d8a6f65ae32",
+        "negotiation_request_id": 2,
+        "media_sample": {
+          "capture_session": "87fa0532-c81f-436b-995e-0d8a6f65ae32",
+          "id": 8,
+          "kind": "request",
+          "time": 1790976019932,
+          "method": "GET",
+          "path": "/jellyfin/videos/f92cb8897d1227ea45dcd733eb73a5b1/hls1/main/0.mp4?DeviceId=7bbfd17d4355ac7e4954b1f36bcd9adb&MediaSourceId=92f53cee227d101c70591049336cee55&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=2&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=02d365b90bf5205097a73e950feb4df9&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+          "headers": {
+            "user-agent": "okhttp/4.12.0",
+            "accept-encoding": "identity",
+            "credential_carriers": []
+          },
+          "body": null
+        },
+        "sample_response": {
+          "capture_session": "87fa0532-c81f-436b-995e-0d8a6f65ae32",
+          "id": 8,
+          "kind": "response",
+          "time": 1790976019983,
+          "status": 200,
+          "headers": {
+            "content-type": "video/mp4",
+            "content-length": "293815",
+            "credential_carriers": []
+          },
+          "bytes": 293815,
+          "body": null
+        },
+        "error": "Media3 readUnsignedLongToLong/parseTfdt: Top bit not zero: -1008",
+        "classification": "controlled reference variant failure; not a universal fMP4 capability verdict"
+      },
+      {
+        "label": "vtt_over_ts",
+        "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+        "negotiation_request_id": 103,
+        "profile_override": {
+          "TranscodingProfiles": [
+            {
+              "Container": "ts",
+              "Type": "Video",
+              "VideoCodec": "hevc,h264",
+              "AudioCodec": "aac,aac_latm,ac3,alac,dca,dts,eac3,flac,mlp,mp2,mp3,opus,pcm_alaw,pcm_mulaw,pcm_s16le,pcm_s20le,pcm_s24le,truehd,vorbis",
+              "Protocol": "hls",
+              "EnableSubtitlesInManifest": true,
+              "Conditions": []
+            },
+            {
+              "Container": "ts",
+              "Type": "Audio",
+              "VideoCodec": "",
+              "AudioCodec": "aac",
+              "Protocol": "hls",
+              "Conditions": []
+            }
+          ],
+          "SubtitleProfiles": [
+            {
+              "Format": "vtt",
+              "Method": "Embed"
+            },
+            {
+              "Format": "vtt",
+              "Method": "External"
+            },
+            {
+              "Format": "vtt",
+              "Method": "Hls"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "Embed"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "External"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "Hls"
+            }
+          ]
+        },
+        "negotiated_sources": [
+          {
+            "TranscodingContainer": "ts",
+            "TranscodingSubProtocol": "hls",
+            "SubtitleDelivery": [
+              {
+                "Index": 0,
+                "Codec": "subrip",
+                "DeliveryMethod": "External",
+                "DeliveryUrl": "/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E"
+              },
+              {
+                "Index": 4,
+                "Codec": "subrip",
+                "DeliveryMethod": "External",
+                "DeliveryUrl": "/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/4/0/Stream.vtt?ApiKey=%3Credacted%3E"
+              }
+            ]
+          }
+        ],
+        "sample_requests_and_responses": [
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 111,
+            "kind": "request",
+            "time": 1790976325067,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 111,
+            "kind": "response",
+            "time": 1790976325072,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          }
+        ]
+      },
+      {
+        "label": "normalized_fmp4_vtt",
+        "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+        "negotiation_request_id": 162,
+        "profile_override": {
+          "TranscodingProfiles": [
+            {
+              "Container": "mp4",
+              "Type": "Video",
+              "VideoCodec": "h264",
+              "AudioCodec": "aac",
+              "Protocol": "hls",
+              "EnableSubtitlesInManifest": true,
+              "Conditions": []
+            },
+            {
+              "Container": "ts",
+              "Type": "Audio",
+              "VideoCodec": "",
+              "AudioCodec": "aac",
+              "Protocol": "hls",
+              "Conditions": []
+            }
+          ],
+          "SubtitleProfiles": [
+            {
+              "Format": "vtt",
+              "Method": "Embed"
+            },
+            {
+              "Format": "vtt",
+              "Method": "External"
+            },
+            {
+              "Format": "vtt",
+              "Method": "Hls"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "Embed"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "External"
+            },
+            {
+              "Format": "webvtt",
+              "Method": "Hls"
+            }
+          ]
+        },
+        "negotiated_sources": [
+          {
+            "TranscodingContainer": "mp4",
+            "TranscodingSubProtocol": "hls",
+            "SubtitleDelivery": [
+              {
+                "Index": 0,
+                "Codec": "subrip",
+                "DeliveryMethod": "External",
+                "DeliveryUrl": "/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E"
+              },
+              {
+                "Index": 4,
+                "Codec": "subrip",
+                "DeliveryMethod": "External",
+                "DeliveryUrl": "/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/4/0/Stream.vtt?ApiKey=%3Credacted%3E"
+              }
+            ]
+          }
+        ],
+        "sample_requests_and_responses": [
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 167,
+            "kind": "request",
+            "time": 1790976373547,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/-1.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=2&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=b51771b03dc49820ac1adddbf2f376cf&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=0",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 167,
+            "kind": "response",
+            "time": 1790976373797,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "1344",
+              "credential_carriers": []
+            },
+            "bytes": 1344,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 168,
+            "kind": "request",
+            "time": 1790976373814,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/0.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=2&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=b51771b03dc49820ac1adddbf2f376cf&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 168,
+            "kind": "response",
+            "time": 1790976373905,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "292166",
+              "credential_carriers": []
+            },
+            "bytes": 292166,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 170,
+            "kind": "request",
+            "time": 1790976374136,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 170,
+            "kind": "response",
+            "time": 1790976374141,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 215,
+            "kind": "request",
+            "time": 1790976414616,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 215,
+            "kind": "response",
+            "time": 1790976414628,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 216,
+            "kind": "request",
+            "time": 1790976414618,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/-1.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=2&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=b51771b03dc49820ac1adddbf2f376cf&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=0",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 216,
+            "kind": "response",
+            "time": 1790976414635,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "1344",
+              "credential_carriers": []
+            },
+            "bytes": 1344,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 260,
+            "kind": "request",
+            "time": 1790976453373,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 260,
+            "kind": "response",
+            "time": 1790976453387,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 261,
+            "kind": "request",
+            "time": 1790976453375,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/-1.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=2&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=b51771b03dc49820ac1adddbf2f376cf&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=0",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 261,
+            "kind": "response",
+            "time": 1790976453396,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "1344",
+              "credential_carriers": []
+            },
+            "bytes": 1344,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 296,
+            "kind": "request",
+            "time": 1790976469375,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 296,
+            "kind": "response",
+            "time": 1790976469394,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 297,
+            "kind": "request",
+            "time": 1790976469377,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/-1.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=3&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=251337eb9821f78a136e65431e3257d5&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=0",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 297,
+            "kind": "response",
+            "time": 1790976469618,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "1344",
+              "credential_carriers": []
+            },
+            "bytes": 1344,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 298,
+            "kind": "request",
+            "time": 1790976469634,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/0.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=3&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=251337eb9821f78a136e65431e3257d5&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=30000000",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 298,
+            "kind": "response",
+            "time": 1790976469670,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "294638",
+              "credential_carriers": []
+            },
+            "bytes": 294638,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 302,
+            "kind": "request",
+            "time": 1790976469860,
+            "method": "GET",
+            "path": "/jellyfin/videos/fd00466c93abd137de5a893f31ee22ec/hls1/main/-1.mp4?DeviceId=890b165a1840d13507613ea8a9cd3260&MediaSourceId=42e7695abd291b5383cff66b6606cac2&VideoCodec=h264&AudioCodec=copy&AudioStreamIndex=3&VideoBitrate=528000&AudioBitrate=192000&MaxFramerate=24&MaxWidth=4096&MaxHeight=2304&SegmentContainer=mp4&BreakOnNonKeyFrames=False&PlaySessionId=251337eb9821f78a136e65431e3257d5&ApiKey=%3Credacted%3E&EnableSubtitlesInManifest=True&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0b60db84695ac642d1c36fd3928f63df&h264-level=31&h264-videobitdepth=8&h264-profile=constrainedbaseline&h264-maxrefframes=12&aac-audiochannels=8&TranscodeReasons=ContainerBitrateExceedsLimit&runtimeTicks=0&actualSegmentLengthTicks=0",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 302,
+            "kind": "response",
+            "time": 1790976469875,
+            "status": 200,
+            "headers": {
+              "content-type": "video/mp4",
+              "content-length": "1344",
+              "credential_carriers": []
+            },
+            "bytes": 1344,
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 303,
+            "kind": "request",
+            "time": 1790976469863,
+            "method": "GET",
+            "path": "/jellyfin/Videos/fd00466c93abd137de5a893f31ee22ec/42e7695abd291b5383cff66b6606cac2/Subtitles/0/0/Stream.vtt?ApiKey=%3Credacted%3E",
+            "headers": {
+              "user-agent": "okhttp/4.12.0",
+              "accept-encoding": "identity",
+              "credential_carriers": []
+            },
+            "body": null
+          },
+          {
+            "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+            "id": 303,
+            "kind": "response",
+            "time": 1790976469870,
+            "status": 200,
+            "headers": {
+              "content-type": "text/vtt",
+              "content-length": "375",
+              "credential_carriers": []
+            },
+            "bytes": 375,
+            "body": null
+          }
+        ]
+      }
+    ],
+    "boundary": "Transport/format spike, not production facade/native VOD acceptance",
+    "normalized_fmp4_pause": {
+      "seconds": 325.477,
+      "paused_events": 22,
+      "same_play_session_id": true,
+      "paused_position_unchanged": true,
+      "resumed_progress_seconds": 248.805,
+      "trace": [
+        {
+          "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+          "id": 335,
+          "kind": "request",
+          "time": 1790976491041,
+          "method": "POST",
+          "path": "/jellyfin/Sessions/Playing/Progress",
+          "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+            "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+            "accept-encoding": "gzip",
+            "content-length": "347",
+            "credential_carriers": [
+              "authorization"
+            ],
+            "authorization_identity": {
+              "Client": "Jellyfin+Android+TV",
+              "Version": "0.19.10",
+              "DeviceId": "890b165a1840d13507613ea8a9cd3260",
+              "Device": "61034cd394ec2de4e763ffebdf32131d"
+            }
+          },
+          "body": {
+            "CanSeek": true,
+            "ItemId": "fd00466c93abd137de5a893f31ee22ec",
+            "MediaSourceId": "42e7695abd291b5383cff66b6606cac2",
+            "AudioStreamIndex": 3,
+            "SubtitleStreamIndex": 0,
+            "IsPaused": true,
+            "IsMuted": false,
+            "PositionTicks": 1555350000,
+            "PlayMethod": "Transcode",
+            "PlaySessionId": "251337eb9821f78a136e65431e3257d5",
+            "RepeatMode": "RepeatNone",
+            "PlaybackOrder": "Default"
+          }
+        },
+        {
+          "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+          "id": 357,
+          "kind": "request",
+          "time": 1790976806198,
+          "method": "POST",
+          "path": "/jellyfin/Sessions/Playing/Progress",
+          "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+            "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+            "accept-encoding": "gzip",
+            "content-length": "347",
+            "credential_carriers": [
+              "authorization"
+            ],
+            "authorization_identity": {
+              "Client": "Jellyfin+Android+TV",
+              "Version": "0.19.10",
+              "DeviceId": "890b165a1840d13507613ea8a9cd3260",
+              "Device": "61034cd394ec2de4e763ffebdf32131d"
+            }
+          },
+          "body": {
+            "CanSeek": true,
+            "ItemId": "fd00466c93abd137de5a893f31ee22ec",
+            "MediaSourceId": "42e7695abd291b5383cff66b6606cac2",
+            "AudioStreamIndex": 3,
+            "SubtitleStreamIndex": 0,
+            "IsPaused": true,
+            "IsMuted": false,
+            "PositionTicks": 1555350000,
+            "PlayMethod": "Transcode",
+            "PlaySessionId": "251337eb9821f78a136e65431e3257d5",
+            "RepeatMode": "RepeatNone",
+            "PlaybackOrder": "Default"
+          }
+        },
+        {
+          "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+          "id": 358,
+          "kind": "request",
+          "time": 1790976816518,
+          "method": "POST",
+          "path": "/jellyfin/Sessions/Playing/Progress",
+          "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+            "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+            "accept-encoding": "gzip",
+            "content-length": "348",
+            "credential_carriers": [
+              "authorization"
+            ],
+            "authorization_identity": {
+              "Client": "Jellyfin+Android+TV",
+              "Version": "0.19.10",
+              "DeviceId": "890b165a1840d13507613ea8a9cd3260",
+              "Device": "61034cd394ec2de4e763ffebdf32131d"
+            }
+          },
+          "body": {
+            "CanSeek": true,
+            "ItemId": "fd00466c93abd137de5a893f31ee22ec",
+            "MediaSourceId": "42e7695abd291b5383cff66b6606cac2",
+            "AudioStreamIndex": 3,
+            "SubtitleStreamIndex": 0,
+            "IsPaused": false,
+            "IsMuted": false,
+            "PositionTicks": 1555350000,
+            "PlayMethod": "Transcode",
+            "PlaySessionId": "251337eb9821f78a136e65431e3257d5",
+            "RepeatMode": "RepeatNone",
+            "PlaybackOrder": "Default"
+          }
+        },
+        {
+          "capture_session": "de98d21d-cf95-4b53-be78-f5af74c8f7cd",
+          "id": 420,
+          "kind": "request",
+          "time": 1790976909461,
+          "method": "POST",
+          "path": "/jellyfin/Sessions/Playing/Progress",
+          "headers": {
+            "content-type": "application/json; charset=utf-8",
+            "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+            "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+            "accept-encoding": "gzip",
+            "content-length": "348",
+            "credential_carriers": [
+              "authorization"
+            ],
+            "authorization_identity": {
+              "Client": "Jellyfin+Android+TV",
+              "Version": "0.19.10",
+              "DeviceId": "890b165a1840d13507613ea8a9cd3260",
+              "Device": "61034cd394ec2de4e763ffebdf32131d"
+            }
+          },
+          "body": {
+            "CanSeek": true,
+            "ItemId": "fd00466c93abd137de5a893f31ee22ec",
+            "MediaSourceId": "42e7695abd291b5383cff66b6606cac2",
+            "AudioStreamIndex": 3,
+            "SubtitleStreamIndex": 0,
+            "IsPaused": false,
+            "IsMuted": false,
+            "PositionTicks": 2488050000,
+            "PlayMethod": "Transcode",
+            "PlaySessionId": "251337eb9821f78a136e65431e3257d5",
+            "RepeatMode": "RepeatNone",
+            "PlaybackOrder": "Default"
+          }
+        }
+      ],
+      "boundary": "Reference variant; native VOD idle reap not forced"
+    },
+    "restored_after_probe": true
+  },
+  "native_delivery_probe": {
+    "source_tree": "9c5d6bc981de9a85a36b54562e4df11becb20167",
+    "native_toolchain": "rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "fixture": "synthetic eleven-minute H264/AAC MP4; reference metadata override deliberately not track-mapping evidence",
+    "isolation": "loopback-only native daemon and dedicated native account; isolated settings disable rolling recovery and copy preparation; shared fleet untouched",
+    "transport": "capability-protected exact-name proxy aliases for one native VOD session; 30-minute alias expiry; original client profile unchanged; reference PlaybackInfo media response overridden",
+    "copy_create": {
+      "status": 503,
+      "code": "vod_index_pending",
+      "elapsed_seconds": 0.023
+    },
+    "encoded_create": {
+      "status": 200,
+      "elapsed_seconds": 0.129,
+      "copy_index_present": false,
+      "encoder": "software (x264)",
+      "presentation": "closed VOD fMP4",
+      "playlist_endlist": true
+    },
+    "rendering": {
+      "observed": true,
+      "visible_source_timestamp_seconds": 13.833,
+      "fragment_http_status": 200
+    },
+    "pause": {
+      "pause_command_unix_ms": 1790977475200,
+      "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+      "activity_samples": [
+        {
+          "time": 1790977715598,
+          "rows": 1
+        },
+        {
+          "time": 1790977797785,
+          "rows": 0,
+          "kinds": []
+        }
+      ],
+      "resume_command_unix_ms": 1790977818645,
+      "pause_seconds": 343.445,
+      "paused_reports": 22,
+      "resume_native_responses": [
+        {
+          "time": 1790977819533,
+          "status": 410,
+          "filename": "init.mp4",
+          "bytes": 81
+        },
+        {
+          "time": 1790977819559,
+          "status": 410,
+          "filename": "init.mp4",
+          "bytes": 81
+        },
+        {
+          "time": 1790977820581,
+          "status": 410,
+          "filename": "init.mp4",
+          "bytes": 81
+        },
+        {
+          "time": 1790977822596,
+          "status": 410,
+          "filename": "init.mp4",
+          "bytes": 81
+        },
+        {
+          "time": 1790977822813,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977822838,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977823868,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977825886,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977826166,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977826184,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977827209,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        },
+        {
+          "time": 1790977829222,
+          "status": 410,
+          "filename": "index.m3u8",
+          "bytes": 81
+        }
+      ],
+      "result": "failed_media_session_ended_after_confirmed_idle_reap",
+      "proxy_sha256": "3ab1581ffb5362d340d8abce550b2df2e3868e2b1d6166f3763ce67ef2f49dbd"
+    },
+    "recovery": {
+      "result": "failed",
+      "http_status": 410,
+      "code": "media_session_ended",
+      "idle_reap_confirmed": true,
+      "client_requested_new_init_and_playlist": true,
+      "producer_touch_forwarded_from_reference_progress": false,
+      "native_control_synthesized": false,
+      "source_explanation": "vodserve idle reap removes the reader; renewable_session_ids no longer includes its route; media_sessions stale settlement terminalizes the active route; public resurrection requires active durable route"
+    },
+    "selected_sanitized_records": [
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 3,
+        "kind": "probe_response_override",
+        "time": 1790977349351,
+        "probe": "single_fixture_native_vod_alias",
+        "body": {
+          "MediaSources": [
+            {
+              "Protocol": "File",
+              "Id": "0007ae92b91fafeee480293ad01b13cc",
+              "Path": "/media/Movies/J0%20Tracks%20(2026).mkv",
+              "Type": "Default",
+              "Container": "mkv",
+              "Size": 410811287,
+              "Name": "258bbe029c14e7703d4816f9c7bee651",
+              "IsRemote": false,
+              "ETag": "0b60db84695ac642d1c36fd3928f63df",
+              "RunTimeTicks": 6600210000,
+              "ReadAtNativeFramerate": false,
+              "IgnoreDts": false,
+              "IgnoreIndex": false,
+              "GenPtsInput": false,
+              "SupportsTranscoding": true,
+              "SupportsDirectStream": false,
+              "SupportsDirectPlay": false,
+              "IsInfiniteStream": false,
+              "UseMostCompatibleTranscodingProfile": false,
+              "RequiresOpening": false,
+              "RequiresClosing": false,
+              "RequiresLooping": false,
+              "SupportsProbing": true,
+              "VideoType": "VideoFile",
+              "MediaStreams": [
+                {
+                  "Codec": "h264",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "SDR",
+                  "VideoRangeType": "SDR",
+                  "AudioSpatialFormat": "None",
+                  "DisplayTitle": "720p H264 SDR",
+                  "NalLengthSize": "4",
+                  "IsInterlaced": false,
+                  "IsAVC": true,
+                  "BitRate": 4979372,
+                  "BitDepth": 8,
+                  "RefFrames": 1,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Height": 720,
+                  "Width": 1280,
+                  "AverageFrameRate": 24,
+                  "RealFrameRate": 24,
+                  "ReferenceFrameRate": 24,
+                  "Profile": "Constrained Baseline",
+                  "Type": "Video",
+                  "AspectRatio": "16:9",
+                  "Index": 1,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "PixelFormat": "yuv420p",
+                  "Level": 31,
+                  "IsAnamorphic": false
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "eng",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "English - AAC - Mono - Default",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": true,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 2,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                },
+                {
+                  "Codec": "aac",
+                  "Language": "fra",
+                  "TimeBase": "1/1000",
+                  "VideoRange": "Unknown",
+                  "VideoRangeType": "Unknown",
+                  "AudioSpatialFormat": "None",
+                  "LocalizedDefault": "Default",
+                  "LocalizedExternal": "External",
+                  "DisplayTitle": "French - AAC - Mono",
+                  "IsInterlaced": false,
+                  "IsAVC": false,
+                  "ChannelLayout": "mono",
+                  "BitRate": 192000,
+                  "Channels": 1,
+                  "SampleRate": 48000,
+                  "IsDefault": false,
+                  "IsForced": false,
+                  "IsHearingImpaired": false,
+                  "Profile": "LC",
+                  "Type": "Audio",
+                  "Index": 3,
+                  "IsExternal": false,
+                  "IsTextSubtitleStream": false,
+                  "SupportsExternalStream": false,
+                  "Level": 0
+                }
+              ],
+              "MediaAttachments": [],
+              "Formats": [],
+              "Bitrate": 5363372,
+              "RequiredHttpHeaders": {},
+              "TranscodingUrl": "/__j0native/index.m3u8?MediaToken=%3Credacted%3E",
+              "TranscodingSubProtocol": "hls",
+              "TranscodingContainer": "mp4",
+              "DefaultAudioStreamIndex": 3,
+              "DefaultSubtitleStreamIndex": -1,
+              "HasSegments": false
+            }
+          ],
+          "PlaySessionId": "e9635134f95c759396d6ab53fed7314f"
+        }
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 5,
+        "kind": "native_response",
+        "time": 1790977349452,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 6,
+        "kind": "native_response",
+        "time": 1790977349482,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 8,
+        "kind": "native_response",
+        "time": 1790977350494,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 116,
+        "kind": "request",
+        "time": 1790977475161,
+        "method": "POST",
+        "path": "/jellyfin/Sessions/Playing/Progress",
+        "headers": {
+          "content-type": "application/json; charset=utf-8",
+          "user-agent": "Jellyfin Android TV/0.19.10 via jellyfin-sdk-kotlin (OkHttp/4.12.0)",
+          "accept": "application/json, application/octet-stream;q=0.9, */*;q=0.8",
+          "accept-encoding": "gzip",
+          "content-length": "347",
+          "credential_carriers": [
+            "authorization"
+          ],
+          "authorization_identity": {
+            "Client": "Jellyfin+Android+TV",
+            "Version": "0.19.10",
+            "DeviceId": "40baa4730175f009b774187b3489a432",
+            "Device": "2f076174e243988c131a139c1a26620c"
+          }
+        },
+        "body": {
+          "CanSeek": true,
+          "ItemId": "50236063456e57bb005da188b2d9be64",
+          "MediaSourceId": "0007ae92b91fafeee480293ad01b13cc",
+          "AudioStreamIndex": 3,
+          "SubtitleStreamIndex": -1,
+          "IsPaused": true,
+          "IsMuted": false,
+          "PositionTicks": 298300000,
+          "PlayMethod": "Transcode",
+          "PlaySessionId": "d2c4689368a3a8e0df45e6e006953625",
+          "RepeatMode": "RepeatNone",
+          "PlaybackOrder": "Default"
+        }
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 157,
+        "kind": "native_response",
+        "time": 1790977826166,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 158,
+        "kind": "native_response",
+        "time": 1790977826184,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 160,
+        "kind": "native_response",
+        "time": 1790977827209,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      },
+      {
+        "capture_session": "072b8191-869c-40b3-9c36-709d4f96c619",
+        "id": 161,
+        "kind": "native_response",
+        "time": 1790977829222,
+        "status": 410,
+        "bytes": 81,
+        "filename": "index.m3u8",
+        "probe": "single_fixture_native_vod_alias"
+      }
+    ],
+    "boundary": "Actual native byte rendering and failed native durable idle recovery through disposable alias; production facade, auth, track mapping and worker propagation not accepted. Reference override removed after experiment."
+  },
+  "native_restart_probe": {
+    "started_utc": "2026-10-02T21:55:27.236208+00:00",
+    "source_tree": "9c5d6bc981de9a85a36b54562e4df11becb20167",
+    "requests": [
+      {
+        "request_after_start_seconds": 2.9312906669802032,
+        "elapsed_seconds": 1.731718750030268,
+        "status": 200,
+        "code": null,
+        "vod": true,
+        "encoder": "software (x264)",
+        "duration_ms": 660000
+      }
+    ],
+    "ready_after_seconds": 2.9312009169952944,
+    "playlist": {
+      "endlist": true,
+      "bytes": 10369
+    },
+    "engine_metrics": [
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"0.1\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"0.25\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"0.5\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"1\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"2.5\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"5\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"10\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"spawn\",le=\"+Inf\"} 1",
+      "plurx_engine_attestation_seconds_sum{kind=\"media\",phase=\"spawn\"} 0.048434",
+      "plurx_engine_attestation_seconds_count{kind=\"media\",phase=\"spawn\"} 1",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"0.1\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"0.25\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"0.5\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"1\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"2.5\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"5\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"10\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"media\",phase=\"stat\",le=\"+Inf\"} 2",
+      "plurx_engine_attestation_seconds_sum{kind=\"media\",phase=\"stat\"} 0.000462",
+      "plurx_engine_attestation_seconds_count{kind=\"media\",phase=\"stat\"} 2",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"0.1\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"0.25\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"0.5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"1\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"2.5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"10\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"spawn\",le=\"+Inf\"} 0",
+      "plurx_engine_attestation_seconds_sum{kind=\"font\",phase=\"spawn\"} 0",
+      "plurx_engine_attestation_seconds_count{kind=\"font\",phase=\"spawn\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"0.1\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"0.25\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"0.5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"1\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"2.5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"5\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"10\"} 0",
+      "plurx_engine_attestation_seconds_bucket{kind=\"font\",phase=\"stat\",le=\"+Inf\"} 0",
+      "plurx_engine_attestation_seconds_sum{kind=\"font\",phase=\"stat\"} 0",
+      "plurx_engine_attestation_seconds_count{kind=\"font\",phase=\"stat\"} 0"
+    ]
+  },
+  "native_attestation_fault_probe": {
+    "fault": "temporary path unavailability for isolated copied encoder dependency; directory restored without replacing executable",
+    "source_tree": "9c5d6bc981de9a85a36b54562e4df11becb20167",
+    "attempts": [
+      {
+        "after_seconds": 3.008398925885558e-05,
+        "elapsed_seconds": 0.056151082972064614,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 0.3081423750263639,
+        "elapsed_seconds": 0.059544374991673976,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 0.8725477500120178,
+        "elapsed_seconds": 0.04105995799181983,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 1.9171801669872366,
+        "elapsed_seconds": 0.04365487501490861,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 3.965862167009618,
+        "elapsed_seconds": 0.09382150002056733,
+        "status": 200,
+        "code": null
+      }
+    ],
+    "warmup": {
+      "status": 200,
+      "elapsed_seconds": 1.701131375040859
+    },
+    "successful_session_created": true,
+    "total_seconds": 4.062411458988208,
+    "persistent_failure_attempts": [
+      {
+        "after_seconds": 1.7833022866398096e-05,
+        "elapsed_seconds": 0.03819304099306464,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 0.2932326670270413,
+        "elapsed_seconds": 0.041646917001344264,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 0.8375617920537479,
+        "elapsed_seconds": 0.04188712500035763,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 1.879625208035577,
+        "elapsed_seconds": 0.04336483299266547,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 3.928015833022073,
+        "elapsed_seconds": 0.04393987497314811,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 7.976657750026789,
+        "elapsed_seconds": 0.07541325001511723,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      },
+      {
+        "after_seconds": 12.053559958003461,
+        "elapsed_seconds": 0.07423908403143287,
+        "status": 503,
+        "code": "vod_engine_unattested"
+      }
+    ],
+    "persistent_failure_seconds": 12.127823458053172,
+    "persistent_failure_budget_seconds": 15,
+    "persistent_failure_result": "bounded_refusal",
+    "boundary": "Disposable synchronous harness with one 15-second deadline and finite retry schedule; production facade retry/service extraction remains unbuilt."
   }
 }
