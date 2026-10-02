@@ -119,12 +119,12 @@ pub enum DownmixMatrix {
     /// The incumbent unlimited fold. Retained for durable snapshots and for
     /// non-stereo targets (7.1 → 5.1), which this measurement did not cover.
     RequiresLayoutMeasurement { source_channels: u8 },
-    /// `5.1` (back surrounds) → Lo/Ro, limited.
-    #[serde(rename = "lo_ro_5_1_back")]
-    LoRo51Back,
-    /// `5.1(side)` → Lo/Ro, limited.
-    #[serde(rename = "lo_ro_5_1_side")]
-    LoRo51Side,
+    /// `5.1` or `5.1(side)` → Lo/Ro, limited. One row names both surround
+    /// pairs, so it folds the same whichever pair the decoder actually emits
+    /// (an absent channel contributes nothing): a stored spelling that
+    /// disagrees with the decoded layout cannot silently drop the surrounds.
+    #[serde(rename = "lo_ro_5_1")]
+    LoRo51,
     /// `7.1` → Lo/Ro with both surround pairs at −6 dB, limited.
     #[serde(rename = "lo_ro_7_1")]
     LoRo71,
@@ -140,8 +140,7 @@ impl DownmixMatrix {
     /// probe's opaque `layout` spelling.
     pub fn stereo_for(source_channels: u8, layout: Option<&str>) -> Self {
         match (layout, source_channels) {
-            (Some("5.1"), 6) => Self::LoRo51Back,
-            (Some("5.1(side)"), 6) => Self::LoRo51Side,
+            (Some("5.1" | "5.1(side)"), 6) => Self::LoRo51,
             (Some("7.1"), 8) => Self::LoRo71,
             _ => Self::LimitedDefault { source_channels },
         }
@@ -152,8 +151,9 @@ impl DownmixMatrix {
     pub fn filter(&self) -> Option<String> {
         let pan = match self {
             Self::RequiresLayoutMeasurement { .. } => return None,
-            Self::LoRo51Back => "pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR",
-            Self::LoRo51Side => "pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR",
+            Self::LoRo51 => {
+                "pan=stereo|FL=FL+0.707*FC+0.707*SL+0.707*BL|FR=FR+0.707*FC+0.707*SR+0.707*BR"
+            }
             Self::LoRo71 => "pan=stereo|FL=FL+0.707*FC+0.5*SL+0.5*BL|FR=FR+0.707*FC+0.5*SR+0.5*BR",
             Self::LimitedDefault { .. } => {
                 return Some(format!(
@@ -168,7 +168,7 @@ impl DownmixMatrix {
         match self {
             Self::RequiresLayoutMeasurement { source_channels }
             | Self::LimitedDefault { source_channels } => *source_channels > 0,
-            Self::LoRo51Back | Self::LoRo51Side | Self::LoRo71 => true,
+            Self::LoRo51 | Self::LoRo71 => true,
         }
     }
 }
@@ -365,27 +365,27 @@ pub fn resolve_audio(
         .audio_codecs
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(&codec));
-    // A sink's channel count is what its route reproduces, which decides what
+    // A sink describes what the client's route reproduces, which decides what
     // the server *encodes*. A client that decodes the codec itself mixes any
-    // decodable layout down for its own output — exactly what it does with a
-    // direct play — so a copy only has to fit the route when the bitstream is
-    // passed through undecoded to a receiver.
-    let fits_sink = explicit_sink.is_some_and(|sink| {
-        source_channels <= sink.max_channels || profile.claimed_audio_decoders.contains(&codec)
+    // decodable layout down and resamples any rate for its own output —
+    // exactly what it does with a direct play — so channel count and rate
+    // only have to fit when the bitstream is passed through undecoded to a
+    // receiver. A codec the claim does not mention keeps the legacy answer.
+    let decodes = profile.claimed_audio_decoders.contains(&codec);
+    let sink_admits = explicit_sink.is_some_and(|sink| {
+        decodes
+            || (sink.passthrough
+                && source_channels <= sink.max_channels
+                && source.sample_rate.is_some_and(|rate| {
+                    u32::try_from(rate)
+                        .ok()
+                        .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
+                }))
     });
-    let rate_admitted = explicit_sink.is_some_and(|sink| {
-        source.sample_rate.is_some_and(|rate| {
-            u32::try_from(rate)
-                .ok()
-                .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
-        })
-    });
-    let trust_admitted = explicit_sink
-        .is_some_and(|sink| sink.passthrough || profile.claimed_audio_decoders.contains(&codec));
+    let legacy_codec = legacy_claim || explicit_sink.is_none();
     let copy_admitted = route_admits_copy(route, &codec)
         && audio_offset_ms == 0
-        && ((fits_sink && rate_admitted && trust_admitted)
-            || (legacy_claim && codec_allowed && route == AudioRoute::Progressive));
+        && (sink_admits || (legacy_codec && codec_allowed && route == AudioRoute::Progressive));
     if copy_admitted {
         return AudioDelivery {
             action: AudioAction::Copy {
@@ -696,12 +696,9 @@ mod tests {
         };
         assert_eq!(
             fold(laid_out("dts", 6, "5.1(side)")),
-            Some(DownmixMatrix::LoRo51Side)
+            Some(DownmixMatrix::LoRo51)
         );
-        assert_eq!(
-            fold(laid_out("dts", 6, "5.1")),
-            Some(DownmixMatrix::LoRo51Back)
-        );
+        assert_eq!(fold(laid_out("dts", 6, "5.1")), Some(DownmixMatrix::LoRo51));
         assert_eq!(
             fold(laid_out("truehd", 8, "7.1")),
             Some(DownmixMatrix::LoRo71)
@@ -747,12 +744,8 @@ mod tests {
     fn downmix_filters_are_float_matrix_then_minus_four_dbfs_limiter() {
         let limit = "alimiter=limit=0.6309573444801932:level=0:latency=1";
         assert_eq!(
-            DownmixMatrix::LoRo51Side.filter().expect("measured fold"),
-            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*SL|FR=FR+0.707*FC+0.707*SR,{limit}")
-        );
-        assert_eq!(
-            DownmixMatrix::LoRo51Back.filter().expect("measured fold"),
-            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*BL|FR=FR+0.707*FC+0.707*BR,{limit}")
+            DownmixMatrix::LoRo51.filter().expect("measured fold"),
+            format!("aformat=sample_fmts=fltp,pan=stereo|FL=FL+0.707*FC+0.707*SL+0.707*BL|FR=FR+0.707*FC+0.707*SR+0.707*BR,{limit}")
         );
         assert_eq!(
             DownmixMatrix::LoRo71.filter().expect("measured fold"),
@@ -780,11 +773,49 @@ mod tests {
         );
         assert!(delivery.valid_snapshot());
         let snapshot = delivery.byte_identity();
-        assert!(snapshot.contains("lo_ro_5_1_side"), "{snapshot}");
+        assert!(snapshot.contains("lo_ro_5_1"), "{snapshot}");
         if let AudioAction::Encode { channels, .. } = &mut delivery.action {
             *channels = 6;
         }
         assert!(!delivery.valid_snapshot());
+    }
+
+    #[test]
+    fn a_decoding_client_copies_any_rate_and_unmentioned_codecs_keep_the_legacy_copy() {
+        let stereo = claimed(&[("aac", 2)]);
+        for rate in [Some(22_050), Some(96_000), None] {
+            let stream = AudioStream {
+                sample_rate: rate,
+                ..super::tests::source("aac", 2)
+            };
+            let delivery = resolve_audio(Some(&stream), &stereo, AudioRoute::RollingHls, 0);
+            assert!(
+                matches!(delivery.action, AudioAction::Copy { .. }),
+                "{rate:?}: {delivery:?}"
+            );
+        }
+        // FLAC is copyable only on the progressive route; with a claim that
+        // does not mention it, the legacy codec-list rule still applies.
+        let mut flac_listed = claimed(&[("aac", 2)]);
+        flac_listed.audio_codecs.push("flac".into());
+        let flac = resolve_audio(
+            Some(&super::tests::source("flac", 2)),
+            &flac_listed,
+            AudioRoute::Progressive,
+            0,
+        );
+        assert!(matches!(flac.action, AudioAction::Copy { .. }), "{flac:?}");
+        // A passthrough-only sink still needs the exact rate.
+        let mut receiver = claimed(&[("eac3", 6)]);
+        receiver.claimed_audio_decoders.clear();
+        if let Some(sink) = receiver.audio_sink_claims.get_mut("eac3") {
+            sink.passthrough = true;
+        }
+        let stream = AudioStream {
+            sample_rate: Some(44_100),
+            ..super::tests::source("eac3", 6)
+        };
+        assert!(resolve_audio(Some(&stream), &receiver, AudioRoute::RollingHls, 0).transcodes());
     }
 
     #[test]
@@ -908,8 +939,14 @@ mod tests {
     }
 
     #[test]
-    fn copy_requires_known_compatible_source_and_sink_sample_rates() {
-        let profile = claimed(&[("aac", 6)]);
+    fn a_passthrough_copy_requires_known_compatible_source_and_sink_sample_rates() {
+        // A client that decodes resamples (decision 6); an undecoded
+        // bitstream reaches the receiver at its own rate, so it must match.
+        let mut profile = claimed(&[("aac", 6)]);
+        profile.claimed_audio_decoders.clear();
+        if let Some(sink) = profile.audio_sink_claims.get_mut("aac") {
+            sink.passthrough = true;
+        }
         let mut input = source("aac", 6);
         input.sample_rate = None;
         assert!(resolve_audio(Some(&input), &profile, AudioRoute::RollingHls, 0).transcodes());

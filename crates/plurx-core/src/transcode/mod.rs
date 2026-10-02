@@ -4195,7 +4195,7 @@ mod tests {
             index: 1,
             ..Default::default()
         }];
-        let fold = DownmixMatrix::LoRo51Side.filter().expect("measured fold");
+        let fold = DownmixMatrix::LoRo51.filter().expect("measured fold");
         let filters = |args: &[String]| -> Vec<String> {
             args.windows(2)
                 .filter(|pair| pair[0] == "-af")
@@ -4244,7 +4244,7 @@ mod tests {
             AudioRoute::Progressive,
             media.audio_offset_ms,
         );
-        assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo51Side));
+        assert_eq!(audio.downmix, Some(DownmixMatrix::LoRo51));
         let args = copy_pipe_args_with_audio_delivery(
             &media,
             0.0,

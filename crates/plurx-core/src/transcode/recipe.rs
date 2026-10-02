@@ -823,8 +823,8 @@ mod tests {
             source_channels: 6,
         }));
         assert_eq!(unfolded, incumbent, "the incumbent fold's key is unchanged");
-        let side = hash_for(Some(DownmixMatrix::LoRo51Side));
-        let back = hash_for(Some(DownmixMatrix::LoRo51Back));
+        let side = hash_for(Some(DownmixMatrix::LoRo51));
+        let back = hash_for(Some(DownmixMatrix::LoRo71));
         let limited = hash_for(Some(DownmixMatrix::LimitedDefault { source_channels: 6 }));
         assert_ne!(side, incumbent);
         assert_ne!(side, back);
