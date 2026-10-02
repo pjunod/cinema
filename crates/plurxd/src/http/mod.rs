@@ -12105,7 +12105,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.0, StatusCode::OK, "{response:?}");
-        let id: uuid::Uuid = response.1["id"]
+        let id: uuid::Uuid = response.1["import"]["id"]
             .as_str()
             .expect("import ID")
             .parse()
@@ -12130,6 +12130,14 @@ mod tests {
                 .len(),
             1
         );
+        recipient
+            .store
+            .put_setting(
+                plurx_core::store::keys::SERVER_NAME,
+                "Recipient renamed after the ambiguous claim",
+            )
+            .await
+            .expect("rename recipient");
         recipient.sharing = restart(&recipient);
         recipient
             .sharing
