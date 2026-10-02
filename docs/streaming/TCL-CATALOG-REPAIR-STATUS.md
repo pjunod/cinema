@@ -148,3 +148,8 @@ SQLite 91 and replicated 69 before the final test pass.
 Corrective-history audit passed after the anchor fix. Main subsequently added
 only the HLS request-cleanup timing regression adjustment; it is integrated
 before the next fast-lane push. Previously passing focused tests are unaffected.
+
+Before the next push, regenerated the surface embed and documentation from
+the shared fixture (`node scripts/player-contract-table --embed` and `--write`).
+The web values are unchanged; the generated formatting and documented retry
+code now match the fixture. Current-base all-target Clippy passed.
