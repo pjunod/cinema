@@ -5,7 +5,7 @@
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
 playback acceptance. Work uses an isolated clone and the current Forgejo main
-(`bfdc4930b`) as its base. The original checkout is untouched.
+(`955e1551e`) as its current base; initial base was `bfdc4930b`. The original checkout is untouched.
 
 ## 1. Delivery — commits batched for one main review
 
@@ -83,3 +83,14 @@ Compiler checks pass on the current implementation. Boundary, legacy, binding
 and expired-budget regressions are written and have not run. Apple compilation
 first hit sandboxed macro/simulator services; an unsandboxed compile is underway.
 No review or test acceptance is claimed.
+
+Main integration, 2026-10-02: preserve main's SQLite v90 and replicated v68 DV
+request provenance migrations, then append planning generation as SQLite v91
+and replicated v69. The combined source compiled before review. Android app
+and test sources and both Apple platforms compiled without running tests.
+
+The work is one batched repair PR. The local effort branch retains the original
+integration base; no independently merged task PRs are being created. Main's
+fast lane includes its fast Rust unit/SQLite lane. It runs only after the
+adversarial review, alongside focused feature-enabled generation evidence.
+Full cluster qualification and device deployment remain separate acceptance.

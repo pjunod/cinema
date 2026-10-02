@@ -152,8 +152,10 @@ const ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION: i64 = 66;
 const ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
 const PREPARATION_INDEX_SCHEMA_VERSION: i64 = 67;
 const PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION;
-const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 68;
-const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
+const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
+const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
+const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
+const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
@@ -3119,6 +3121,23 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self.client().txn(vec![
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN.to_owned(), params!()),
+                        ("DROP TRIGGER dv_queue_admission_settings_ai".to_owned(), params!()),
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_TRIGGER.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(DV_REQUEST_PROVENANCE_SCHEMA_VERSION, now, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     for result in
@@ -5183,6 +5202,7 @@ fn schema_migration_action(
         | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE
         | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
+        | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
         | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }

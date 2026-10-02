@@ -591,3 +591,146 @@ mod tests {
         assert_eq!(super::candidate_heights(Some(4320)).last(), Some(&2160));
     }
 }
+
+#[cfg(test)]
+mod snapshot_catalog_regression {
+    use super::*;
+    #[tokio::test]
+    async fn tcl_fixture_catalog_uses_frozen_inputs_and_keeps_executable_rungs() {
+        use plurx_core::{
+            domain::{ItemKind, LibraryKind, NewItem, NewLibrary},
+            store::SqliteStore,
+        };
+        let j: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../docs/evidence/tcl-candidate-catalog-source-2026-10-02.json"
+        ))
+        .expect("retained source facts");
+        let mut p = plurx_core::scan::probe::parse_probe_json(&j["probe"]);
+        p.max_cll = Some(2259);
+        p.max_fall = Some(183);
+        p.mastering_max_luminance = Some(1000);
+        let store: Arc<dyn Store> =
+            Arc::new(SqliteStore::open_in_memory().expect("incident fixture operation"));
+        let l = store
+            .create_library(&NewLibrary {
+                name: "incident".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("incident fixture operation");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: l.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "fixture".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("incident fixture operation");
+        let id = store
+            .upsert_file(item, "/sanitized/movie.mkv", 18986891679, 1790349395, &p)
+            .await
+            .expect("incident fixture operation");
+        let file = store
+            .get_file(id)
+            .await
+            .expect("incident fixture operation")
+            .expect("incident fixture operation");
+        let base = crate::test_tempdir().expect("incident fixture operation");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store),
+            base.path().join("work"),
+            EncoderCaps {
+                vaapi: true,
+                ..Default::default()
+            },
+            Pipeline::Cpu,
+        )
+        .with_cache(
+            base.path().join("cache"),
+            "incident-ffmpeg".into(),
+            "incident".into(),
+        )
+        .with_decoders(vec!["hevc".into()]);
+        let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(serde_json::json!({"v":2,"video":[{"codec":"h264","decode":true,"present":["sdr"]}],"audio":["aac"],"transports":["hls"]})).expect("incident fixture operation");
+        let planning = store
+            .playback_planning_snapshot(id, &QUALITY_PLANNING_KEYS)
+            .await
+            .expect("incident fixture operation")
+            .expect("incident fixture operation");
+        assert_eq!(planning.file.id, file.id);
+        let rows = manager
+            .quality_candidates_from_snapshot_progress(
+                &planning,
+                &caps,
+                Some(1),
+                0,
+                None,
+                Presentation::Vod,
+                None,
+                None,
+                None,
+            )
+            .await;
+        // A later settings revision must not leak into this enumeration.
+        store
+            .put_setting(keys::HWACCEL, "software")
+            .await
+            .expect("incident fixture operation");
+        store
+            .put_setting(keys::TRANSCODE_RATE_MODE, "quality")
+            .await
+            .expect("incident fixture operation");
+        let repeated = manager
+            .quality_candidates_from_snapshot_progress(
+                &planning,
+                &caps,
+                Some(1),
+                0,
+                None,
+                Presentation::Vod,
+                None,
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            repeated.iter().map(|row| row.id).collect::<Vec<_>>()
+        );
+        let heights: Vec<_> = rows.iter().map(|row| row.target_height).collect();
+        for height in [144, 240, 360, 480, 720, 1080, 1918] {
+            assert!(
+                heights.contains(&height),
+                "missing incident rung {height}: {heights:?}"
+            );
+        }
+        for selected in &rows {
+            let followup = manager
+                .quality_candidates_from_snapshot_progress(
+                    &planning,
+                    &caps,
+                    Some(1),
+                    0,
+                    None,
+                    Presentation::Vod,
+                    None,
+                    None,
+                    Some(selected),
+                )
+                .await;
+            assert!(
+                followup
+                    .iter()
+                    .any(|row| row.id == selected.id && row.decoder_compatible),
+                "selected recipe must survive a follow-up without a synthetic capability document"
+            );
+        }
+        assert!(rows.iter().all(|row| row.decoder_compatible));
+    }
+}

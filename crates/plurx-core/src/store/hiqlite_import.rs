@@ -680,6 +680,7 @@ const TABLES: &[TablePlan] = &[
             "queued_at_ms",
             "finished_at_ms",
             "recovery_guard_id",
+            "requested_manually",
         ],
         order_by: "file_id",
         minimum_schema: 43,
@@ -2879,6 +2880,8 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 "NULL".to_owned()
             } else if table.name == "background_transcode_artifacts" && *column == "producer_payload" && schema_version < 82 {
                 "NULL".to_owned()
+            } else if table.name == "dv_conversions" && *column == "requested_manually" && schema_version < 90 {
+                "0".to_owned()
             } else if table.name == "files" && *column == "downloaded_subtitles" && schema_version < 67 {
                 "'[]'".to_owned()
             } else if table.name == "files" && *column == "field_order" && schema_version < 64 {
@@ -3465,9 +3468,9 @@ mod tests {
             .find(|table| table.name == "dv_conversions")
             .copied()
             .expect("conversion table plan");
-        assert!(value_projection(table, 43, false).ends_with("finished_at_ms, NULL"));
+        assert!(value_projection(table, 43, false).ends_with("finished_at_ms, NULL, 0"));
         assert!(value_projection(table, SQLITE_SCHEMA_VERSION, false)
-            .ends_with("finished_at_ms, recovery_guard_id"));
+            .ends_with("finished_at_ms, recovery_guard_id, requested_manually"));
     }
 
     /// A source below v46 has no attempt history, and the import must carry

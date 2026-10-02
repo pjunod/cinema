@@ -494,19 +494,24 @@ function dvFileActionMount(file){
   return `<div class="dv-file-action px-admin th-admin" id="dv-file-${id}" aria-live="polite"><span class="muted">Checking on-disk conversion…</span></div>`;
 }
 function dvConversionStateHtml(file,snapshot){
-  const conversion=snapshot.conversion;
+  let conversion=snapshot.conversion;
   const capability=snapshot.capabilities||{};
   const id=exactWireId(file);
   const mode=(snapshot.library_modes||{})[String(file.library_id)]||"off";
   const modeOff=mode==="off";
   const modeReason="library Dolby Vision conversion mode is Off — choose Manual or Automatic in Settings → Libraries";
+  // A historical automatic failure is not an outstanding manual request.
+  // Keep recovery information visible even when policy hides the old error.
+  const hiddenFailure=conversion?.state==="failed"&&(modeOff||(mode==="manual"&&conversion.requested_manually!==true));
+  const recovery=hiddenFailure?dvRecoveryGuardStatusHtml(conversion.recovery_guard):"";
+  if(hiddenFailure) conversion=null;
   if(!conversion){
-    if(!snapshot.eligible) return "";
+    if(!snapshot.eligible) return recovery?`<div class="muted" style="margin-top:8px">Recovery status${recovery}</div>`:"";
     const reason=modeOff?modeReason
       :capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
     return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
       <button class="ghost sm" aria-label="Convert file ${esc(id)} from Dolby Vision Profile 7 to Profile 8.1 on disk" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
-      ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
+      ${reason?`<span class="${modeOff?"muted":"problem"}">${modeOff?"":"Unavailable: "}${esc(reason)}</span>`:""}${recovery}</div>`;
   }
   const state=conversion.state;
   const bytes=(conversion.bytes_before||conversion.bytes_after)

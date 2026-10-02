@@ -2,7 +2,7 @@
 use axum::extract::{Path, State};
 use axum::Json;
 use plurx_core::domain::{MediaFile, SubtitleStream};
-use plurx_core::store::SubtitleSourcePublication;
+use plurx_core::store::{DvConversion, DvConversionState, SubtitleSourcePublication};
 use plurx_core::tracks::lang_matches;
 use serde_json::{json, Value};
 
@@ -12,6 +12,29 @@ use crate::subtitle_source::TrackKind;
 
 fn fact(state: &str, detail: impl Into<String>) -> Value {
     json!({"state":state,"detail":detail.into()})
+}
+
+fn dv_preparation_fact(
+    conversion: Option<&DvConversion>,
+    mode: &str,
+    profile: Option<i64>,
+) -> Value {
+    if mode == "off" {
+        return fact("off", "On-disk Dolby Vision conversion is disabled");
+    }
+    let conversion = conversion.filter(|c| {
+        c.state != DvConversionState::Failed || mode != "manual" || c.requested_manually
+    });
+    match conversion {
+        Some(c) => {
+            json!({"state":c.state,"detail":"On-disk Dolby Vision conversion","updated_at_ms":c.finished_at_ms.unwrap_or(c.queued_at_ms)})
+        }
+        None if profile != Some(7) => fact(
+            "not_applicable",
+            "This file does not require Profile 7 conversion",
+        ),
+        None => fact("on_demand", "Optional on-disk Profile 7 → 8.1 conversion"),
+    }
 }
 
 /// The configured language still matters when automatic playback chooses Off.
@@ -342,19 +365,7 @@ pub async fn status(
         .get(&item.library_id)
         .map(|m| m.as_str())
         .unwrap_or("off");
-    let dv = match conversion {
-        Some(c) => {
-            json!({"state":c.state,"detail":"On-disk Dolby Vision conversion","updated_at_ms":c.finished_at_ms.unwrap_or(c.queued_at_ms)})
-        }
-        None if file.dolby_vision.profile != Some(7) => fact(
-            "not_applicable",
-            "This file does not require Profile 7 conversion",
-        ),
-        None => fact(
-            if mode == "off" { "off" } else { "on_demand" },
-            "Optional on-disk Profile 7 → 8.1 conversion",
-        ),
-    };
+    let dv = dv_preparation_fact(conversion.as_ref(), mode, file.dolby_vision.profile);
     let automatic = state
         .store
         .get_setting("subtitles.automatic")
@@ -411,6 +422,61 @@ pub async fn status(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dv_preparation_respects_policy_and_manual_attempt_provenance() {
+        let mut conversion = DvConversion {
+            file_id: 1,
+            state: DvConversionState::Failed,
+            requested_manually: false,
+            el_type: None,
+            original_path: None,
+            bytes_before: None,
+            bytes_after: None,
+            error: Some("old automatic failure".into()),
+            queued_at_ms: 1,
+            finished_at_ms: Some(2),
+            recovery_guard: None,
+        };
+        for manual in [false, true] {
+            conversion.requested_manually = manual;
+            assert_eq!(
+                dv_preparation_fact(Some(&conversion), "off", Some(7))["state"],
+                "off"
+            );
+            assert_eq!(
+                dv_preparation_fact(Some(&conversion), "manual", Some(7))["state"],
+                if manual { "failed" } else { "on_demand" }
+            );
+            assert_eq!(
+                dv_preparation_fact(Some(&conversion), "auto", Some(7))["state"],
+                "failed"
+            );
+        }
+        for state in [
+            DvConversionState::Queued,
+            DvConversionState::Running,
+            DvConversionState::Verified,
+            DvConversionState::Committed,
+        ] {
+            conversion.state = state;
+            assert_eq!(
+                dv_preparation_fact(Some(&conversion), "off", Some(7))["state"],
+                "off"
+            );
+            assert_eq!(
+                dv_preparation_fact(Some(&conversion), "manual", Some(7))["state"],
+                json!(state)
+            );
+        }
+        assert_eq!(
+            dv_preparation_fact(None, "manual", Some(7))["state"],
+            "on_demand"
+        );
+        assert_eq!(
+            dv_preparation_fact(None, "manual", Some(8))["state"],
+            "not_applicable"
+        );
+    }
     #[test]
     fn subtitle_indicator_follows_configured_default_before_all_tracks() {
         assert_eq!(

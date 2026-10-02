@@ -1015,7 +1015,10 @@ async fn background_subtitles_reconcile_historical_ready_demand_without_overwrit
         let connection =
             rusqlite::Connection::open(&path).expect("subtitle reconciliation fixture");
         connection
-            .execute_batch("DROP TRIGGER background_subtitle_settled;")
+            .execute_batch(
+                "DROP TRIGGER background_subtitle_settled;
+                ALTER TABLE dv_conversions DROP COLUMN requested_manually;",
+            )
             .expect("subtitle reconciliation fixture");
         connection
             .execute_batch(super::background_jobs_subtitle::SCHEMA)
