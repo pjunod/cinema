@@ -140,6 +140,7 @@ const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
 const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
 const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
 const CONTROL_RATE_PER_SESSION: u32 = 8;
+const QUALITY_RATE_PER_SESSION: u32 = 32;
 const CONTROL_RATE_GLOBAL: u32 = 512;
 /// Maximum authenticated clock disagreement accepted on a relayed resource
 /// deadline. This is deliberately small: it is only tolerance for wall-clock
@@ -1763,6 +1764,7 @@ pub(crate) struct MediaSessionCoordinator {
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, LeaseSeed>>>,
     control_admission: Arc<StdMutex<ControlAdmission>>,
+    quality_admission: Arc<StdMutex<ControlAdmission>>,
     route_cache_metrics: Arc<RouteCacheMetrics>,
     /// Test-only: while set, a lookup that reaches the Store read waits here
     /// until the semaphore is closed, so a test can hold one read open and
@@ -1816,6 +1818,15 @@ impl Default for ControlAdmission {
 
 impl ControlAdmission {
     fn admit(&mut self, now: Instant, session_id: &str) -> Result<(), u32> {
+        self.admit_with_limit(now, session_id, CONTROL_RATE_PER_SESSION)
+    }
+
+    fn admit_with_limit(
+        &mut self,
+        now: Instant,
+        session_id: &str,
+        per_session: u32,
+    ) -> Result<(), u32> {
         if now.duration_since(self.window_started) >= CONTROL_RATE_WINDOW {
             self.window_started = now;
             self.admitted = 0;
@@ -1852,7 +1863,7 @@ impl ControlAdmission {
             entry.window_started = now;
             entry.admitted = 0;
         }
-        if entry.admitted >= CONTROL_RATE_PER_SESSION {
+        if entry.admitted >= per_session {
             let remaining =
                 CONTROL_RATE_WINDOW.saturating_sub(now.duration_since(entry.window_started));
             return Err(u32::try_from(remaining.as_millis())
@@ -1890,6 +1901,7 @@ impl MediaSessionCoordinator {
             ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
+            quality_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             route_cache_metrics: Arc::new(RouteCacheMetrics::default()),
             #[cfg(test)]
             route_store_gate: Arc::new(StdMutex::new(None)),
@@ -1939,6 +1951,15 @@ impl MediaSessionCoordinator {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         admission.admit(now, session_id)
+    }
+
+    /// Fragment reservations and completed facts have a separate bounded
+    /// budget: prebuffering must not consume the manual intent/lease budget.
+    pub(crate) fn admit_quality_schedule(&self, session_id: &str) -> Result<(), u32> {
+        self.quality_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admit_with_limit(Instant::now(), session_id, QUALITY_RATE_PER_SESSION)
     }
 
     /// Cache active routes and short negative answers. Deterministic query
@@ -8235,6 +8256,54 @@ mod tests {
             spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES,
             "the admission map itself must stay bounded"
         );
+    }
+
+    #[test]
+    fn quality_reservation_burst_keeps_manual_control_budget_independent() {
+        let started = Instant::now();
+        let mut quality = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        let mut manual = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for _ in 0..QUALITY_RATE_PER_SESSION {
+            assert_eq!(
+                quality.admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(quality
+            .admit_with_limit(started, "film", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        for _ in 0..CONTROL_RATE_PER_SESSION {
+            assert_eq!(manual.admit(started, "film"), Ok(()));
+        }
+        assert!(manual.admit(started, "film").is_err());
+        assert_eq!(
+            quality.admit_with_limit(
+                started + CONTROL_RATE_WINDOW,
+                "film",
+                QUALITY_RATE_PER_SESSION
+            ),
+            Ok(())
+        );
+        let mut spray = ControlAdmission {
+            window_started: started,
+            ..Default::default()
+        };
+        for index in 0..CONTROL_RATE_GLOBAL {
+            assert_eq!(
+                spray.admit_with_limit(started, &index.to_string(), QUALITY_RATE_PER_SESSION),
+                Ok(())
+            );
+        }
+        assert!(spray
+            .admit_with_limit(started, "extra", QUALITY_RATE_PER_SESSION)
+            .is_err());
+        assert!(spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES);
     }
 
     #[test]

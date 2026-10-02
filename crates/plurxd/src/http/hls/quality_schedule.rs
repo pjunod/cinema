@@ -85,6 +85,13 @@ async fn quality_schedule_routed(
     expected_owner: Option<&str>,
     deadline_unix_ms: i64,
 ) -> Response {
+    if state
+        .media_sessions
+        .admit_quality_schedule(session)
+        .is_err()
+    {
+        return (StatusCode::TOO_MANY_REQUESTS, [(header::RETRY_AFTER, "1")]).into_response();
+    }
     let route = match state.media_sessions.control_route(session).await {
         Ok(Some(route)) => route,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -121,9 +128,6 @@ async fn quality_schedule_routed(
         if let Some(refusal) = control_owner_refusal(&route, Some(request.control_epoch)) {
             return refusal;
         }
-    }
-    if state.media_sessions.admit_control(session).is_err() {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     if route.owner_node_id != state.node_id {
         let relay = QualityScheduleRelayRequest {

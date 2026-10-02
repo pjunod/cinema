@@ -108,3 +108,16 @@ test('normal ninety-second video and AAC buffers fit the bounded receipt',()=>{
  const extra=segments('e'.repeat(64),48000,200).slice(0,39);
  response.ledger.shared_audio_reserved.push(...extra);assert.equal(valid(response,request),false);
 });
+
+
+test('rate refusal waits for admission before retrying the identical reservation',async()=>{
+ const events=[],requests=[];
+ const client=protocol(bootstrap,attachment,async(url,request)=>{
+  events.push('send');requests.push(clone(request));
+  if(requests.length===1)throw Object.assign(new Error('burst'),{status:429,retryAfterMs:1000});
+  return answer(request,requests.length);
+ },async ms=>events.push(ms));
+ await client.transition(uuid(4),{kind:'prepare',intent_revision:1,target_rendition_id:interval.rendition_id},{timescale:24000,through_tick:0});
+ assert.deepEqual(events,['send',1000,'send']);assert.deepEqual(requests[0],requests[1]);
+ assert.equal(client.pending,null);assert.equal(client.ledger.accepted_sequence,1);
+});

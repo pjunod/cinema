@@ -92,7 +92,12 @@ async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeout
   try{
     const response=await fetch(url,{method:body?'POST':'GET',signal:controller.signal,
       cache:'no-store',headers:body?{'content-type':'application/json'}:{},body:body?JSON.stringify(body):null});
-    if(!response.ok)throw Object.assign(new Error(`Continuous quality request refused (${response.status})`),{status:response.status});
+    if(!response.ok){
+      const retry=response.headers.get('retry-after');
+      const retryAfterMs=retry!=null&&/^\d+$/.test(retry)?Math.min(1000,Number(retry)*1000):1000;
+      throw Object.assign(new Error(`Continuous quality request refused (${response.status})`),
+        {status:response.status,retryAfterMs});
+    }
     const declared=response.headers.get('content-length');
     if(declared!=null&&(!/^\d+$/.test(declared)||Number(declared)>limit))throw new Error('Continuous quality response bound');
     if(!response.body||!response.body.getReader)throw new Error('Continuous quality response stream missing');
@@ -106,7 +111,8 @@ async function continuousQualityFetch(url,body,{signal=null,limit=270336,timeout
     if(reader){try{await reader.cancel();}catch(e){}reader.releaseLock();}
   }
 }
-function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQualityFetch){
+function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQualityFetch,
+  wait=ms=>new Promise(resolve=>setTimeout(resolve,ms))){
   if(!bootstrap||!continuousQualityIdentity(bootstrap.generation)||!continuousQualityInteger(bootstrap.control_epoch,1)
     ||!continuousQualityIdentity(attachment.client_instance_id)||!continuousQualityIdentity(attachment.attachment_id)
     ||!continuousQualityArtifact(attachment.family_id)||typeof attachment.lifetime_id!=='string'
@@ -124,7 +130,10 @@ function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQuali
       if(!continuousQualityResponse(response,request)||response.revision<revision)throw new Error('Continuous quality response identity');
       revision=response.revision;ledger=response.ledger;
       sequence=Math.max(sequence,ledger.accepted_sequence);pending=null;return response;
-    }catch(error){failure=error;if(error.status&&error.status<500&&error.status!==429)break;}
+    }catch(error){
+      failure=error;if(error.status&&error.status<500&&error.status!==429)break;
+      if(error.status===429&&attempt===0)await wait(Math.max(1,Math.min(1000,error.retryAfterMs||1000)));
+    }
     throw failure;
   }
   function own(action){

@@ -1128,7 +1128,8 @@ from legacy control readers. The operation object is tagged by `kind` and
 unknown fields and operations fail strict decoding. No production discovery
 advertises continuous support yet: serving and client adapters remain work.
 
-One generation and attachment retain 16 transactions, 64 reserved intervals,
+One generation and attachment initially retained 16 transactions and 64
+reserved intervals (128 since §10.75),
 256 MiB of reserved media, and 128 replay receipts. The complete durable JSON
 is capped at 128 KiB. Exact receipt replay lasts 90 seconds; expiry removes
 replay copies, never unresolved reserved intervals. Refusal applies atomically
@@ -2639,3 +2640,21 @@ completed network payload behind selection and models hls.js's stats-based
 loading reset, requiring Idle and no outgoing exposure or current error.
 The failed receipt is `continuous-chrome-full-linux-aac.json`; it is retained
 without a continuity claim. Final replay will use the current integrated tree.
+
+
+### 10.82 Reservation bursts have independent bounded admission
+
+The exact `6462b41e3` diagnostic replay captured HTTP 429 before its first
+selection completed: reservation windows, Scheduled, Appended and Presented
+facts shared the eight-per-second manual control budget. Immediate retries
+hit the same window; loading stopped and recovery replaced the attachment.
+The retained receipt and ledger capture are failed diagnostic evidence.
+
+Quality scheduling now has a separate 32-per-second session budget, a
+512-per-second global budget and the existing bounded map and 64-owner pool.
+Admission precedes route lookup. Manual controls retain their own eight-request
+budget. Rate refusal carries Retry-After; the client waits up to one second
+before its one identical retry, preserving sequence and pending ownership.
+Authored regressions cover isolated budgets, global spray refusal and the
+ordered delayed retry. They await the final fast lane; no unit execution is
+claimed. Browser replay remains required on the committed candidate.
