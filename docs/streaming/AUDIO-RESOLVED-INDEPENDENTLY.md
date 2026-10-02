@@ -419,6 +419,14 @@ Acceptance: the four observations recorded in the PR; the receiver reads a
 multichannel format in step 1; no second live session in Activity after
 step 2.
 
+**2026-10-02 client claim built (claude-opus-5-5):** each capability snapshot
+reads `AVAudioSession` once — `maximumOutputNumberOfChannels` and whether an
+output port is HDMI — and the v2 document carries `audio_sinks`: every codec
+AVPlayer decodes reaches the route's channel count (stereo floor, 7.1 cap),
+and AC-3/E-AC-3 are passthrough only on a multichannel HDMI route. The claim
+is logged with the capability line. The four observations above remain owed
+on the living-room Apple TV.
+
 ### 5.4 M4 — the downmix matrix, measured
 
 Fixtures: three 5.1 clips (dialogue-centred drama scene, action scene with
@@ -446,6 +454,25 @@ source/PCM hashes, actual argv and numeric JSON are retained. This is not
 the three real-content scene comparisons, 7.1 content, listening notes,
 device evidence, production argv pinning, or complete M4 acceptance.
 
+**2026-10-02 real-content measurement and shipped fold (claude-opus-5-5):**
+the [real-content receipt](AUDIO-DOWNMIX-REAL-CONTENT-QUALIFICATION.md)
+measured nine film windows (DTS-HD MA, TrueHD 7.1, E-AC-3, AC-3, AAC). The
+incumbent `-ac 2` fold already met the −3 dB centre split on most sources but
+was unlimited — decoded AAC reached full scale on three windows — and applied
+AC-3/E-AC-3 stored downmix levels (dialogue 1.5 dB low on both E-AC-3 titles).
+The §3.4 string as written hard-clips inside `pan` on 32-bit decoders, and the
+synthetic −2 dBFS ceiling failed after AAC overshoot. `DownmixMatrix` now
+carries `lo_ro_5_1_back`, `lo_ro_5_1_side`, `lo_ro_7_1` and `limited_default`:
+float conversion, the named matrix chosen only from the source's own layout
+spelling with a matching channel count, and one −4 dBFS look-ahead limiter;
+other layouts take the float default fold with the same limiter. Each fold's
+exact filter chain feeds `plan_digest`, so folded keys move once and any later
+gain change moves them again; unfolded and incumbent keys do not move. The
+fold and the A/V correction travel as one `-af` (ffmpeg keeps only the last),
+and encoded VOD runs the fold ahead of its sample-lattice trim — generation
+joins are bit-identical in pre-AAC PCM. Non-stereo targets keep the incumbent
+fold. Still owed: listening notes on the three heavily limited windows.
+
 ### 5.5 M5 — Android and web claims
 
 Each client slice remains a logical commit in this plan PR, with the device
@@ -453,7 +480,21 @@ evidence Q11 requires (Shield on the same AVR; a phone on Bluetooth;
 Safari/Chrome on the laptop). The server needs no change.
 
 Acceptance: per client, the M3 observations repeated; a phone claim of 2
-channels produces the M4 stereo matrix path.
+channels produces the M4 stereo matrix path whenever the server encodes for it
+(a DTS/TrueHD source, an A/V offset, or a full transcode of undecodable audio);
+decodable AAC/AC-3/E-AC-3 still direct-plays or copies under decision 6.
+
+**2026-10-02 client claims built (claude-opus-5-5):** Android spells
+`audio_sinks` from the probes it already had — the HDMI sink's PCM channel
+count (`liveSinkFacts`, stereo on a handset or panel speakers) for decoded
+codecs, and Media3 `AudioCapabilities` bitstreams as AC-3/E-AC-3 passthrough
+at the format's channel count. The web client reads
+`AudioContext.destination.maxChannelCount` once at boot (closing the probe
+context) and claims that count for the codecs it decodes, never
+passthrough. Under decision 6 a phone's stereo claim still direct-plays and
+copies decodable 5.1; the M4 stereo fold applies whenever the server encodes
+for it (DTS/TrueHD sources, offset correction, full transcodes of
+undecodable audio). Device observations remain owed.
 
 ## 6. Verification and rollout
 
@@ -502,18 +543,33 @@ channels produces the M4 stereo matrix path.
    wins until a client supplies measured route evidence.
 3. **Unmeasured downmixes carry a requirement, not invented gains.** The pure
    decision reports `requires_layout_measurement` with the source channel
-   count. M2 must not turn that into FFmpeg argv until M4 supplies the source
+   count. *(2026-10-02: stereo folds are now measured — see §5.4; only
+   non-stereo targets keep this requirement.)* M2 must not turn that into FFmpeg argv until M4 supplies the source
    layout and measured matrix. Source and sink sample-rate facts now fail
    closed before a copy is admitted; missing evidence takes the encode
    fallback.
 4. **No feature gate or setting is added.** The server accepts and reports an
-   evidence-bearing claim, but no shipped client sends one. A Developer toggle
+   evidence-bearing claim; from 2026-10-02 the Apple, Android and web clients
+   send one. A Developer toggle
    would imply an enablement choice where the remaining boundary is physical
    evidence, not preference.
 5. **Decoder, sink and passthrough are separate authority.** A sink codec does
    not populate the decoder set. Copy requires an explicit decoder plus a
    compatible sink, or a true passthrough claim plus a compatible sink; both
-   require exact source/sink sample-rate agreement.
+   require exact source/sink sample-rate agreement. *(Narrowed by decision 6:
+   the rate rule applies to passthrough only.)*
+6. **A decoding client's route does not refuse a copy (2026-10-02).** A
+   sink's channel count is what the route reproduces and decides what the
+   server encodes. A client that decodes the codec mixes any decodable layout
+   down and resamples any rate for its own output — what it already does on a
+   direct play — so copy and direct play require the channel count and the
+   sample rate to fit only for a bitstream passed through undecoded, and a
+   codec the claim does not mention (DTS, TrueHD, Opus) keeps the codec-list
+   answer. Without this, the first claims would have turned 5.1 direct plays
+   on stereo routes, DTS/TrueHD receiver passthrough, Opus WebM and odd-rate
+   MP3/AAC into server remuxes with re-encoded audio. Server nodes must be
+   updated before clients that send claims (an older server applies the
+   strict rule).
 
 ---
 
@@ -534,3 +590,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review disposition | [#418 comment #3296](http://192.168.4.7:3000/noirr/plurx/pulls/418#issuecomment-3296) | Separated decoder/sink/passthrough authority; source/sink sample rates now fail closed; recipe v4 keys the 48 kHz decision; flat `achannels` is bounded at the request; progressive AAC remux is fixed at 48 kHz. Hardware, layout and downmix evidence remain blocked honestly. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/architecture_receipt_reconcile_sol61 | M2 source-layout prerequisite | Draft continuation on current effort `ffbbc16ce` | Claimed only optional source facts and backend round trips. `AudioStream.channel_layout` retains trimmed, opaque ffprobe spelling, bounded to 256 UTF-8 bytes; `5.1` and `5.1(side)` remain distinct. Empty, unknown/N/A, control-bearing and malformed non-string values mean no claim; unsupported bounded spellings remain opaque, not supported speaker maps. No inference from channel count. Absent/null legacy JSON remains absent on serialization, with no migration/backfill. Raw probe JSON retains rejected facts. Focused parser/serde and real SQLite plus feature-enabled three-voter Hiqlite round trips are required before push. No pan, gain, argv, recipe, client, runtime or surround-output change; M2 remains partial and M3–M5 acceptance remains owed. Current effort/focused-test workflow supersedes the older task-to-main/broad-suite instructions for this continuation. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M2 propagation and sole-review disposition | [#665](http://192.168.4.7:3000/noirr/plurx/pulls/665) | Typed audio reaches actual producer options/argv, plan/recipe identity, manifests/budgets, remote responses, durable offline snapshots and prepared successors. Sole review #28/comment #6752 identified retained rolling/encoded audio being re-resolved; actual owner regressions fail with the old claim-first behavior and pass with retained authority. Initial rolling negotiation remains route-specific; legacy absence and the v4 golden remain pinned. Composed effort `ec79f4b34` / main `5c99538fd`: pinned workspace check, core7, daemon11, real SQLite/three-voter offline2, numeric/docs9 and ownership census passed on their recorded source. Later main `1b2ae4f62` (#662) is composed additively with its yield reasons, publication/admission ownership and tests; audio owner/test bytes are unchanged, measured census414. Current committed-tree/compiler/hook receipts are in the PR; no already-passed tests are repeated for this base refresh. Numeric failures and physical/content/listening limits are retained; M3–M5 remain open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M4 real content + shipped stereo fold | Opus S-09 continuation PR | Nine real windows measured on the production ffmpeg; incumbent fold clipped and honoured AC-3/E-AC-3 stored levels. Float named matrix per layout + −4 dBFS limiter ships for every stereo fold (legacy absent-claim transcodes included); digest carries the exact chain; one `-af` with the A/V correction; encoded VOD folds ahead of the lattice trim (join bit-identical in PCM, lag 0). Listening notes and M3/M5 device evidence remain open. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M3/M5 client claims | Opus S-09 continuation PR | Apple (AVAudioSession route channels + HDMI receiver), Android (HDMI PCM channels + Media3 bitstreams) and web (AudioContext destination channels) send `audio_sinks`; decision 6 keeps decodable copies and direct plays for stereo routes. Focused Apple iOS+tvOS, Android JVM and web-policy tests pass; device observations owed. |

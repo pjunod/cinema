@@ -3685,10 +3685,13 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         ));
     }
     if let Some(audio) = audio_delivery {
-        if audio.transcodes() {
-            if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
-                args.extend(["-af".to_owned(), af]);
-            }
+        let offset = if audio.transcodes() {
+            plurx_core::transcode::audio_offset_filter(audio_offset_ms)
+        } else {
+            None
+        };
+        if let Some(af) = plurx_core::transcode::audio_filter_chain(Some(audio), offset) {
+            args.extend(["-af".to_owned(), af]);
         }
         plurx_core::transcode::push_audio_delivery_args(&mut args, audio, false);
     } else if transcode_audio {
