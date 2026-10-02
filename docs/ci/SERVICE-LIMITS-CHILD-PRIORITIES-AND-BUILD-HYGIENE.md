@@ -1267,7 +1267,8 @@ symbolicate; B is honest and simple and five times the download. Whichever
 lands, `plurxd diagnostic-panic` on the deployed image is the check.
 
 **Reproducible image, 2026-10-02** (claude-opus-5-5, branch
-`opus/p02-repro-continuation`, not yet a pull request). This closes M6's
+`opus/p02-repro-continuation`,
+[PR #733](http://forge.lan:3000/noirr/plurx/pulls/733)). This closes M6's
 "`docker build` reproduces" and "image size delta recorded" for the profile C
 tree, and re-runs `plurxd diagnostic-panic` on the image itself.
 
@@ -1275,8 +1276,12 @@ tree, and re-runs `plurxd diagnostic-panic` on the image itself.
 `SystemTime::now()`, so no two builds of a commit could be the same binary.
 It is now the build's source date (`crates/plurxd/build_support/source_date.rs`,
 unit-tested from `version.rs`): `SOURCE_DATE_EPOCH` when set and non-empty,
-else the `HEAD` commit's committer time, else the clock; a malformed
-`SOURCE_DATE_EPOCH` fails the build. The field keeps its name and its job (it
+else the `HEAD` commit's committer time when the tree is clean, else the
+clock; a malformed `SOURCE_DATE_EPOCH` fails the build. A `-dirty` build is
+not HEAD, so neither the build script nor `make` dates it with HEAD's time
+(review of #733); and `make` takes the date from the checkout it stamps, not
+from a `SOURCE_DATE_EPOCH` left exported in the shell (`make docker
+SOURCE_DATE_EPOCH=…` still overrides deliberately). The field keeps its name and its job (it
 still tells one deploy from the next, because two commits differ in it); its
 meaning is documented as "source date". The Docker context has no `.git`, so
 every image build passes the commit time: `ARG SOURCE_DATE_EPOCH` in the build
@@ -1325,7 +1330,7 @@ differed in 10 of its 4,549 entries:
 |---|---|
 | `var/log/dpkg.log`, `var/log/alternatives.log`, `var/log/apt/history.log`, `var/log/apt/term.log` | install timestamps |
 | `var/cache/ldconfig/aux-cache` | inode and change times of the libraries |
-| four `var/cache/fontconfig/*-le64.cache-8` | the font directories' build-time mtimes, which the exporter's rewrite then contradicts, so they are stale in the shipped image anyway |
+| four `var/cache/fontconfig/*-le64.cache-8` | they embed the font directories' build-time mtimes (with a `rewrite-timestamp` export, as here, those mtimes are then clamped, so the baked caches are also stale; a plain `docker build` keeps them valid) |
 | `usr/share/doc/plurx/ffprobe/config.log` | the configure log dumps the shell environment (BuildKit's per-build `TRACEPARENT`), the script's `mktemp -d` path, configure's own random `ffconf.*` scratch paths and a `mktemp -u` probe |
 
 `/etc/shadow`'s `plurx:!:20728::::::` matched only because both builds ran
@@ -1334,9 +1339,10 @@ on the same day: `useradd` stamps the last-change day from
 `SOURCE_DATE_EPOCH=86400 useradd -r t` writes `t:!:1::::::`).
 
 *The layer fix (`9ed98a30c`).* The `RUN` now removes the logs, the aux-cache
-and the fontconfig caches after its last package operation (each ffmpeg child
-rebuilds a font cache once under its writable `XDG_CACHE_HOME`; there are six
-fonts); `useradd` gets `SOURCE_DATE_EPOCH` from the pinned `DEBIAN_SNAPSHOT`
+and the fontconfig caches after its last package operation. Dropping the
+font caches is harmless whichever exporter is used: the image carries six
+fonts, which rescan instantly, and each ffmpeg child regenerates its cache
+under its `XDG_CACHE_HOME` on the writable data volume; `useradd` gets `SOURCE_DATE_EPOCH` from the pinned `DEBIAN_SNAPSHOT`
 day, which is already this layer's input. The commit time is deliberately
 not declared in this stage: it would change the `RUN`'s cache key on every
 commit and rebuild apt plus the static probe each time.
@@ -1827,7 +1833,7 @@ or M8's actual fuzz campaigns. No production service directive, runner
 configuration, deployment, playback or process-supervision contract changes.
 | Date | Model | Session | Milestone | PR | Evidence |
 |---|---|---|---|---|---|
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M6 reproducible image and size; M4 Compose proposal | Local branch `opus/p02-repro-continuation`; no PR yet | `9b45483e7` stamps `built_at` from `SOURCE_DATE_EPOCH` (else commit time, else clock) and every image build passes the commit time; two cold isolated builds then matched in every Rust binary, `.dwp` and binary layer, and differed only in ten build-time entries of the media runtime layer, which `9ed98a30c` removes. Two more cold builds of `9ed98a30c` were byte-identical OCI archives, manifest `sha256:60afe405…`, image ID `sha256:90e2a1d2…`; +564,722,968 B (+55.4 %) over production main, all binaries and debug files. `plurxd diagnostic-panic` on that image resolved file:line frames; the image is kept as `plurx-opus-lab:effort-9ed98a30c`. M4's Compose rows are proposed in §5.4 for Paul (documented only: production deploys this tracked Compose file). Still owed: §3.2's busy-load cadence and the M1/M3 readback with real transcodes, cross-day/arm64 rebuilds, and the publish path's timestamp rewrite (§5.6). |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | M6 reproducible image and size; M4 Compose proposal | [#733](http://forge.lan:3000/noirr/plurx/pulls/733) (`opus/p02-repro-continuation`) | `9b45483e7` stamps `built_at` from `SOURCE_DATE_EPOCH` (else commit time, else clock) and every image build passes the commit time; two cold isolated builds then matched in every Rust binary, `.dwp` and binary layer, and differed only in ten build-time entries of the media runtime layer, which `9ed98a30c` removes. Two more cold builds of `9ed98a30c` were byte-identical OCI archives, manifest `sha256:60afe405…`, image ID `sha256:90e2a1d2…`; +564,722,968 B (+55.4 %) over production main, all binaries and debug files. `plurxd diagnostic-panic` on that image resolved file:line frames; the image is kept as `plurx-opus-lab:effort-9ed98a30c`. M4's Compose rows are proposed in §5.4 for Paul (documented only: production deploys this tracked Compose file). Still owed: §3.2's busy-load cadence and the M1/M3 readback with real transcodes, cross-day/arm64 rebuilds, and the publish path's timestamp rewrite (§5.6). |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M8 actual post-merge campaigns; M6 frozen-artifact backtrace | Evidence-only continuation; draft PR pending | All five bounded run3727 campaigns on exact effort `d3dfbe2a` completed; counts/log/ZIP identities in §5.8. Separate frozen `4f243a01` artifact resolved native file/line stack with expected exit101 and owned cleanup. Neither result closes whole P02 or current-main qualification. No fuzz or unit campaign repeated by this docs author. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/p02_effort_sync_sol61 | M7 PR 3 measured — retain thin/16 | [#629](http://192.168.4.7:3000/noirr/plurx/pulls/629) draft | Exact `f523e097a` source, serial native AMD64 host matrix, no retry; §5.7 records all binary/receipt hashes and bounded guard ranges. All four passed; unchanged thin/16 retained for build cost only. Owned containers, scratch and tooling image removed; production healthy/restarts0. M7 PRs 2/4, M6 image acceptance, M5 credential prerequisite and M8 post-merge campaigns remain open. |
 

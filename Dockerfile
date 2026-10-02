@@ -96,9 +96,11 @@ COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
 # differed only in build-time state, so the end of this RUN removes it. Apt,
 # dpkg and alternatives logs are timestamped; ldconfig's aux-cache records
 # inode times; fontconfig's caches embed the font directories' build-time
-# mtimes (which the exporter's timestamp rewrite then contradicts, so they are
-# stale in the shipped image anyway; children rebuild theirs once under their
-# writable XDG_CACHE_HOME). `useradd` stamps the account's last-change day from
+# mtimes. Removing those caches costs nothing measurable: the image carries six
+# fonts, which rescan instantly, and each child regenerates its cache under its
+# XDG_CACHE_HOME on the writable data volume. (Only an export that rewrites
+# file timestamps also makes the baked caches stale; a plain `docker build`
+# would have kept them valid.) `useradd` stamps the account's last-change day from
 # SOURCE_DATE_EPOCH or the clock, so it is given the Debian snapshot's date,
 # which is already this layer's input; the commit's own time is not, because
 # declaring it here would rebuild this whole layer on every commit.
