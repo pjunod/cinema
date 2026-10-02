@@ -1657,3 +1657,12 @@ The existing bounded producer-group regression now covers duplicate refusal,
 claim reuse and capacity retained through parent teardown. Pinned compiler
 checks and the normal hook apply; unit execution remains deferred until final
 adversarial review. Parent integration remains outstanding.
+
+### 10.34 Media-reader retirement and parent captions
+
+Rendition reader retirement is now separate from ending the public playback's
+subtitle window. Existing single-rendition endings still perform both in the
+same order. Family children can retire their media demand and parked requests
+without fencing the parent out of its next caption window. This is a lifecycle
+refactor for parent integration, not a claim that family children are attached
+yet. The normal Rust compiler and commit checks apply; no unit execution.

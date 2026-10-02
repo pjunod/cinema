@@ -257,10 +257,17 @@ impl Rendition {
         *self.dormant_since.lock().expect("dormant lock") = None;
     }
 
-    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+    /// Detach one media reader without ending its parent playback. Family
+    /// children release media demand independently; subtitle ownership belongs
+    /// to the public parent and must survive a rung's retirement.
+    pub(super) async fn detach_media_reader(
+        &self,
+        pool: &crate::waitpool::WaitPool,
+        reader_id: &str,
+    ) {
         {
             let mut readers = self.readers.lock().await;
-            readers.remove(session_id);
+            readers.remove(reader_id);
             if readers.is_empty() {
                 *self.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
             }
@@ -271,7 +278,12 @@ impl Rendition {
         // marking the session's oldest wait foreground — so a departed
         // viewer's abandoned request outranks a present viewer's and aims the
         // producer at media nobody is watching until its deadline expires.
-        pool.retire_session(&self.key, session_id);
+        pool.retire_session(&self.key, reader_id);
+    }
+
+    /// End a legacy single-rendition playback and its parent-owned captions.
+    pub(super) async fn detach_reader(&self, pool: &crate::waitpool::WaitPool, session_id: &str) {
+        self.detach_media_reader(pool, session_id).await;
         // Every VOD session *ending* converges here — terminal and idle reap
         // alike — so this is the one place a departing viewer's subtitle
         // window is released. Reattachment is deliberately not one of them:
