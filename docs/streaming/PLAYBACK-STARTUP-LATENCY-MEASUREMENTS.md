@@ -207,3 +207,62 @@ Per-run locks now cover mutation, snapshot and persistence; a temporary file
 is atomically replaced, including playlist reload records. A local concurrent
 check retained all 128 unique events plus a reload in valid JSON. Required
 fast-lane validation remains the merge prerequisite; no new TTFF claim.
+
+
+## October 2 amendment — candidate rejection and generated browser sweep
+
+The September measurements above are retained history of the conservative
+settings correction. Current build base is `dea1a403e`; the current decision
+receipt is [M2-20261002](PLAYBACK-STARTUP-LATENCY-M2-20261002.json).
+
+The new replay uses the normal 16-second publication cadence, complete
+8/16-second objects, 0.25–4× playback, 1.05× relative production, three origin
+leads, three reload phases, a 0/2-second source pause and an assumed 2.5-second
+transfer/append margin. `scripts/playback-startup-trace --output <owned-path>`
+reproduces it. These margins are experiment inputs, not measured fleet bounds.
+
+| 1× candidate / minimum | Buffer deficits / 180 rows |
+|---|---:|
+| 12 / 12 seconds | 130 |
+| 16 / 16 seconds | 102 |
+| 24 / 12 seconds | 68 |
+| 24 / 24 seconds | 44 |
+| 32 / 12 seconds | 18 |
+| 32 / 32 seconds | 0 |
+| 48 / 48 seconds | 0 |
+
+Keep a 32-second candidate minimum rather than assuming the 12-second writer
+gate provides enough runway at slower playback. Fifty-four rows per candidate
+cannot produce a new complete object within 24 seconds at low absolute
+production. This applies to the old policy too; those rows are not protocol
+qualification and are not converted into a pass by additional buffering.
+
+The generated Chrome/shipped-hls.js sweep observed first frames after 4.459,
+4.428, 6.548, 8.639 and 12.868 seconds for 12/16/24/32/48-second thresholds.
+Each short trial had no observed waiting event after the first frame in its
+45-second window. The 32-second continuity trial is in progress; Safari is
+blocked by the locked Mac pending user unlock. Do not infer native/HEVC
+qualification or production startup timing from these AVC trials.
+
+The fixture exposes a complete 8-second object at 2.25 seconds, bursts at
+3.8× until the selected bootstrap, then runs at 1.05×. It includes every new
+completed endpoint on 16-second snapshot cycles. It exercises actual shipped
+web startup/loading code and the HLS engine, with generated local media; it
+does not exercise daemon actor, production flow or scratch. The authored
+server regressions cover those publication seams separately and remain
+unrun until final review, per the build contract.
+
+Current main preserves PR #703's index reconciliation and the existing
+durable playback-interest/source-reader admission. The incident census is a
+dated review report; no fresh live request-cycle trace was obtained during
+this build. There is no demonstrated new queue defect to justify a second
+scheduler change, no digest fence is weakened, and no live requeue occurs.
+Boot storage-probe/consensus contention remains a reported pre-creation cost;
+this build does not claim that changing publication removes it. First complete
+media at 2.25 seconds is already separated from the first served snapshot.
+
+The interim candidate buffers 32 media seconds and has no few-seconds
+startup guarantee. Native readiness and preparation deadline alignment repair
+the failure attribution even when ordinary HLS still needs a larger runway.
+Track S and physical Apple/Android acceptance remain open. Deployment and
+live reference-film acceptance are separate and have not occurred.

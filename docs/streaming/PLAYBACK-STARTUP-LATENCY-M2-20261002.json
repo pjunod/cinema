@@ -1,0 +1,136 @@
+{
+  "status": "candidate; continuity and native qualification pending",
+  "build_base": "dea1a403e9a650fc51e35909b36e596be5a5ed13",
+  "target_ms": 16000,
+  "writer_gate_ms": 12000,
+  "candidate_1x_ms": 32000,
+  "candidate_minimum_ms": 32000,
+  "ceiling_ms": 124000,
+  "design_receipt_sha256": "1c9881302f38281e4f3f641b0c563e7b85df48c591949d5919ee8d660b628702",
+  "design_receipt_path": "/private/tmp/plurx-fast-start-design-replay-20261002.json",
+  "design_assumptions": {
+    "source_segment_ms": [
+      8000,
+      16000
+    ],
+    "production_to_consumption": 1.05,
+    "server_cadence_ms": 16000,
+    "transfer_append_ms": 2500,
+    "source_pause_ms": [
+      0,
+      2000
+    ],
+    "lead_ms": [
+      0,
+      675,
+      7965
+    ],
+    "rates": [
+      0.25,
+      0.5,
+      1,
+      2,
+      4
+    ],
+    "first_reload_ms": [
+      0,
+      7999,
+      15999
+    ]
+  },
+  "model_summary": {
+    "12000:12000": {
+      "rows": 180,
+      "buffer_deficits": 130,
+      "illegal_update_spacing": 54
+    },
+    "16000:12000": {
+      "rows": 180,
+      "buffer_deficits": 114,
+      "illegal_update_spacing": 54
+    },
+    "16000:16000": {
+      "rows": 180,
+      "buffer_deficits": 102,
+      "illegal_update_spacing": 54
+    },
+    "24000:12000": {
+      "rows": 180,
+      "buffer_deficits": 68,
+      "illegal_update_spacing": 54
+    },
+    "24000:24000": {
+      "rows": 180,
+      "buffer_deficits": 44,
+      "illegal_update_spacing": 54
+    },
+    "32000:12000": {
+      "rows": 180,
+      "buffer_deficits": 18,
+      "illegal_update_spacing": 54
+    },
+    "32000:32000": {
+      "rows": 180,
+      "buffer_deficits": 0,
+      "illegal_update_spacing": 54
+    },
+    "48000:12000": {
+      "rows": 180,
+      "buffer_deficits": 12,
+      "illegal_update_spacing": 54
+    },
+    "48000:48000": {
+      "rows": 180,
+      "buffer_deficits": 0,
+      "illegal_update_spacing": 54
+    }
+  },
+  "protocol_limit": "54/180 rows per candidate cannot emit a new complete segment within 24s at low absolute production; the same issue exists for the old policy. Zero buffer deficits is not all-rate qualification.",
+  "hlsjs_generated_sweep": [
+    {
+      "threshold_media_s": 12,
+      "first_frame_ms": 4459,
+      "last_position_s": 40.449313,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 16,
+      "first_frame_ms": 4428,
+      "last_position_s": 40.472851,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 24,
+      "first_frame_ms": 6548,
+      "last_position_s": 38.341186,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 32,
+      "first_frame_ms": 8639,
+      "last_position_s": 36.233352,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    },
+    {
+      "threshold_media_s": 48,
+      "first_frame_ms": 12868,
+      "last_position_s": 31.995324,
+      "post_first_frame_waits": 0,
+      "observation_s": 45
+    }
+  ],
+  "hlsjs_sweep_receipt_sha256": "ad457f5957ab54a09df9868188b9cc9927bfdcc35de7ae79f7b09dc3d423b083",
+  "native_status": "not started; Mac locked, user unlock pending",
+  "physical_apple_android_status": "not qualified; absent transport metadata retains conservative policy",
+  "limits": [
+    "Generated AVC/AAC with stock Mac FFmpeg, not pinned FFmpeg 6 or the incident HEVC/DV source.",
+    "Browser fixture exercises shipped startup/load policy and HLS engine; actor/flow/scratch are covered separately by authored regressions.",
+    "32 seconds of media is an interim improvement, not the strict few-seconds buffer requirement.",
+    "No deployment, queue reset, digest migration or live reference-film acceptance."
+  ],
+  "regressions": "authored, not run; deferred until final adversarial review fixes"
+}

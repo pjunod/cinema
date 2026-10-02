@@ -1783,6 +1783,63 @@
         parse_avc_init(&feed)
     }
 
+    /// Preparation can outlive the five-second response admission phase;
+    /// both native entry points share the fixed outer preparation deadline.
+    #[tokio::test]
+    async fn native_master_preparation_can_wait_six_seconds_for_exact_init() {
+        let dir = crate::test_tempdir().expect("delayed native init");
+        let fixture =
+            HlsDeliveryFixture::publish_copy_actor_managed(dir.path(), "delayed-native-init").await;
+        fixture.mark_started().await;
+        let init_path = dir.path().join("init.mp4");
+        let init = valid_avc_init();
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio::fs::write(init_path, init.bytes)
+                .await
+                .expect("delayed exact init");
+        });
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(12);
+        let query = || PlaylistQuery {
+            native: Some(1),
+            subtitle: None,
+            diagnostic: None,
+        };
+        let (master, legacy) = tokio::join!(
+            master_playlist_response_local_before(
+                &fixture.state,
+                "delayed-native-init",
+                query(),
+                deadline,
+                deadline
+            ),
+            playlist_local_before(
+                &fixture.state,
+                "delayed-native-init",
+                query(),
+                deadline,
+                deadline
+            ),
+        );
+        assert_eq!(
+            master.expect("master waits through preparation").status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            legacy
+                .expect("legacy native bridge waits through preparation")
+                .status(),
+            StatusCode::OK
+        );
+        assert!(started.elapsed() >= Duration::from_secs(6));
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "no renewed outer deadline"
+        );
+        writer.await.expect("init writer");
+    }
+
     #[tokio::test]
     async fn an_fmp4_avc_session_normalises_its_codec_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");

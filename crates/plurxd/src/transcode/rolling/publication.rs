@@ -134,8 +134,47 @@ pub(super) struct ServedPlaylistSnapshot {
     pub(super) available_at: Instant,
 }
 
+/// Frozen at create from explicit web transport metadata. Unknown clients
+/// and legacy demand retain the qualified three-target bootstrap.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RollingStartupPolicy {
+    #[default]
+    Conservative,
+    WebFixedHlsV1,
+}
+
+impl RollingStartupPolicy {
+    fn from_transport(transport: Option<&str>) -> Self {
+        match transport {
+            Some("native" | "hlsjs") => Self::WebFixedHlsV1,
+            _ => Self::Conservative,
+        }
+    }
+
+    pub(super) fn bootstrap_ms(self, rate: f64) -> i64 {
+        match self {
+            Self::Conservative => rolling_initial_runway_ms(rate),
+            Self::WebFixedHlsV1 => {
+                ((32_000.0 * rate).ceil() as i64).clamp(32_000, ROLLING_RESERVE_MAX_MS)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum RollingReservePhase {
+    #[default]
+    Prepublication,
+    AwaitingPresentation,
+    ActiveLowReserve,
+    Steady,
+}
+
 #[derive(Default)]
 pub(super) struct RollingPublicationClock {
+    pub(super) startup_policy: RollingStartupPolicy,
+    startup_policy_bound: bool,
+    pub(super) reserve_phase: RollingReservePhase,
     pub(super) served: Option<ServedPlaylistSnapshot>,
     pub(super) staged_attempt: Option<u64>,
     /// Actual monotonic observation of the writer's first gated inventory.
@@ -157,6 +196,56 @@ pub(super) struct RollingPublicationClock {
 }
 
 impl RollingPublicationClock {
+    pub(super) fn bind_startup_transport(&mut self, transport: Option<&str>) {
+        if !self.startup_policy_bound && self.served.is_none() {
+            self.startup_policy = RollingStartupPolicy::from_transport(transport);
+            self.startup_policy_bound = true;
+        }
+    }
+
+    pub(super) fn clear_attempt(&mut self) {
+        let policy = self.startup_policy;
+        let bound = self.startup_policy_bound;
+        *self = Self {
+            startup_policy: policy,
+            startup_policy_bound: bound,
+            ..Self::default()
+        };
+    }
+
+    pub(super) fn update_reserve_phase(
+        &mut self,
+        lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
+        budget: &RollingPublicationBudget,
+    ) {
+        self.reserve_phase = match self.served.as_ref() {
+            None => RollingReservePhase::Prepublication,
+            Some(_)
+                if !lease.is_some_and(|lease| {
+                    lease.startup.phase == crate::playback_control::RollingStartupPhase::Presented
+                }) =>
+            {
+                RollingReservePhase::AwaitingPresentation
+            }
+            Some(served) if served.end_ms >= budget.desired_end_ms => RollingReservePhase::Steady,
+            Some(_) => RollingReservePhase::ActiveLowReserve,
+        };
+    }
+
+    pub(super) fn first_ready_end_ms(
+        &self,
+        budget: &RollingPublicationBudget,
+        lease: Option<&crate::playback_control::RollingLeaseSnapshot>,
+    ) -> i64 {
+        if budget.demand_sequence.is_none() {
+            return budget.desired_end_ms;
+        }
+        let rate = rolling_playback_rate(lease.and_then(|lease| lease.demand.as_ref()));
+        budget
+            .consumed_end_ms
+            .saturating_add(self.startup_policy.bootstrap_ms(rate))
+    }
+
     pub(super) fn staged_seconds(&self) -> i64 {
         let served = self.served.as_ref().map_or(0, |snapshot| snapshot.end_ms);
         self.staged_end_ms.unwrap_or(served).saturating_sub(served) / 1_000
@@ -171,6 +260,7 @@ impl RollingPublicationClock {
                 .as_ref()
                 .is_some_and(|snapshot| snapshot.producer_attempt != producer_attempt)
         {
+            self.reserve_phase = RollingReservePhase::Prepublication;
             self.served = None;
             self.first_staged_at = None;
             self.staged_last_segment = None;

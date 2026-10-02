@@ -23,6 +23,13 @@ requires weakening one, record the failed candidate and revise the design.
 The independent review and its dispositions belong in
 [PLAYBACK-STARTUP-LATENCY-REVIEW.md](PLAYBACK-STARTUP-LATENCY-REVIEW.md).
 
+> **Authorized amendment, 2026-10-02 EDT:** the user authorized the revised
+> incident packet with “ok build it”. The appended contract is folded into
+> this repository against build base `dea1a403e`. Track N and the publication
+> candidate are in progress; measured qualification and deployment remain
+> separate. See [the incident evidence](PLAYBACK-STARTUP-LATENCY-M0-20261002.md)
+> and [the current build status](PLAYBACK-STARTUP-LATENCY-STATUS.html).
+
 ## 1. Evidence — one measured slow start, with a bounded causal claim
 
 ### 1.1 The observed attempt
@@ -603,3 +610,155 @@ artifacts. Do not repair latency by clearing storage or resetting the queue.
 | Selected M2 runtime policy and physical transport evidence | Not started |
 | Runtime implementation / regression runs | Not started |
 | Deployment / user-observed improvement | Not started |
+
+## 11. Authorized amendment — incident evidence for M0/M1 and a measured M2 choice
+
+**Disposition:** fold the 2026-10-02 incident into M0/M1; keep M2's measured
+selection gate and M3's integrated policy ownership. This amendment does
+not dispatch the historical build authorization or create another effort.
+[The review](PLAYBACK-STARTUP-LATENCY-REVIEW-20261002.md) approved the causal
+diagnosis and requested these changes to the proposal.
+
+### 11.1 M0 must separate warm startup from startup immediately after restart
+
+Use [the retained incident trace](PLAYBACK-STARTUP-LATENCY-M0-20261002.md)
+as evidence, not a newly reproduced M0 result. The reviewer reports daemon
+start at 04:14:31.245 UTC, listening at 31.719 and playback decision at
+40.805: about 9.56 s after daemon start. Concurrent storage probing,
+20 caption-graph proof encodes and slow Raft applies were reported.
+
+Measure warm-daemon and immediately-after-restart cases separately. The
+latter is a qualification scenario, not authorization to restart lab6.
+Retain source, engine, recipe, lease mode and resume anchor for each replay.
+Record boot work and media/storage contention. Do not infer that the burst
+rate here is representative sustained capacity or that boot load alone
+caused the observed publication gate and timeout.
+
+Decompose decision → create (8.36 s in this trace), the reported 2.714 s
+creation phase, producer launch, first segment, first writer playlist,
+first served snapshot, readiness completion and actual first frame. Keep
+click-to-frame's real origin. A two-to-four-second overall claim is not
+supported while pre-creation cost remains unaccounted for.
+
+### 11.2 M1 begins from digest churn and the foreground-promotion gap
+
+The reviewer read a copy of lab6's replicated database. Their snapshot
+reports 1,523 ready / 1,037 queued files for previous digest `953a…`, versus
+310 ready / 909 queued for `85e6…`, current since 2026-09-28. File 120 had
+six ready artifacts under older digests, current-digest requests with zero
+attempts, and `foreground_preempted` outcomes. No current-digest request
+for this file had been claimed; the play did not promote it to foreground.
+
+Treat those numbers as the review's dated census, not a new live query.
+Reproduce the census by exact source/recipe/digest and retain the sanitized
+query and receipt in M1. Explain queued versus eligible versus claimed,
+priority promotion, preemption reason, worker availability and hydration;
+counts alone do not identify a scheduler defect. Start from this evidence
+instead of treating a missing local index as an unexplained single-title
+condition. Indexed VOD is preferred when available, but cannot be assumed
+to cover the majority of this keyspace.
+
+The engine digest includes executable/dependency identity deliberately.
+Preserve that correctness fence here. A separate digest-scope investigation
+may evaluate compatibility and cache reuse if authorized; no weakening,
+requeue or key migration belongs in this incident amendment. The review's
+historical failed DV conversion is context, not permission to assume the
+on-the-fly route is unavoidable forever.
+
+### 11.3 M2 retains ordinary HLS and the existing readiness sweep
+
+Keep low-latency HLS introduction outside this effort. Keep the existing
+12/16/24/32/48 media-second sweep and the 12-second writer gate. The prior
+four-second proposal is withdrawn as a runtime default for this geometry:
+the first complete segment alone is 7.8 s, and ordinary native discovery
+must be qualified against the fixed 16-second target.
+
+After a snapshot at `a`, the deployed server normally schedules the next
+publication at `a + 16 s`. Its early arm needs Rendering and low runway,
+and cannot act before `a + 8 s`. A client's changed-playlist reload at
+`a + δ + 16 s` overlaps the server schedule; do not add those two waits
+as independent serial delays. Worst alignment, unchanged reloads, producer
+completion and transfer/append cost still belong in §4.2's inequality.
+
+The review estimates about 20 s usable coverage at 1× after allowances,
+rounding to the third segment (about 24–25 s) on this source. At the observed
+3.75–3.9× burst rate, that suggests about 6.5 s server readiness after
+creation rather than the observed 15.11 s. This is an extrapolation, not a
+measured first-frame time or approved shipping threshold. The exact
+post-position threshold includes achieved-origin lead; source durations
+and transfer margin must be measured again. `EXT-X-START:TIME-OFFSET=0`
+and removal of `PLAYLIST-TYPE` already handle the initial snapshot's start
+selection; preserve and test them rather than inventing another offset.
+
+**Requirement disposition:** the user said a few seconds of media should
+be buffered before playback, then filling should continue. Approximately
+24 s of media does not meet that strict requirement. Ordinary HLS can be
+proposed as an interim improvement only with that gap stated. Choosing
+LL-HLS requires a separate scope/transport design and explicit authorization;
+this amendment does not silently override the existing non-goal.
+
+At rates below 1×, record bootstrap scaling explicitly. M2 tests the
+existing consumption-scaled candidate values down to 0.25×, with effective
+coverage constrained by the unchanged writer gate, complete cuts and actual
+native discovery. The current steady runway clamps to at least 48,000 ms;
+that clamp is not automatically inherited by a new bootstrap, and its
+removal is not selected by this amendment. Choose the effective minimum in
+the decision receipt, including down-scaling results and 4× capacity limits.
+
+### 11.4 M3 remains integrated; one predicate is a candidate, not a proof
+
+The smallest likely first-release seam is `publication_cycle_at`'s
+`None => end_list || end_ms >= budget.desired_end_ms` arm. Replace initial
+readiness there only with M2's qualified policy, and reconcile startup
+scratch sizing. At readiness ≥16 s, leave the 12-second writer gate intact;
+it is not the dominating gate. Preserve complete validated init/media,
+attempt fences, media sequence and the unchanged steady resource ceiling.
+
+Do not assume that restoring the existing 48-second budget on the next
+cycle proves continuity. Retain §4.3's Prepublication, AwaitingPresentation,
+ActiveLowReserve and Steady contract, legal cadence and actual client
+discovery. Qualify sustained production at 1.05× as well as the fast burst;
+reserve growth may take 480 wall seconds and cannot be a new startup gate
+or expiry. Any smaller patch must demonstrate those invariants rather than
+claiming that its size eliminates the need for them.
+
+### 11.5 Master preparation alignment remains a separate decision
+
+After Track N, propose aligning native master and legacy-native preparation
+with the child-media path: wait under the existing absolute playlist wait
+budget (55 s), then use the unchanged 5 s final response-admission budget,
+clipped to the original outer request deadline. Replacement may reclassify
+within that same deadline; it cannot renew the clock or use predecessor
+init to authorize a successor.
+
+This changes where waiting occurs even though the final five-second
+publication budget stays fixed. Reconcile it explicitly with the native
+contract's server-deadline non-goal before implementation. Track N's
+application fetch preflight owns its shorter remaining attachment deadline
+and aborts when exhausted; a server's 55 s cap is not a promise the browser
+will wait that long. Native-element tolerance of a held request is unmeasured.
+
+Retain the existing served-snapshot init fence. Withdraw the separately
+fenced prepared-init reader: there is no evidence requiring another
+publication authority. Keep byte bounds, response ownership, capability
+checks and internal inspection/delivery accounting separate.
+
+### 11.6 Integration order and acceptance receipts
+
+1. Track N under its existing contract, plus the proposed compatible-route
+   preflight; prove real Safari delayed readiness before claiming repair.
+2. M0 warm and after-restart traces, plus M1's exact keyspace/foreground
+   diagnosis; patch only an evidenced defect through existing job owners.
+3. M2's original sweep and decision receipt, then M3's qualified readiness,
+   scratch and startup-to-steady integration. Any interim improvement must
+   retain the unmet strict-buffer requirement in its acceptance report.
+4. Master/child preparation alignment only after its scope decision.
+
+Run new/affected or failed regressions with nonzero selected test counts;
+retain applicable passing evidence and do not repeat unrelated suites or
+coverage. Exact candidate compile/lint/policy and affected client checks
+still apply. Observe first frame and at least 30 minutes of continued
+playback at resume 3273.778 s and zero, including worst-aligned reloads,
+rate changes and slow reserve growth. Record produced, advertised, buffered
+and presented frontiers separately. Required device qualification from
+§7/§8 remains; a lab6 Safari improvement alone does not complete M5.

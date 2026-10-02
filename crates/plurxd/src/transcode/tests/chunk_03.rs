@@ -520,6 +520,181 @@
         }
     }
 
+    #[test]
+    fn rolling_web_bootstrap_policy_is_frozen_and_rate_bounded() {
+        let mut clock = RollingPublicationClock::default();
+        clock.bind_startup_transport(Some("native"));
+        assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
+        for (rate, expected) in [(0.25, 32_000), (1.0, 32_000), (4.0, 124_000)] {
+            assert_eq!(clock.startup_policy.bootstrap_ms(rate), expected);
+        }
+        clock.bind_startup_transport(Some("unknown"));
+        clock.reset_for_attempt(1);
+        clock.reset_for_attempt(2);
+        clock.clear_attempt();
+        assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
+        clock.bind_startup_transport(None);
+        assert_eq!(clock.startup_policy, RollingStartupPolicy::WebFixedHlsV1);
+        let mut unknown = RollingPublicationClock::default();
+        unknown.bind_startup_transport(Some("other"));
+        assert_eq!(unknown.startup_policy.bootstrap_ms(1.0), 48_000);
+    }
+
+    #[tokio::test]
+    async fn rolling_web_bootstrap_covers_position_after_copy_lead() {
+        let directory = crate::test_tempdir().expect("web bootstrap");
+        let mut session = test_session(directory.path().to_path_buf());
+        session.start_seconds = 2_000.0;
+        session.media_origin_seconds = 1_992.035;
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            2_000_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Starting,
+        )
+        .await;
+        for count in 1..=5 {
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![8.0; count], false),
+            )
+            .await
+            .expect("writer snapshot");
+            session
+                .publication_cycle("web-bootstrap-origin")
+                .await
+                .expect("publication cycle");
+            let clock = session.publication.lock().await;
+            if count < 5 {
+                assert!(
+                    clock.served.is_none(),
+                    "pre-position bytes cannot pay reserve"
+                );
+            } else {
+                let served = clock
+                    .served
+                    .as_ref()
+                    .expect("40s endpoint covers 7.965s lead plus 32s");
+                assert_eq!(served.end_ms, 40_000);
+                assert!(served.end_ms - 7_965 >= 32_000);
+                assert!(served.end_ms - 7_965 < 48_000);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn rolling_web_bootstrap_refuses_known_insufficient_production() {
+        let directory = crate::test_tempdir().expect("slow web bootstrap");
+        let session = test_session(directory.path().to_path_buf());
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            0,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Starting,
+        )
+        .await;
+        session.progress.recent_milli.store(950, Relaxed);
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[8.0; 4], false),
+        )
+        .await
+        .expect("writer inventory");
+        let refusal = session
+            .publication_cycle("slow-web-bootstrap")
+            .await
+            .expect_err("smaller bootstrap cannot bypass known insufficient capacity");
+        assert!(refusal.starts_with("rolling_insufficient_capacity:"));
+        assert!(session.publication.lock().await.served.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rolling_web_low_reserve_keeps_all_completed_media_for_thirty_minutes() {
+        let directory = crate::test_tempdir().expect("low reserve continuity");
+        let session = test_session(directory.path().to_path_buf());
+        session
+            .publication
+            .lock()
+            .await
+            .bind_startup_transport(Some("native"));
+        let started = Instant::now();
+        let mut previous_end = 0;
+        for step in 0..=112_i64 {
+            let position = step * 16_000;
+            accept_rolling_publication_demand(
+                &session,
+                (step + 1) as u64,
+                position,
+                1.0,
+                crate::playback_control::PlaybackDemand::Active,
+                if step == 0 {
+                    crate::playback_control::RenderState::Starting
+                } else {
+                    crate::playback_control::RenderState::Rendering
+                },
+            )
+            .await;
+            // Only 5% spare capacity: reaching the former 48s reserve takes
+            // 320s. Include all completed 8s segments on each legal cycle.
+            let produced = 32_000 + position * 105 / 100;
+            let count = usize::try_from(produced / 8_000).expect("segment count");
+            tokio::fs::write(
+                directory.path().join("index.m3u8"),
+                rolling_playlist(&vec![8.0; count], false),
+            )
+            .await
+            .expect("writer snapshot");
+            session
+                .publication_cycle_at(
+                    "web-low-reserve-continuity",
+                    started + Duration::from_millis(position as u64),
+                )
+                .await
+                .expect("sustainable publication");
+            let clock = session.publication.lock().await;
+            let served = clock.served.as_ref().expect("published media");
+            assert!(served.end_ms > position, "no drain at step {step}");
+            assert!(
+                served.end_ms >= previous_end,
+                "no revoked advertised endpoint"
+            );
+            if position < 320_000 {
+                assert_eq!(
+                    served.end_ms,
+                    (produced / 8_000) * 8_000,
+                    "must include all completed eligible endpoints during reserve growth"
+                );
+            }
+            if served.first_segment > 0 {
+                assert!(
+                    served.duration_ms >= 48_000,
+                    "prefix removal keeps three targets"
+                );
+            }
+            previous_end = served.end_ms;
+            drop(clock);
+            tokio::time::advance(Duration::from_millis(251)).await;
+        }
+        assert!(
+            !session.failed.load(Acquire),
+            "normal low reserve is not startup expiry"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_two_x_writer_tracks_one_x_for_one_simulated_hour() {
         let directory = crate::test_tempdir().expect("publication budget");

@@ -1,6 +1,6 @@
 # Playback startup build — Sol's execution contract through a qualified merge
 
-**Status:** authorized for implementation; dispatch pending ·
+**Status:** implementation in progress; qualification pending ·
 **Written:** 2026-09-29 EDT · **Builder:** Sol ·
 **Executes:** [the reviewed implementation plan](PLAYBACK-STARTUP-LATENCY-IMPLEMENTATION.md)
 and [R1–R3 review dispositions](PLAYBACK-STARTUP-LATENCY-REVIEW.md).
@@ -64,9 +64,9 @@ Prefer a completed correction with no additional setting.
 The builder's repository is:
 
 ```text
-/private/tmp/plurx-startup-build-20260929
+/private/tmp/plurx-fast-start-build-20261002
 branch: codex/playback-startup-latency
-initial remote-main base: 38c917225d2c47e66524896c9ad0351d2314f508
+current build base: dea1a403e9a650fc51e35909b36e596be5a5ed13
 ```
 
 This is an independent clone of the configured remote. It contains only the
@@ -208,3 +208,24 @@ a deployment and playback observation.
 | 2026-09-29 EDT | Separate clone; planning files removed from user checkout | User requires their working tree contain none of this effort's additions |
 | 2026-09-29 EDT | Preserve evidence-gated numeric policy selection | A smaller constant alone can exchange startup latency for a later stall |
 | 2026-09-29 EDT | Existing plan review retained as design history | Future implementation still needs its own final adversarial review |
+
+## 8. October 2 native-startup amendment build
+
+The user authorized the revised native-startup incident packet with “ok build
+it” on October 2. This resumes the contracts against fresh main, preserves
+the prior conservative settings correction, and builds Track N plus the
+ordinary-HLS publication candidate and preparation deadline alignment.
+The source clone above is the current owned build workspace.
+
+The candidate freezes transport qualification at create, preserves the
+12-second writer gate, fixed 16-second target and steady 48-second production
+allowance, and derives a separate first-snapshot runway. Numeric selection
+remains dependent on M2 evidence; the current 32-second-minimum candidate is not a
+claim of qualification. Unknown/legacy clients retain the conservative
+policy. Apple/Android physical qualification remains open; their absent
+transport hint retains the conservative policy.
+
+Native readiness, same-session reload and compatible-route admission reuse
+Track N. Track S's joinable encoded-source preparation is separate outstanding
+work and is not claimed delivered by this amendment. No production deployment,
+queue reset, digest migration or live reference-film acceptance has occurred.

@@ -800,15 +800,20 @@ function wirePlayerMedia(v){
   // A media error never reaches the console on its own — surface it, always.
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
-  v.addEventListener("error",()=>{
+  v.addEventListener("error",async()=>{
     if(!playbackOwnsAttachedMedia(PLAYER)) return;
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
     if(!v.getAttribute("src")&&!v.currentSrc) return;
+    const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
+    const nativePlayer=PLAYER;
+    if(nativePlayer?.hlsStartup?.transport==='native'&&nativePlayer.hlsStartup.native.video!==v) return;
+    if(nativePlayer?.hlsStartup?.transport==='native'&&!playbackIsReal()
+      &&await classifyNativeHlsError(v,nativePlayer,code,msg)) return;
+    if(PLAYER!==nativePlayer) return;
     const controlTrigger=notifyPlaybackControl("failed");
     clearStall();
-    const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const src=(v.currentSrc||"").split("?")[0];
     console.warn("[cinema] video error",{code,msg,method:PLAYER&&PLAYER.method,src});
     // Paused on a rolling session and the network failed: the pause grace
