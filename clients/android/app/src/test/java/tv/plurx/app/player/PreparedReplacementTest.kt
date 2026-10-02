@@ -946,6 +946,18 @@ class PreparedActiveWallBudgetTest {
         assertEquals(0L, budget.remainingMs)
     }
 
+    @Test fun preparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline() {
+        val budget = PreparedActiveWallBudget(5_000, 11_100, false,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(1_000L, budget.remainingOverlapMs)
+        assertFalse(budget.update(12_099, false))
+        assertTrue(budget.update(12_100, false))
+        assertEquals(5_000L, budget.remainingMs)
+        val spent = PreparedActiveWallBudget(5_000, 20_100, true,
+            overlapBoundMs = 12_000, overlapStartedAtMs = 100)
+        assertEquals(0L, spent.remainingOverlapMs)
+    }
+
     @Test fun pauseParksObservationButPhysicalOverlapStillExpires() {
         val budget = PreparedActiveWallBudget(5_000, 100, true, overlapBoundMs = 12_000)
         assertFalse(budget.update(2_100, false))

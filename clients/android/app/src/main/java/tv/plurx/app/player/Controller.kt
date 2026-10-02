@@ -3940,6 +3940,7 @@ class Controller internal constructor(
     private fun startSuccessor(action: ControlAction) {
         val playlist = action.playlistUrl ?: return
         val originMs = action.mediaOriginMs ?: return
+        preparedStartedAtMs = monotonicNowMs()
         val built = try {
             buildSuccessorPlayer(context, vm, plan.isAudioOnly)
         } catch (_: Exception) {
@@ -3952,7 +3953,6 @@ class Controller internal constructor(
             fallBackAfterPreparedFailure()
             return
         }
-        preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
         try {
             preparedVideoSurfaces?.stage(built.player)
@@ -4100,6 +4100,10 @@ class Controller internal constructor(
                 if (rendezvous !== hold) return@launch
                 val successor = preparedPlayer ?: return@launch
                 if (!preparedLedger.isLive) return@launch
+                if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
+                    abandonPreparedReplacement(failed = true)
+                    return@launch
+                }
                 if (!hold.isReady) {
                     delay(RENDEZVOUS_READY_POLL_MS)
                     val target = hold.rendezvousFilmMs ?: return@launch
@@ -4174,6 +4178,10 @@ class Controller internal constructor(
         val successor = preparedPlayer ?: return
         val action = preparedLedger.action ?: return
         val originMs = action.mediaOriginMs ?: return
+        if (monotonicNowMs() - preparedStartedAtMs >= PREPARED_OVERLAP_BOUND_MS) {
+            abandonPreparedReplacement(failed = true)
+            return
+        }
         if (autoPreparing && !autoTrialMayCommit(autoDesiredCandidate?.id, action.effectiveSelection?.candidateId,
                 autoPreparedTargetRevision, autoPresentationTarget?.revision,
                 autoPreparedMutationEpoch, mediaMutationEpoch,
@@ -4216,6 +4224,7 @@ class Controller internal constructor(
             monotonicNowMs(),
             playbackIntent.playbackRequested && presentationForeground,
             overlapBoundMs = PREPARED_OVERLAP_BOUND_MS,
+            overlapStartedAtMs = preparedStartedAtMs,
         )
         // M3. Three assignments, on the line the swap is decided at. Nothing
         // is awaited, nothing is read back, and the picture is untouched.

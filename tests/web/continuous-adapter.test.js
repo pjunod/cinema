@@ -17,14 +17,16 @@ class BufferSurface {
  emit(type){if(type==='updateend')this.updating=false;
   for(const row of this.listeners.filter(row=>row.type===type).sort((a,b)=>Number(b.capture)-Number(a.capture)))row.handler();}
 }
-function fixture({holdScheduled=false}={}){
+function fixture({holdScheduled=false,sharedAudio=false}={}){
  const firstInit=init(),secondInit=init(1,{width:1920,height:1080});
  const firstMedia=media({start:0}),secondMedia=media({start:0,payload:Buffer.from([8,7,6,5,4,3,2,1])});
  const primary={candidate_id:'1'.repeat(32),rendition_id:'a'.repeat(64),init_id:digest(firstInit),width:1280,height:720,
   codec:'avc1.640032',timescale:24000,frame_ticks:1001,segment_ticks:2002,peak_bps:1000000,playlist:`video/${'a'.repeat(64)}/index.m3u8`};
  const target={...primary,candidate_id:'2'.repeat(32),rendition_id:'b'.repeat(64),init_id:digest(secondInit),width:1920,height:1080,
   playlist:`video/${'b'.repeat(64)}/index.m3u8`};
- const family={version:1,mode:'autonomous_reserved',family_id:'c'.repeat(64),master:'master.m3u8',video:[primary,target],audio:null};
+ const audioInit=init(1,{type:'soun'}),audio={rendition_id:'d'.repeat(64),init_id:digest(audioInit),
+  codec:'mp4a.40.2',timescale:48000,channels:2,peak_bps:192000,playlist:`audio/${'d'.repeat(64)}/index.m3u8`};
+ const family={version:1,mode:'autonomous_reserved',family_id:'c'.repeat(64),master:'master.m3u8',video:[primary,target],audio:sharedAudio?audio:null};
  const prefix=`/api/v1/hls/${uuid(1)}/`,bootstrap={generation:uuid(2),control_epoch:1,
   schedule_url:prefix+'quality-schedule',family_url:prefix+'quality-family',family,primary_candidate_id:primary.candidate_id};
  const resources=new Map([[prefix+`video/${primary.rendition_id}/init/${primary.init_id}.mp4`,firstInit],
@@ -45,6 +47,13 @@ function fixture({holdScheduled=false}={}){
   return {artifact_id:digest(data),rendition_id:row.rendition_id,timescale:24000,
    from_tick:ordinal*2002,through_tick:(ordinal+1)*2002,byte_length:data.length};
  }));
+ const audioIntervals=sharedAudio?Array.from({length:4},(_,ordinal)=>{
+  const data=media({start:ordinal*4004+16,sampleTicks:2002,payload:Buffer.from([ordinal,9,6,5,4,3,2,1])});
+  resources.set(prefix+`audio/${audio.rendition_id}/segment/${ordinal}.m4s`,data);
+  return {artifact_id:digest(data),rendition_id:audio.rendition_id,timescale:48000,
+   from_tick:ordinal*4004+16,through_tick:(ordinal+1)*4004+16,byte_length:data.length};
+ }):[];
+ if(sharedAudio)resources.set(prefix+`audio/${audio.rendition_id}/init/${audio.init_id}.mp4`,audioInit);
  const exchange=async(url,request)=>{
   requests.push(copy(request));
   if(!ledger)ledger={version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),
@@ -81,6 +90,12 @@ function fixture({holdScheduled=false}={}){
    transaction.ready=copy(intervals.filter(row=>row.rendition_id===transaction.target_rendition_id
     &&row.from_tick>=request.window.frontier.through_tick).slice(0,2));
   }
+  if(sharedAudio&&transaction){
+   ledger.shared_audio_rendition_id=audio.rendition_id;ledger.shared_audio_reserved??=[];
+   for(const pin of audioIntervals.filter(row=>transaction.ready.some(video=>row.from_tick<video.through_tick*2
+    &&row.through_tick>video.from_tick*2)))if(!ledger.shared_audio_reserved.some(old=>old.artifact_id===pin.artifact_id)){
+     ledger.shared_audio_reserved.push(copy(pin));}
+  }
   return {version:1,generation:request.generation,control_epoch:request.control_epoch,attachment:copy(request.attachment),revision:++revision,
    receipt,ledger:copy(ledger)};
  };
@@ -97,7 +112,7 @@ function fixture({holdScheduled=false}={}){
  const load=(url,{progress=()=>{}}={})=>new Promise((resolve,reject)=>{
   new Loader({}).load({url},{},{onProgress:progress,onSuccess:response=>resolve(response.data),onError:error=>reject(new Error(error.text))});
  });
- return {adapter,player,surface,hls,requests,load,prefix,primary,target,firstInit,firstMedia,secondInit,secondMedia,
+ return {adapter,player,surface,hls,requests,load,prefix,primary,target,audio,audioIntervals,firstInit,firstMedia,secondInit,secondMedia,
   releaseScheduled:()=>releaseScheduled?.(),present(time,width=1280,height=720){const callback=frame;frame=null;callback?.(0,{mediaTime:time,width,height});}};
 }
 test('fragment data remains private until exact scheduling acknowledges it',async()=>{
@@ -218,5 +233,18 @@ test('aborted outgoing fragment callbacks cannot authorize after a quality switc
  assert.equal(await f.adapter.choose(f.target.candidate_id),'continuous');assert.equal(aborts,1);
  const count=f.requests.length;callbacks.onSuccess({data:bytes(f.firstMedia)},{},ctx,{});
  await pause();await pause();assert.equal(f.requests.length,count);
+ assert.equal(f.player.continuousQualityObservation,undefined);
+});
+
+
+test('AAC just beyond a video boundary reserves a forward owner window',async()=>{
+ const f=fixture({sharedAudio:true});
+ await f.load(f.prefix+`video/${f.primary.rendition_id}/init/${f.primary.init_id}.mp4`);
+ await f.load(f.prefix+`audio/${f.audio.rendition_id}/init/${f.audio.init_id}.mp4`);
+ await f.load(f.prefix+`video/${f.primary.rendition_id}/segment/0.m4s`);
+ assert.equal(f.adapter.protocol.ledger.shared_audio_reserved.some(row=>row.artifact_id===f.audioIntervals[2].artifact_id),false);
+ await f.load(f.prefix+`audio/${f.audio.rendition_id}/segment/2.m4s`);
+ assert.equal(f.requests.find(row=>row.window)?.window.frontier.through_tick,4004);
+ assert.equal(f.adapter.protocol.ledger.shared_audio_reserved.some(row=>row.artifact_id===f.audioIntervals[2].artifact_id),true);
  assert.equal(f.player.continuousQualityObservation,undefined);
 });

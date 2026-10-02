@@ -864,11 +864,11 @@ historical measured outcomes as current evidence.
 | CQ2a | Integrated upstream route-v1 floor; independent cancellation envelope being built | Pinned workspace/all-target compile; negotiation and exact-cancel regressions authored, not run | Separate bounded public/peer route, exact accepted intent fences; web caller and durable cleanup receipts implemented; client replay/retention settlement remains |
 | CQ1 | Integrated upstream retention/admission | Pending-planning cancellation regression authored; not run | Upstream safety reused; incumbent-wait planning gap closed; manual retention and explicit Retry/restart implemented, qualification pending |
 | CQ2 | Strict transaction ledger and owner-fenced storage implemented; serving integration underway | Pinned workspace/all-target compile; lost append, replay, takeover, pin-pressure and cross-language fixture regressions authored, unrun | Dependency reservations persist; producer/cache-pin and client adapters still need integration |
-| CQ3 | — | — | Not run |
-| CQ4 | — | — | Not run |
-| CQ5 | — | — | Not run |
-| CQ6 | — | — | Not run |
-| CQ7 | — | — | Not run |
+| CQ3 | Verified two-rung AVC/shared-AAC family implemented | Actual isolated Linux init verification and production probes | BT.709 proof passes; continuity qualification remains |
+| CQ4 | Controlled cold admission and demand retirement implemented | Pinned all-target compilation; regressions authored | Measured cleanup and pressure qualification remain |
+| CQ5 | Shipped hls.js enrollment, reserved loader and observers implemented | Exact-source Chrome probes; first frame and first rung observed | Second-switch AAC pin failure corrected; full Chrome/Firefox series remain |
+| CQ6 | Warm prepared surfaces and original overlap clocks implemented | iOS/tvOS and Android source compilation | Unit execution deferred; physical qualification remains |
+| CQ7 | Public API and SDK constraints audited; prepared path retained | Official variant/track API documentation; device inventory | Continuous native adapters and device evidence remain unfinished |
 | CQ8 | — | — | Not run |
 
 ### 10.1 CQ0 isolated experiment — mechanics evidence, capture incomplete
@@ -2564,3 +2564,41 @@ and rejects incomplete evidence. The normal-buffer 25-minute fixture was
 generated once on Linux with two encoder threads. Firefox 157.0 and signed
 geckodriver 0.37.1 are staged in an owned temporary folder for qualification.
 Unit execution remains deferred until the final adversarial review.
+
+
+### 10.78 AAC starts select a window that actually covers them
+
+A bounded debugger replay captured the missing pins directly: an AAC fragment
+started at tick 192512 on its 48000 Hz clock, while the reused video readiness
+ended at tick 96 on its 24 Hz clock. Selecting the preceding video entry let
+that old window satisfy the membership check without covering the requested
+audio. The adapter now selects the video entry containing the actual AAC start.
+The owner's existing two-entry rational projection supplies all crossing audio
+artifacts; only its returned immutable hash permits delivery.
+
+The authored regression loads a separate AAC init and an AAC fragment whose
+start lies just beyond the old video window. It requires a new forward window
+and the real audio pin before payload delivery. The original failed full run
+is `continuous-chrome-full-linux-race.json`; its durable census correctly
+counted three attachments after recovery. The diagnostic replay and bounded
+interval captures are retained separately and cannot qualify continuity.
+
+### 10.79 Native overlap keeps the original pipeline construction clock
+
+Apple and Android no longer restart the 12-second physical overlap budget at
+exposure. Both first-frame budgets carry the successor's original construction
+clock, including time spent preparing and aligning. Pause still parks active
+frame observation but consumes physical overlap. Android checks the deadline
+before rendezvous exposure; Apple bounds both its initial staging seek and
+commit alignment by the remaining overlap, cancels timed-out pending seeks,
+and checks the same remainder while obtaining decoded post-seek output.
+
+Authored regressions start exposure after 11 seconds of preparation and require
+only one remaining second even under Pause; an already exhausted deadline stays
+exhausted. iOS production and test sources, tvOS production, and Android
+production and test sources compile. No unit execution or physical device
+qualification is claimed. The public Apple SDK and official documentation
+still expose variant preferences and a preferred maximum resolution, not exact
+manual variant selection; the existing warm prepared path preserves exact
+manual semantics. Android's exact track overrides need matching runtime groups
+and device adaptation evidence before a continuous adapter can claim support.

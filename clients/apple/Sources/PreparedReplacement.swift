@@ -469,11 +469,18 @@ func awaitBoundedValue<Value>(
 /// A decoder stall does not pause this clock; explicit transport intent does.
 struct PreparedActiveWallBudget: Equatable {
     private(set) var remainingMs: Int
+    private(set) var remainingOverlapMs: Int?
     private var lastUpdateMs: Int
     private var playbackRequested: Bool
 
-    init(boundMs: Int, nowMs: Int, playbackRequested: Bool) {
+    init(boundMs: Int, nowMs: Int, playbackRequested: Bool,
+         overlapBoundMs: Int? = nil, overlapStartedAtMs: Int? = nil) {
         remainingMs = max(0, boundMs)
+        remainingOverlapMs = overlapBoundMs.map { bound in
+            let limit = max(0, bound)
+            let spent = max(0, nowMs - (overlapStartedAtMs ?? nowMs))
+            return limit - min(limit, spent)
+        }
         lastUpdateMs = max(0, nowMs)
         self.playbackRequested = playbackRequested
     }
@@ -484,9 +491,12 @@ struct PreparedActiveWallBudget: Equatable {
         if self.playbackRequested {
             remainingMs -= min(remainingMs, current - lastUpdateMs)
         }
+        if let remaining = remainingOverlapMs {
+            remainingOverlapMs = remaining - min(remaining, current - lastUpdateMs)
+        }
         lastUpdateMs = current
         self.playbackRequested = playbackRequested
-        return remainingMs == 0
+        return remainingMs == 0 || remainingOverlapMs == 0
     }
 }
 

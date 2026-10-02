@@ -318,12 +318,13 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         if(found.row.rendition_id!==wanted.rendition_id)throw new Error('Unreserved superseded video load');
         await reserveWindow(facts.from_tick);
       }else{
-        // AAC intervals can cross a video boundary. Reserve the preceding
-        // video entry and its next neighbor through the owner's exact rational
-        // projection; only the returned immutable AAC hash grants delivery.
+        // Select the entry containing this AAC interval's actual start.
+        // The owner's two-entry projection includes boundary-crossing AAC.
+        // Selecting the preceding entry could reuse a ready window that ends
+        // before this fragment and never reserve its immutable hash.
         const tick=Math.floor(facts.from_tick*wanted.timescale/facts.timescale);
         const entry=Math.floor(tick/wanted.segment_ticks)*wanted.segment_ticks;
-        await reserveWindow(Math.max(0,entry-wanted.segment_ticks));
+        await reserveWindow(entry);
       }
       pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
     }

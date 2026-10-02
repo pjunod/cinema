@@ -443,10 +443,14 @@ internal class PreparedActiveWallBudget(
     nowMs: Long,
     playbackRequested: Boolean,
     overlapBoundMs: Long? = null,
+    overlapStartedAtMs: Long = nowMs,
 ) {
     var remainingMs = boundMs.coerceAtLeast(0)
         private set
-    var remainingOverlapMs = overlapBoundMs?.coerceAtLeast(0)
+    var remainingOverlapMs = overlapBoundMs?.let { bound ->
+        val limit = bound.coerceAtLeast(0)
+        limit - minOf(limit, (nowMs - overlapStartedAtMs).coerceAtLeast(0))
+    }
         private set
     private var observedAtMs = nowMs.coerceAtLeast(0)
     private var wasActive = playbackRequested

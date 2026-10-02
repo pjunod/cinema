@@ -25,6 +25,18 @@ final class PreparedCommitRendezvousTests: XCTestCase {
         XCTAssertEqual(budget.remainingMs, 0)
     }
 
+    func testPreparationAndAlignmentConsumeTheSamePhysicalOverlapDeadline() {
+        var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 11_100,
+            playbackRequested: false, overlapBoundMs: 12_000, overlapStartedAtMs: 100)
+        XCTAssertEqual(budget.remainingOverlapMs, 1_000)
+        XCTAssertFalse(budget.update(nowMs: 12_099, playbackRequested: false))
+        XCTAssertTrue(budget.update(nowMs: 12_100, playbackRequested: false))
+        XCTAssertEqual(budget.remainingMs, 6_000)
+        let spent = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 20_100,
+            playbackRequested: true, overlapBoundMs: 12_000, overlapStartedAtMs: 100)
+        XCTAssertEqual(spent.remainingOverlapMs, 0)
+    }
+
     func testFirstFrameBudgetBoundsStallsAndIgnoresBackwardClockSamples() {
         var budget = PreparedActiveWallBudget(boundMs: 6_000, nowMs: 100, playbackRequested: true)
         XCTAssertFalse(budget.update(nowMs: 3_100, playbackRequested: true))

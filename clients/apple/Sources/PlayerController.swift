@@ -2384,6 +2384,13 @@ final class PlayerController: ObservableObject {
     private var preparedAlignmentOutcome: Bool?
     private var preparedAlignmentGeneration = 0
     private var preparedFrameBudget: PreparedActiveWallBudget?
+    /// One physical deadline from pipeline construction through exposure.
+    private var preparedOverlapStartedAtMs: Int?
+    private var preparedOverlapRemainingMs: Int {
+        guard let began = preparedOverlapStartedAtMs else { return 0 }
+        return max(0, PreparedReplacementBounds.overlapMs
+            - max(0, Int(ProcessInfo.processInfo.systemUptime * 1_000) - began))
+    }
     /// How long the viewer's picture was interrupted the last time a prepared
     /// handoff fell back, in milliseconds. Nil until one does. Published so
     /// the developer surfaces can show the number that is currently missing
@@ -10430,6 +10437,7 @@ extension PlayerController: PreparedSuccessorHost {
               player.currentItem != nil,
               let url = Session.shared.url(action.playlistUrl)
         else { return false }
+        preparedOverlapStartedAtMs = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         let item = AVPlayerItem(url: url)
         Self.configureBuffering(item, growingHLS: true)
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
@@ -10507,6 +10515,7 @@ extension PlayerController: PreparedSuccessorHost {
     }
 
     func discardPreparedSuccessor() {
+        preparedOverlapStartedAtMs = nil
         autoStagedTransferMetricTask?.cancel()
         autoStagedTransferMetricTask = nil
         autoStagedTransfers.removeAll()
@@ -10545,7 +10554,8 @@ extension PlayerController: PreparedSuccessorHost {
             // Subscribe before the initial status read. The timer uses the
             // coordinator's original open clock, not a fresh six seconds.
             if item.status == .unknown {
-                let remaining = self.preparedReplacement.readinessRemainingMs() ?? 0
+                let remaining = min(self.preparedReplacement.readinessRemainingMs() ?? 0,
+                                    self.preparedOverlapRemainingMs)
                 let ready = await withTaskGroup(of: Bool.self) { group in
                     group.addTask { @MainActor in
                         for await event in observer.events {
@@ -10576,7 +10586,7 @@ extension PlayerController: PreparedSuccessorHost {
                     self.preparedReplacement.abandon(.failed)
                     return
                 }
-                if self.preparedReplacement.readinessBoundElapsed() {
+                if self.preparedReplacement.readinessBoundElapsed() || self.preparedOverlapRemainingMs == 0 {
                     self.preparedReplacement.abandon(.failed)
                     return
                 }
@@ -10598,11 +10608,13 @@ extension PlayerController: PreparedSuccessorHost {
                         // choosing, and asserting main-actor isolation inside
                         // one is what killed every play on build 90.
                         self.preparedSeekMs = nil
-                        _ = await item.seek(
-                            to: CMTime(value: CMTimeValue(seekMs), timescale: 1_000),
-                            toleranceBefore: .zero,
-                            toleranceAfter: .zero
-                        )
+                        let aligned = await self.awaitPreparedAlignment(of: item, to: seekMs)
+                        guard !Task.isCancelled, self.preparedItem === item,
+                              self.preparedPlayer === successor else { return }
+                        if !aligned {
+                            self.preparedReplacement.abandon(.failed)
+                            return
+                        }
                         continue
                     } else if let throughMs = self.preparedBufferedThroughMs(item),
                               throughMs >= self.preparedFilmPositionMs
@@ -10659,6 +10671,8 @@ extension PlayerController: PreparedSuccessorHost {
         guard started,
               let successor = preparedPlayer,
               let item = preparedItem,
+              let overlapStartedAtMs = preparedOverlapStartedAtMs,
+              preparedOverlapRemainingMs > 0,
               player.currentItem != nil,
               // A paused viewer produces no new frame, ever: the item's output
               // clock does not advance at rate zero, so a switch made while
@@ -10765,6 +10779,7 @@ extension PlayerController: PreparedSuccessorHost {
         preparedPlayer = nil
         preparedItem = nil
         preparedVideoOutput = nil
+        preparedOverlapStartedAtMs = nil
         warmPredecessor = incumbentPlayer
         stagedSurfacePlayer = incumbentPlayer
         defer {
@@ -10862,7 +10877,7 @@ extension PlayerController: PreparedSuccessorHost {
         refreshPGSOverlayWindow(at: boundaryMs, reason: .force)
         ttffMeasurement.rebasePosition(at: realPositionMs())
         let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
-        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)
+        let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs, overlapStartedAtMs: overlapStartedAtMs)
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
         // starts the predecessor's bounded drain. Ending it first removes the
@@ -10947,6 +10962,8 @@ extension PlayerController: PreparedSuccessorHost {
     /// abandoned seek is left to resolve or not; the generation check is what
     /// stops it reporting into a commit that has moved on.
     private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int) async -> Bool {
+        let remaining = min(PreparedReplacementBounds.alignmentMs, preparedOverlapRemainingMs)
+        guard remaining > 0 else { return false }
         preparedAlignmentGeneration &+= 1
         let generation = preparedAlignmentGeneration
         preparedAlignmentOutcome = nil
@@ -10960,7 +10977,7 @@ extension PlayerController: PreparedSuccessorHost {
             self.preparedAlignmentOutcome = landed
         }
         let landed = await awaitBoundedValue(
-            boundMs: PreparedReplacementBounds.alignmentMs,
+            boundMs: remaining,
             pollMs: PreparedReplacementBounds.pollMs,
             now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
             sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
@@ -10969,6 +10986,7 @@ extension PlayerController: PreparedSuccessorHost {
         // Best effort, and expected to do nothing to the seek itself; it stops
         // the wrapper task rather than the media operation inside it.
         seek.cancel()
+        if landed == nil { item.cancelPendingSeeks() }
         return landed ?? false
     }
 
@@ -10979,7 +10997,8 @@ extension PlayerController: PreparedSuccessorHost {
         rendezvous: PreparedCommitRendezvous, viewerEpoch: Int
     ) async -> Bool {
         let startedAt = Int(ProcessInfo.processInfo.systemUptime * 1_000)
-        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - startedAt < PreparedReplacementBounds.alignmentMs {
+        while Int(ProcessInfo.processInfo.systemUptime * 1_000) - startedAt < PreparedReplacementBounds.alignmentMs,
+              preparedOverlapRemainingMs > 0 {
             guard !Task.isCancelled, preparedItem === item, preparedPlayer === successor,
                   preparedVideoOutput === output, viewerActionEpoch == viewerEpoch,
                   wantsPlayback, UIApplication.shared.applicationState == .active,
@@ -11010,19 +11029,19 @@ extension PlayerController: PreparedSuccessorHost {
     /// changed. `AVPlayerItemVideoOutput` does not acknowledge physical
     /// display by `AVPlayerLayer` — the same caveat the seek monitor carries —
     /// so device qualification still has to verify the final boundary.
-    private func awaitPreparedFirstFrame(boundaryMs: Int) async -> Int? {
+    private func awaitPreparedFirstFrame(boundaryMs: Int, overlapStartedAtMs: Int) async -> Int? {
         guard let output = preparedSeekVideoOutput(), let item = player.currentItem else {
             return nil
         }
         preparedFrameBudget = PreparedActiveWallBudget(
             boundMs: PreparedReplacementBounds.firstFrameMs,
             nowMs: Int(ProcessInfo.processInfo.systemUptime * 1_000),
-            playbackRequested: wantsPlayback
+            playbackRequested: wantsPlayback,
+            overlapBoundMs: PreparedReplacementBounds.overlapMs,
+            overlapStartedAtMs: overlapStartedAtMs
         )
         defer { preparedFrameBudget = nil }
-        let overlapStarted = Int(ProcessInfo.processInfo.systemUptime * 1_000)
         while true {
-            if Int(ProcessInfo.processInfo.systemUptime * 1_000) - overlapStarted >= PreparedReplacementBounds.overlapMs { return nil }
             guard !Task.isCancelled, started, player.currentItem === item,
                   seekVideoOutput === output else { return nil }
             if preparedFrameBudget?.update(
