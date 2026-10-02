@@ -241,26 +241,29 @@ impl DeviceProfile {
     }
 
     fn allows_audio_stream(&self, stream: &crate::domain::AudioStream) -> bool {
-        if self.max_audio_channels.is_empty() {
+        let codec = stream.codec.to_ascii_lowercase();
+        // Sink claims decide what the server encodes and what may be passed
+        // through. A client that decodes the codec mixes and resamples for its
+        // own route, as every direct play always has, and a codec the claim
+        // does not mention keeps the codec-list answer.
+        let Some(sink) = self.audio_sink_claims.get(&codec) else {
             return self.allows_audio(&stream.codec);
+        };
+        if self.claimed_audio_decoders.contains(&codec) {
+            return true;
         }
         let channels = stream
             .channels
             .and_then(|channels| u8::try_from(channels).ok())
             .filter(|channels| *channels > 0)
             .unwrap_or(2);
-        let codec = stream.codec.to_ascii_lowercase();
-        // As in `resolve_audio`: a decoding client mixes any layout down for
-        // its own route; only an undecoded bitstream must fit the receiver.
-        self.audio_sink_claims.get(&codec).is_some_and(|sink| {
-            (channels <= sink.max_channels || self.claimed_audio_decoders.contains(&codec))
-                && stream.sample_rate.is_some_and(|rate| {
-                    u32::try_from(rate)
-                        .ok()
-                        .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
-                })
-                && (sink.passthrough || self.claimed_audio_decoders.contains(&codec))
-        })
+        sink.passthrough
+            && channels <= sink.max_channels
+            && stream.sample_rate.is_some_and(|rate| {
+                u32::try_from(rate)
+                    .ok()
+                    .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
+            })
     }
 
     /// This client's height ceiling for a source in `codec`, narrowed by the
@@ -1801,6 +1804,107 @@ mod tests {
         let decision = decide(&audiobook, default_profile(), &RenderCaps::proven(true));
         assert_eq!(decision.method, PlaybackMethod::DirectPlay);
         assert!(decision.reasons.is_empty());
+    }
+
+    fn claimed_profile(caps: &str) -> DeviceProfile {
+        DeviceProfile::from_caps_v2(&serde_json::from_str(caps).expect("caps parse"))
+    }
+
+    fn with_audio(mut f: MediaFile, channels: i64, rate: Option<i64>) -> MediaFile {
+        f.audio_streams[0].channels = Some(channels);
+        f.audio_streams[0].sample_rate = rate;
+        f
+    }
+
+    /// The first clients to send `audio_sinks` must not lose a direct play
+    /// they had: a codec the client decodes is mixed down and resampled by
+    /// the client for its own route, a codec the claim does not mention
+    /// keeps the codec-list answer, and only an undecoded bitstream must fit.
+    #[test]
+    fn sink_claims_never_cost_a_decodable_or_unmentioned_direct_play() {
+        let rendered = RenderCaps::proven(true);
+        // An Android TV on an AVR: DTS/TrueHD are passthrough bitstreams the
+        // claim does not spell; Opus is decoded but has no sink entry.
+        let tv = claimed_profile(
+            r#"{"v":2,"video":[{"codec":"h264"},{"codec":"hevc"},{"codec":"vp9"}],
+                "audio":["aac","mp3","opus","flac","ac3","eac3","dts","truehd"],
+                "containers":["mkv","mp4","webm","mp3"],
+                "audio_sinks":[
+                  {"codec":"aac","max_channels":6,"sample_rates_hz":[44100,48000]},
+                  {"codec":"mp3","max_channels":2,"sample_rates_hz":[44100,48000]},
+                  {"codec":"flac","max_channels":6,"sample_rates_hz":[44100,48000]},
+                  {"codec":"ac3","max_channels":6,"passthrough":true,"sample_rates_hz":[48000]},
+                  {"codec":"eac3","max_channels":8,"passthrough":true,"sample_rates_hz":[48000]}]}"#,
+        );
+        for (codec, channels) in [("dts", 6), ("truehd", 8), ("opus", 6), ("eac3", 8)] {
+            let d = decide(
+                &with_audio(file("mkv", "hevc", codec), channels, Some(48_000)),
+                &tv,
+                &rendered,
+            );
+            assert_eq!(
+                d.method,
+                PlaybackMethod::DirectPlay,
+                "{codec}: {:?}",
+                d.reasons
+            );
+            assert!(!d.transcode_audio, "{codec}");
+        }
+        // Rates the claim does not list, and an unprobed rate, still play.
+        for rate in [Some(22_050), Some(96_000), None] {
+            let d = decide(
+                &with_audio(file("mp3", "h264", "mp3"), 2, rate),
+                &tv,
+                &rendered,
+            );
+            assert!(!d.transcode_audio, "mp3 at {rate:?}: {:?}", d.reasons);
+        }
+
+        // A phone on a stereo route still direct-plays decodable 5.1.
+        let phone = claimed_profile(
+            r#"{"v":2,"video":[{"codec":"h264"}],"audio":["aac","eac3"],
+                "containers":["mp4"],
+                "audio_sinks":[
+                  {"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+                  {"codec":"eac3","max_channels":2,"sample_rates_hz":[48000]}]}"#,
+        );
+        for codec in ["aac", "eac3"] {
+            let d = decide(
+                &with_audio(file("mp4", "h264", codec), 6, Some(24_000)),
+                &phone,
+                &rendered,
+            );
+            assert_eq!(
+                d.method,
+                PlaybackMethod::DirectPlay,
+                "{codec}: {:?}",
+                d.reasons
+            );
+        }
+
+        // A receiver-only bitstream (no decoder claimed) must fit the sink.
+        let receiver = claimed_profile(
+            r#"{"v":2,"video":[{"codec":"h264"}],"audio":["aac"],
+                "containers":["mp4"],
+                "audio_sinks":[
+                  {"codec":"aac","max_channels":2,"sample_rates_hz":[48000]},
+                  {"codec":"eac3","max_channels":2,"passthrough":true,"sample_rates_hz":[48000]}]}"#,
+        );
+        let d = decide(
+            &with_audio(file("mp4", "h264", "eac3"), 6, Some(48_000)),
+            &receiver,
+            &rendered,
+        );
+        assert!(
+            d.transcode_audio,
+            "a 5.1 bitstream exceeds a 2-channel receiver"
+        );
+        let d = decide(
+            &with_audio(file("mp4", "h264", "eac3"), 2, Some(48_000)),
+            &receiver,
+            &rendered,
+        );
+        assert!(!d.transcode_audio, "{:?}", d.reasons);
     }
 
     #[test]
