@@ -2761,7 +2761,19 @@ async fn open_active_store_with_key(
                 activation_admission
                     .revalidate()
                     .map_err(|error| StoreError::Database(error.to_string()))?;
-                drop(HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry).await?);
+                let admit_next = || {
+                    activation_admission
+                        .revalidate()
+                        .map_err(|error| StoreError::Database(error.to_string()))
+                };
+                drop(
+                    HiqliteAuthStore::open_or_migrate_admitted(
+                        client.clone(),
+                        &telemetry,
+                        &admit_next,
+                    )
+                    .await?,
+                );
             }
             activation_admission
                 .revalidate()
@@ -5221,8 +5233,16 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+    #[test]
+    fn restore_archive_from_real_snapshot_starts_as_the_only_voter() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-restore",
+            restore_archive_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn restore_archive_observation_fixture() {
         install_default_crypto_provider();
 
         let source_dir = tempfile::tempdir().expect("source data dir");
@@ -6318,8 +6338,13 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+    #[test]
+    fn daemon_join_refuses_occupied_and_expired_targets_then_resumes_finalization() {
+        startup_observer::run_plural_fixture("k06-r1-voter-join", daemon_join_observation_fixture);
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn daemon_join_observation_fixture() {
         let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
@@ -6816,8 +6841,16 @@ mod tests {
     /// asked for. The refusal that comes after activation is the point of the
     /// whole guard, so it is asserted on the message an operator would read.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+    #[test]
+    fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-protocol-range",
+            deployed_binary_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn deployed_binary_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("protocol activation data dir");
@@ -7456,8 +7489,16 @@ mod tests {
     /// durable role survives a restart, and while it exists the cluster refuses
     /// to deactivate the protocol that admitted it.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+    #[test]
+    fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+        startup_observer::run_plural_fixture(
+            "k06-r1-learner-join",
+            learner_join_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn learner_join_observation_fixture() {
         let observed = startup_observer::MeasuredPeers::default();
         install_default_crypto_provider();
 
@@ -7776,8 +7817,16 @@ mod tests {
     /// voter has to advance it. Either arm collapsing onto the other fails
     /// one of the two halves.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+    #[test]
+    fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-schema-role",
+            learner_schema_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn learner_schema_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("schema role data dir");
@@ -7877,8 +7926,16 @@ mod tests {
     /// heartbeat coupling exists for — the row is present and looks like a
     /// proof until it is compared with that node's current heartbeat.
     #[cfg(feature = "hiqlite-store")]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+    #[test]
+    fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+        startup_observer::run_full_hiqlite_fixture(
+            "k06-r1-capability",
+            capability_observation_fixture,
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn capability_observation_fixture() {
         install_default_crypto_provider();
 
         let dir = tempfile::tempdir().expect("unproven voter data dir");

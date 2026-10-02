@@ -1,5 +1,5 @@
-// Test-only selector owner for an actually applied standalone voter.
-// This never synthesizes remote evidence or advertises serving readiness.
+// Test-only owners for applied singleton or signed, measured peer observation.
+// Never synthesize remote evidence or advertise serving readiness.
 use super::observer_core as core;
 use core::cluster::membership::MembershipManager;
 use core::cluster::migration::{
@@ -54,6 +54,41 @@ pub async fn select_applied_singleton(config: &Config) -> Result<SelectedStore, 
 }
 
 const CLOCK_PATH: &str = "/_internal/v1/clock";
+
+/// Only affected plural fixtures own this finite debug-frame allowance.
+/// Matches the existing actual aged-learner fixture; no global stack env.
+pub fn run_plural_fixture<F, Fut>(name: &str, factory: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    let worker = std::thread::Builder::new()
+        .name(name.into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("owned R1 plural runtime")
+                .block_on(Box::pin(factory()));
+        })
+        .expect("owned R1 plural thread");
+    if let Err(panic) = worker.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// The four invalidated singleton selectors and their activation worker
+/// share the actual startup poll seam of the failed default-stack restore.
+pub fn run_full_hiqlite_fixture<F, Fut>(name: &str, factory: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = ()>,
+{
+    run_plural_fixture(name, factory);
+}
 
 #[derive(Default)]
 pub struct MeasuredPeers {
@@ -126,8 +161,19 @@ impl StartupClockObserver for MeasuredObserver<'_> {
                 .lock()
                 .expect("test probe ownership")
                 .push(tokio::spawn(async move {
+                    let mut next_periodic = tokio::time::Instant::now();
                     loop {
-                        measured_round(&manager).await;
+                        // Match the daemon's ten-second periodic cadence.
+                        // An actually refused guard demands a fresh real
+                        // exchange after applied membership changes. Never
+                        // replace safe original tickets every polling tick.
+                        if tokio::time::Instant::now() >= next_periodic
+                            || manager.clock_guard().acquire().is_err()
+                        {
+                            measured_round(&manager).await;
+                            next_periodic =
+                                tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+                        }
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 }));
