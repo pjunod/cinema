@@ -11188,6 +11188,9 @@ mod tests {
             .expect("change on disk");
         std::fs::remove_file(&gone).expect("delete");
         std::fs::remove_file(&dangling).expect("replace with a link");
+        // A dangling link where the platform has them; elsewhere the row is
+        // simply another deleted file, with the same expected outcome.
+        #[cfg(unix)]
         std::os::unix::fs::symlink(fixture.root.join("missing-target.mkv"), &dangling)
             .expect("dangling link");
 
