@@ -1,6 +1,6 @@
 # TCL catalog repair — implementation and evidence
 
-**Status:** validation fixes complete; CI policy decision pending · **Updated:** 2026-10-02
+**Status:** validated; combined passing receipt approved for merge · **Updated:** 2026-10-02
 
 Companion to [the reviewed RCA](TCL-CANDIDATE-CATALOG-RCA-AND-FIX.md).
 This page records implementation, decisions and evidence separately from physical
@@ -257,3 +257,13 @@ regression was executed on the combined source:
 passed (1 case, 0.02 s; Rust 1.97.1). Every unaffected passing result remains
 retained. The PR's final code is integrated with that main revision; the
 remaining hold is the explicit CI-policy decision above.
+
+
+Merge decision settled, 2026-10-02: the user explicitly authorized merging
+with the combined passing receipt. This supersedes the aggregate workflow
+requirement for this PR; no CI status is fabricated and no whole unit suite
+is repeated. Forgejo main was rechecked at `4f55ae17e`, with the integrated
+code and all reported failed regressions passing. The landing retains all
+15 Regression-Test trailers. The final merge result and landing commit are
+recorded in [PR #718](http://192.168.4.7:3000/noirr/plurx/pulls/718), which is
+the authoritative completion record. Physical acceptance remains outstanding.
