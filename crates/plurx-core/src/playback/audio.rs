@@ -365,7 +365,14 @@ pub fn resolve_audio(
         .audio_codecs
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(&codec));
-    let fits_sink = explicit_sink.is_some_and(|sink| source_channels <= sink.max_channels);
+    // A sink's channel count is what its route reproduces, which decides what
+    // the server *encodes*. A client that decodes the codec itself mixes any
+    // decodable layout down for its own output — exactly what it does with a
+    // direct play — so a copy only has to fit the route when the bitstream is
+    // passed through undecoded to a receiver.
+    let fits_sink = explicit_sink.is_some_and(|sink| {
+        source_channels <= sink.max_channels || profile.claimed_audio_decoders.contains(&codec)
+    });
     let rate_admitted = explicit_sink.is_some_and(|sink| {
         source.sample_rate.is_some_and(|rate| {
             u32::try_from(rate)
@@ -622,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn compatible_aac_five_one_copies_only_when_the_sink_claims_six_channels() {
+    fn a_decoding_client_copies_five_one_whatever_its_route_and_a_bitstream_must_fit() {
         let source = source("aac", 6);
         let six = resolve_audio(
             Some(&source),
@@ -638,10 +645,38 @@ mod tests {
             AudioRoute::RollingHls,
             0,
         );
-        // No layout spelling in the facts: the limited default fold, never a
-        // matrix guessed from the channel count.
+        // The client decodes AAC itself and mixes it down for its stereo
+        // route, as it does on a direct play: copy, no server fold.
+        assert!(matches!(
+            stereo.action,
+            AudioAction::Copy { channels: 6, .. }
+        ));
+
+        // A passthrough-only sink (no decoder) must fit the receiver.
+        let mut receiver = claimed(&[("eac3", 2)]);
+        receiver.claimed_audio_decoders.clear();
+        if let Some(sink) = receiver.audio_sink_claims.get_mut("eac3") {
+            sink.passthrough = true;
+        }
+        let bitstream = resolve_audio(
+            Some(&super::tests::source("eac3", 6)),
+            &receiver,
+            AudioRoute::RollingHls,
+            0,
+        );
+        assert!(bitstream.transcodes(), "{bitstream:?}");
+
+        // A codec the client cannot decode is folded by the server. No layout
+        // spelling in the facts: the limited default fold, never a matrix
+        // guessed from the channel count.
+        let dts = resolve_audio(
+            Some(&super::tests::source("dts", 6)),
+            &claimed(&[("aac", 2)]),
+            AudioRoute::RollingHls,
+            0,
+        );
         assert_eq!(
-            stereo.downmix,
+            dts.downmix,
             Some(DownmixMatrix::LimitedDefault { source_channels: 6 })
         );
     }
@@ -664,7 +699,7 @@ mod tests {
             Some(DownmixMatrix::LoRo51Side)
         );
         assert_eq!(
-            fold(laid_out("aac", 6, "5.1")),
+            fold(laid_out("dts", 6, "5.1")),
             Some(DownmixMatrix::LoRo51Back)
         );
         assert_eq!(
@@ -673,7 +708,7 @@ mod tests {
         );
         // A spelling whose channel count disagrees is not trusted.
         assert_eq!(
-            fold(laid_out("aac", 8, "5.1")),
+            fold(laid_out("dts", 8, "5.1")),
             Some(DownmixMatrix::LimitedDefault { source_channels: 8 })
         );
         assert_eq!(
@@ -681,7 +716,7 @@ mod tests {
             Some(DownmixMatrix::LimitedDefault { source_channels: 5 })
         );
         // Stereo sources fold nothing.
-        assert_eq!(fold(laid_out("aac", 2, "stereo")), None);
+        assert_eq!(fold(laid_out("dts", 2, "stereo")), None);
         // The legacy (absent-claim) transcode default folds the same way: it
         // is the path every multichannel title takes today.
         let legacy = resolve_audio(
