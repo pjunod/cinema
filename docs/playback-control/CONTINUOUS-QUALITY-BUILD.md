@@ -2870,3 +2870,40 @@ fixed wall-time estimate across rates, saturation and bounded failure beyond
 the supported lead calculation. Android production and final regression
 sources compile. Unit execution remains deferred until the final review;
 physical timing and the continuous adapter remain outstanding.
+
+
+### 10.92 Android transaction foundation — compiled, not yet enrolled
+
+The native adapter now has a version-one receipt validator, bounded serialized
+exchange owner and profile-bound HTTP transport. The owner retains uncertain
+requests across failed acknowledgements and coroutine cancellation, replays
+identical wire data before newer intent, and bounds queued exchanges at 32.
+Rate-limited retries wait at most one second. Only durable End proof permits
+terminal reconciliation. Incoming identities, sequences, revisions, intervals,
+transaction collections, shared-audio pins, total pin count and byte sum are
+validated before advancing state. String booleans and unsafe integers cannot
+stand in for protocol values. Family binding verifies the two-to-eight-rung
+AVC clock and raster graph, playlist paths and optional shared AAC metadata.
+
+The HTTP client captures the creating profile, checks the exact same-origin
+schedule path, rejects redirects, bounds both response and request bytes, has
+a fourteen-second call deadline, rejects malformed UTF-8 and cancels its owned
+calls on close. Authored regressions cover lost acknowledgement ordering,
+cancellation, delayed rate limits, foreign and malformed receipts, terminal
+proof, family binding and cross-transaction reservation bounds. Compilation
+of production and test sources is the evidence here; unit execution is
+still deferred. These foundations do not enroll playback by themselves.
+The retained track-selection, reserved data source, accepted-sample ownership
+and disposal integration remain required before native enrollment is wired.
+No new feature switch or readiness gate was introduced.
+
+Pinned Media3 exposes the HLS extractor output and the actual public
+`SampleQueue` indices. A metadata callback can be rejected by the queue;
+therefore append proof needs the accepted write-index change, observed under
+its monitor rather than an unsynchronized UI poll. Front indices establish
+queue retirement, but cannot establish release of decoder or audio-sink
+ownership. The adapter must combine real queue lifetime with actual renderer
+and sink observations, and fence queue resets and reused extractors. These
+are implementation constraints, not qualified native playback evidence.
+The inspected implementation is
+[SampleQueue 1.10.1](https://github.com/androidx/media/blob/1.10.1/libraries/exoplayer/src/main/java/androidx/media3/exoplayer/source/SampleQueue.java).
