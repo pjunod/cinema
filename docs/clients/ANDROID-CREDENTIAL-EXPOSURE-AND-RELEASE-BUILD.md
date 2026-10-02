@@ -701,6 +701,15 @@ visible to adb, so "every device in the role's inventory" is not yet met. The
 source counter is still 142 on this effort branch; the next client build bumps
 it, and that rollout must recheck every device against the new number.
 
+**Observation, not a bar: a leftover test package.** `tv.plurx.app.test` — the
+debug instrumentation APK — is listed by Backup Manager on the Google TV (its
+full-backup queue) and the Pixel 10 Pro Fold, so it is likely still installed
+there. Backup lists can keep entries for removed packages (the Google TV queue
+also lists the `capabilityprobe` packages uninstalled on 2026-09-30), so this is
+not proof. Device step for an operator: `adb -s <device> shell pm list packages
+tv.plurx.app.test`, and if it is listed, `adb -s <device> uninstall
+tv.plurx.app.test`. Uninstall only that exact package — never `tv.plurx.app`.
+
 **M2 — the shipped backup rules.** The release APK was pulled from the Pixel 11
 Pro XL (7.5 MB, resource-shrunk) and its manifest decoded: no `debuggable`,
 `allowBackup=true`, `fullBackupContent=@xml/backup_rules` excluding `offline/`

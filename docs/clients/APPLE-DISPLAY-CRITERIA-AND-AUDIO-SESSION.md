@@ -449,8 +449,8 @@ Rollback is the previous build number.
 ### 6.1 Status and remaining physical evidence (2026-10-02)
 
 **Simulator suite, 2026-10-02.** `make apple-test`'s steps (xcodegen, then
-`build-for-testing` and `test-without-building` per platform) ran once on mba
-(Xcode 27.0, iPhone 17 Pro and Apple TV 4K (3rd generation) simulators, iOS and
+`build-for-testing` and `test-without-building` per platform) ran once on maca,
+the macOS CI runner (Xcode 27.0, iPhone 17 Pro and Apple TV 4K (3rd generation) simulators, iOS and
 tvOS 26.5 runtimes) against a plain source copy of
 `effort/architecture-review-2026-09-20` @ `6f6466ebc`. Both builds succeeded.
 iOS: **742 tests, 735 passed, 7 failed**. tvOS: **726 tests, 719 passed, 7
@@ -477,7 +477,7 @@ None of the seven is an A-01 test: the display-criteria decision and all four
 interruption tests (finite, Live TV, library channel, and the
 system-suspension/intent policy) passed on both platforms.
 
-What only a physical device can close — none of it can come from mba, which
+What only a physical device can close — none of it can come from maca, which
 has no paired Apple TV, iPhone or iPad. First ship an Apple build at or above
 the source counter (`CURRENT_PROJECT_VERSION` 204 on this branch), and report
 the installed build with every result:
@@ -537,4 +537,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | `b1709dbc` / #406 | One owned observer serves all three player stacks; interruption state remains separate from viewer intent, stall/watchdog sampling is gated, old-route loss revokes intent, and iOS uses `.playback` / `.moviePlayback`. Six focused Swift tests and all 64 shared surface cases pass. The iPhone interruption matrix remains required. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | `3bbe3ea3` / #406 | No second display writer was added beside SwiftUI `VideoPlayer`. APPLE-CLIENT-PARITY records the implementation and explicitly leaves inline/fullscreen HDMI behavior unobserved; needs the §6 Apple TV prompt before this plan can be `done`. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review fixes | `c5ca81f7`, `42b631d1` / #406 | Addressed all findings from sole adversarial review #3154: explicit-resume reconciliation on all three stacks, attached Live TV route-loss pause, ready/current/serial-fenced Live TV display matching, and truthful source-level retirement documentation. Five selected iOS simulator tests, tvOS simulator compilation, all 64 surface cases, and docs-index validation pass. Physical HDMI and interruption evidence remains pending. |
-| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Simulator suite and remaining evidence | `opus/client-evidence` into the architecture effort | `make apple-test` steps on mba (Xcode 27.0) at `6f6466ebc`: iOS 742/735/7, tvOS 726/719/7 (total/passed/failed); every A-01 decision and interruption test passed on both platforms, and the seven failures are pre-existing and outside A-01 (listed in §6.1). Physical HDMI, Siri and iPhone evidence remains, as concrete steps in §6.1. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Simulator suite and remaining evidence | `opus/client-evidence` into the architecture effort | `make apple-test` steps on maca (Xcode 27.0) at `6f6466ebc`: iOS 742/735/7, tvOS 726/719/7 (total/passed/failed); every A-01 decision and interruption test passed on both platforms, and the seven failures are pre-existing and outside A-01 (listed in §6.1). Physical HDMI, Siri and iPhone evidence remains, as concrete steps in §6.1. |
