@@ -1157,10 +1157,8 @@ fn video_filters_for_contract(
             }
             gpu.push_str(",setsar=1");
         }
-        if (bitmap_burn || text_burn)
-            && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
-        {
-            // These two end in vendor surfaces (their encoders read them
+        if (bitmap_burn || text_burn) && opts.pipeline.keeps_frames_off_the_cpu() {
+            // These graphs end in vendor surfaces (their encoders read them
             // directly); the composite cannot. Libplacebo and OpenCL already
             // finish with their own download, so they need nothing here.
             chain.push(format!("{gpu},hwdownload,format=nv12"));
@@ -1703,8 +1701,7 @@ fn hls_args_inner(
     // vendor pipeline is the exception both ways: `video_filters` appended a
     // download for libass/overlay, so the encoder's upload IS owed again.
     let subtitle_burn = opts.subtitle_burn.is_some();
-    let vendor_gpu =
-        matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi) && !subtitle_burn;
+    let vendor_gpu = opts.pipeline.keeps_frames_off_the_cpu() && !subtitle_burn;
     let suffix = opts
         .pipeline
         .encoder_upload(encoder)
@@ -2681,6 +2678,56 @@ mod tests {
             ),
             "{graph}"
         );
+    }
+
+    #[test]
+    fn vulkan_vaapi_playback_transfers_only_for_subtitle_burns() {
+        let source = file(Some("hdr10"));
+        for burn in [None, Some(false), Some(true)] {
+            let options = TranscodeOptions {
+                pipeline: Pipeline::LibplaceboVaapi,
+                target_height: 1080,
+                subtitle_burn: burn.map(|bitmap| SubtitleBurn {
+                    subtitle_index: 0,
+                    bitmap,
+                }),
+                ..Default::default()
+            };
+            let args = hls_args(
+                &source,
+                Encoder::Vaapi,
+                &options,
+                Pacing::unpaced(),
+                "/tmp/s",
+            );
+            assert!(args
+                .windows(2)
+                .any(|p| p == ["-hwaccel_output_format", "vaapi"]));
+            let flag = if burn == Some(true) {
+                "-filter_complex"
+            } else {
+                "-vf"
+            };
+            let graph = &args[args.iter().position(|a| a == flag).expect("video graph") + 1];
+            assert!(
+                graph.contains("hwmap=derive_device=vaapi,format=vaapi"),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwdownload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            assert_eq!(
+                graph.matches("hwupload").count(),
+                usize::from(burn.is_some()),
+                "{graph}"
+            );
+            if burn.is_some() {
+                assert!(graph.contains("hwupload=derive_device=vaapi"), "{graph}");
+                assert!(graph.find("hwmap=") < graph.find("hwdownload"), "{graph}");
+            }
+        }
     }
 
     #[test]

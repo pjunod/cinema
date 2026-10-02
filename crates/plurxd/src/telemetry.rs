@@ -3,7 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use futures_util::future::BoxFuture;
@@ -1540,7 +1540,15 @@ struct EffectiveSettings {
     read_at: Option<Instant>,
 }
 
-static SINKS: LazyLock<Mutex<HashMap<usize, Arc<TelemetrySink>>>> =
+// Keep the allocation identity alive without retaining the Store itself.
+// A writer can disappear with its runtime; its old queue must not be handed
+// to a later Store whose allocation reuses the same address.
+struct RegisteredSink {
+    store: Weak<dyn Store>,
+    sink: Arc<TelemetrySink>,
+}
+
+static SINKS: LazyLock<Mutex<HashMap<usize, RegisteredSink>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn store_key(store: &Arc<dyn Store>) -> usize {
@@ -1553,13 +1561,21 @@ fn ensure_sink(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
     let mut sinks = SINKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(sink) = sinks.get(&key) {
-        return Arc::clone(sink);
+    if let Some(registered) = sinks.get(&key) {
+        return Arc::clone(&registered.sink);
     }
+    sinks.retain(|_, registered| registered.store.strong_count() > 0);
+    let store_identity = Arc::downgrade(&store);
     let sink = new_sink(&QUEUE_METRICS);
     let writer: Arc<dyn WriterStore> = Arc::new(DurableWriterStore(store));
     tokio::spawn(supervise_writer(writer, Arc::clone(&sink)));
-    sinks.insert(key, Arc::clone(&sink));
+    sinks.insert(
+        key,
+        RegisteredSink {
+            store: store_identity,
+            sink: Arc::clone(&sink),
+        },
+    );
     sink
 }
 
@@ -1605,7 +1621,13 @@ fn install_test_sink(
     SINKS
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(store_key(store), Arc::clone(&sink));
+        .insert(
+            store_key(store),
+            RegisteredSink {
+                store: Arc::downgrade(store),
+                sink: Arc::clone(&sink),
+            },
+        );
     sink
 }
 
@@ -1620,7 +1642,7 @@ fn sink_for(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
-        .cloned();
+        .map(|registered| Arc::clone(&registered.sink));
     // Production registers during boot. Lazy construction keeps isolated
     // handler tests on the same bounded path without making emit async.
     registered.unwrap_or_else(|| ensure_sink(store))
@@ -1695,7 +1717,7 @@ pub(crate) fn invalidate_settings(store: &Arc<dyn Store>) {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
     {
-        sink.invalidate_settings();
+        sink.sink.invalidate_settings();
     }
 }
 
@@ -1877,7 +1899,7 @@ pub(crate) async fn drain_for_shutdown(store: &Arc<dyn Store>) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(&key)
-        .cloned();
+        .map(|registered| Arc::clone(&registered.sink));
     let Some(sink) = sink else {
         return;
     };
@@ -3300,6 +3322,70 @@ mod tests {
             1,
             "a terminal was refused by a queue full of samples"
         );
+    }
+
+    #[test]
+    fn a_store_outliving_its_writer_runtime_cannot_reuse_a_stale_sink() {
+        let runtime = || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+        };
+        let old_runtime = runtime();
+        let (old_store, old_sink) = old_runtime.block_on(async {
+            let store: Arc<dyn Store> =
+                Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("old store"));
+            let sink = ensure_sink(Arc::clone(&store));
+            (store, sink)
+        });
+        let old_key = store_key(&old_store);
+        drop(old_runtime);
+        let identity = Arc::downgrade(&old_store);
+        drop(old_store);
+        assert!(
+            identity.upgrade().is_none(),
+            "registry must not retain the Store"
+        );
+        runtime().block_on(async {
+            let store: Arc<dyn Store> =
+                Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("new store"));
+            let new_sink = ensure_sink(Arc::clone(&store));
+            assert!(
+                !Arc::ptr_eq(&old_sink, &new_sink),
+                "a new Store needs a live writer"
+            );
+            assert!(
+                !SINKS.lock().expect("registry").contains_key(&old_key),
+                "expired store registrations must be pruned"
+            );
+            emit(
+                Arc::clone(&store),
+                PlaybackEvent {
+                    event: "session_end".into(),
+                    ..Default::default()
+                },
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let rows = store
+                        .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                            event: Some("session_end".into()),
+                            limit: 10,
+                            ..Default::default()
+                        })
+                        .await
+                        .expect("events");
+                    if !rows.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the replacement writer must persist events");
+            drain_for_shutdown(&store).await;
+        });
     }
 
     /// `emit` against a Store boot never registered must build the sink and
