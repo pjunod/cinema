@@ -91,3 +91,9 @@ test("route closure and account change during streamed response fail closed and 
  const h=harness();for(const path of ["https://source/files","/sharing/imports/7/assignments","/sharing/imports/"+id+"/../rotate","/sharing/imports/"+id+"?token=secret","/sharing/exports?after="+id+"&x=1"])await assert.rejects(h.m.request(path));assert.equal(h.requests.length,0);
  let release,cancelled=false;const gate=new Promise(resolve=>release=resolve);const stale=harness(async()=>new Response(new ReadableStream({async pull(controller){await gate;controller.enqueue(new TextEncoder().encode('{"updated":true}'));},cancel(){cancelled=true;}})));const pending=stale.m.request("/sharing/status");await Promise.resolve();stale.c.TOKEN="login-b";release();await assert.rejects(pending);assert.equal(cancelled,true);
 });
+
+test("complete4096 actual Local library DTOs with paths remain within the bounded editor read",async()=>{
+ const libraries=Array.from({length:4096},(_,i)=>({id:large+BigInt(i),name:"Movies "+i,kind:"movies",paths:Array.from({length:8},(_,j)=>"/library/"+i+"/"+j),anime:false,created_at:large,scan_interval_mins:0n,refresh_interval_mins:0n,last_scan_at:null,last_refresh_at:null}));
+ const wire=stringify(libraries);assert.ok(Buffer.byteLength(wire)<4194304);
+ const h=harness(async()=>reply(libraries));await h.m.open("invite");const e=h.m.state().editor;assert.equal(e.ready,true);assert.equal(e.libraries.length,4096);assert.equal(e.libraries[4095].library_id,(large+4095n).toString());h.m.select(4095,true);assert.equal(e.selected[0],(large+4095n).toString());
+});

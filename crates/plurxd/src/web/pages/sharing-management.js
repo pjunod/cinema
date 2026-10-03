@@ -6,7 +6,7 @@ function sharingJSON(text){
   const fail=()=>{throw new Error("Invalid Sharing JSON");};
   const ws=()=>{while(/[ \t\r\n]/.test(text[i]||"x"))i++;};
   function value(depth){
-    if(depth>32||++nodes>100000)fail(); ws(); const c=text[i];
+    if(depth>32||++nodes>1000000)fail(); ws(); const c=text[i];
     if(c==='"'){
       const start=i++; let escaped=false;
       while(i<text.length){const ch=text[i++];if(ch==='"'&&!escaped)return JSON.parse(text.slice(start,i));if(ch==='\\'&&!escaped)escaped=true;else escaped=false;}
