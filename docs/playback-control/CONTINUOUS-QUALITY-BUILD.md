@@ -5402,3 +5402,32 @@ or physical-resource-pressure scenarios. Autonomous native entitlements,
 source-reader contention and multi-node takeover remain unmeasured.
 Owned browser profiles, daemon and runtime were cleaned up. No units or
 final review ran. Multi-owner/source/platform qualification remains open.
+
+
+### 10.186 · Three-voter preflight passes; mixed ingress exposes relay stack overflow
+
+The isolated three-voter preflight on executable `75c9c7ba3` PASSED.
+Three distinct voter processes on the approved physical host retained one
+logical server identity and appeared as three activity workers. All joined
+processes stopped and the owned runtime tree was removed. Receipt:
+`continuous-cluster-75c9c7ba3-preflight1`. This is a same-host environment
+proof, not playback, multi-host networking or takeover qualification.
+
+The first mixed-ingress playback attempt FAILED before its first frame.
+Catalog/session creation was routed to voter B, while media/quality requests
+went through ingress A. Voter B created media but then aborted on
+`tokio-rt-worker` stack overflow while serving the authenticated relay.
+The browser had no confirmed session or durable session-start event.
+The three-process environment was cleaned up; failed report and bounded
+node logs use stem `continuous-chrome-75c9c7ba3-targeted-mixed-owner1`
+and `continuous-cluster-75c9c7ba3-mixed-owner1-node-*`.
+
+The relay dispatcher directly embedded every resource future in its async
+state. Each resource await now boxes its future, keeping that dispatch
+frame bounded without increasing worker stacks or changing authorization,
+resource routing, inherited deadlines or response semantics. A new unrun
+regression checks actual dispatch/authenticated-handler future footprints
+against a 128 KiB ceiling without constructing or polling daemon state.
+Pinned Rust 1.97.1 `cargo check --locked -p plurxd --tests` PASSED
+in 1m32s; it compiled test sources without executing them. Normal hook
+and exact-source runtime verification of the patch are pending. No units or final review ran.

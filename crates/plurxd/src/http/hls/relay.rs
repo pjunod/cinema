@@ -130,13 +130,21 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
         return response_publication_timeout().into_response();
     };
     let (playlist_deadline, _) = playlist_request_deadlines_before(state, request_deadline);
+    // Keep each resource future on the heap. Their combined dispatch frame
+    // otherwise overflows a normal Tokio worker stack on a relayed request,
+    // before the owner can finish serving its media.
     let result = match request.resource {
         RelayResource::Status => {
-            status_local_before_with_relay(state, &request.session_id, request_deadline, false)
-                .await
+            Box::pin(status_local_before_with_relay(
+                state,
+                &request.session_id,
+                request_deadline,
+                false,
+            ))
+            .await
         }
         RelayResource::Playlist { native, subtitle } => {
-            playlist_local_before(
+            Box::pin(playlist_local_before(
                 state,
                 &request.session_id,
                 PlaylistQuery {
@@ -146,14 +154,14 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 },
                 playlist_deadline,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::Master {
             subtitle,
             diagnostic,
         } => {
-            master_playlist_response_local_before(
+            Box::pin(master_playlist_response_local_before(
                 state,
                 &request.session_id,
                 PlaylistQuery {
@@ -163,70 +171,75 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                 },
                 playlist_deadline,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::VideoPlaylist => {
-            video_playlist_local_before(
+            Box::pin(video_playlist_local_before(
                 state,
                 &request.session_id,
                 "video.m3u8",
                 playlist_deadline,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::SubtitlePlaylist { index } => {
-            subtitle_playlist_local_before(
+            Box::pin(subtitle_playlist_local_before(
                 state,
                 &request.session_id,
                 index,
                 playlist_deadline,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::SubtitleSegment { index, segment } => {
-            subtitle_vtt_local_before(
+            Box::pin(subtitle_vtt_local_before(
                 state,
                 &request.session_id,
                 index,
                 &segment,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::Segment { segment } => {
-            segment_local_before(
+            Box::pin(segment_local_before(
                 state,
                 &request.session_id,
                 &segment,
                 &request.headers,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::ContinuousFamily => {
-            continuous_family_local_before(state, &request.session_id, request_deadline).await
+            Box::pin(continuous_family_local_before(
+                state,
+                &request.session_id,
+                request_deadline,
+            ))
+            .await
         }
         RelayResource::ChildPlaylist { role, rendition } => {
-            child_playlist_local_before(
+            Box::pin(child_playlist_local_before(
                 state,
                 &request.session_id,
                 &role,
                 &rendition,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::ChildSegment { child } => {
-            child_segment_local_before(
+            Box::pin(child_segment_local_before(
                 state,
                 &request.session_id,
                 &child,
                 &request.headers,
                 request_deadline,
-            )
+            ))
             .await
         }
         RelayResource::Delete => {
@@ -234,14 +247,14 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             // It must join the same durable first-writer transaction as the
             // public endpoint; a process-local 204 would allow the active row
             // to be takeover-claimed later.
-            return release_with_slots(
+            return Box::pin(release_with_slots(
                 state.clone(),
                 request.session_id.clone(),
                 session_release_slots(),
                 request_deadline,
                 crate::vodserve::Terminal::Deleted,
                 "released by client",
-            )
+            ))
             .await
             .into_response();
         }
@@ -249,5 +262,37 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
     match result {
         Ok(response) => response,
         Err(error) => error.into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn relayed_media_dispatch_futures_fit_a_normal_worker_stack() {
+        // Infer the actual future types without constructing state or polling
+        // the handlers; nested async additions still count in their footprint.
+        fn dispatch_size<F: std::future::Future>(
+            _: impl FnOnce(&'static AppState, RelayRequest) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        fn handler_size<F: std::future::Future>(
+            _: impl FnOnce(State<AppState>, HeaderMap, Bytes) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let ceiling = 128 * 1024;
+        let dispatch = dispatch_size(relay_local);
+        let handler = handler_size(crate::http::internal_media_sessions::relay);
+        assert!(
+            dispatch < ceiling,
+            "relay dispatch frame is {dispatch} bytes"
+        );
+        assert!(
+            handler < ceiling,
+            "authenticated relay frame is {handler} bytes"
+        );
     }
 }
