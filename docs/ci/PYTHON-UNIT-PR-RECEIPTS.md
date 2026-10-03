@@ -288,6 +288,65 @@ Separate read-only live restoration validated the genuine 277+4 keys using
 13 API requests and zero test methods. Original journal/source attribution
 remains unchanged; source compilation remains current-candidate evidence.
 
+## The bounded #742 lost-journal recovery retains 935 original passes
+
+PR #742's API3915 Python job40909 **attempt1** completed successfully at
+`5fa478987bf464ef6ab9b50bf49dea842acef018`. Its start marker1630 retained926
+passes from run3898/source12990cf0; final1631 retained those unchanged and
+added two validation and seven operations methods, each individually logged.
+The completed final has935 keys and no fixture errors. Root retained both
+original ZIPs before a later non-unit retry; Windows subsequently reports
+attempt3, but that is not another Python execution. The live artifact API
+now lists neither1630 nor1631 and returns404 for their ZIPs. The association
+with that retry does not establish why the server ceased serving them.
+
+`validation/python-unit-lost-journals742.json` embeds those exact archival ZIP
+bytes, original source hashes, job/log identities and counts. The implementation
+pins its whole-file SHA256 and admits only repository1/PR742, branch
+`opus/client-evidence`, the existing effort base, run3915/job40909 and the
+separate run3930/job41018 refusal. It cannot enroll an arbitrary run or path.
+An authenticated repository writer must first attest the reviewed record hash
+on **PR742**, not the recovery task PR:
+
+```text
+Python-Journal-Recovery: {"repository":1,"pr":742,"sha256":"31ef59fb7a45a480df9129499d34772fcfe071c03a284a2967caa4e8bd96ed31"}
+```
+
+Technical access to the retained ZIPs is not that authority. Missing attestation
+blocks. The existing writer-permission check and its exact403 enrolled-owner
+fallback apply unchanged. Neither this record nor the comment is a new unit
+execution or a synthetic success journal.
+
+Restore checks live original run/job metadata (Python attempt1/success while
+the containing run failed), exact original workflow/receipt-code hashes and
+log SHA256, absence of live start/final/run artifacts, both archival ZIP
+hashes/sizes and single-member safety. Start publication precedes individual
+events and final publication follows them. All nine unique positive events
+must match the final-minus-start IDs, source/run attribution and suite counts.
+The inherited926 keys must equal the retained start and still have their
+separately trusted original run3898 journal. Imported maps retain every
+original source; the current mandatory applicability consumer still checks
+each candidate before union. Recovery is not proof of changed assertions or
+arbitrary product dependencies.
+
+API3930/job41018 at `2a299d44b38e67c029b66087f69edc4d5315222e` refused
+prepare because3915's final was missing. Its exact source/log hashes, failure
+attempt1, named refusal before both skipped publication steps, absence of
+discovery/unit/fixture phases and empty artifact lists prove **zero units**.
+That separately pinned branch imports no successes and creates no journal.
+Started units, live partial artifacts, source/log contradictions, unknown runs,
+ambiguous Python attempts or untrusted inherited sources continue to refuse.
+
+The two new synthetic methods in
+`tests/validation/test_python_lost_journal_recovery.py` exercise actual restore,
+original provenance/applicability, archive and writer binding, phase ordering,
+missing/contradictory evidence and the zero-unit branch. Their fake API bytes
+are not actual CI evidence. Original935 successes are never replayed by these
+controls. No workflow, runner, artifact service, retention policy or compiler
+cache changes are made. Durable preservation before any future non-unit retry
+remains operational work; this exact recovery is not a generic lost-artifact
+fallback or permission to delete markers.
+
 ## Focused proof and limits
 
 The small fake-fixture tests in
