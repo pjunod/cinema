@@ -13,6 +13,7 @@ final class Session: @unchecked Sendable {
     /// origin of another account while a background image or media load reads.
     private var credentialOrigin = ""
     private var credentialToken: String?
+    private var credentialGeneration: UInt64 = 0
     private var mediaFailoverOrigins: [String] = []
     private var mediaFailoverIndex = 0
 
@@ -22,8 +23,17 @@ final class Session: @unchecked Sendable {
         return (credentialOrigin, credentialToken)
     }
 
+    var playbackAuthorization: (origin: String, token: String?, generation: UInt64) {
+        nodeLock.lock()
+        defer { nodeLock.unlock() }
+        return (credentialOrigin, credentialToken, credentialGeneration)
+    }
+
     func setCredentials(origin: String, token: String?) {
         nodeLock.lock()
+        if credentialOrigin != origin || credentialToken != token {
+            credentialGeneration += 1
+        }
         credentialOrigin = origin
         credentialToken = token
         nodeLock.unlock()

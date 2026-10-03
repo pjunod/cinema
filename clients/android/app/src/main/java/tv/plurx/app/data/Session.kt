@@ -10,13 +10,29 @@ import java.nio.charset.StandardCharsets
  * token can change without rebuilding it.
  */
 object Session {
+    private val authorizationLock = Any()
+    private var credentialOrigin = ""
+    private var credentialToken: String? = null
+    private var credentialGeneration = 0L
+    data class PlaybackAuthorization(val origin: String, val token: String?, val generation: Long)
+    fun playbackAuthorization(): PlaybackAuthorization = synchronized(authorizationLock) {
+        PlaybackAuthorization(credentialOrigin, credentialToken, credentialGeneration)
+    }
     /** Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`. */
-    @Volatile
-    var origin: String = ""
+    var origin: String
+        get() = synchronized(authorizationLock) { credentialOrigin }
+        set(value) = synchronized(authorizationLock) {
+            if (credentialOrigin != value) credentialGeneration++
+            credentialOrigin = value
+        }
 
     /** Bearer token, or null when signed out. */
-    @Volatile
-    var token: String? = null
+    var token: String?
+        get() = synchronized(authorizationLock) { credentialToken }
+        set(value) = synchronized(authorizationLock) {
+            if (credentialToken != value) credentialGeneration++
+            credentialToken = value
+        }
 
     /** Replicated Android-TV refresh matching policy from `/api/v1/server`. */
     @Volatile

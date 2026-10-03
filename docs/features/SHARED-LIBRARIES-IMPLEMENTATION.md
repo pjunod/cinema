@@ -2772,3 +2772,31 @@ includes actual shipped caller/control fixtures, asset order/layout, settings,
 JavaScript/TypeScript contracts and the existing documented contrast allowance.
 Shared navigation/settings/details/Continue Watching and end-to-end player
 behavior still require their S4/S5 authority and delivery integrations.
+
+
+### 16.8 S7 native file-context foundation
+
+The parallel native checkpoint `52b27c2b4` adds immutable full-reference contexts
+and account-generation seams to Apple and Android. Shared factories fetch the
+actual B detail through the authenticated B origin, capture authorization before
+the await, and refuse changes afterward. They validate canonical string file
+identities/revisions, the complete import/Source/epoch/library/item reference
+and the exact B-relative opaque locator. Private constructors provide no raw
+Source-to-Local conversion. Optional delivery binding uses B's existing UUIDv4
+session grammar, and logout/account replacement retires captured contexts.
+Local Apple Int/Android Long identities retain the existing exact i64 wire.
+
+Four iPhone context XCTest cases passed, including actual mock HTTP origin and
+bearer assertions, large IDs, reference/revision mismatch, malformed locators,
+account ABA and authorization change during fetch. Four Android context and
+five existing Session JVM cases passed. Unsigned iOS and tvOS builds passed;
+Android used the pinned source-only JDK25/SDK compiler image, not the host JDK21.
+The checkpoint's normal catalog/format/workspace Clippy/JavaScript hook passed.
+Its source-only archive hash is
+`787a598af7a07cf6058c07582d66b3be2e5824a27de34e85e2ed0b5778d2c6c1`.
+
+Integration preserves that tested native source but is not a combined native
+qualification receipt. Caller propagation, full resource/query vocabulary,
+PGS/reopen/prepared adapters, Shared UI/decision models and physical TV playback
+remain open. Current B details omit the locator, so the native Shared factories
+refuse that unavailable contract rather than selecting a Local file.
