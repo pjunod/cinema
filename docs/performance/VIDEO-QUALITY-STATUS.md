@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation and runtime receipts retained; selective fast-lane qualification · **Updated:** 2026-10-03
+**Status:** implementation and qualification complete; [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) records landing and cleanup · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -17,7 +17,7 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Isolated | Direct Forgejo clones only; no borrowed Git objects or access to Paul's checkout. Final landing and workspace cleanup are recorded in PR #766. |
-| Consolidated branch | Implementation integrated | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `3197d0c58` integrated as `408297c01`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
+| Consolidated branch | Qualified for landing | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `3197d0c58` integrated as `408297c01`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
 | Content-aware runtime C2 | Integrated `8fd3bba7d` + `e56c80274` | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Retained-HLS can reuse a completed measured artifact; misses preserve live policy. Modern immutable VOD is separate. |
 | Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Preparation and extracted player-owner regressions passed; hook passed. |
@@ -62,8 +62,16 @@ were addressed in `827023fd2` (application-owned probe metadata) and
 | Fast-lane preflight | [Run 3969](http://192.168.4.7:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields. Retain 249 validation methods and 604 operations methods; four validation inventories and one operations inventory passed targeted repairs. Nine environment-dependent operations methods passed on Linux in [run 3972](http://192.168.4.7:3000/noirr/plurx/actions/runs/3972). Original failed results remain recorded. |
 | Player contracts | All seven preflight commands are covered by retained passing checks and focused repaired harness checks. Current-main policy passed 203 assertions; control passed five manual groups and the prepared-buffer case. Twenty-two unchanged native-HLS cases retain matching-main CI evidence. [Receipt](../evidence/video-quality-2026-10-03/web-preflight-repair.json). |
 | Rust continuation | Retained 4,863 passing tests; all eight failures now have targeted passing results. Store inventory and the new three-backend contract, probe negative-control and VAAPI fixture repairs passed individually. The AAC partition fix passed packet conservation and native FFmpeg 9 splicing. All four unchanged scheduler tests, the original B-frame failure under FFmpeg 6 and both previously unrun restart checks passed in [run 3979](http://192.168.4.7:3000/noirr/plurx/actions/runs/3979), pinned to `1cc946893`. [Selective receipt](../evidence/video-quality-2026-10-03/selective-rust-41557-receipt.json). |
-| Windows compilation | First attempt against `bd24f2767` passed; [receipt](../evidence/video-quality-2026-10-03/windows-41503-receipt.json). The final AAC source needs renewed compilation. Job 41558 lost its runner before the 30-minute timeout; all four m6 general registrations were offline and the log ended without a compiler error. A Windows-only retry uses an online runner with the same source, container, toolchain and compile command. No runner service is changed. [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) records completion. |
+| Windows compilation | Passed on final runtime `1cc946893` in [run 3984, job 41591](http://192.168.4.7:3000/noirr/plurx/actions/runs/3984). The original attempt against `bd24f2767` also passed. Final-source job 41558 lost its runner before timeout; the [failed receipt](../evidence/video-quality-2026-10-03/selective-windows-41558-receipt.json) remains recorded. Only Windows was retried on an online baremetal runner, with the same source, container, toolchain and compile command. No runner service changed. |
 | Web continuation | Syntax, 13 media/layout tests and generated jsconfig passed. Two new checkbox typing diagnostics were corrected without runtime changes or a baseline increase; only the failed type check and previously unrun typedef check were then executed and passed. [Receipt](../evidence/video-quality-2026-10-03/continuation-receipt.json). |
+
+The [combined qualification receipt](../evidence/video-quality-2026-10-03/batch-qualification.json)
+binds the final runtime source, retained checks, targeted repairs, all 37
+landing regression references and 27 named Rust passes. Documentation-only
+follow-ups retain the normal hook; no successful suite was repeated. The
+original failed CI jobs remain failed in Forgejo. This aggregate records
+per-check qualification under the owner-approved workflow, not a fabricated
+all-green run. Main `3197d0c58` was unchanged at final qualification.
 
 **Rust failure disposition:** the initial continuation retained 4,863 passes
 and eight failures. Store coverage omitted the newly added publication method;
