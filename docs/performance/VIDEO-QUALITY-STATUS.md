@@ -17,11 +17,11 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Ready | `/private/tmp/plurx-video-quality-build-20261003`, cloned directly from Forgejo; no borrowed Git objects or access to Paul's checkout. |
-| Consolidated branch | Implementation integrated | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `9416dbe89` integrated as `9c93f303f`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
+| Consolidated branch | Implementation integrated | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `3197d0c58` integrated as `408297c01`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
 | Content-aware runtime C2 | Integrated `8fd3bba7d` + `e56c80274` | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Retained-HLS can reuse a completed measured artifact; misses preserve live policy. Modern immutable VOD is separate. |
-| Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Five regressions authored; hook passed. |
-| HLS acknowledgement batching | Implemented, validation deferred | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
+| Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Preparation and extracted player-owner regressions passed; hook passed. |
+| HLS acknowledgement batching | Implemented; Rust lane running | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
 | Apply encoder calibration (2) | Retain baseline | QSV Q22 failed all six quality comparisons; no default change is justified. |
 | VOD B-frames (6) | Integrated `6a9599295` and Developer controls | Strict decode/presentation-grid publication, signed offsets and optional software x264 recipe; compile and hook passed, runtime/client evidence pending. |
 | Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook and isolated m6 continuous-PQ output qualification passed; hard-edge image and client limits remain recorded below. |
@@ -36,8 +36,8 @@ review found two blocking issues: application-owned probe metadata entered
 source comparison, and fixed-level VAAPI HDR admitted higher source cadences.
 The first is corrected in `827023fd2`; the second now uses the same known
 at-most-30-fps contract in grade selection and the facts-aware planner.
-Authored regressions remain deferred to the final lane. Runtime qualification
-and the once-only fast lane follow these review fixes. Existing reports below remain dated evidence,
+Runtime qualification passed within the scopes below. The fast lane retains
+every passing check and retries only failed checks after these review fixes. Existing reports below remain dated evidence,
 not a claim that newly implemented code has already passed its future checks.
 
 Decisions taken without requiring Paul: preparation caches metadata but retains a fresh
@@ -59,7 +59,9 @@ were addressed in `827023fd2` (application-owned probe metadata) and
 | Shipping scorer | Actual Docker runtime-assets stage passed on idle nuc3 in 398 s with 2 CPUs / 3 GiB, including static ELF closure and built-in VMAF model smoke. The first build exposed the missing C++ runtime link; `555c7defb` fixes it. [Receipt](../evidence/video-quality-2026-10-03/scorer/qualification.json). |
 | VAAPI HDR graph | Continuous neutral PQ ramp passed on idle m6: 96 frames at 1920×1080/24, exact timestamps, Main10/PQ/BT.2020/limited range and complete decode. Actual `hvc1.2.4.H120.B0` equals the declaration. Mean luma error 0.531 and maximum 2 ten-bit codes; 1.960 s encode for 4 s content (2.04× in this synthetic capture). [Receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json). |
 | Developer settings | 36/36 passed, once after review; this changed suite is outside fast lane. Both saved choices remain independent of readiness. [Receipt](../evidence/video-quality-2026-10-03/settings-sections.json). |
-| Fast lane | [Run 3969](http://192.168.4.7:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields; 249/253 validation methods passed. Four stale inventory methods are repaired and passed individually, with runtime source unchanged. Continue the previously unrun steps; [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) is the live per-check and merge record. |
+| Fast-lane preflight | [Run 3969](http://192.168.4.7:3000/noirr/plurx/actions/runs/3969) passed scope, history and regression fields. Retain 249 validation methods and 604 operations methods; four validation inventories and one operations inventory passed targeted repairs. Nine environment-dependent operations methods passed on Linux in [run 3972](http://192.168.4.7:3000/noirr/plurx/actions/runs/3972). Original failed results remain recorded. |
+| Player contracts | All seven preflight commands are covered by retained passing checks and focused repaired harness checks. Current-main policy passed 203 assertions; control passed five manual groups and the prepared-buffer case. Twenty-two unchanged native-HLS cases retain matching-main CI evidence. [Receipt](../evidence/video-quality-2026-10-03/web-preflight-repair.json). |
+| Compiler/web continuation | Rust and Windows jobs run against `bd24f2767` in run 3972. Web syntax, 13 media/layout tests and generated jsconfig passed. Two new checkbox typing diagnostics were corrected without runtime changes or a baseline increase; only the failed type check and previously unrun typedef check were then executed and passed. [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) is the live completion/merge record. |
 
 **What the failed HDR captures taught us:** the first output used constraints
 `B0`, not the shared `90`, and MP4 defaulted to `hev1`. Commits `117570654`
@@ -138,12 +140,12 @@ effort or main, and no runner/action pin was changed to bypass the failure.
 
 | Priority | Work | State |
 |---|---|---|
-| 1 | Next-episode preparation | Implemented in `f632af81d`; metadata only, fresh authoritative playback decision, regressions deferred. |
+| 1 | Next-episode preparation | Implemented in `f632af81d`; metadata only, fresh authoritative playback decision; preparation and player-owner regressions passed. |
 | 2 | Apply qualified encoder policies / retain measured baseline | Retain bitrate: QSV Q22 failed every fixture quality comparison. No justified default change. |
-| 5 | HLS acknowledgement batching | Implemented in `157f31ab9`; 128 KiB coordination with unchanged 4 KiB proof. Hook passed; tests deferred. |
+| 5 | HLS acknowledgement batching | Implemented in `157f31ab9`; 128 KiB coordination with unchanged 4 KiB proof. Hook passed; Rust fast-lane qualification in progress. |
 | 6 | VOD B-frames | Implemented `6a9599295`; Settings → Developer controls integrated. Runtime/client evidence remains pending. |
-| 3 | Broader codec/HDR output | Implemented plain HDR10 VAAPI Main10 at 1080p; m6 inventory confirms encoder/options, qualification remains pending. Does not extend Dolby processing or HDR subtitle burn. |
-| 4 | Remaining cold-start latency | Integrated `133be1706` after PR #745: one authoritative held-source collection removes the second stream FFprobe launch. Runtime validation remains deferred. |
+| 3 | Broader codec/HDR output | Implemented plain HDR10 VAAPI Main10 at 1080p; m6 continuous-PQ signal qualification passed; broader image/client evidence remains outstanding. Does not extend Dolby processing or HDR subtitle burn. |
+| 4 | Remaining cold-start latency | Integrated `133be1706` after PR #745: one authoritative held-source collection removes the second stream FFprobe launch. Compile checks passed; Rust fast-lane qualification in progress. |
 
 ## 4. Evidence interpretation
 
