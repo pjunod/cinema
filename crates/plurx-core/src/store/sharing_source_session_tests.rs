@@ -165,6 +165,190 @@ async fn count(store: &SqliteStore, table: &str) -> i64 {
         .parse()
         .expect("Source candidate fixture operation")
 }
+
+#[tokio::test]
+async fn sharing_source_dispatch_assignment_current_rotation_and_corruption_fences() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory store"),
+        SqliteStore::open(&dir.path().join("dispatch.db")).expect("pooled store"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let first = intent(&store, grant, &key, "dispatch-one").await;
+        let second = intent(&store, grant, &key, "dispatch-two").await;
+        let SourceClaimOutcome::Acquired(first) = store
+            .claim_source_media_session(&first, &proof())
+            .await
+            .expect("first claim")
+        else {
+            panic!("acquired first")
+        };
+        let SourceClaimOutcome::Acquired(second) = store
+            .claim_source_media_session(&second, &proof())
+            .await
+            .expect("second claim")
+        else {
+            panic!("acquired second")
+        };
+        // Current stored credential changes; the binding is not keyed by the
+        // old peer token and the trusted assignment uses current authority.
+        store
+            .sharing_txn(vec![(
+                "UPDATE sharing_exports SET token_hash=$1 WHERE id=$2".into(),
+                vec!["f".repeat(64).into(), grant.into()],
+            )])
+            .await
+            .expect("rotate fixture credential");
+        let assigned = store
+            .assign_source_dispatch(&first, &key, &proof())
+            .await
+            .expect("assignment write")
+            .expect("actual local assignment");
+        assert_eq!(assigned.owner_node_id(), "voter");
+        assert_eq!(assigned.dispatch_generation(), 1);
+        assert!(assigned
+            .validate_observation_freshness(now_ms().expect("clock") + 6000)
+            .is_err());
+        assert_eq!(assigned.binding().incarnation_id(), first.incarnation_id());
+        let replay = store
+            .assign_source_dispatch(&first, &key, &proof())
+            .await
+            .expect("assignment replay")
+            .expect("same committed assignment");
+        assert_eq!(replay.binding().incarnation_id(), first.incarnation_id());
+        assert_eq!(
+            store
+                .release_source_never_dispatched(&first)
+                .await
+                .expect("release refusal"),
+            SourceReleaseOutcome::Refused
+        );
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("saved switch off");
+        assert!(store
+            .assign_source_dispatch(&second, &key, &proof())
+            .await
+            .expect("disabled assignment")
+            .is_none());
+        let unchanged = binding_row(&store, &second.principal.owner_key(), &second.request_id)
+            .await
+            .expect("binding")
+            .expect("retained second");
+        assert_eq!(unchanged.dispatch, 0);
+        assert!(unchanged.request_owner.is_none());
+        store.sharing_txn(vec![("UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(), vec![]),("UPDATE sharing_source_session_bindings SET dispatch_generation=1 WHERE incarnation_id=$1".into(), vec![second.incarnation_id.into()])]).await.expect("inject incomplete dispatch pair");
+        assert!(store
+            .assign_source_dispatch(&second, &key, &proof())
+            .await
+            .expect("corruption refusal")
+            .is_none());
+        let unchanged = binding_row(&store, &second.principal.owner_key(), &second.request_id)
+            .await
+            .expect("binding after refusal")
+            .expect("retained corrupted pair");
+        assert_eq!(unchanged.dispatch, 1);
+        assert!(unchanged.request_owner.is_none());
+        assert_eq!(count(&store, "media_sessions").await, 0);
+        assert_eq!(count(&store, "job_leases").await, 0);
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_faults() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("activation-guard.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let intent = intent(&store, grant, &key, "guarded-start").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&intent, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("acquired")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("assigned local worker");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("private authority")
+        else {
+            panic!("current witness")
+        };
+        let now = now_ms().expect("clock");
+        let activation = crate::domain::MediaSessionActivation {
+            incarnation_id: binding.incarnation_id.to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            principal: binding.principal.clone(),
+            playback_id: binding.playback_id.clone(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: Some(binding.request_id.clone()),
+            request_fingerprint: binding.request_fingerprint.clone(),
+            owner_node_id: "voter".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("toggle race");
+        let guard = source_activation_guard(&authority, &activation)
+            .expect("closed assertion")
+            .expect("matching tuple");
+        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('guard-sentinel','voter',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("same transaction refuses");
+        assert!(source_write_refused(&error));
+        assert_eq!(count(&store, "job_leases").await, 0);
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("enable");
+        let guard = source_activation_guard(&authority, &activation)
+            .expect("valid assertion")
+            .expect("matching authority");
+        let error=store.sharing_txn(vec![guard,("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES(NULL,'voter',1,1,$1,$2)".into(),vec![(now+60000).into(),now.into()])]).await.expect_err("genuine storage fault");
+        assert!(!source_write_refused(&error));
+        assert_eq!(count(&store, "job_leases").await, 0);
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET path='/private/replacement.mkv' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("file race");
+        assert!(matches!(
+            store
+                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .await
+                .expect("revalidate actual file"),
+            SourceWriteAuthorityRead::Unavailable
+        ));
+        assert_eq!(count(&store, "media_sessions").await, 0);
+    }
+}
 #[tokio::test]
 async fn sharing_source_claim_atomic_replay_caps_authority_and_never_dispatched_release() {
     let dir = tempfile::tempdir().expect("Source candidate fixture operation");

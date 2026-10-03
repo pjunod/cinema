@@ -130,3 +130,45 @@ pub enum SourceReleaseOutcome {
     ExactReplay,
     Refused,
 }
+
+/// An actual local worker's committed assignment. A retained binding or a
+/// caller-supplied node string cannot construct this handle. This is not an
+/// encoder permit, an active route lease, or takeover authority.
+pub struct SourceDispatchAssignment {
+    pub(crate) binding: SourceBindingHandle,
+    pub(crate) owner_node_id: String,
+    pub(crate) dispatch_generation: i64,
+    pub(crate) members: crate::cluster::membership::SourceAdmissionMembers,
+}
+impl SourceDispatchAssignment {
+    pub fn binding(&self) -> &SourceBindingHandle {
+        &self.binding
+    }
+    pub fn owner_node_id(&self) -> &str {
+        &self.owner_node_id
+    }
+    pub fn dispatch_generation(&self) -> i64 {
+        self.dispatch_generation
+    }
+    /// Check the original observation's clock before actual queue admission.
+    /// Success is not a current grant/floor proof or a physical worker permit.
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.members.write_guard(now_ms, 1, 2, 3).map(|_| ())
+    }
+}
+
+/// Fresh assignment-stage authority for a first blocked Source activation.
+/// It is not renewable route, replacement, or takeover authority.
+pub struct SourceSessionWriteAuthority {
+    pub(crate) assignment: SourceDispatchAssignment,
+    pub(crate) intent: Box<SourceSessionIntent>,
+}
+
+pub enum SourceWriteAuthorityRead {
+    Ready(Box<SourceSessionWriteAuthority>),
+    Unavailable,
+    Capacity,
+}
