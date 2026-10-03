@@ -105,6 +105,12 @@ internal class SharedSharingManagementClient private constructor(private val aut
         wire.jsonObject.getValue("assignments").jsonArray.forEach { require(it.jsonObject.getValue("library_id").jsonPrimitive.isString) }
         return json.decodeFromJsonElement<SharedSharingAssignmentSnapshot>(wire).also { it.validate(row) }
     }
+    suspend fun sourceLibraries(row: SharedSharingImportSummary): SharedSharingSourceLibrariesSnapshot {
+        require(row.state == "active")
+        val wire = request("sharing/imports/${id(row.id)}/libraries")
+        wire.jsonObject.getValue("libraries").jsonArray.forEach { require(it.jsonObject.getValue("library_id").jsonPrimitive.isString) }
+        return json.decodeFromJsonElement<SharedSharingSourceLibrariesSnapshot>(wire).also { it.validate(row) }
+    }
     suspend fun saveAssignments(snapshot: SharedSharingAssignmentSnapshot, row: SharedSharingImportSummary, groups: List<SharedSharingAssignmentGroup>) {
         snapshot.validate(row); SharedSharingValidation.assignments(groups)
         mutation("sharing/imports/${id(row.id)}/assignments", "PUT", buildJsonObject {

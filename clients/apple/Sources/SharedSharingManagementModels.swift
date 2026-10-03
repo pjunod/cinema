@@ -120,6 +120,71 @@ struct SharedSharingAssignmentSnapshot: Decodable {
         try SharedSharingValidation.assignments(assignments)
     }
 }
+/// Complete admin Source scope; an empty list is valid only after a successful bound read.
+struct SharedSharingSourceLibrary: Decodable, Identifiable {
+    let libraryId: String
+    let name: String
+    let kind: String
+    let anime: Bool
+    var id: String { libraryId }
+}
+struct SharedSharingSourceLibrariesSnapshot: Decodable {
+    let state: String
+    let importId: String
+    let serverId: String
+    let catalogueEpoch: String
+    let lifecycleGeneration: Int64
+    let expectedAssignmentGeneration: Int64
+    let libraries: [SharedSharingSourceLibrary]
+    func validate(for row: SharedSharingImportSummary) throws {
+        guard state == "active", state == row.state, importId == row.id,
+              serverId == row.sourceServerId, catalogueEpoch == row.catalogueEpoch,
+              lifecycleGeneration == row.lifecycleGeneration,
+              expectedAssignmentGeneration == row.assignmentGeneration else { throw APIError.badURL }
+        try SharedSharingValidation.ids(libraries.map(\.libraryId))
+        guard libraries.allSatisfy({ ["movies", "shows"].contains($0.kind) && $0.name.utf8.count <= 256 }) else { throw APIError.badURL }
+    }
+}
+
+/// A whole-replacement draft retains rows and viewers omitted by today's Source/user lists.
+struct SharedSharingAssignmentMatrix {
+    struct Library: Identifiable { let id: String; let name: String; let outsideScope: Bool }
+    let snapshot: SharedSharingAssignmentSnapshot
+    let libraries: [Library]
+    let viewers: [SharedSharingViewer]
+    private(set) var groups: [SharedSharingAssignmentGroup]
+    private(set) var revision: UInt64 = 0
+    init(row: SharedSharingImportSummary, assignments: SharedSharingAssignmentSnapshot,
+         scope: SharedSharingSourceLibrariesSnapshot, viewers currentViewers: [SharedSharingViewer]) throws {
+        try assignments.validate(for: row); try scope.validate(for: row)
+        guard currentViewers.count <= 4096, Set(currentViewers.map(\.id)).count == currentViewers.count,
+              currentViewers.allSatisfy({ $0.id >= 0 }) else { throw APIError.badURL }
+        snapshot = assignments; groups = assignments.assignments
+        let currentIds = Set(scope.libraries.map(\.libraryId))
+        libraries = scope.libraries.map { Library(id: $0.libraryId, name: $0.name, outsideScope: false) }
+            + assignments.assignments.filter { !currentIds.contains($0.libraryId) }.map { Library(id: $0.libraryId, name: "Outside current Source scope · " + $0.libraryId, outsideScope: true) }
+        let viewerIds = Set(currentViewers.map(\.id))
+        let omitted = Set(assignments.assignments.flatMap(\.userIds)).subtracting(viewerIds).sorted()
+        viewers = currentViewers + omitted.map { SharedSharingViewer(id: $0, username: "Unavailable viewer · " + String($0), isAdmin: false) }
+    }
+    func contains(library: String, viewer: Int64) -> Bool { groups.first { $0.libraryId == library }?.userIds.contains(viewer) ?? false }
+    mutating func set(library: String, viewer: Int64, enabled: Bool) throws {
+        guard libraries.contains(where: { $0.id == library }), viewers.contains(where: { $0.id == viewer }) else { throw APIError.badURL }
+        let index = groups.firstIndex { $0.libraryId == library }
+        var ids = Set(index.map { groups[$0].userIds } ?? [])
+        if enabled { ids.insert(viewer) } else { ids.remove(viewer) }
+        var replacement = groups
+        let group = SharedSharingAssignmentGroup(libraryId: library, userIds: ids.sorted())
+        if let index { replacement[index] = group } else { replacement.append(group) }
+        try SharedSharingValidation.assignments(replacement); groups = replacement; revision += 1
+    }
+    mutating func removeOutsideScope(_ library: String) throws {
+        guard libraries.contains(where: { $0.id == library && $0.outsideScope }) else { throw APIError.badURL }
+        groups.removeAll { $0.libraryId == library }; revision += 1
+    }
+    func accepts(_ requestedRevision: UInt64) -> Bool { revision == requestedRevision }
+}
+
 enum SharedSharingValidation {
     static func ids(_ values: [String]) throws {
         guard values.count <= 64, Set(values).count == values.count, values.allSatisfy(PlaybackFileContext.canonicalID) else { throw APIError.badURL }
