@@ -11,20 +11,22 @@ Shared grant, scope, lifetime or member-floor authority.
 
 ## Audited snapshots and boundaries
 
-The Hiqlite terminal/maintenance and acknowledgement checkpoint is
-`81f4cd09e7e96e4b004395b244844d52beb78b09`. The initial immutable caller
-snapshot is root integration `e99099a170a0610d7b3450bb1356e62eb4897b0a`;
-caller files are unchanged through root's `bed8d0ae1` cleanup integration. Both
-SQLite and Hiqlite implement the same 36 Store methods there. SQLite
-terminal/maintenance predicates have been reconciled to that committed source;
-caller repair qualification passes in this census checkpoint. The combined
-integration repairs both remaining SQLite reads: `desired_within` selects the
-canonical Local owner key and decodes the complete retained principal;
-`validation_playback_pointer_desired_revision` uses the same canonical owner
-predicate. A corrupt retained projection now fails decoding rather than
-reconstructing a Local principal. SQLite terminal acknowledgement also preserves
-a foreign owner's pointer that names the ended incarnation. The caller snapshot was extracted with
-`git archive`; no Git metadata or credentials were copied.
+The integrated backend and caller snapshot is root
+`f65eaace4b5b6372f3212cd8912c0620da26c910`, extracted with `git archive`
+without Git metadata or credentials. It includes the Hiqlite terminal/ACK
+checkpoint `81f4cd09e7e96e4b004395b244844d52beb78b09` and the caller repairs.
+Both backends implement the same 36 Store methods. SQLite's two residual reads
+are closed there: `desired_within` selects the canonical Local key and decodes
+the complete persisted principal with `from_projection`;
+`validation_playback_pointer_desired_revision` uses the canonical ownership
+helper. The malformed retained desired-metadata regression rejects the row
+instead of reconstructing Local metadata. Terminal acknowledgement pointer
+cleanup now correlates canonical owner/playback in both backends.
+
+The initial immutable caller snapshot was
+`e99099a170a0610d7b3450bb1356e62eb4897b0a`; the lower-level copy/VOD repairs
+are qualified in the integrated snapshot above. The Source witness seam is
+S4 commit `ae626d8e6235268a1b32cac25bf07c40adb765f6` and remains separate from implemented Source admission.
 
 The original Hiqlite census at `9e2e0e55c2f3946d6df7a14bd6e73f0e5662503f`
 contains 61 numeric-owner SQL literals: 55 runtime literals, three validation
@@ -60,7 +62,7 @@ identity is the exact session/incarnation/node/epoch tuple, not a numeric user.
 ## Finite Store method inventory
 
 The following is the Hiqlite checkpoint inventory, reconciled against the
-corresponding SQLite methods in root `bed8d0ae1`. “Refused” means an explicit
+corresponding SQLite methods in root `f65eaace4b5b6372f3212cd8912c0620da26c910`. “Refused” means an explicit
 Local adapter/validator or same-write stored Local/current-user predicate;
 Shared worker ingress remains refused. “Retained read” preserves metadata on
 the candidate layout and refuses Shared on the original layout. Terminal
@@ -135,8 +137,8 @@ The existing sharing schema definition contains Source grant identity and scope 
 Current file authority requires the same query to join `libraries`, `items`
 and `files`, correlate the Source/epoch/library/item/file identities and check
 `item_identity_watermark.importing = 0`. The S4 server-only `SourceFileWitness`
-and guarded fixed-alias revision projection are candidates, not installed
-admission authority. A wire file revision, recipe JSON or size/mtime pair
+and guarded fixed-alias revision projection are committed read seams, not
+installed admission authority. A wire file revision, recipe JSON or size/mtime pair
 cannot replace the private witness in the actual mutation.
 
 Neither existing adjunct table is a Source admission binding:
@@ -170,6 +172,309 @@ forwarding, recovery and takeover. They must not accept a serialized private
 witness or replace Shared ownership with a numeric viewer. The existing
 refusals remain until these proof-bearing paths and atomic capacity behavior
 are implemented and qualified.
+
+## Proposed server-only claim API and transaction
+
+This is a design proposal. The types, binding table and SQL below are not
+implemented or qualified. They preserve the existing incarnation namespace
+and the seven principal families; they do not enable a Shared adapter.
+
+The proposed Core API is deliberately separate from Local request admission:
+
+```rust
+async fn claim_source_media_session(
+    &self,
+    intent: &SourceSessionIntent,
+    proof: &SourceAdmissionProof,
+) -> Result<SourceClaimOutcome, StoreError>;
+
+async fn source_session_binding(
+    &self,
+    incarnation: &SessionIncarnationId,
+) -> Result<Option<SourceBindingHandle>, StoreError>;
+
+async fn release_source_reservation(
+    &self,
+    proof: &SourceProducerRetirementProof,
+) -> Result<SourceReleaseOutcome, StoreError>;
+```
+
+These are new proposal names, not existing signatures. `SourceSessionIntent`
+has private fields containing the validated Sharing principal, request ID,
+fingerprint, playback ID, existing incarnation ID, Source/epoch/library/item/
+file identity and authenticated `FileRevision`. Its factory derives those
+identities from an authenticated Source grant and current `SourceFileWitness`,
+checks the wire revision against the Source-purpose HMAC and compares every
+request identity component. Neither this type nor the proof or handle has
+`Serialize`, `Deserialize` or `Debug` exposing its private witness.
+
+`SourceAdmissionProof` owns current authenticated grant context, the private
+file witness, the bounded committed-member roster/freshness observation and
+the current server-derived resource policy. Private constructors accept
+results from the Source authentication, S4 witness and membership paths;
+they do not accept a recipient-created witness, boolean floor or free-slot
+count. An immutable `SourceBindingHandle` identifies the persisted binding;
+it is not reusable current authority. Assignment, preparation, activation,
+publication, renewal, recovery and takeover must obtain fresh proof and
+re-evaluate its predicates in their own mutations.
+
+The minimal membership seam factors the existing quorum-observation helper
+into a private observation-returning implementation. Existing bool readiness
+methods remain advisory wrappers. The proposed
+`MembershipManager::observe_source_admission_members()` hardcodes
+`SharingMemberFloor::PrincipalAndCatalogue` and obtains the actual local Raft
+ID from `replicated_inner().identity`, not a caller argument. Its opaque result
+has private bounded roster JSON, membership log/config identity, query and
+completion timestamps and freshness cutoff. The factory retains before/after
+leader/config/ID checks and freshness at quorum-read completion. Only a
+crate-visible method exposes binds and the closed composition of
+`sharing_member_guard_predicate(PrincipalAndCatalogue, ...)` with
+`sharing_member_transition_absence_predicate()` for the mutation. No public
+constructor accepts JSON, a caller-selected Raft ID or a cached bool. The
+object needs a freshness deadline checked at use; it still cannot authorize
+a write without the SQL predicates.
+
+`SourceClaimOutcome` needs separate acquired, original in-flight, original
+resolved, conflict, unavailable and capacity variants. Capacity names the
+Source slot, grant slot, unresolved-start or resource bound. A mismatched
+retry is conflict; missing schema, scope, witness or member floor is
+unavailable. Exact replay is checked before caps because it adds no slot,
+but it still needs current authority before returning a playable result.
+It returns the original incarnation, never the retry's new proposed ID.
+
+The proposed FK-free `sharing_source_session_bindings` has incarnation as its
+primary key and a unique `(owner_key, request_id)` identity. It stores complete
+grant/viewer/request/fingerprint/playback and Source/epoch/library/item/file/
+revision identity, `reservation_state` (`held` or `released`), nullable
+`start_resolved_at_ms` and an exact release receipt. IDs and the HMAC revision
+are persisted; the potentially 2 MiB private projection is regenerated and
+passed only to each atomic comparison. Current source identity and a revision
+equal to the immutable binding are required on every extending write.
+`start_resolved_at_ms` is set by exact publication or authoritative terminal
+resolution, so maintenance cannot erase the grant's two-start bound merely
+by deleting an expired request row.
+
+The proposed addition to the contract's §4 adjunct table is:
+
+| Adjunct | Key and purpose | Lifecycle owner |
+|---|---|---|
+| `sharing_source_session_bindings` | Existing canonical incarnation; immutable Source file/request binding and remote capacity reservation | The existing seven families retain session, route and producer lifecycle; this FK-free row only fences identity, dispatch/resolution accounting and exact reservation release. |
+
+This row is necessary because neither existing adjunct nor a media request
+persists immutable Source file authority, and ordinary request/route cleanup
+cannot prove physical resource release. It must not grow another session,
+relay or producer state machine. A monotonic `dispatch_generation` reservation
+fence, initially zero, is advanced in the same guarded assignment before the
+first queue/producer dispatch. The never-dispatched release CAS requires zero
+and no existing dispatch authority; it cannot rely on an absent process-local
+registry entry. Held rows survive grant/user deletion and maintenance until
+explicit release; no FK cascade can erase an uncertain reservation. Exact
+receipt and released-row retention are bounded independently of active caps.
+
+The capacity query is a template shared by both backends. Named parameters
+are explanatory; Hiqlite must lower them to numbered parameters in actual
+first-appearance order and validate the resulting SQL. The `UNION` removes
+duplicate representations of one obligation; inconsistent grant projections
+must fail closed rather than authorize a new reservation.
+
+```sql
+WITH obligations(incarnation_id, grant_id) AS (
+  SELECT incarnation_id, share_grant_id
+    FROM sharing_source_session_bindings WHERE reservation_state = 'held'
+  UNION
+  SELECT incarnation_id, share_grant_id FROM media_session_requests
+    WHERE principal_kind = 'sharing' AND state = 'starting'
+  UNION
+  SELECT incarnation_id, share_grant_id FROM media_sessions
+    WHERE principal_kind = 'sharing' AND state IN ('starting', 'active')
+  UNION
+  SELECT staged_incarnation_id, share_grant_id
+    FROM media_session_preparations WHERE principal_kind = 'sharing'
+), counts AS (
+  SELECT count(*) AS source_slots,
+         coalesce(sum(grant_id = :grant), 0) AS grant_slots
+    FROM obligations
+), pending AS (
+  SELECT count(*) AS grant_starts FROM sharing_source_session_bindings
+    WHERE share_grant_id = :grant AND reservation_state = 'held'
+      AND start_resolved_at_ms IS NULL
+)
+SELECT source_slots, grant_slots, grant_starts FROM counts, pending;
+```
+
+There is no lease, claim-expiry, preparation-deadline, current-pointer or
+catalogue-epoch exclusion. Old-epoch held obligations still occupy Source
+resources. Admission also refuses unbound or inconsistently bound Shared
+obligations: a partially installed binding schema cannot authorize new work.
+
+For a fresh request, the first statement inserts the immutable binding using
+`INSERT ... SELECT ... WHERE`, requiring all of these in that statement:
+
+- No existing binding/request for the same `(owner_key, request_id)` and no
+  existing incarnation belonging to any other request or principal.
+- Installed schema and the same-write membership-floor predicate.
+- Current active export, Source/epoch, effective library scope, movie/episode
+  item, movie/show library, file ownership and `importing = 0`, using S4's fixed
+  `e/s/x/l/i/f` joins and `file_revision_guarded_projection_sql()` equality
+  against the server-private witness. The loose legacy raw-size predicate is
+  insufficient.
+- `source_slots < 8`, `grant_slots < 4`, `grant_starts < 2`, applicable lower
+  server resource policy, and independently specified retained-row bounds.
+
+Concretely, reuse `obligations`, `counts` and `pending` above, append this
+authority CTE and replace the final count `SELECT` with the binding insert.
+The three brace fragments are closed, server-generated SQL builders, not wire
+strings: installed-schema proof, the opaque combined floor/absence predicate,
+and S4's guarded fixed-`f/i/s` file projection. Retained-row and any configured
+lower replicated Source policy predicates must also be implemented before this
+template can authorize work; they are not supplied by a free-slot parameter.
+
+```sql
+, authority AS (
+  SELECT 1 FROM sharing_exports e
+    JOIN sharing_identity s ON s.singleton = 1
+    JOIN sharing_export_libraries x ON x.grant_id = e.id
+    JOIN libraries l ON l.id = x.library_id
+    JOIN items i ON i.library_id = l.id
+    JOIN files f ON f.item_id = i.id
+   WHERE e.id = :grant AND e.token_hash = :credential_hash
+     AND e.state = 'active'
+     AND s.server_id = :source AND s.catalogue_epoch = :epoch
+     AND CAST(i.library_id AS TEXT) = :library
+     AND CAST(i.id AS TEXT) = :item AND CAST(f.id AS TEXT) = :file
+     AND i.kind IN ('movie', 'episode') AND l.kind IN ('movies', 'shows')
+     AND EXISTS (SELECT 1 FROM item_identity_watermark
+                 WHERE singleton = 1 AND importing = 0)
+     AND {GUARDED_FILE_PROJECTION} = :private_projection
+     AND {INSTALLED_SCHEMA_PROOF} AND {COMBINED_MEMBER_FLOOR_AND_ABSENCE}
+)
+INSERT INTO sharing_source_session_bindings
+  (incarnation_id, owner_key, share_grant_id, share_viewer_key,
+   request_id, request_fingerprint, playback_id,
+   source_server_id, catalogue_epoch, library_id, item_id, file_id,
+   file_revision, reservation_state, start_resolved_at_ms,
+   dispatch_generation, created_at_ms)
+SELECT :incarnation, :owner_key, :grant, :viewer,
+       :request, :fingerprint, :playback,
+       :source, :epoch, :library, :item, :file,
+       :revision, 'held', NULL, 0, :now
+  FROM counts, pending
+ WHERE EXISTS (SELECT 1 FROM authority)
+   AND :owner_key = 'share:' || :grant || ':' || :viewer
+   AND source_slots < 8 AND grant_slots < 4 AND grant_starts < 2
+   AND NOT EXISTS (SELECT 1 FROM sharing_source_session_bindings
+                    WHERE incarnation_id = :incarnation
+                       OR (owner_key = :owner_key AND request_id = :request))
+   AND NOT EXISTS (SELECT 1 FROM media_session_requests
+                    WHERE owner_key = :owner_key AND request_id = :request)
+   AND NOT EXISTS (SELECT 1 FROM media_sessions
+                    WHERE incarnation_id = :incarnation);
+```
+
+The second statement creates the canonical starting request from that exact
+binding, with every immutable field matched and the authority predicates
+re-evaluated. `ON CONFLICT(owner_key, request_id) DO NOTHING` cannot treat a
+different binding as successful replay. The final transaction assertion
+requires both exact rows to exist; a missing second row rolls back the first
+insert. Both backends need this assertion, including Hiqlite transactions
+whose individual guarded writes can return zero affected rows. Classification
+reads after failure may explain refusal; they never authorize allocation.
+
+Its insert is likewise conditional, not `VALUES` followed by an optimistic
+post-read. `authority` below means the same current closed predicates in the
+same transaction, with the fixed aliases and freshly derived private witness:
+
+```sql
+-- Prepend the authority CTE again: CTEs are statement-local.
+INSERT INTO media_session_requests
+  (owner_key, principal_kind, user_id, share_grant_id, share_viewer_key,
+   request_id, request_fingerprint, playback_id, state,
+   claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
+   updated_at_ms)
+SELECT b.owner_key, 'sharing', NULL, b.share_grant_id, b.share_viewer_key,
+       b.request_id, b.request_fingerprint, b.playback_id, 'starting',
+       :claim_expires, b.incarnation_id, NULL, NULL, :now
+  FROM sharing_source_session_bindings b
+ WHERE b.incarnation_id = :incarnation AND b.owner_key = :owner_key
+   AND b.request_id = :request AND b.request_fingerprint = :fingerprint
+   AND b.playback_id = :playback AND b.share_grant_id = :grant
+   AND b.share_viewer_key = :viewer
+   AND b.source_server_id = :source AND b.catalogue_epoch = :epoch
+   AND b.library_id = :library AND b.item_id = :item AND b.file_id = :file
+   AND b.file_revision = :revision AND b.reservation_state = 'held'
+   AND b.dispatch_generation = 0 AND b.start_resolved_at_ms IS NULL
+   AND EXISTS (SELECT 1 FROM authority)
+ON CONFLICT(owner_key, request_id) DO NOTHING;
+```
+
+Before returning acquired, the conditional rollback assertion checks exact
+binding and request agreement, including the same incarnation, fingerprint,
+playback, grant and viewer. The assertion's deliberate constraint failure
+must be distinguished from arbitrary SQL errors. A newly inserted binding
+with no exact request is never committed. The binding and request checks are
+also required at subsequent assignment, with a monotonic dispatch fence set
+before queue/producer ownership can leave the selected worker.
+
+Existing lower hardware/software admission uses process-local `Admissions`
+in `transcode/manager/start.rs`; there is no SQL inventory of all ordinary
+Local and remote hardware permits. The daemon therefore must acquire and
+retain the actual selected worker resource permit before enqueue/producer
+allocation, in addition to the atomic Source/grant reservation. A proposed
+replicated lower Source-slot policy must be read and rechecked in the claim;
+an observed process free-slot count is not such a policy. Resource refusal
+before allocation must reconcile the reserved incarnation using an explicit
+never-started receipt. Cancellation or a timed-out worker response leaves a
+held ambiguous obligation until reconciliation, not an automatic release.
+
+`SourceProducerRetirementProof` must correlate canonical owner, incarnation,
+session UUID, node/owner epoch and resource generation with a recorded exact
+stop/never-dispatched receipt. Release requires confirmed producer reap and
+writer settlement, or an exact proven-never-dispatched CAS. Route-ended state,
+terminal projection, timeout and raw lease expiry alone are insufficient.
+Release is a same-write
+held-to-released CAS plus durable receipt, idempotent only for that exact
+receipt. A user control acknowledgement is not by itself proof that an
+encoder returned its hardware permit. Binding cleanup must retain held rows;
+released bindings and exact replay identities need a bounded retention policy
+that cannot recreate an ambiguous original producer after maintenance.
+
+The concrete rolling callback seam is
+`transcode/rolling/retirement.rs::own_rolling_retirement`. Its detached owner
+holds the exact Session Arc, actor Terminal settlement and child-transition
+gate. It retries termination until the supervised child is confirmed reaped;
+`finish_rolling_retirement_after_reap` then releases hardware/software
+admission. It settles scratch/copy writers and removes only the matching
+registry Arc before publishing `retirement_cleanup_finished` and the shared
+settlement. A durable Source release retry owner can capture the exact binding,
+session/node/epoch and producer attempt after those physical facts, before
+the completion signal. Failed Raft release keeps the reservation held and
+retries independently of the stop caller or event telemetry. It must never
+hold registry/child-transition locks across the Raft call.
+
+`manager/control.rs::stop_session_until` transfers ownership before waiting;
+a timeout stops only the caller's wait while detached teardown continues.
+Its false/timeout result is not a release proof. Likewise
+`settle_exact_published_child` confirms one attempt and releases its permits
+but deliberately preserves the published generation for readers or future
+respawn; it is not whole-session retirement and must not free the remote slot.
+
+VOD has a distinct seam in `vod/serve/end.rs::spawn_terminal_cleanup`: exact
+reader detach, optional terminal commit, matching cleanup/rendition Arc
+compaction and heavyweight capture drop precede its completion guard.
+`end().await` joins that cleanup; `begin_end_detached` merely transfers it.
+A common rendition producer can remain for other readers/cache, so this is
+not proof of global encoder reap. Shared VOD remains refused until the
+reservation contract distinguishes exact remote consumer/writer settlement
+from shared rendition producer ownership and qualifies both. One remote
+tombstone cannot release another reader's physical resource permit.
+
+Qualification must race Source nine across grants, grant five with active/
+prepared occupancy, and the separate two-start bound on actual voters. It
+must exercise full-capacity exact replay, changed-identity conflict, expired
+ambiguous claims, prepared/unpublished/draining/displaced producers, stale
+witness/scope/floor refusal without allocation, rollback of a failed second
+statement, and exactly one slot reopened by an authoritative release. These
+are required tests, not receipts already obtained.
 
 ## Evidence and open completion conditions
 

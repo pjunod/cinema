@@ -2533,6 +2533,73 @@ pub async fn sharing_member_floor_ready(
     local_raft_id: u64,
     required: SharingMemberFloor,
 ) -> Result<bool, MembershipError> {
+    Ok(
+        sharing_member_floor_observation(client, local_raft_id, required, false)
+            .await?
+            .is_some(),
+    )
+}
+
+const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
+
+/// Server-derived membership inputs for a Source admission write. There is no
+/// wire decoder or caller-supplied roster constructor. This observation alone
+/// never authorizes allocation: its closed guard must run in the mutation.
+pub struct SourceAdmissionMembers {
+    members_json: String,
+    local_raft_id: u64,
+    membership_log_json: String,
+    query_at_ms: i64,
+    completed_at_ms: i64,
+}
+
+impl SourceAdmissionMembers {
+    /// Return the closed SQL predicate and its three numbered bindings. The
+    /// caller composes these with installed-schema and current file authority
+    /// in the same write. A delayed observation must be reacquired.
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        let indices = [members_parameter, cutoff_parameter, observed_at_parameter];
+        if self.local_raft_id == 0
+            || self.membership_log_json == "null"
+            || self.query_at_ms <= 0
+            || self.completed_at_ms < self.query_at_ms
+            || now_ms < self.completed_at_ms
+            || now_ms.saturating_sub(self.query_at_ms) > SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS
+            || indices.iter().any(|index| *index == 0 || *index > 256)
+            || indices.iter().collect::<BTreeSet<_>>().len() != 3
+        {
+            return Err(MembershipError::Incompatible);
+        }
+        Ok((
+            format!(
+                "({}) AND ({})",
+                sharing_member_guard_predicate(
+                    SharingMemberFloor::PrincipalAndCatalogue,
+                    members_parameter,
+                    cutoff_parameter,
+                    observed_at_parameter,
+                ),
+                sharing_member_transition_absence_predicate(),
+            ),
+            self.members_json.clone(),
+            now_ms.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS),
+            now_ms,
+        ))
+    }
+}
+
+async fn sharing_member_floor_observation(
+    client: &Client,
+    local_raft_id: u64,
+    required: SharingMemberFloor,
+    require_transition_absence: bool,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
     let before = client.metrics_db().await?;
     let members = before
         .membership_config
@@ -2540,20 +2607,30 @@ pub async fn sharing_member_floor_ready(
         .map(|(id, _)| *id)
         .collect::<BTreeSet<_>>();
     if before.current_leader.is_none() || !members.contains(&local_raft_id) {
-        return Ok(false);
+        return Ok(None);
+    }
+    if require_transition_absence && before.membership_config.log_id().is_none() {
+        return Ok(None);
     }
     let members_json = bounded_committed_raft_ids_json(&members)?;
     let now = unix_ms()?;
     let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+    let mut guard = sharing_member_guard_predicate(required, 1, 2, 3);
+    if require_transition_absence {
+        guard = format!(
+            "({guard}) AND ({})",
+            sharing_member_transition_absence_predicate()
+        );
+    }
     let rows = client
         .query_consistent_map::<SharingPrincipalFloorRow, _>(
             format!(
                 "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
                  MIN(node.last_seen_at) AS oldest_heartbeat \
                  FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
-                sharing_member_guard_predicate(required, 1, 2, 3),
+                guard,
             ),
-            params!(members_json, cutoff, now),
+            params!(members_json.as_str(), cutoff, now),
         )
         .await?;
     let after = client.metrics_db().await?;
@@ -2566,12 +2643,65 @@ pub async fn sharing_member_floor_ready(
                 .map(|(id, _)| *id)
                 .collect::<BTreeSet<_>>()
     {
-        return Ok(false);
+        return Ok(None);
     }
     let [row] = rows.as_slice() else {
-        return Ok(false);
+        return Ok(None);
     };
-    Ok(sharing_principal_floor_observation_ready(row, unix_ms()?))
+    let completed_at_ms = unix_ms()?;
+    if !sharing_principal_floor_observation_ready(row, completed_at_ms)
+        || (require_transition_absence
+            && (completed_at_ms < now
+                || completed_at_ms.saturating_sub(now) > SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS))
+    {
+        return Ok(None);
+    }
+    Ok(Some(SourceAdmissionMembers {
+        members_json,
+        local_raft_id,
+        membership_log_json: serde_json::to_string(&before.membership_config.log_id())
+            .map_err(|_| MembershipError::Incompatible)?,
+        query_at_ms: now,
+        completed_at_ms,
+    }))
+}
+
+/// Contract fixtures use the actual quorum observation path. This test-only
+/// wrapper is absent from production builds; production obtains the serving
+/// Raft identity exclusively from MembershipManager.
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn observe_source_admission_members_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    sharing_member_floor_observation(
+        client,
+        actual_local_raft_id,
+        SharingMemberFloor::PrincipalAndCatalogue,
+        true,
+    )
+    .await
+}
+
+/// SQLite unit fixtures still execute every SQL authority fence, but have no
+/// serving Raft process. This constructor is never compiled in production.
+#[cfg(test)]
+pub(crate) fn source_admission_members_for_unit_test(
+    local_raft_id: u64,
+    members: &BTreeSet<u64>,
+    now_ms: i64,
+) -> Result<SourceAdmissionMembers, MembershipError> {
+    if local_raft_id == 0 || !members.contains(&local_raft_id) || now_ms <= 0 {
+        return Err(MembershipError::Incompatible);
+    }
+    Ok(SourceAdmissionMembers {
+        members_json: bounded_committed_raft_ids_json(members)?,
+        local_raft_id,
+        membership_log_json: "{\"unit_fixture\":true}".into(),
+        query_at_ms: now_ms,
+        completed_at_ms: now_ms,
+    })
 }
 
 fn sharing_principal_floor_observation_ready(
@@ -8931,6 +9061,22 @@ impl MembershipManager {
         sharing_member_floor_ready(&inner.client, inner.identity.raft_id, required).await
     }
 
+    /// Observe the actual serving member and both Source writer capabilities.
+    /// The opaque result can supply guarded write inputs, never a cached
+    /// readiness permission. Missing factories and unresolved intents refuse.
+    pub async fn observe_source_admission_members(
+        &self,
+    ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        sharing_member_floor_observation(
+            &inner.client,
+            inner.identity.raft_id,
+            SharingMemberFloor::PrincipalAndCatalogue,
+            true,
+        )
+        .await
+    }
+
     /// Active nodes that cannot currently prove the always-compiled live-TV
     /// v1 owner/snapshot protocol. A matching capability row from a process
     /// that has since gone silent is not proof: activation must wait for a
@@ -11465,6 +11611,65 @@ mod tests {
             .sharing_session_principal_floor_ready()
             .await
             .is_err());
+        assert!(MembershipManager::unavailable()
+            .observe_source_admission_members()
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn sharing_source_member_observation_rechecks_both_floors_and_unresolved_intents() {
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("CREATE TABLE cluster_sharing_membership_intents (id TEXT); CREATE TABLE cluster_sharing_join_declarations (token_hash TEXT); CREATE TABLE cluster_join_tokens (token_hash TEXT, state TEXT); CREATE TABLE source_write_receipts (id INTEGER PRIMARY KEY)").expect("candidate transition fence fixture");
+        let mut observation =
+            source_admission_members_for_unit_test(1, &BTreeSet::from([1, 2]), 1000000)
+                .expect("unit-only fixture observation");
+        observation.completed_at_ms = 1000001;
+        let (guard, members, cutoff, now) = observation
+            .write_guard(1000002, 1, 2, 3)
+            .expect("fresh server observation");
+        let write = |id: i64| {
+            connection
+                .execute(
+                    &format!("INSERT INTO source_write_receipts SELECT {id} WHERE {guard}"),
+                    rusqlite::params![members, cutoff, now],
+                )
+                .expect("same-mutation closed Source guard")
+        };
+        assert_eq!(write(1), 0, "principal capability alone is insufficient");
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes", [SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY]).expect("allocator binary proofs");
+        assert_eq!(write(1), 1);
+        connection
+            .execute(
+                "INSERT INTO cluster_sharing_membership_intents VALUES('unresolved')",
+                [],
+            )
+            .expect("membership proposal starts after observation");
+        assert_eq!(
+            write(2),
+            0,
+            "an earlier observation cannot bypass an unresolved transition"
+        );
+        connection
+            .execute("DELETE FROM cluster_sharing_membership_intents", [])
+            .expect("authoritative fixture resolution");
+        connection.execute_batch("INSERT INTO cluster_sharing_join_declarations VALUES('joining'); INSERT INTO cluster_join_tokens VALUES('joining','redeeming')").expect("joining member declaration");
+        assert_eq!(write(2), 0);
+        connection
+            .execute("UPDATE cluster_join_tokens SET state='joined'", [])
+            .expect("fixture join finishes");
+        assert_eq!(write(2), 1);
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at=last_seen_at-1 WHERE node_id='learner'",
+                [],
+            )
+            .expect("legacy heartbeat races admission");
+        assert_eq!(write(3), 0);
+        assert!(observation.write_guard(1000000, 1, 2, 3).is_err());
+        assert!(observation.write_guard(1005001, 1, 2, 3).is_err());
+        assert!(observation.write_guard(1000002, 1, 1, 3).is_err());
+        assert!(observation.write_guard(1000002, 0, 2, 3).is_err());
     }
 
     #[test]

@@ -516,11 +516,18 @@ retention, are required in the same storage work package:
 | `sharing_catalogue_revisions` | Library ID and positive membership/order revision; bump only on membership or sort-key changes, not metadata-only writes; no per-browse writes |
 | `sharing_relay_upstream` | Existing B media-session incarnation FK; import, lifecycle/assignment observations, remote item/file/revision, A request/session/incarnation, approved endpoint revision, sealed upstream capability, source position; one row per incarnation |
 | `sharing_delivery_grants` | File-grant-style hash verifier bound to B relay/session incarnation and source login-token hash, active/revoked state, deadline; no second player token |
+| `sharing_source_session_bindings` | Existing Source incarnation; immutable canonical principal/request/fingerprint/playback and Source/epoch/library/item/file/revision binding, held reservation, dispatch/resolution fence and exact release receipt; FK-free retained capacity ledger, not another session lifecycle |
 | `sharing_endpoint_manifest` | Singleton approved node endpoint set and monotonic revision, modified only by local admin; node private keys excluded |
 
 There is no `sharing_media_*` family, separate relay lifecycle table,
 per-segment resource map, or replicated browse snapshot. The existing media
-session family owns both A's share principal and B's local-user relay (§7).
+session family owns both A's share principal and B's local-user relay (§7). The
+Source binding adjunct cannot carry a second route or producer state machine.
+It preserves uncertain remote obligations across ordinary request/route cleanup
+until an exact never-dispatched CAS or confirmed producer-reap and writer
+settlement releases them. Expiry, pointer displacement and a terminal control
+receipt alone do not prove physical capacity was returned.
+
 Library deletion uses a single store transaction: advance each affected
 export's scope/catalogue/mutation counters, remove export links, then delete
 the library. Restrict the FK to catch callers that forget this step; both
@@ -2535,3 +2542,26 @@ cases. The integration preserves canonical ownership fixes while adding the
 bounded catalogue, allocator/import identity, private history, transport body
 cancellation and stable existing-key-only file-witness candidates. It does
 not install their schemas or enable Shared producer admission.
+
+
+**Opaque Source membership observation candidate:**
+`MembershipManager::observe_source_admission_members` derives the serving
+Raft identity from its actual replicated state and returns no wire-decodable
+proof. It quorum-checks both closed writer capabilities plus unresolved
+membership/join declarations, and compares committed membership before and
+after that read. Its write guard must be embedded with installed-schema and
+current-file authority in the mutation; the observation expires after five
+seconds and refuses a backwards clock. The existing advisory readiness APIs
+retain their original floor semantics. No capability is advertised and no
+Shared ingress is enabled by this API.
+
+Pinned feature-enabled all-target check passed (25.07 seconds), the guarded
+SQLite mutation race regression passed (one test, zero ignored), and all four
+existing actual-voter/fourth-learner floor contracts passed (13.77 seconds).
+The narrow test-only proof seams additionally passed check (28.66 seconds),
+the mutation regression (0.01 seconds) and denied-warning feature Clippy
+(33.73 seconds). SQLite unit fixtures construct only a test-build observation;
+the contract-only wrapper must execute the actual quorum observation path.
+Neither constructor is present in production builds. These checks qualify the
+closed guard and readiness refactor; a Source binding write using the opaque
+observation still needs its own actual-voter admission regression.
