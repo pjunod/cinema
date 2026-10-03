@@ -7,24 +7,72 @@ import tv.plurx.app.player.PGSOverlayPolicy
 
 @Serializable
 internal data class SharedPlaybackFileReference(
-    val item: SharedPlaybackReference, val file_id: String, val revision: String,
+    val item: SharedPlaybackReference, val file_id: String, val revision: String, val lifecycle_generation: Long? = null,
 ) {
     fun validate(context: PlaybackFileContext) {
         item.validate()
+        require(lifecycle_generation != null && lifecycle_generation > 0 && lifecycle_generation == context.lifecycleGeneration)
         context.validateSharedReference(item, file_id, revision)
     }
 }
 
+@Serializable
+internal data class SharedDecisionPresentation(
+    val delivery: Delivery? = null,
+    val source: SourceSummary? = null,
+    val reasons: List<String> = emptyList(),
+    val transcode_audio: Boolean = false,
+    /** The source DV metadata survives this decision, including direct play. */
+    val preserve_dolby_vision: Boolean = false,
+    val audio: List<AudioTrack> = emptyList(),
+    val subtitles: List<SubTrack> = emptyList(),
+    /** Present only for a selection-aware request; see [DecisionSelection]. */
+    val selection: DecisionSelection? = null,
+    val markers: List<Marker> = emptyList(),
+    val ladder: List<Rung> = emptyList(),
+    val quality_candidates: List<QualityCandidate> = emptyList(),
+    val quality_candidate_id: String? = null,
+    val display_aware_auto_protocol: String? = null,
+    val audio_offset_ms: Long = 0,
+    val declared_offset_ms: Long? = null,
+    /**
+     * The dynamic range of the bytes this delivery plan would put on the wire —
+     * `"dolby_vision" | "hdr10" | "hlg" | "sdr"`, the source's own vocabulary
+     * plus `"sdr"`, so a client compares source against delivered with string
+     * equality. Absent on a server that predates it; the badge then falls back
+     * to describing the source alone.
+     */
+    val delivered_dynamic_range: String? = null,
+    /**
+     * The Dolby Vision profile actually on the wire, when the delivery carries
+     * Dolby Vision at all.
+     *
+     * [delivered_dynamic_range] answers `"dolby_vision"` for both a Profile 7
+     * title preserved for a device that enumerates 7 and the same title
+     * converted to 8.1 for one that does not, because the grade really is the
+     * same in both. What differs is that in the second case the profile on
+     * screen is not the profile on disk, and a badge reading the file's
+     * profile for both is describing the disk rather than the picture.
+     *
+     * **Absent means "no answer", not "not Dolby Vision."** Three things
+     * produce it: a delivery carrying no Dolby Vision at all (a transcode, a
+     * strip), a source that never had any, and a library row scanned before
+     * the profile columns existed. [delivered_dynamic_range] beside it is the
+     * field that answers "is this Dolby Vision".
+     */
+    val delivered_dolby_vision_profile: Int? = null,
+)
+
 /** Retains every server wire field; never decoded through the numeric Local Decision. */
 internal class SharedDecision private constructor(
     val fileId: String, val reference: SharedPlaybackFileReference,
-    val method: String, val playUrl: String, val wire: JsonObject,
+    val method: String, val playUrl: String, val wire: JsonObject, val presentation: SharedDecisionPresentation,
 ) {
     fun validated(context: PlaybackFileContext): SharedDecision {
         reference.validate(context)
         context.validateDescriptiveUrl(playUrl)
         val delivery = wire.getValue("delivery").jsonObject
-        require(delivery.strictString("mode") in setOf("direct", "remux", "transcode"))
+        require(delivery.strictString("mode") == if (method == "direct_play") "direct" else method)
         listOf("url", "sessions_url").forEach { key ->
             delivery[key]?.takeUnless { it == JsonNull }?.let {
                 val url = delivery.strictString(key)
@@ -36,7 +84,7 @@ internal class SharedDecision private constructor(
     }
     companion object {
         fun decode(text: String): SharedDecision {
-            require(text.toByteArray().size <= 1_048_576)
+            require(text.toByteArray().size <= 4_194_304)
             val wire = Json.parseToJsonElement(text).jsonObject
             val file = wire.strictString("file_id")
             require(PlaybackFileContext.canonicalId(file))
@@ -45,7 +93,7 @@ internal class SharedDecision private constructor(
             val method = wire.strictString("method")
             require(method in setOf("direct_play", "remux", "transcode"))
             wire.getValue("delivery").jsonObject
-            return SharedDecision(file, reference, method, wire.strictString("play_url"), wire)
+            return SharedDecision(file, reference, method, wire.strictString("play_url"), wire, Json { ignoreUnknownKeys = true }.decodeFromJsonElement(wire))
         }
     }
 }

@@ -17,16 +17,16 @@ class SharedPlaybackModelsTest {
     private val ref = SharedPlaybackReference("11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222",
         "33333333-3333-4333-8333-333333333333", "9007199254740993", "9223372036854775807")
     private val file = "9007199254740993"
-    private val base = "/api/v1/shared/imports/${ref.import_id}/files/signed_locator-ABC123"
+    private val base = "/api/v1/shared/imports/${ref.import_id}/files/${"L".repeat(236)}"
     private val revision = "a".repeat(64)
     private suspend fun fetch(locator: String?, mutate: (JsonObject) -> JsonObject = { it }, change: () -> Unit = {}): PlaybackFileContext {
         val item = Json.parseToJsonElement(Json.encodeToString(ref))
         val row = mutate(buildJsonObject {
             put("file_id", file); put("revision", revision)
-            put("reference", buildJsonObject { put("item", item); put("file_id", file); put("revision", revision) })
+            put("reference", buildJsonObject { put("item", item); put("file_id", file); put("revision", revision); put("lifecycle_generation", 1) })
             if (locator != null) put("file_base", locator)
         })
-        val body = buildJsonObject { put("files", buildJsonArray { add(row) }) }.toString()
+        val body = buildJsonObject { put("lifecycle_generation", 1); put("files", buildJsonArray { add(row) }) }.toString()
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             assertEquals("b.test", chain.request().url.host)
             assertEquals("Bearer fixture-bearer", chain.request().header("Authorization"))
@@ -37,7 +37,7 @@ class SharedPlaybackModelsTest {
         return PlaybackFileContext.authenticatedDetailForTest(ref, file, client)
     }
     private fun binding() = buildJsonObject {
-        put("item", Json.encodeToJsonElement(ref)); put("file_id", file); put("revision", revision)
+        put("item", Json.encodeToJsonElement(ref)); put("file_id", file); put("revision", revision); put("lifecycle_generation", 1)
     }
     private fun decision(change: (JsonObject) -> JsonObject = { it }): SharedDecision {
         val wire = buildJsonObject {

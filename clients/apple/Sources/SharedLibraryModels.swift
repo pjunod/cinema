@@ -80,6 +80,7 @@ struct SharedLibraryPage: Decodable {
     }
 }
 struct SharedLibraryFile: Decodable, Identifiable {
+    let fileBase: String?
     let fileId: String
     let revision: String
     let reference: SharedPlaybackFileReference
@@ -103,6 +104,7 @@ struct SharedLibraryDetail: Decodable {
     let files: [SharedLibraryFile]
     let watch: SharedLibraryWatch?
     let deliveryStatus: String
+    let lifecycleGeneration: Int64?
     func validate(expected: SharedPlaybackReference) throws {
         let library = SharedLibraryIdentity(importId: expected.importId, serverId: expected.serverId,
                                            catalogueEpoch: expected.catalogueEpoch, libraryId: expected.libraryId)

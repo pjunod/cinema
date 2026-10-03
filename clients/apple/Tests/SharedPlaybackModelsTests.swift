@@ -23,23 +23,23 @@ final class SharedPlaybackModelsTests: XCTestCase {
         libraryId: "9007199254740993", itemId: "9223372036854775807")
     private let revision = String(repeating: "a", count: 64)
     private let file = "9007199254740993"
-    private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/signed_locator-ABC123" }
+    private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/\(String(repeating: "L", count: 236))" }
     override func tearDown() { SharedWireHTTP.beforeResponse = nil; Session.shared.setCredentials(origin: "", token: nil) }
     private func fetch(_ base: String?, mutate: (inout [String: Any]) -> Void = { _ in }) async throws -> PlaybackFileContext {
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
         let reference = try JSONSerialization.jsonObject(with: encoder.encode(ref))
         var row: [String: Any] = ["file_id": file, "revision": revision,
-                                  "reference": ["item": reference, "file_id": file, "revision": revision]]
+                                  "reference": ["item": reference, "file_id": file, "revision": revision, "lifecycle_generation": 1]]
         row["file_base"] = base
         mutate(&row)
-        SharedWireHTTP.body = try JSONSerialization.data(withJSONObject: ["files": [row]])
+        SharedWireHTTP.body = try JSONSerialization.data(withJSONObject: ["files": [row], "lifecycle_generation": 1])
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [SharedWireHTTP.self]
         return try await PlaybackFileContext.authenticatedDetail(reference: ref, fileId: file,
                                                                  testTransport: URLSession(configuration: config))
     }
     private func binding() throws -> [String: Any] {
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
-        return ["item": try JSONSerialization.jsonObject(with: encoder.encode(ref)), "file_id": file, "revision": revision]
+        return ["item": try JSONSerialization.jsonObject(with: encoder.encode(ref)), "file_id": file, "revision": revision, "lifecycle_generation": 1]
     }
     private func decision(_ change: (inout [String: Any]) -> Void = { _ in }) throws -> SharedDecision {
         var object: [String: Any] = ["file_id": file, "reference": try binding(), "method": "remux",

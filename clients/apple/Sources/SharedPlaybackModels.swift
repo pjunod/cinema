@@ -35,10 +35,32 @@ struct SharedPlaybackFileReference: Codable, Hashable {
     let item: SharedPlaybackReference
     let fileId: String
     let revision: String
+    let lifecycleGeneration: Int64?
     func validate(_ context: PlaybackFileContext) throws {
         try item.validate()
+        guard let lifecycleGeneration, lifecycleGeneration > 0, lifecycleGeneration == context.lifecycleGeneration else { throw APIError.badURL }
         try context.validateSharedReference(item, file: fileId, revision: revision)
     }
+}
+
+struct SharedDecisionPresentation: Decodable {
+    var delivery: Delivery?
+    var reasons: [String]?
+    var transcodeAudio: Bool?
+    var preserveDolbyVision: Bool?
+    var source: SourceSummary?
+    var audio: [AudioTrack]?
+    var subtitles: [SubtitleTrack]?
+    var selection: DecisionSelection?
+    var markers: [Marker]?
+    var audioOffsetMs: Int?
+    var declaredOffsetMs: Int?
+    var ladder: [QualityRung]?
+    var qualityCandidates: [QualityCandidate]?
+    var qualityCandidateId: String?
+    var displayAwareAutoProtocol: String?
+    var deliveredDynamicRange: String?
+    var deliveredDolbyVisionProfile: Int?
 }
 
 /// No conversion to Decision: Source file IDs remain strings, including IDs above 2^53.
@@ -48,24 +70,27 @@ struct SharedDecision {
     let method: String
     let playUrl: String
     let wire: [String: SharedPlaybackJSON]
+    let presentation: SharedDecisionPresentation
     static func decode(_ data: Data) throws -> Self {
-        guard data.count <= 1_048_576,
+        guard data.count <= 4_194_304,
               let object = try JSONDecoder().decode(SharedPlaybackJSON.self, from: data).object,
               let file = object["file_id"]?.string, PlaybackFileContext.canonicalID(file),
               let method = object["method"]?.string, ["direct_play", "remux", "transcode"].contains(method),
               let play = object["play_url"]?.string,
               let binding = object["reference"], object["delivery"]?.object != nil
         else { throw APIError.badURL }
+        let raw = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let rawReference = raw?["reference"] as? [String: Any], PlaybackFileContext.canonicalLifecycle(rawReference["lifecycle_generation"]) != nil else { throw APIError.badURL }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
         let reference = try decoder.decode(SharedPlaybackFileReference.self, from: JSONEncoder().encode(binding))
         guard file == reference.fileId else { throw APIError.badURL }
-        return Self(fileId: file, reference: reference, method: method, playUrl: play, wire: object)
+        return Self(fileId: file, reference: reference, method: method, playUrl: play, wire: object, presentation: try decoder.decode(SharedDecisionPresentation.self, from: data))
     }
     func validated(_ context: PlaybackFileContext) throws -> Self {
         try reference.validate(context)
         try context.validateDescriptiveURL(playUrl)
         guard let delivery = wire["delivery"]?.object,
-              let mode = delivery["mode"]?.string, ["direct", "remux", "transcode"].contains(mode)
+              let mode = delivery["mode"]?.string, mode == (method == "direct_play" ? "direct" : method)
         else { throw APIError.badURL }
         for key in ["url", "sessions_url"] {
             if let value = delivery[key], value != .null {
