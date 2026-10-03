@@ -176,6 +176,186 @@ async fn jellyfin_pending_admission_expiry_and_terminal_fences_preserve_active_p
     .await;
 }
 #[tokio::test]
+async fn jellyfin_direct_activation_fences_prior_play_without_negotiation_or_replay_eviction() {
+    for_each_backend(|store, backend| async move {
+        let old = manual_active(&store, fixture(&store).await).await;
+        let mut next = old.clone();
+        next.play_id = uuid::Uuid::new_v4().simple().to_string();
+        next.created_at_ms = 1_002;
+        assert!(store
+            .create_jellyfin_play(next.clone())
+            .await
+            .expect("pending"));
+        assert_eq!(
+            store
+                .jellyfin_play(&old.play_id, &old.scope)
+                .await
+                .expect("old")
+                .expect("row")
+                .state,
+            "active"
+        );
+        let grant = uuid::Uuid::new_v4().to_string();
+        store
+            .create_file_grant(plurx_core::store::NewFileGrant {
+                id: grant.clone(),
+                token_hash: digest(&grant),
+                file_id: next.file_id,
+                user_id: next.scope.user_id,
+                source_token_hash: next.scope.token_digest.clone(),
+                created_at: unix_seconds(),
+                expires_at: i64::MAX,
+            })
+            .await
+            .expect("grant");
+        assert!(store
+            .activate_jellyfin_play(
+                &next.play_id,
+                &next.scope,
+                Activation::DirectGrant(grant.clone()),
+                1_003
+            )
+            .await
+            .expect("activate"));
+        assert_eq!(
+            store
+                .jellyfin_play(&old.play_id, &old.scope)
+                .await
+                .expect("old")
+                .expect("row")
+                .state,
+            "ended",
+            "{backend}"
+        );
+        let mut newer = next.clone();
+        newer.play_id = uuid::Uuid::new_v4().simple().to_string();
+        // Even an equal clock reading belongs to a fresh later negotiation.
+        assert!(store
+            .create_jellyfin_play(newer.clone())
+            .await
+            .expect("new pending"));
+        assert!(!store
+            .activate_jellyfin_play(
+                &next.play_id,
+                &next.scope,
+                Activation::DirectGrant(grant),
+                1_004
+            )
+            .await
+            .expect("replay"));
+        assert_eq!(
+            store
+                .jellyfin_play(&newer.play_id, &newer.scope)
+                .await
+                .expect("newer")
+                .expect("row")
+                .state,
+            "pending",
+            "{backend}: replay must not evict fresh metadata"
+        );
+        assert!(store
+            .put_jellyfin_progress(progress_write(&old, 0, 9000, true), None)
+            .await
+            .expect("late final")
+            .is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn jellyfin_native_pointer_activation_atomically_fences_prior_events_and_keeps_newer_asks() {
+    for_each_backend(|store, backend| async move {
+        let mut old = fixture(&store).await;
+        old.native_request_fingerprint = digest("old direct identity");
+        let old = manual_active(&store, old).await;
+        assert!(store
+            .put_jellyfin_progress(progress_write(&old, 0, 1000, false), None)
+            .await
+            .expect("old progress")
+            .is_some());
+        let mut stale = old.clone();
+        stale.play_id = uuid::Uuid::new_v4().simple().to_string();
+        stale.created_at_ms = 1_000;
+        assert!(store
+            .create_jellyfin_play(stale.clone())
+            .await
+            .expect("stale ask"));
+        let mut selected = old.clone();
+        selected.play_id = uuid::Uuid::new_v4().simple().to_string();
+        selected.native_request_fingerprint = "a".repeat(64);
+        selected.created_at_ms = 1_000;
+        assert!(store
+            .create_jellyfin_play(selected.clone())
+            .await
+            .expect("selected ask"));
+        let mut newer = stale.clone();
+        newer.play_id = uuid::Uuid::new_v4().simple().to_string();
+        newer.created_at_ms = 1_000;
+        assert!(store
+            .create_jellyfin_play(newer.clone())
+            .await
+            .expect("newer ask"));
+        let mut other_player = old.clone();
+        other_player.play_id = uuid::Uuid::new_v4().simple().to_string();
+        other_player.playback_id = "other-player".into();
+        let other_player = manual_active(&store, other_player).await;
+        assert_eq!(
+            store
+                .jellyfin_play(&old.play_id, &old.scope)
+                .await
+                .expect("old")
+                .expect("binding")
+                .state,
+            "active",
+            "{backend}: pending asks must leave incumbent live"
+        );
+        current_media_session(
+            store.as_ref(),
+            selected.scope.user_id,
+            &selected.playback_id,
+            "11111111-1111-4111-8111-111111111301",
+            "11111111-1111-4111-8111-111111111302",
+            backend,
+        )
+        .await;
+        for (play, expected) in [
+            (&old, "ended"),
+            (&stale, "ended"),
+            (&selected, "pending"),
+            (&newer, "pending"),
+            (&other_player, "active"),
+        ] {
+            assert_eq!(
+                store
+                    .jellyfin_play(&play.play_id, &play.scope)
+                    .await
+                    .expect("read")
+                    .expect("binding")
+                    .state,
+                expected,
+                "{backend}: {}",
+                play.play_id
+            );
+        }
+        assert!(store
+            .put_jellyfin_progress(progress_write(&old, 0, 9000, true), None)
+            .await
+            .expect("late old final")
+            .is_none());
+        assert_eq!(
+            store
+                .watch_state(old.scope.user_id, old.item_id)
+                .await
+                .expect("watch")
+                .expect("prior watch")
+                .position_ms,
+            1000
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn jellyfin_media_binding_resolves_transferred_owner_and_never_retargets_late_stop() {
     for_each_backend(|store, backend| async move {
         let mut first = fixture(&store).await;
@@ -849,6 +1029,7 @@ async fn jellyfin_manual_own_edit_refuses_ambiguous_scope_and_terminal_reduction
         let first = manual_active(&store, initial).await;
         let mut another = first.clone();
         another.play_id = uuid::Uuid::new_v4().simple().to_string();
+        another.playback_id = "second-legacy-player".into();
         let second = manual_active(&store, another).await;
         store
             .set_watched_tree_with_origin(
@@ -971,6 +1152,7 @@ async fn jellyfin_manual_progress_retains_queued_revision_and_final_is_atomic_wi
         );
         let mut fresh = play.clone();
         fresh.play_id = uuid::Uuid::new_v4().simple().to_string();
+        fresh.playback_id = "independent-final-player".into();
         let fresh = manual_active(&store, fresh).await;
         let revision = store
             .jellyfin_play(&fresh.play_id, &fresh.scope)
@@ -1041,6 +1223,7 @@ async fn jellyfin_manual_import_drops_edit_origin_without_reviving_an_ambiguous_
     let first = manual_active(&local, initial).await;
     let mut second = first.clone();
     second.play_id = uuid::Uuid::new_v4().simple().to_string();
+    second.playback_id = "second-imported-player".into();
     let second = manual_active(&local, second).await;
     local
         .set_watched_tree_with_origin(first.scope.user_id, first.item_id, true, Some(&first.scope))

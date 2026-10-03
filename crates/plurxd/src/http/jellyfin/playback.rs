@@ -92,11 +92,26 @@ async fn binding(
     }
     Ok(play)
 }
+fn player_id(scope: &JellyfinPlayScope) -> String {
+    format!(
+        "jellyfin:{}",
+        plurx_core::auth::hash_token(&format!(
+            "plurx/jellyfin/player/v1:{}:{}:{}",
+            scope.user_id,
+            scope.device_digest,
+            match scope.client_family {
+                JellyfinClientFamily::Infuse => "infuse",
+                JellyfinClientFamily::AndroidTv => "android_tv",
+            }
+        ))
+    )
+}
+
 fn direct_key(play: &JellyfinPlay) -> crate::delivery::Key {
     crate::delivery::Key::new(
         play.negotiation.scope.user_id,
         play.negotiation.file_id,
-        Some(&play.negotiation.playback_id),
+        Some(&format!("jellyfin-direct:{}", play.negotiation.play_id)),
     )
 }
 async fn release(state: &AppState, play: &JellyfinPlay) -> Result<(), ApiError> {
@@ -663,7 +678,7 @@ async fn info(
     let play = NewJellyfinPlay {
         play_id: play_id.clone(),
         scope: scope.clone(),
-        playback_id: format!("jellyfin:{play_id}"),
+        playback_id: player_id(&scope),
         item_id,
         file_id,
         item_wire_id: item.id.to_hex(),
@@ -885,7 +900,7 @@ async fn serve_direct(
         State(state),
         Path(play.negotiation.file_id),
         Query(super::super::stream::DirectQuery {
-            stream: Some(play.negotiation.playback_id),
+            stream: Some(format!("jellyfin-direct:{}", play.negotiation.play_id)),
         }),
         method,
         headers,
@@ -981,4 +996,29 @@ pub(super) async fn logout(
     }
     auth::revoke_token_under_exclusion(&state, &client.token_hash, exclusion).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod player_identity_tests {
+    use super::*;
+    #[test]
+    fn player_identity_is_stable_across_login_replacement_but_separates_user_device_and_family() {
+        let original = JellyfinPlayScope {
+            user_id: 1,
+            token_digest: "a".repeat(64),
+            device_digest: "b".repeat(64),
+            client_family: JellyfinClientFamily::Infuse,
+        };
+        let mut changed = original.clone();
+        changed.token_digest = "c".repeat(64);
+        assert_eq!(player_id(&original), player_id(&changed));
+        changed.user_id = 2;
+        assert_ne!(player_id(&original), player_id(&changed));
+        changed = original.clone();
+        changed.device_digest = "d".repeat(64);
+        assert_ne!(player_id(&original), player_id(&changed));
+        changed = original.clone();
+        changed.client_family = JellyfinClientFamily::AndroidTv;
+        assert_ne!(player_id(&original), player_id(&changed));
+    }
 }

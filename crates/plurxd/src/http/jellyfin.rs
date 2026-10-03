@@ -1257,6 +1257,134 @@ mod tests {
             .status()
     }
     #[tokio::test]
+    async fn jellyfin_replacement_activation_fences_old_events_and_preserves_new_direct_presence() {
+        let f = playback_fixture().await;
+        let old = negotiate(&f).await;
+        let old_id = old["PlaySessionId"].as_str().expect("old");
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", old_id, Some(1000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let next = negotiate(&f).await;
+        let next_id = next["PlaySessionId"].as_str().expect("next");
+        let scope = f
+            .state
+            .store
+            .jellyfin_login_scope(plurx_core::auth::hash_token(&f.token))
+            .await
+            .expect("scope")
+            .expect("login");
+        let old_binding = f
+            .state
+            .store
+            .jellyfin_play(old_id, &scope)
+            .await
+            .expect("old")
+            .expect("binding");
+        let next_binding = f
+            .state
+            .store
+            .jellyfin_play(next_id, &scope)
+            .await
+            .expect("next")
+            .expect("binding");
+        assert_eq!(
+            old_binding.state, "active",
+            "negotiation must keep incumbent"
+        );
+        assert_eq!(
+            old_binding.negotiation.playback_id,
+            next_binding.negotiation.playback_id
+        );
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing", next_id, Some(2000)).await,
+            StatusCode::NO_CONTENT
+        );
+        let url = next["MediaSources"][0]["DirectStreamUrl"]
+            .as_str()
+            .expect("URL");
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", url, Some(&f.token), json!({})))
+            .await
+            .expect("new direct");
+        assert_eq!(response.status(), StatusCode::OK);
+        response.into_body().collect().await.expect("direct body");
+        // Native start notification is asynchronous; observe its committed
+        // presence before exercising the late Stop, without adding an owner.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !f
+            .state
+            .direct_plays
+            .list()
+            .iter()
+            .any(|p| p.registry_id.contains(next_id))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "native start notification did not register this play"
+            );
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            f.state
+                .direct_plays
+                .list()
+                .iter()
+                .any(|p| p.registry_id.contains(next_id)),
+            "new play has its own direct presence"
+        );
+        assert_eq!(
+            play_event(&f, "/jellyfin/Sessions/Playing/Stopped", old_id, Some(9000)).await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(
+            f.state.direct_plays.list().len(),
+            1,
+            "old Stop cannot remove new presence"
+        );
+        assert_eq!(
+            play_event(
+                &f,
+                "/jellyfin/Sessions/Playing/Progress",
+                old_id,
+                Some(9999)
+            )
+            .await,
+            StatusCode::CONFLICT
+        );
+        let before = f
+            .state
+            .store
+            .watch_state(scope.user_id, f.native_item)
+            .await
+            .expect("watch");
+        assert!(before.is_none_or(|w| w.position_ms != 9000 && w.position_ms != 9999));
+        assert_eq!(
+            play_event(
+                &f,
+                "/jellyfin/Sessions/Playing/Stopped",
+                next_id,
+                Some(2500)
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        assert!(f.state.direct_plays.list().is_empty());
+        assert_eq!(
+            f.state
+                .store
+                .watch_state(scope.user_id, f.native_item)
+                .await
+                .expect("watch")
+                .expect("final")
+                .position_ms,
+            2500
+        );
+    }
+
+    #[tokio::test]
     async fn jellyfin_direct_range_head_and_stop_preserve_native_authority_and_final_position() {
         let f = playback_fixture().await;
         let negotiation = negotiate(&f).await;

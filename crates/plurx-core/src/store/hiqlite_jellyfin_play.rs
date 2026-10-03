@@ -106,25 +106,44 @@ impl JellyfinPlayStore for HiqliteAuthStore {
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         jp::validate_key(play_id, scope)?;
-        jp::terminal_expiry(now_ms)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
         let (sql, reference) = jp::activation_sql(activation)?;
-        Ok(self
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let changed = self
             .client()
-            .execute(
-                sql,
-                params!(
-                    reference,
-                    i64::MAX,
-                    play_id,
-                    scope.user_id,
-                    &scope.token_digest,
-                    &scope.device_digest,
-                    scope.client_family.as_str(),
-                    now_ms
+            .txn(vec![
+                (
+                    sql,
+                    params!(
+                        reference,
+                        i64::MAX,
+                        play_id,
+                        scope.user_id,
+                        &scope.token_digest,
+                        &scope.device_digest,
+                        scope.client_family.as_str(),
+                        now_ms,
+                        nonce.as_str()
+                    ),
                 ),
-            )
+                (
+                    jp::SUPERSEDE_AFTER_BINDING_ACTIVATION,
+                    params!(
+                        play_id,
+                        scope.user_id,
+                        &scope.token_digest,
+                        &scope.device_digest,
+                        scope.client_family.as_str(),
+                        expiry,
+                        nonce.as_str()
+                    ),
+                ),
+            ])
             .await?
-            == 1)
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(changed.first().copied() == Some(1))
     }
     async fn end_jellyfin_play(
         &self,

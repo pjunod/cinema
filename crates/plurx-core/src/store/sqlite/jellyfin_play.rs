@@ -118,12 +118,14 @@ impl JellyfinPlayStore for SqliteStore {
         now_ms: i64,
     ) -> Result<bool, StoreError> {
         jp::validate_key(play_id, scope)?;
-        jp::terminal_expiry(now_ms)?;
+        let expiry = jp::terminal_expiry(now_ms)?;
         let (sql, reference) = jp::activation_sql(activation)?;
+        let nonce = uuid::Uuid::new_v4().to_string();
         let id = play_id.to_owned();
         let scope = scope.clone();
         self.with_conn(move |conn| {
-            Ok(conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            let activated = tx.execute(
                 sql,
                 params![
                     reference,
@@ -133,9 +135,26 @@ impl JellyfinPlayStore for SqliteStore {
                     scope.token_digest,
                     scope.device_digest,
                     scope.client_family.as_str(),
-                    now_ms
+                    now_ms,
+                    nonce
                 ],
-            )? == 1)
+            )? == 1;
+            if activated {
+                tx.execute(
+                    jp::SUPERSEDE_AFTER_BINDING_ACTIVATION,
+                    params![
+                        id,
+                        scope.user_id,
+                        scope.token_digest,
+                        scope.device_digest,
+                        scope.client_family.as_str(),
+                        expiry,
+                        nonce
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(activated)
         })
         .await
     }

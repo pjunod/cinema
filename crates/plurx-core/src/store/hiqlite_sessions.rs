@@ -1773,6 +1773,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                     activation.incarnation_id.as_str()
                 ),
             ),
+            (
+                super::jellyfin_play::SUPERSEDE_AT_NATIVE_POINTER,
+                params!(activation.user_id, activation.playback_id.as_str(), activation.incarnation_id.as_str(),
+                    activation.now_ms.saturating_add(super::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS)),
+            ),
         ];
         let statement_count = statements.len();
         let changed = self

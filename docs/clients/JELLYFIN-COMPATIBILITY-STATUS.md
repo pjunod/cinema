@@ -576,3 +576,35 @@ On the current integrated base, all 19 focused Jellyfin HTTP regressions pass
 documentation/identity/ownership contracts pass. Route deadline and attribution
 inventories pass. Workspace/all-target Clippy passes on pinned Rust 1.97.1.
 These automated results do not count as physical client qualification.
+
+
+[PR #781](http://192.168.4.7:3000/noirr/plurx/pulls/781) merged the ancillary
+slice as `e5c6e9d34aad7d382bd4985c055c98ec87dd9131`, with parents
+`7a4e56b86` and `fa16201f3`. All eight jobs passed in
+[effort run 4023](http://192.168.4.7:3000/noirr/plurx/actions/runs/4023), and
+its landing preserves all seven checked regression references.
+
+The next J4 slice keeps native player identity stable for an authenticated
+user/device/client family across login replacement. Direct presence stays
+keyed to each play. Binding activation and native pointer activation fence
+older compatibility events inside their Store transactions. A pending
+negotiation leaves the incumbent active. Private ordering metadata assigned
+by the transaction distinguishes pending asks with identical clock readings;
+legacy metadata precedes a newly ordered ask. A bound activation nonce makes
+a replay unable to terminalize a later negotiation. Neither metadata value
+is a producer lease or a public credential.
+
+The supersession slice preserves native source/manual-revision fences and
+exact resource references. Late Stop releases only its own direct presence
+and grant; it cannot write progress through a superseded binding. Full native
+VOD negotiation, activation, HLS aliases and no-signal resource cleanup remain
+subsequent J4/J6 work, and this slice does not advertise transcode delivery.
+
+
+On integrated base `e5c6e9d34`, all 25 Jellyfin Store contracts pass on SQLite
+and three voters (253.76 seconds). All 20 focused HTTP regressions and the
+stable player identity regression pass. The shared native stale-activation
+replay and changed-viewer-request regressions pass. Workspace/all-target
+Clippy, all 28 SQL/read/process censuses and all 17 documentation/identity/
+ownership contracts pass on pinned Rust 1.97.1. Physical qualification and the
+remaining VOD transport work are not included in these results.
