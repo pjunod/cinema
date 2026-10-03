@@ -33,6 +33,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     var invitationId by remember { mutableStateOf<String?>(null) }
     var editingExport by remember { mutableStateOf<SharedSharingExport?>(null) }
     var editingImport by remember { mutableStateOf<SharedSharingImport?>(null) }
+    var editingEndpoints by remember { mutableStateOf<SharedSharingEndpointTarget?>(null) }
     var confirmation by remember { mutableStateOf<Pair<String, suspend (SharedSharingManagementClient) -> Unit>?>(null) }
     var message by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
@@ -52,14 +53,14 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     }
     DisposableEffect(secrets) { onDispose { secrets.leave() } }
     LaunchedEffect(draftRevision) {
-        if (secrets.snapshot() == null) { imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; editingImport = null; confirmation = null }
+        if (secrets.snapshot() == null) { imports = emptyList(); exports = emptyList(); invitationId = null; editingExport = null; editingImport = null; editingEndpoints = null; confirmation = null }
     }
     LaunchedEffect(Unit) { load() }
     BackHandler { secrets.leave(); onBack() }
     Column(Modifier.fillMaxSize().windowInsetsPadding(safeDisplayInsets()).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         TextButton(onClick = { secrets.leave(); onBack() }) { Text("Back") }
         Text("Sharing management", style = MaterialTheme.typography.headlineMedium)
-        if (draft == null) Text("This account changed. Leave and reopen Sharing management.")
+        if (draft == null) Text("Sharing authorization changed or was refused. Leave and reopen management.")
         else {
             Text("Source invitations", style = MaterialTheme.typography.titleLarge)
             Text("Select this server's movie/show libraries. An invitation grants no access until the recipient's pairing code is explicitly approved.")
@@ -99,6 +100,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
                 Text("${row.`import`.state} · Pairing code: ${row.pairing_code}")
                 Text("Compare this code with the exporting server before approval.")
                 SharedSharingEndpointSummary(row.`import`.endpoints)
+                TextButton(enabled = !busy && row.`import`.state in listOf("claiming", "pending", "active"), onClick = { editingEndpoints = SharedSharingEndpointTarget.Source(row.`import`) }) { Text("Edit Source endpoints") }
                 Text("Lifecycle ${row.`import`.lifecycle_generation} · Assignments ${row.`import`.assignment_generation} · Endpoints ${row.`import`.endpoint_generation}")
                 TextButton(enabled = !busy && row.`import`.state == "active", onClick = { scope.launch { run { client ->
                     val result = client.rotate(row.`import`); client.requireCurrent(); if (secrets.snapshot() != null) { imports = imports.filterNot { it.`import`.id == result.`import`.id } + result; message = "Credential rotation completed." }
@@ -125,7 +127,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
             } } }) { Text("Load more recipients") } }
             Text("This server's endpoints", style = MaterialTheme.typography.titleLarge)
             manifest?.let { Text("Revision ${it.revision}"); SharedSharingEndpointSummary(it.endpoints) } ?: Text("No configured endpoint manifest.")
-            Text("Endpoint changes require current generations and explicit pin confirmation. This screen shows validated summaries.")
+            TextButton(enabled = !busy, onClick = { editingEndpoints = SharedSharingEndpointTarget.Server }) { Text("Edit this server’s endpoints") }
             TextButton(enabled = !busy, onClick = { scope.launch { load() } }) { Text("Refresh management") }
             Text(message)
         }
@@ -133,6 +135,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
     confirmation?.let { action -> AlertDialog(onDismissRequest = { confirmation = null }, title = { Text(action.first) }, text = { Text("This changes access for this recipient or Source. Sharing enablement is unchanged.") },
         confirmButton = { Button(enabled = !busy, onClick = { confirmation = null; scope.launch { run { client -> action.second(client); if (secrets.snapshot() != null) message = "Access change saved. Refresh management for current state." } } }) { Text("Confirm") } },
         dismissButton = { TextButton(onClick = { confirmation = null }) { Text("Cancel") } }) }
+    editingEndpoints?.let { target -> SharedSharingEndpointEditor(target, onDone = { editingEndpoints = null }) }
     editingImport?.let { row -> SharedSharingAssignmentEditor(row.`import`, onDone = { editingImport = null }) }
     editingExport?.let { row -> SharedSharingExportEditor(row, libraries, onDone = { editingExport = null }) }
 }
@@ -224,7 +227,7 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
         Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("${source.source_server_id} · ${source.catalogue_epoch}")
             val draft = matrix
-            if (authority.snapshot() == null) Text("Account changed. Close and reopen this Source.")
+            if (authority.snapshot() == null) Text("Sharing authorization changed or was refused. Close and reopen this Source.")
             else if (draft == null) Text("No replacement matrix is available until all current reads succeed.")
             else {
                 Text("Assignment generation ${draft.snapshot.expected_assignment_generation}")
@@ -248,4 +251,106 @@ internal fun SharedSharingManagementScreen(onBack: () -> Unit) {
             TextButton(enabled = !busy, onClick = { coroutine.launch { load() } }) { Text("Reload current matrix") }
         }
     }, confirmButton = { TextButton(onClick = { authority.leave(); matrix = null; onDone() }) { Text("Done") } })
+}
+
+private sealed interface SharedSharingEndpointTarget {
+    data object Server : SharedSharingEndpointTarget
+    data class Source(val row: SharedSharingImportSummary) : SharedSharingEndpointTarget
+}
+@Composable private fun SharedSharingEndpointEditor(target: SharedSharingEndpointTarget, onDone: () -> Unit) {
+    val authority = remember(target) { SharedSharingSecretDraft() }
+    val authorizationRevision by authority.invalidations.collectAsState()
+    var fields by remember { mutableStateOf<List<SharedSharingEndpointFields>>(emptyList()) }
+    var source by remember { mutableStateOf<SharedSharingImportSummary?>(null) }
+    var revision by remember { mutableStateOf(0L) }
+    var confirmPins by remember { mutableStateOf(false) }
+    var readCurrent by remember { mutableStateOf(false) }
+    var busy by remember { mutableStateOf(false) }
+    var saved by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf("") }
+    val coroutine = rememberCoroutineScope()
+    val endpoints = runCatching { fields.map { it.validated() } }.getOrNull()
+    val oldPins = source?.endpoints?.map { it.spki_sha256 }?.toSet().orEmpty()
+    val needsPinConfirmation = target is SharedSharingEndpointTarget.Server || endpoints == null || endpoints.any { it.spki_sha256 !in oldPins }
+    fun leave() { authority.leave(); fields = emptyList(); source = null; confirmPins = false; onDone() }
+    fun edited() { confirmPins = false; authority.edit() }
+    DisposableEffect(authority) { onDispose { authority.leave() } }
+    LaunchedEffect(authorizationRevision) { if (authority.snapshot() == null) { fields = emptyList(); source = null; confirmPins = false; readCurrent = false } }
+    suspend fun load() {
+        val request = authority.snapshot() ?: return; if (busy) return; busy = true; readCurrent = false
+        try {
+            val client = SharedSharingManagementClient.create()
+            when (target) {
+                SharedSharingEndpointTarget.Server -> {
+                    val manifest = client.endpoints(); client.requireCurrent()
+                    if (!authority.accepts(request.revision)) return
+                    revision = manifest?.revision ?: 0; fields = manifest?.endpoints?.map(::SharedSharingEndpointFields) ?: listOf(SharedSharingEndpointFields())
+                }
+                is SharedSharingEndpointTarget.Source -> {
+                    val row = client.imports().firstOrNull { it.`import`.id == target.row.id }?.`import`
+                    require(row != null && row.source_server_id == target.row.source_server_id && row.catalogue_epoch == target.row.catalogue_epoch && row.state in listOf("claiming", "pending", "active"))
+                    client.requireCurrent(); if (!authority.accepts(request.revision)) return
+                    source = row; fields = row.endpoints.map(::SharedSharingEndpointFields)
+                }
+            }
+            confirmPins = false; saved = false; readCurrent = true; message = "Current endpoint snapshot loaded. Review exact pins before saving."
+        } catch (failure: Exception) { if (failure is CancellationException) throw failure; message = "${failure.message}. Draft retained; Save waits for a successful current read." }
+        finally { busy = false }
+    }
+    suspend fun save() {
+        val request = authority.snapshot() ?: return; if (busy || saved || !readCurrent) return; busy = true
+        try {
+            val values = fields.map { it.validated() }; require(!needsPinConfirmation || confirmPins)
+            val client = SharedSharingManagementClient.create()
+            when (target) {
+                SharedSharingEndpointTarget.Server -> client.saveManifest(revision, values)
+                is SharedSharingEndpointTarget.Source -> client.saveSourceEndpoints(requireNotNull(source), values, confirmPins)
+            }
+            client.requireCurrent(); if (authority.accepts(request.revision)) { saved = true; message = "Endpoints saved. Reload the current revision or generation before another change." }
+        } catch (failure: Exception) { if (failure is CancellationException) throw failure; message = "${failure.message}. No automatic retry; reload and review before explicitly saving again." }
+        finally { busy = false }
+    }
+    LaunchedEffect(Unit) { load() }
+    AlertDialog(onDismissRequest = ::leave, title = { Text("Sharing endpoints") }, text = {
+        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (authority.snapshot() == null) Text("Sharing authorization changed or was refused. Close and reopen endpoint management.")
+            else {
+                when (target) {
+                    SharedSharingEndpointTarget.Server -> {
+                        Text("This B server’s advertised private Tailnet endpoints · revision $revision")
+                        Text("Use this server’s configured TLS certificate pin. Saving metadata does not change its certificate or network routing.")
+                    }
+                    is SharedSharingEndpointTarget.Source -> {
+                        Text(target.row.source_name); Text("${target.row.source_server_id} · ${target.row.catalogue_epoch}")
+                        Text("Current endpoint generation ${source?.endpoint_generation ?: target.row.endpoint_generation}")
+                    }
+                }
+                Text("Enter one to four private Tailnet endpoints. Pins are exact 64-character lowercase SHA-256 SPKI fingerprints.")
+                fields.forEach { field -> key(field.id) {
+                    fun change(value: SharedSharingEndpointFields) { fields = fields.map { if (it.id == field.id) value else it }; edited() }
+                    val enabled = !busy && !saved && readCurrent
+                    SharedSharingEndpointField("Tailnet IPv4 (100.64.0.0/10)", field.ipv4, enabled) { change(field.copy(ipv4 = it)) }
+                    SharedSharingEndpointField("Tailnet IPv6 (optional)", field.ipv6, enabled) { change(field.copy(ipv6 = it)) }
+                    SharedSharingEndpointField("Machine.tailnet.ts.net", field.fqdn, enabled) { change(field.copy(fqdn = it)) }
+                    SharedSharingEndpointField("Port", field.port, enabled) { change(field.copy(port = it)) }
+                    SharedSharingEndpointField("TLS SPKI SHA-256", field.pin, enabled) { change(field.copy(pin = it)) }
+                    Text("Exact pin: ${field.pin}")
+                    TextButton(enabled = enabled && fields.size > 1, onClick = { fields = fields.filterNot { it.id == field.id }; edited() }) { Text("Remove endpoint") }
+                } }
+                TextButton(enabled = !busy && !saved && readCurrent && fields.size < 4, onClick = { fields = fields + SharedSharingEndpointFields(); edited() }) { Text("Add endpoint") }
+                Row {
+                    Checkbox(checked = confirmPins, enabled = !busy && !saved && readCurrent, onCheckedChange = { confirmPins = it; authority.edit() }, modifier = Modifier.tvFocusRing())
+                    Text("I explicitly checked and confirm the exact TLS pins shown above.", Modifier.padding(top = 12.dp))
+                }
+                if (!needsPinConfirmation) Text("Pins match current Source pins; a new-pin confirmation is not required.")
+                Button(enabled = !busy && !saved && readCurrent && (!needsPinConfirmation || confirmPins), onClick = { coroutine.launch { save() } }) { Text("Save endpoints") }
+                TextButton(enabled = !busy, onClick = { coroutine.launch { load() } }) { Text("Reload current endpoints") }
+                Text(message)
+            }
+        }
+    }, confirmButton = { TextButton(onClick = ::leave) { Text("Done") } })
+}
+@Composable private fun SharedSharingEndpointField(label: String, value: String, enabled: Boolean, onChange: (String) -> Unit) {
+    OutlinedTextField(value = value, onValueChange = onChange, enabled = enabled, label = { Text(label) },
+        keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.None, autoCorrectEnabled = false), modifier = Modifier.fillMaxWidth())
 }

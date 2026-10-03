@@ -129,6 +129,89 @@ final class SharedSharingManagementTests: XCTestCase {
         XCTAssertTrue(matrix.groups.contains { $0.libraryId == "7" && $0.userIds.isEmpty })
     }
 
+    func testEndpointMutationsPreserveExactGenerationsAndRequireExplicitNewPins() async throws {
+        let client = try client()
+        let endpoint = SharedSharingEndpoint(ipv4: "100.64.1.2", ipv6: nil, tsFqdn: "cinema.example.ts.net", port: 8443, spkiSha256: String(repeating: "a", count: 64))
+        SharedManagementHTTP.body = Data("{\"updated\":true}".utf8)
+        try await client.saveManifest(expectedRevision: 0, endpoints: [endpoint])
+        XCTAssertEqual(SharedManagementHTTP.requests.last?.httpMethod, "PUT")
+        XCTAssertEqual(SharedManagementHTTP.requests.last?.url?.path, "/api/v1/sharing/endpoints")
+        XCTAssertEqual(try requestJSON()["expected_revision"], .integer(0))
+        try await client.saveManifest(expectedRevision: precise, endpoints: [endpoint])
+        XCTAssertEqual(try requestJSON()["expected_revision"], .integer(precise))
+        let row = SharedSharingImportSummary(id: uuid, sourceServerId: server, catalogueEpoch: epoch, sourceName: "A", claimId: uuid, remoteGrantId: uuid, state: "active", assignmentGeneration: 1, lifecycleGeneration: 3, endpointGeneration: precise, observedEndpointRevision: nil, endpoints: [endpoint])
+        let replacement = SharedSharingEndpoint(ipv4: "100.64.1.3", ipv6: nil, tsFqdn: endpoint.tsFqdn, port: 8443, spkiSha256: String(repeating: "b", count: 64))
+        SharedManagementHTTP.requests = []
+        do { try await client.saveSourceEndpoints(row, endpoints: [replacement], confirmNewPins: false); XCTFail("new pin implicitly confirmed") } catch {}
+        XCTAssertTrue(SharedManagementHTTP.requests.isEmpty)
+        try await client.saveSourceEndpoints(row, endpoints: [replacement], confirmNewPins: true)
+        XCTAssertEqual(SharedManagementHTTP.requests.last?.url?.path, "/api/v1/sharing/imports/\(uuid)/endpoints")
+        let wire = try requestJSON(); XCTAssertEqual(wire["expected_endpoint_generation"], .integer(precise)); XCTAssertEqual(wire["confirm_new_pins"], .bool(true))
+        XCTAssertEqual(wire["endpoints"], .array([.object(["ipv4": .string(replacement.ipv4), "ipv6": .null, "ts_fqdn": .string(endpoint.tsFqdn), "port": .integer(8443), "spki_sha256": .string(replacement.spkiSha256)])]))
+        SharedManagementHTTP.requests = []; SharedManagementHTTP.status = 409; SharedManagementHTTP.body = Data("{\"code\":\"sharing_conflict\",\"message\":\"Reload endpoint generation\"}".utf8)
+        do { try await client.saveSourceEndpoints(row, endpoints: [endpoint], confirmNewPins: false); XCTFail("stale endpoint save accepted") } catch {}
+        XCTAssertEqual(SharedManagementHTTP.requests.count, 1)
+        SharedManagementHTTP.status = 200; SharedManagementHTTP.body = Data("{\"updated\":true}".utf8)
+        SharedManagementHTTP.beforeResponse = { Session.shared.setCredentials(origin: "https://b.test", token: "replacement") }
+        do { try await client.saveManifest(expectedRevision: precise, endpoints: [endpoint]); XCTFail("old account completion accepted") } catch {}
+    }
+    func testEndpointDraftRejectsPublicTargetsAndMalformedFieldsBeforeAnyRequest() async throws {
+        let client = try client()
+        let endpoint = SharedSharingEndpoint(ipv4: "100.127.255.254", ipv6: "fd7a:115c:a1e0::1", tsFqdn: "cinema.example.ts.net", port: 65535, spkiSha256: String(repeating: "a", count: 64))
+        XCTAssertEqual(try SharedSharingEndpointFields(endpoint).validated(), endpoint)
+        var fields = SharedSharingEndpointFields(endpoint); fields.port = "065535"; XCTAssertThrowsError(try fields.validated())
+        fields = SharedSharingEndpointFields(endpoint); fields.ipv4 = "100.128.0.0"; XCTAssertThrowsError(try fields.validated())
+        fields = SharedSharingEndpointFields(endpoint); fields.ipv6 = "fd00::1"; XCTAssertThrowsError(try fields.validated())
+        fields = SharedSharingEndpointFields(endpoint); fields.tsFqdn = "cinema.ts.net"; XCTAssertThrowsError(try fields.validated())
+        fields = SharedSharingEndpointFields(endpoint); fields.pin = String(repeating: "A", count: 64); XCTAssertThrowsError(try fields.validated())
+        SharedManagementHTTP.requests = []
+        for endpoints in [[], Array(repeating: endpoint, count: 5), [SharedSharingEndpoint(ipv4: "127.0.0.1", ipv6: nil, tsFqdn: endpoint.tsFqdn, port: 8443, spkiSha256: endpoint.spkiSha256)]] {
+            do { try await client.saveManifest(expectedRevision: 0, endpoints: endpoints); XCTFail("invalid endpoint mutation sent") } catch {}
+        }
+        XCTAssertTrue(SharedManagementHTTP.requests.isEmpty)
+    }
+
+    func testCurrentManagementAuthorizationRefusalsRetireAllDraftsWithoutChangingSession() async throws {
+        let client = try client()
+        for status in [401, 403] {
+            let first = SharedSharingSecretDraft(); let second = SharedSharingSecretDraft()
+            first.edit(invitation: "first-secret"); second.edit(pairingCode: "second-secret")
+            let auth = Session.shared.playbackAuthorization
+            SharedManagementHTTP.status = status; SharedManagementHTTP.body = status == 403 ? Data(repeating: 32, count: 131_073) : Data("{}".utf8)
+            do { _ = try await client.endpoints(); XCTFail("refused authorization accepted") } catch {}
+            XCTAssertNil(first.snapshot()); XCTAssertNil(second.snapshot())
+            let unchanged = Session.shared.playbackAuthorization
+            XCTAssertEqual(unchanged.generation, auth.generation); XCTAssertEqual(unchanged.token, auth.token); XCTAssertEqual(unchanged.origin, auth.origin)
+            first.leave(); second.leave()
+        }
+    }
+    func testOldAuthorizationRefusalCannotRetireNewAccountDraftAndLeaveRemovesRegistration() async throws {
+        let old = try client(); let oldAuth = Session.shared.playbackAuthorization
+        let left = SharedSharingSecretDraft(); left.edit(invitation: "retired-on-leave"); left.leave()
+        func drainPresentation() async {
+            let drained = expectation(description: "presentation queue drained")
+            DispatchQueue.main.async { drained.fulfill() }; await fulfillment(of: [drained], timeout: 2)
+        }
+        await drainPresentation()
+        let notificationLock = NSLock(); var notifications = 0
+        let subscription = left.objectWillChange.sink { notificationLock.lock(); notifications += 1; notificationLock.unlock() }
+        SharedSharingSecretDraft.retireAuthorization(generation: oldAuth.generation)
+        await drainPresentation()
+        let count = notificationLock.withLock { notifications }
+        XCTAssertEqual(count, 0, "left draft still received registry invalidations"); subscription.cancel()
+        var replacement: SharedSharingSecretDraft?
+        SharedManagementHTTP.status = 401; SharedManagementHTTP.body = Data("{}".utf8)
+        SharedManagementHTTP.beforeResponse = {
+            Session.shared.setCredentials(origin: "https://b.test", token: "replacement")
+            replacement = SharedSharingSecretDraft(); replacement?.edit(invitation: "new-account-secret")
+        }
+        do { _ = try await old.endpoints(); XCTFail("old account refusal accepted as current") } catch {}
+        XCTAssertNil(left.snapshot()); XCTAssertEqual(replacement?.snapshot()?.invitation, "new-account-secret")
+        SharedSharingSecretDraft.retireAuthorization(generation: oldAuth.generation)
+        XCTAssertEqual(replacement?.snapshot()?.invitation, "new-account-secret")
+        replacement?.leave()
+    }
+
     func testActualInvitationImportRePairRotationAndExplicitDisconnectRoutes() async throws {
         let client = try client(); let token = "cinema-share-v1:Zml4dHVyZQ"
         SharedManagementHTTP.body = Data("{\"id\":\"\(uuid)\",\"invitation\":\"\(token)\",\"expires_at_ms\":1000}".utf8)

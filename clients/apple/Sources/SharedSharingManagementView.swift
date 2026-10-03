@@ -15,6 +15,7 @@ struct SharedSharingManagementView: View {
     @State private var confirmation: Confirmation?
     @State private var editingExport: SharedSharingExport?
     @State private var editingImport: SharedSharingImport?
+    @State private var editingEndpoints: SharedSharingEndpointTarget?
     private enum Confirmation: Identifiable {
         case cancel(String), revoke(String), disconnect(String)
         var id: String { switch self { case .cancel(let id), .revoke(let id), .disconnect(let id): return id } }
@@ -22,7 +23,7 @@ struct SharedSharingManagementView: View {
     }
     var body: some View {
         Form {
-            if secrets.snapshot() == nil { Text("This account changed. Leave and reopen Sharing management.") }
+            if secrets.snapshot() == nil { Text("Sharing authorization changed or was refused. Leave and reopen management.") }
             else {
                 Section("Source invitations") {
                     Text("Select this server's movie/show libraries. An invitation grants no access until you explicitly approve the recipient's pairing code.").font(.caption)
@@ -45,6 +46,7 @@ struct SharedSharingManagementView: View {
                             Text("\(row.import.state) · Pairing code: \(row.pairingCode)").font(.caption)
                             Text("Compare this code with the exporting server before approval.").font(.caption)
                             SharedSharingEndpointSummary(endpoints: row.import.endpoints)
+                            Button("Edit Source endpoints") { editingEndpoints = .source(row.import) }.disabled(busy || !["claiming", "pending", "active"].contains(row.import.state))
                             Text("Lifecycle \(row.import.lifecycleGeneration) · Assignments \(row.import.assignmentGeneration) · Endpoints \(row.import.endpointGeneration)").font(.caption)
                             Button("Rotate credential") { Task { await rotate(row) } }.disabled(busy || row.import.state != "active")
                             Button("Re-pair using entered invitation") { Task { await rePair(row) } }.disabled(busy || (secrets.snapshot()?.invitation.isEmpty ?? true))
@@ -64,17 +66,18 @@ struct SharedSharingManagementView: View {
                 Section("This server's endpoints") {
                     if let manifest { Text("Revision \(manifest.revision)"); SharedSharingEndpointSummary(endpoints: manifest.endpoints) }
                     else { Text("No configured endpoint manifest.") }
-                    Text("Endpoint changes require a current generation and explicit pin confirmation. This screen currently shows the validated summary.").font(.caption)
+                    Button("Edit this server’s endpoints") { editingEndpoints = .server }.disabled(busy)
                 }
                 Section { Button("Refresh management") { Task { await load() } }.disabled(busy); Text(message).font(.caption) }
             }
         }
         .navigationTitle("Sharing management")
+        .sheet(item: $editingEndpoints) { target in NavigationStack { SharedSharingEndpointEditor(target: target) } }
         .sheet(item: $editingImport) { row in NavigationStack { SharedSharingAssignmentEditor(source: row.import) } }
         .sheet(item: $editingExport) { row in NavigationStack { SharedSharingExportEditor(row: row, libraries: libraries) } }
         .task { await load() }
         .onReceive(secrets.objectWillChange) { _ in
-            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; confirmation = nil }
+            if secrets.snapshot() == nil { imports = []; exports = []; invitationId = nil; editingExport = nil; editingImport = nil; editingEndpoints = nil; confirmation = nil }
         }
         .onDisappear { secrets.leave(); imports = []; exports = []; invitationId = nil }
         .alert(confirmation?.label ?? "Confirm", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
@@ -157,7 +160,7 @@ private struct SharedSharingExportEditor: View {
     init(row: SharedSharingExport, libraries: [SharedSharingLocalLibrary]) { self.row = row; self.libraries = libraries; _selected = State(initialValue: Set(row.libraryIds)) }
     var body: some View {
         Form {
-            if secrets.snapshot() == nil { Text("Account changed. Reopen this recipient.") }
+            if secrets.snapshot() == nil { Text("Sharing authorization changed or was refused. Reopen this recipient.") }
             else {
                 Text(row.recipientName); Text(row.grant.recipientServerId).font(.caption)
                 Text("Mutation generation \(row.grant.mutationGeneration)").font(.caption)
@@ -206,7 +209,7 @@ private struct SharedSharingAssignmentEditor: View {
         Form {
             Text(source.sourceName).font(.headline)
             Text("\(source.sourceServerId) · \(source.catalogueEpoch)").font(.caption)
-            if authority.snapshot() == nil { Text("Account changed. Close and reopen this Source.") }
+            if authority.snapshot() == nil { Text("Sharing authorization changed or was refused. Close and reopen this Source.") }
             else if let matrix {
                 Text("Assignment generation \(matrix.snapshot.expectedAssignmentGeneration)").font(.caption)
                 Text("The complete matrix is retained. Libraries outside the current Source scope and unavailable viewers stay assigned until explicitly removed.").font(.caption)
@@ -261,5 +264,106 @@ private struct SharedSharingAssignmentEditor: View {
             try client.requireCurrent(); guard authority.accepts(requested.revision), self.matrix?.accepts(matrix.revision) == true else { return }
             saved = true; message = "Assignments saved. Reload current generations before another change."
         } catch { message = "\(error.localizedDescription). No automatic retry; refresh and review before saving again." }
+    }
+}
+
+private enum SharedSharingEndpointTarget: Identifiable {
+    case server, source(SharedSharingImportSummary)
+    var id: String { switch self { case .server: return "server"; case .source(let row): return row.id } }
+}
+private struct SharedSharingEndpointEditor: View {
+    @Environment(\.dismiss) private var dismiss
+    let target: SharedSharingEndpointTarget
+    @StateObject private var authority = SharedSharingSecretDraft()
+    @State private var fields: [SharedSharingEndpointFields] = []
+    @State private var source: SharedSharingImportSummary?
+    @State private var revision: Int64 = 0
+    @State private var confirmPins = false
+    @State private var readCurrent = false
+    @State private var busy = false
+    @State private var saved = false
+    @State private var message = ""
+    private var needsPinConfirmation: Bool {
+        guard case .source = target, let source, let endpoints = try? fields.map({ try $0.validated() }) else { return true }
+        let oldPins = Set(source.endpoints.map(\.spkiSha256))
+        return endpoints.contains { !oldPins.contains($0.spkiSha256) }
+    }
+    var body: some View {
+        Form {
+            if authority.snapshot() == nil { Text("Sharing authorization changed or was refused. Close and reopen endpoint management.") }
+            else {
+                switch target {
+                case .server:
+                    Text("This B server’s advertised private Tailnet endpoints")
+                    Text("Current manifest revision \(revision)").font(.caption)
+                    Text("Use the pin of this server’s configured TLS certificate. Saving this metadata does not change that certificate or network routing.").font(.caption)
+                case .source(let row):
+                    Text(row.sourceName); Text("\(row.sourceServerId) · \(row.catalogueEpoch)").font(.caption)
+                    Text("Current endpoint generation \(source?.endpointGeneration ?? row.endpointGeneration)").font(.caption)
+                }
+                Text("Enter one to four private Tailnet endpoints. Each pin is the exact 64-character lowercase SHA-256 SPKI fingerprint.").font(.caption)
+                ForEach($fields) { $field in
+                    Section("Endpoint") {
+                        endpointField("Tailnet IPv4 (100.64.0.0/10)", text: $field.ipv4)
+                        endpointField("Tailnet IPv6 (optional)", text: $field.ipv6)
+                        endpointField("Machine.tailnet.ts.net", text: $field.tsFqdn)
+                        endpointField("Port", text: $field.port)
+                        endpointField("TLS SPKI SHA-256", text: $field.pin)
+                        Text("Exact pin: \(field.pin)").font(.caption)
+                        Button("Remove endpoint", role: .destructive) { fields.removeAll { $0.id == field.id }; edited() }.disabled(busy || saved || !readCurrent || fields.count <= 1)
+                    }
+                }
+                Button("Add endpoint") { fields.append(SharedSharingEndpointFields()); edited() }.disabled(busy || saved || !readCurrent || fields.count >= 4)
+                Toggle("I explicitly checked and confirm the exact TLS pins shown above.", isOn: Binding(get: { confirmPins }, set: { confirmPins = $0; authority.edit() })).disabled(busy || saved || !readCurrent)
+                if !needsPinConfirmation { Text("These pins match the current Source pins; a new-pin confirmation is not required.").font(.caption) }
+                Button("Save endpoints") { Task { await save() } }.disabled(busy || saved || !readCurrent || (needsPinConfirmation && !confirmPins))
+                Button("Reload current endpoints") { Task { await load() } }.disabled(busy)
+                Text(message).font(.caption)
+            }
+        }.navigationTitle("Sharing endpoints").toolbar { Button("Done") { authority.leave(); fields = []; dismiss() } }
+        .task { await load() }.onDisappear { authority.leave(); fields = []; source = nil }
+        .onReceive(authority.objectWillChange) { _ in if authority.snapshot() == nil { fields = []; source = nil; confirmPins = false; readCurrent = false } }
+    }
+    @ViewBuilder private func endpointField(_ label: String, text: Binding<String>) -> some View {
+        let binding = Binding(get: { text.wrappedValue }, set: { text.wrappedValue = $0; edited() })
+        #if os(iOS)
+        TextField(label, text: binding).textInputAutocapitalization(.never).autocorrectionDisabled().disabled(busy || saved || !readCurrent)
+        #else
+        TextField(label, text: binding).autocorrectionDisabled().disabled(busy || saved || !readCurrent)
+        #endif
+    }
+    private func edited() { confirmPins = false; authority.edit() }
+    private func load() async {
+        guard let request = authority.snapshot(), !busy else { return }; busy = true; readCurrent = false; defer { busy = false }
+        do {
+            let client = try SharedSharingManagementClient()
+            switch target {
+            case .server:
+                let manifest = try await client.endpoints(); try client.requireCurrent(); guard authority.accepts(request.revision) else { return }
+                revision = manifest?.revision ?? 0; fields = manifest?.endpoints.map(SharedSharingEndpointFields.init) ?? [SharedSharingEndpointFields()]
+            case .source(let captured):
+                guard let row = try await client.imports().first(where: { $0.id == captured.id })?.import,
+                      row.sourceServerId == captured.sourceServerId, row.catalogueEpoch == captured.catalogueEpoch,
+                      ["claiming", "pending", "active"].contains(row.state) else { throw APIError.badURL }
+                try client.requireCurrent(); guard authority.accepts(request.revision) else { return }
+                source = row; fields = row.endpoints.map(SharedSharingEndpointFields.init)
+            }
+            confirmPins = false; saved = false; readCurrent = true; message = "Current endpoint snapshot loaded. Review exact pins before saving."
+        } catch { message = "\(error.localizedDescription). Draft retained; Save waits for a successful current read." }
+    }
+    private func save() async {
+        guard let request = authority.snapshot(), !busy, !saved, readCurrent else { return }
+        busy = true; defer { busy = false }
+        do {
+            let endpoints = try fields.map { try $0.validated() }
+            guard !needsPinConfirmation || confirmPins else { throw APIError.badURL }
+            let client = try SharedSharingManagementClient()
+            switch target {
+            case .server: try await client.saveManifest(expectedRevision: revision, endpoints: endpoints)
+            case .source: guard let source else { throw APIError.badURL }; try await client.saveSourceEndpoints(source, endpoints: endpoints, confirmNewPins: confirmPins)
+            }
+            try client.requireCurrent(); guard authority.accepts(request.revision) else { return }
+            saved = true; message = "Endpoints saved. Reload the current revision or generation before another change."
+        } catch { message = "\(error.localizedDescription). No automatic retry; reload and review before explicitly saving again." }
     }
 }

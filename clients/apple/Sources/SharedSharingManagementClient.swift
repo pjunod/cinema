@@ -37,7 +37,9 @@ struct SharedSharingManagementClient {
             request.httpBody = data; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         let (data, response) = try await transport.data(for: request); try requireCurrent()
-        guard let http = response as? HTTPURLResponse, http.url == url, data.count <= ((path == "libraries" || path == "users" || path.hasSuffix("/assignments")) ? 4_194_304 : 131_072) else { throw APIError.badURL }
+        guard let http = response as? HTTPURLResponse, http.url == url else { throw APIError.badURL }
+        if http.statusCode == 401 || http.statusCode == 403 { SharedSharingSecretDraft.retireAuthorization(generation: auth.generation) }
+        guard data.count <= ((path == "libraries" || path == "users" || path.hasSuffix("/assignments")) ? 4_194_304 : 131_072) else { throw APIError.badURL }
         guard (200...299).contains(http.statusCode) else {
             struct Refusal: Decodable { let code: String; let message: String }
             if let refusal = try? JSONDecoder().decode(Refusal.self, from: data) { throw APIError.refused(status: http.statusCode, code: refusal.code, message: refusal.message, positionMs: nil) }
@@ -116,6 +118,24 @@ struct SharedSharingManagementClient {
             try value.endpoints.forEach { try $0.validate() }
         }
         return value
+    }
+    private func endpointBody(_ endpoints: [SharedSharingEndpoint]) throws -> SharedPlaybackJSON {
+        guard (1...4).contains(endpoints.count) else { throw APIError.badURL }
+        try endpoints.forEach { try $0.validate() }
+        return .array(endpoints.map { endpoint in .object([
+            "ipv4": .string(endpoint.ipv4), "ipv6": endpoint.ipv6.map(SharedPlaybackJSON.string) ?? .null,
+            "ts_fqdn": .string(endpoint.tsFqdn), "port": .integer(Int64(endpoint.port)), "spki_sha256": .string(endpoint.spkiSha256)
+        ]) })
+    }
+    func saveManifest(expectedRevision: Int64, endpoints: [SharedSharingEndpoint]) async throws {
+        guard (0..<Int64.max).contains(expectedRevision) else { throw APIError.badURL }
+        try await mutation("sharing/endpoints", method: "PUT", body: ["expected_revision": .integer(expectedRevision), "endpoints": try endpointBody(endpoints)])
+    }
+    func saveSourceEndpoints(_ row: SharedSharingImportSummary, endpoints: [SharedSharingEndpoint], confirmNewPins: Bool) async throws {
+        guard (1..<Int64.max).contains(row.endpointGeneration), ["claiming", "pending", "active"].contains(row.state) else { throw APIError.badURL }
+        let oldPins = Set(row.endpoints.map(\.spkiSha256))
+        guard confirmNewPins || endpoints.allSatisfy({ oldPins.contains($0.spkiSha256) }) else { throw SharedSharingManagementError.invalid("Review and explicitly confirm every new TLS pin before saving.") }
+        try await mutation("sharing/imports/\(id(row.id))/endpoints", method: "PUT", body: ["expected_endpoint_generation": .integer(row.endpointGeneration), "endpoints": try endpointBody(endpoints), "confirm_new_pins": .bool(confirmNewPins)])
     }
     func assignments(_ row: SharedSharingImportSummary) async throws -> SharedSharingAssignmentSnapshot {
         let result = try decode(SharedSharingAssignmentSnapshot.self, await request("sharing/imports/\(id(row.id))/assignments"))
