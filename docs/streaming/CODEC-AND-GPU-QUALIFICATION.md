@@ -76,7 +76,9 @@ A refused graph uses the ordinary SDR route. No new playback retry or watchdog
 owns it. Its encoder, pipeline and grade remain inputs to existing immutable
 recipe/cache identity.
 
-The scope is plain PQ/BT.2020 at 1080p. Dolby RPU reshaping, 4K VAAPI HDR and
+The scope is plain PQ/BT.2020 at 1080p with known cadence at most 30 fps.
+The same source-facts contract informs grade selection and checks the final
+plan; high, variable or unknown rates retain SDR with their original cadence. Dolby RPU reshaping, 4K VAAPI HDR and
 HDR subtitle burn are not advertised: burning subtitles still selects SDR
 composition, avoiding nominal subtitle white at the PQ peak. The HDR ceiling
 now asks for the selected route's own proof; plain QSV HDR no longer

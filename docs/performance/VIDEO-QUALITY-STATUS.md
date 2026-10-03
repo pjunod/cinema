@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** implementation integrated; final review and validation next · **Updated:** 2026-10-03
+**Status:** final review addressed; runtime qualification and fast lane next · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -31,8 +31,13 @@ The agent's first pinned Rust 1.97.1 compile check in the independent clone
 passed. Package-only unused-item warnings are pre-existing; the normal
 workspace hook remains the lint check. The combined tree passed pinned all-target
 compilation and the normal hook at `d717b82b6`; the cache-consumer follow-up is
-receiving the same integrated compile check. The final adversarial review is
-next, followed by its fixes and the once-only fast lane. Existing reports below remain dated evidence,
+compiled in the integrated normal hook at `6cdddaeef`. The final adversarial
+review found two blocking issues: application-owned probe metadata entered
+source comparison, and fixed-level VAAPI HDR admitted higher source cadences.
+The first is corrected in `827023fd2`; the second now uses the same known
+at-most-30-fps contract in grade selection and the facts-aware planner.
+Authored regressions remain deferred to the final lane. Runtime qualification
+and the once-only fast lane follow these review fixes. Existing reports below remain dated evidence,
 not a claim that newly implemented code has already passed its future checks.
 
 Decisions taken without requiring Paul: preparation caches metadata but retains a fresh

@@ -301,3 +301,14 @@ The [ledger](VIDEO-QUALITY-STATUS.md) is the single progress record. It separate
 planned, built, locally tested, measured, merged and production-qualified work.
 A merged tool is not a calibrated fleet; an enabled encoder is not proof of a
 better picture.
+
+### Final review corrections
+
+The final adversarial review identified two integration issues. Application-owned
+content reports are now excluded from source-probe comparison, preserving the
+comparison of actual media fields. The plain VAAPI HDR point is constrained by
+known source cadence at or below 30 fps as well as its existing geometry bound;
+50/60 fps, variable and unknown rates retain the original SDR route and cadence.
+The facts-aware planner checks the same contract before naming an artifact.
+The isolated output qualification also compares actual hvcC profile, tier, level
+and constraint bytes with the advertised codec declaration.

@@ -3155,6 +3155,13 @@
         let mut file = profile5_file();
         file.hdr = Some("hdr10".to_owned());
         file.hdr_format = None;
+        file.id = seed_file_with_probe_at(&store, "/media/plain-hdr.mkv", plurx_core::domain::ProbeResult {
+            raw_json: Some(serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+                "codec_name":"hevc","profile":"Main 10","width":3840,"height":2160,
+                "pix_fmt":"yuv420p10le","color_transfer":"smpte2084","field_order":"progressive",
+                "avg_frame_rate":"24/1","r_frame_rate":"24/1","disposition":{"attached_pic":0}}]}).to_string()),
+            ..Default::default()
+        }).await;
         let manager = TranscodeManager::new(store, dir.path().to_owned(),
             EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
             .with_hdr10_passthrough_vaapi(true);
@@ -3187,4 +3194,44 @@
         assert!(!manager.dovi_passthrough_qsv);
         assert_eq!(manager.capability_height_ceiling_for_request(Some(&file), true).await,
             HDR10_4K_HEIGHT);
+    }
+
+    #[tokio::test]
+    async fn vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans() {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(store.clone(), dir.path().to_owned(),
+            EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+            .with_hdr10_passthrough_vaapi(true);
+        let mut file = profile5_file();
+        file.hdr = Some("hdr10".into());
+        file.hdr_format = None;
+        for (average, nominal, admits) in [
+            ("24000/1001", "24000/1001", true), ("30/1", "30/1", true),
+            ("50/1", "50/1", false), ("60/1", "60/1", false),
+            ("30/1", "60/1", false), ("0/0", "0/0", false),
+        ] {
+            let probe = serde_json::json!({"streams":[{"index":0,"codec_type":"video",
+                "codec_name":"hevc","profile":"Main 10","width":3840,"height":2160,
+                "pix_fmt":"yuv420p10le","color_transfer":"smpte2084","field_order":"progressive",
+                "avg_frame_rate":average,"r_frame_rate":nominal,"disposition":{"attached_pic":0}}]});
+            file.id = seed_file_with_probe_at(&store, &format!("/media/cadence-{}.mkv", file.id),
+                plurx_core::domain::ProbeResult {raw_json:Some(probe.to_string()), ..Default::default()}).await;
+            let grade = manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
+                Encoder::Vaapi, false, Encoder::Vaapi).await.expect("grade");
+            assert_eq!(grade == OutputGrade::Hdr10, admits, "{average}/{nominal}");
+            assert_eq!(manager.vaapi_hdr10_source_fits(&file, HDR10_HEIGHT).await, admits);
+            let facts = crate::decode_facts::legacy_ordinal_facts(&probe,
+                TranscodeManager::plan_source_identity(&file).expect("identity"), 0,
+                Some(&DecodeCatalogMetadata::from_media_file(&file).expect("catalog"))).expect("facts");
+            let options = TranscodeOptions {target_height: HDR10_HEIGHT,
+                pipeline: Pipeline::Hdr10Passthrough, ..Default::default()};
+            let plan = manager.resolve_movie_plan_with_facts(&file, &options, Encoder::Vaapi,
+                &facts, &AttemptRestrictions::none());
+            if !admits {
+                assert!(plan.expect_err("stale HDR preview must not encode").contains("known cadence"));
+            }
+        }
+        file.id = i64::MAX;
+        assert!(!manager.vaapi_hdr10_source_fits(&file, HDR10_HEIGHT).await, "missing cadence is not 24 fps");
     }

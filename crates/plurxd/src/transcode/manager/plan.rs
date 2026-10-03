@@ -233,6 +233,15 @@ impl TranscodeManager {
         restrictions: &AttemptRestrictions,
         qualification: plurx_core::transcode::ArtifactQualification,
     ) -> Result<ResolvedTranscode, String> {
+        // Recheck the same contract against the facts actually used by this
+        // plan. A stale catalogue preview cannot admit a different held source
+        // into the fixed-level encoder or its already-named artifact.
+        if encoder == Encoder::Vaapi
+            && options.pipeline.output_grade() == OutputGrade::Hdr10
+            && !Self::vaapi_hdr10_facts_fit(file, options.target_height, facts)
+        {
+            return Err("VAAPI HDR10 level 4 requires a known cadence at most 30 fps".into());
+        }
         let build = self
             .cache
             .as_ref()
@@ -917,11 +926,14 @@ impl TranscodeManager {
                 );
                 return Ok(OutputGrade::Sdr);
             }
-            if encoder == Encoder::Vaapi && !self.hdr10_passthrough_vaapi {
+            if encoder == Encoder::Vaapi
+                && (!self.hdr10_passthrough_vaapi
+                    || !self.vaapi_hdr10_source_fits(file, target_height).await)
+            {
                 return Ok(OutputGrade::Sdr);
             }
-            // No RPU to prove: the graph reads no metadata, so the boot proof
-            // is the whole proof. `require_dovi_renderer` below is a
+            // No RPU to prove: this graph needs the boot capability proof and,
+            // for the fixed VAAPI level, the source cadence contract. `require_dovi_renderer` below is a
             // per-source check that this file's RPU actually changes pixels,
             // which is a question this route never asks.
             return Ok(OutputGrade::Hdr10);
@@ -956,6 +968,44 @@ impl TranscodeManager {
             return Ok(OutputGrade::Sdr);
         }
         Ok(OutputGrade::Hdr10)
+    }
+
+    /// The advertised VAAPI Main10 point is level 4 at at most 30 fps.
+    /// Keep source cadence intact: unknown, variable or higher rates use the
+    /// existing SDR route instead of dropping frames to make HDR fit.
+    pub(super) fn vaapi_hdr10_facts_fit(
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        facts: &DecodeFacts,
+    ) -> bool {
+        hdr10_rung_fits(file, target_height, Encoder::Vaapi)
+            && facts.frame_rate().value().is_some_and(|rate| {
+                u64::from(rate.numerator()) <= 30 * u64::from(rate.denominator())
+            })
+    }
+
+    pub(super) async fn vaapi_hdr10_source_fits(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+    ) -> bool {
+        let Ok(Some(raw)) = self.store.get_file_probe_json(file.id).await else {
+            return false;
+        };
+        let Ok(probe) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        let Some(index) = crate::decode_facts::absolute_video_ordinal(&probe, 0) else {
+            return false;
+        };
+        let Ok(identity) = Self::plan_source_identity(file) else {
+            return false;
+        };
+        let Ok(catalog) = DecodeCatalogMetadata::from_media_file(file) else {
+            return false;
+        };
+        crate::decode_facts::legacy_ordinal_facts(&probe, identity, index, Some(&catalog))
+            .is_ok_and(|facts| Self::vaapi_hdr10_facts_fit(file, target_height, &facts))
     }
 
     /// The grade a session would deliver, without building one.

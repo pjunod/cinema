@@ -879,6 +879,12 @@ impl TranscodeManager {
                 }
                 (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Vaapi) => {
                     self.hdr10_passthrough_vaapi
+                        && self
+                            .vaapi_hdr10_source_fits(
+                                file.expect("the matched route has a file"),
+                                HDR10_HEIGHT,
+                            )
+                            .await
                 }
                 _ => false,
             };
