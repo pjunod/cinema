@@ -4,6 +4,7 @@ function clearLocalSession(expectedGeneration,notice){
   // A logout response can arrive after another sign-in. It belongs to the
   // captured bearer, never to whichever credential happens to be current now.
   if(expectedGeneration!==AUTH_GENERATION) return false;
+  if(typeof sharingRetire==="function")sharingRetire();
   stopLiveTv().catch(()=>{});
   clearLibraryChannelDraft(true);
   LIBRARY_CHANNEL_TUNE.stop();

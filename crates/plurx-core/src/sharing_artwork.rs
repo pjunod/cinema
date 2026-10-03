@@ -220,14 +220,19 @@ fn integer(bytes: &[u8], offset: usize) -> Result<i64, StoreError> {
     Ok(result)
 }
 fn id(bytes: &[u8], offset: usize) -> Result<SourceId, StoreError> {
-    SourceId::parse(&integer(bytes, offset)?.to_string())
+    let value = i64::from_be_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .map_err(|_| invalid())?,
+    );
+    SourceId::parse(&value.to_string())
 }
-fn positive_id(value: &SourceId) -> Result<i64, StoreError> {
+fn canonical_source_id(value: &SourceId) -> Result<i64, StoreError> {
     value
         .as_str()
         .parse::<i64>()
         .ok()
-        .filter(|n| *n > 0)
+        .filter(|n| *n >= 0)
         .ok_or_else(invalid)
 }
 fn clock(now: i64, expires: i64) -> Result<(), StoreError> {
@@ -296,7 +301,7 @@ impl CatalogueRevisionKey {
             bytes.extend_from_slice(value.as_bytes());
         }
         for value in [&reference.library_id, &reference.item_id] {
-            bytes.extend_from_slice(&positive_id(value)?.to_be_bytes());
+            bytes.extend_from_slice(&canonical_source_id(value)?.to_be_bytes());
         }
         bytes.extend_from_slice(&[reference.kind.byte(), reference.variant.byte()]);
         bytes.extend_from_slice(&reference.expires_at_ms.to_be_bytes());
@@ -458,6 +463,36 @@ mod tests {
             lifecycle_generation: 7,
             source: resource.clone(),
         };
+        let mut zero_source = reference.clone();
+        zero_source.library_id = SourceId::parse("0").expect("canonical zero library");
+        zero_source.item_id = SourceId::parse("0").expect("canonical zero item");
+        let zero_resource = source_key
+            .issue_art(&zero_source, now)
+            .expect("zero Source artwork tuple");
+        assert!(
+            source_key
+                .verify_art(&zero_resource, zero_source.grant_id, now)
+                .expect("exact zero Source roundtrip")
+                == zero_source
+        );
+        let mut zero_b = b_reference.clone();
+        zero_b.item.library_id = zero_source.library_id.clone();
+        zero_b.item.item_id = zero_source.item_id.clone();
+        zero_b.source = zero_resource;
+        let zero_b_resource = receiver_key
+            .issue_art(&zero_b, now)
+            .expect("zero B artwork tuple");
+        assert!(
+            receiver_key
+                .verify_art(
+                    zero_b_resource.as_str(),
+                    zero_b.item.import_id,
+                    zero_b.user_id,
+                    now
+                )
+                .expect("exact zero B roundtrip")
+                == zero_b
+        );
         let item_json = serde_json::json!({"item_id":reference.item_id,"library_id":reference.library_id,"parent_id":null,"kind":"movie","title":"Fixture","sort_title":"fixture","year":null,"overview":null,"genres":[],"season_number":null,"episode_number":null,"art":[{"kind":reference.kind,"variant":reference.variant,"resource":resource}]});
         let typed: crate::sharing_catalogue::SourceCatalogueItem =
             serde_json::from_value(item_json.clone()).expect("closed artwork wire");

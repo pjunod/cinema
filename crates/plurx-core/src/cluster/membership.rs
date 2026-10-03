@@ -148,6 +148,10 @@ pub const SHARING_SESSION_PRINCIPAL_CAPABILITY: &str = "sharing_session_principa
 /// Allocator writers and import semantics must be complete before advertising.
 pub const SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY: &str = "sharing_catalogue_item_identity_v1";
 
+/// Census, factory, restore archive and rewrap support must all be qualified
+/// before a heartbeat may advertise this separate purpose-material capability.
+pub const SHARING_PURPOSE_KEYS_CAPABILITY: &str = "sharing_purpose_keys_v1";
+
 /// Closed, bounded capability requirements. No caller-supplied identifier can
 /// become SQL, and an empty capability set cannot authorize a new writer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,11 +159,19 @@ pub enum SharingMemberFloor {
     SessionPrincipal,
     CatalogueItemIdentity,
     PrincipalAndCatalogue,
+    PurposeKeys,
+    AllSharing,
 }
 
 impl SharingMemberFloor {
     fn capabilities(self) -> &'static [&'static str] {
         match self {
+            Self::PurposeKeys => &[SHARING_PURPOSE_KEYS_CAPABILITY],
+            Self::AllSharing => &[
+                SHARING_SESSION_PRINCIPAL_CAPABILITY,
+                SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+                SHARING_PURPOSE_KEYS_CAPABILITY,
+            ],
             Self::SessionPrincipal => &[SHARING_SESSION_PRINCIPAL_CAPABILITY],
             Self::CatalogueItemIdentity => &[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY],
             Self::PrincipalAndCatalogue => &[
@@ -1431,18 +1443,22 @@ pub struct SharingJoinCapabilities {
     pub session_principal: bool,
     #[serde(default)]
     pub catalogue_item_identity: bool,
+    #[serde(default)]
+    pub purpose_keys: bool,
 }
 
 impl SharingJoinCapabilities {
     fn proves(self, required: Self) -> bool {
         (!required.session_principal || self.session_principal)
             && (!required.catalogue_item_identity || self.catalogue_item_identity)
+            && (!required.purpose_keys || self.purpose_keys)
     }
 
     fn supports(self, capability: &str) -> bool {
         match capability {
             SHARING_SESSION_PRINCIPAL_CAPABILITY => self.session_principal,
             SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY => self.catalogue_item_identity,
+            SHARING_PURPOSE_KEYS_CAPABILITY => self.purpose_keys,
             _ => false,
         }
     }
@@ -1450,6 +1466,8 @@ impl SharingJoinCapabilities {
 
 fn sharing_installed_marker_predicate(capability: &str) -> String {
     match capability {
+        SHARING_PURPOSE_KEYS_CAPABILITY =>
+            "EXISTS (SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_archive','sharing_purpose_key_installation','sharing_purpose_census_intents'))".to_owned(),
         SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY =>
             "EXISTS (SELECT 1 FROM sqlite_master WHERE name='item_identity_watermark')".to_owned(),
         SHARING_SESSION_PRINCIPAL_CAPABILITY =>
@@ -1477,6 +1495,7 @@ impl From<&mut Row<'_>> for SharingAdmissionMarkers {
             required: SharingJoinCapabilities {
                 session_principal: row.get::<i64>("principal") != 0,
                 catalogue_item_identity: row.get::<i64>("catalogue") != 0,
+                purpose_keys: row.get::<i64>("purpose_keys") != 0,
             },
             intents_installed: row.get::<i64>("intents") != 0,
         }
@@ -1487,9 +1506,9 @@ async fn sharing_admission_markers(
     client: &Client,
 ) -> Result<SharingAdmissionMarkers, MembershipError> {
     let rows = client.query_consistent_map::<SharingAdmissionMarkers,_>(format!(
-        "SELECT {} AS principal, {} AS catalogue, EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_join_intents') AS intents",
+        "SELECT {} AS principal, {} AS catalogue, {} AS purpose_keys, EXISTS (SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_join_intents') AS intents",
         sharing_installed_marker_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
-        sharing_installed_marker_predicate(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY)),params!()).await?;
+        sharing_installed_marker_predicate(SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),sharing_installed_marker_predicate(SHARING_PURPOSE_KEYS_CAPABILITY)),params!()).await?;
     let [row] = rows.as_slice() else {
         return Err(MembershipError::Incompatible);
     };
@@ -1561,16 +1580,17 @@ pub fn sharing_member_admission_guard_schema() -> Vec<String> {
     let mut statements = vec![format!(
         "CREATE TABLE IF NOT EXISTS cluster_sharing_join_intents (\
          token_hash TEXT NOT NULL CHECK(length(token_hash)=64), \
-         capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}')), \
+         capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')), \
          last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0), \
          PRIMARY KEY(token_hash,capability)) STRICT")];
     statements.extend([
-        format!("CREATE TABLE IF NOT EXISTS cluster_sharing_join_declarations (token_hash TEXT NOT NULL CHECK(length(token_hash)=64),node_id TEXT NOT NULL CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}')),last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0),PRIMARY KEY(token_hash,capability)) STRICT"),
+        format!("CREATE TABLE IF NOT EXISTS cluster_sharing_join_declarations (token_hash TEXT NOT NULL CHECK(length(token_hash)=64),node_id TEXT NOT NULL CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),capability TEXT NOT NULL CHECK(capability IN ('{SHARING_SESSION_PRINCIPAL_CAPABILITY}','{SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY}','{SHARING_PURPOSE_KEYS_CAPABILITY}')),last_seen_at INTEGER NOT NULL CHECK(last_seen_at>0),PRIMARY KEY(token_hash,capability)) STRICT"),
         "CREATE TABLE IF NOT EXISTS cluster_sharing_membership_intents (raft_id INTEGER PRIMARY KEY CHECK(raft_id>0),node_id TEXT NOT NULL UNIQUE CHECK(length(node_id) BETWEEN 1 AND 256),attempt_id TEXT NOT NULL CHECK(length(attempt_id) BETWEEN 1 AND 64),operation TEXT NOT NULL CHECK(operation IN ('learner','voter')),api_address TEXT NOT NULL CHECK(length(api_address) BETWEEN 1 AND 512),raft_address TEXT NOT NULL CHECK(length(raft_address) BETWEEN 1 AND 512),claimed_at INTEGER NOT NULL CHECK(claimed_at>0)) STRICT".to_owned(),
     ]);
     for (label, capability) in [
         ("principal", SHARING_SESSION_PRINCIPAL_CAPABILITY),
         ("catalogue", SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY),
+        ("purpose_keys", SHARING_PURPOSE_KEYS_CAPABILITY),
     ] {
         let installed = sharing_installed_marker_predicate(capability);
         statements.push(format!(
@@ -1683,7 +1703,7 @@ pub fn sharing_join_intent_statements(
         ("DELETE FROM cluster_sharing_join_declarations WHERE token_hash=$1".to_owned(),params!(request.token_digest.as_str())),
         ("INSERT INTO cluster_node_heartbeat_intents(node_id,last_seen_at) SELECT $1,$2 FROM cluster_join_tokens WHERE token_hash=$3 AND raft_id=$4 AND ((state='issued' AND expires_at>$2) OR (state='redeeming' AND node_id=$1)) ON CONFLICT(node_id) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(request.node_id.as_str(),now,request.token_digest.as_str(),request.raft_id as i64)),
     ];
-    for capability in SharingMemberFloor::PrincipalAndCatalogue.capabilities() {
+    for capability in SharingMemberFloor::AllSharing.capabilities() {
         if request.sharing.supports(capability) {
             statements.push((
                 "INSERT INTO cluster_sharing_join_declarations(token_hash,node_id,raft_id,api_address,raft_address,capability,last_seen_at) SELECT $1,$2,$3,$4,$5,$6,$7 FROM cluster_join_tokens WHERE token_hash=$1 AND raft_id=$3 AND ((state='issued' AND expires_at>$7) OR (state='redeeming' AND node_id=$2))".to_owned(),
@@ -1703,7 +1723,7 @@ async fn require_installed_sharing_promotion_floor(
     node_id: &str,
 ) -> Result<(), MembershipError> {
     let now = unix_ms()?;
-    let guard=SharingMemberFloor::PrincipalAndCatalogue.capabilities().iter().map(|capability|format!(
+    let guard=SharingMemberFloor::AllSharing.capabilities().iter().map(|capability|format!(
         "(NOT ({}) OR EXISTS (SELECT 1 FROM cluster_nodes node JOIN cluster_node_capabilities cap ON cap.node_id=node.node_id AND cap.last_seen_at=node.last_seen_at WHERE node.node_id=$1 AND node.removed_at IS NULL AND cap.capability='{capability}' AND node.last_seen_at>=$2 AND node.last_seen_at<=$3))",
         sharing_installed_marker_predicate(capability))).collect::<Vec<_>>().join(" AND ");
     let rows = client
@@ -2613,6 +2633,23 @@ impl SourceAdmissionMembers {
         cutoff_parameter: usize,
         observed_at_parameter: usize,
     ) -> Result<(String, String, i64, i64), MembershipError> {
+        self.write_guard_for(
+            SharingMemberFloor::PrincipalAndCatalogue,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )
+    }
+
+    fn write_guard_for(
+        &self,
+        required: SharingMemberFloor,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
         let indices = [members_parameter, cutoff_parameter, observed_at_parameter];
         if self.local_raft_id == 0
             || self.membership_generation < 0
@@ -2630,7 +2667,7 @@ impl SourceAdmissionMembers {
             format!(
                 "({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_sharing_membership_generation WHERE singleton=1 AND generation={})",
                 sharing_member_guard_predicate(
-                    SharingMemberFloor::PrincipalAndCatalogue,
+                    required,
                     members_parameter,
                     cutoff_parameter,
                     observed_at_parameter,
@@ -2644,6 +2681,56 @@ impl SourceAdmissionMembers {
             now_ms,
         ))
     }
+}
+
+/// Actual current-roster witness exclusively for purpose-key factory writes.
+/// It cannot be substituted for the Source session observation.
+#[derive(Clone)]
+pub struct PurposeKeyMembers {
+    members: SourceAdmissionMembers,
+    master_key_id: String,
+}
+impl PurposeKeyMembers {
+    pub(crate) fn actual_local_raft_id(&self) -> u64 {
+        self.members.actual_local_raft_id()
+    }
+    pub(crate) fn master_key_id(&self) -> &str {
+        &self.master_key_id
+    }
+    pub fn write_guard(
+        &self,
+        now_ms: i64,
+        members_parameter: usize,
+        cutoff_parameter: usize,
+        observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), MembershipError> {
+        let (guard, members, cutoff, observed) = self.members.write_guard_for(
+            SharingMemberFloor::PurposeKeys,
+            now_ms,
+            members_parameter,
+            cutoff_parameter,
+            observed_at_parameter,
+        )?;
+        Ok((
+            format!(
+                "({guard}) AND ({})",
+                purpose_master_proof_predicate(&self.master_key_id)?
+            ),
+            members,
+            cutoff,
+            observed,
+        ))
+    }
+}
+fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
+    if id.len() != 8
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(MembershipError::Incompatible);
+    }
+    Ok(format!("NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_key_id_v1:{id}'))"))
 }
 
 async fn sharing_member_floor_observation(
@@ -2732,6 +2819,51 @@ async fn sharing_member_floor_observation(
         completed_at_ms,
         membership_generation: row.generation.ok_or(MembershipError::Incompatible)?,
     }))
+}
+
+async fn purpose_key_member_observation(
+    client: &Client,
+    local_raft_id: u64,
+    master_key_id: &str,
+) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+    purpose_master_proof_predicate(master_key_id)?;
+    let Some(members) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        SharingMemberFloor::PurposeKeys,
+        true,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let result = PurposeKeyMembers {
+        members,
+        master_key_id: master_key_id.to_owned(),
+    };
+    let now = unix_ms()?;
+    let (guard, roster, cutoff, observed) = result.write_guard(now, 1, 2, 3)?;
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(roster, cutoff, observed),
+        )
+        .await?;
+    if !matches!(rows.as_slice(),[row] if row.count==1) {
+        return Ok(None);
+    }
+    result.write_guard(unix_ms()?, 1, 2, 3)?;
+    Ok(Some(result))
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn observe_purpose_key_members_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+    master_key_id: &str,
+) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+    purpose_key_member_observation(client, actual_local_raft_id, master_key_id).await
 }
 
 /// Contract fixtures use the actual quorum observation path. This test-only
@@ -4482,7 +4614,8 @@ impl MembershipManager {
         // activated while its request was in flight.
         let sharing_intents = sharing_markers.intents_installed
             && (sharing_markers.required.session_principal
-                || sharing_markers.required.catalogue_item_identity);
+                || sharing_markers.required.catalogue_item_identity
+                || sharing_markers.required.purpose_keys);
         let mut statements = if sharing_intents {
             sharing_join_intent_statements(request, now)
         } else {
@@ -9144,6 +9277,18 @@ impl MembershipManager {
             true,
         )
         .await
+    }
+
+    /// Current exact roster/master proof for key installation only. Source
+    /// admission continues to use its separate PrincipalAndCatalogue witness.
+    pub async fn observe_purpose_key_members(
+        &self,
+        master_key_id: &str,
+    ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(None);
+        };
+        purpose_key_member_observation(&inner.client, inner.identity.raft_id, master_key_id).await
     }
 
     /// Active nodes that cannot currently prove the always-compiled live-TV

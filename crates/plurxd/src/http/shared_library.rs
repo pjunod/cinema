@@ -528,6 +528,26 @@ async fn source_json(
     });
     Ok(response)
 }
+pub(super) fn source_file_json(
+    grant: uuid::Uuid,
+    target: &super::hls::SourcePlaybackTarget,
+    value: Value,
+) -> Result<Response, ApiError> {
+    let mut response = bounded_json(value)?;
+    response.extensions_mut().insert(SourceContentAuthority {
+        grant,
+        server: target.server_id,
+        epoch: target.catalogue_epoch,
+        libraries: vec![target.library_id.clone()],
+        items: vec![(target.library_id.clone(), target.item_id.clone())],
+        files: vec![(
+            target.library_id.clone(),
+            target.item_id.clone(),
+            target.file_id.clone(),
+        )],
+    });
+    Ok(response)
+}
 async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
@@ -592,7 +612,7 @@ pub(super) async fn source_art_scope_current(
     )
     .await
 }
-async fn source_content_guard(
+pub(super) async fn source_content_guard(
     State(state): State<AppState>,
     request: Request<Body>,
     next: Next,
@@ -4474,6 +4494,50 @@ mod tests {
         let prepared = prepare_source_playback(&fixture.state, &headers, target.clone(), body())
             .await
             .expect("actual Source preparation");
+        let decision_input = || super::super::shared_playback::SourceDecisionRequest {
+            reference: target.clone(),
+            caps: caps.clone(),
+            audio: None,
+            subtitle: None,
+            audio_offset_ms: None,
+            force: None,
+        };
+        let peer_response = super::super::shared_playback::source_decision(
+            &fixture.state,
+            &headers,
+            decision_input(),
+        )
+        .await
+        .expect("current peer decision");
+        let peer_payload: Value = serde_json::from_slice(
+            &to_bytes(peer_response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("bounded body"),
+        )
+        .expect("peer payload");
+        assert_eq!(peer_payload["protocol"], 1);
+        assert_eq!(
+            peer_payload["reference"],
+            serde_json::to_value(&target).expect("reference")
+        );
+        assert_eq!(
+            peer_payload["decision"],
+            serde_json::to_value(prepared.decision()).expect("complete engine")
+        );
+        let mut wrong = decision_input();
+        wrong.reference.server_id = uuid::Uuid::new_v4();
+        assert!(
+            super::super::shared_playback::source_decision(&fixture.state, &headers, wrong)
+                .await
+                .is_err()
+        );
+        let mut empty = decision_input();
+        empty.caps = plurx_core::playback::DeviceCaps::default();
+        assert!(
+            super::super::shared_playback::source_decision(&fixture.state, &headers, empty)
+                .await
+                .is_err()
+        );
         assert_eq!(prepared.file().id, 1);
         assert_eq!(prepared.file().path, source);
         assert_eq!(prepared.principal().local_user_id(), None);

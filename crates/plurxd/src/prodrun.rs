@@ -68,6 +68,7 @@ struct GenerationLifetime {
     identity: Arc<()>,
     writers: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     receipt: StdMutex<Option<ConfirmedProducerReap>>,
+    settled: Notify,
 }
 
 /// Owned only by the actual stdout/diagnostic task. Dropping without settlement
@@ -89,6 +90,20 @@ impl ConfirmedProducerReap {
     }
 }
 impl ProducerRegistration {
+    pub(crate) fn same_generation(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    /// A detached viewer can retain its exact old generation even after the
+    /// slot moves on. Cancellation drops only the waiter, never the reaper.
+    pub(crate) async fn wait_confirmed_reap(&self) -> ConfirmedProducerReap {
+        loop {
+            let changed = self.0.settled.notified();
+            if let Some(receipt) = self.confirmed_reap() {
+                return receipt;
+            }
+            changed.await;
+        }
+    }
     pub(crate) fn confirmed_reap(&self) -> Option<ConfirmedProducerReap> {
         self.0
             .receipt
@@ -175,6 +190,7 @@ fn owned_reap(
             drop(resources);
             if let Some(generation)=generation {
                 *generation.0.receipt.lock().expect("producer receipt lock")=Some(ConfirmedProducerReap(Arc::clone(&generation.0.identity)));
+                generation.0.settled.notify_waiters();
             }
             if let Some(inner)=inner.upgrade(){
                 let mut state=inner.lock().await;
@@ -318,6 +334,7 @@ impl ProducerSlot {
             identity: Arc::new(()),
             writers: Mutex::new(Some(receiver)),
             receipt: StdMutex::new(None),
+            settled: Notify::new(),
         }));
         self.attach_resources_registered(
             child,

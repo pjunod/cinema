@@ -8,6 +8,21 @@ pub(super) async fn spawn_generation(
     at: u32,
     permit: Option<crate::vodencode::EncodePermit>,
 ) {
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+        return;
+    }
+    let source_dispatch = match rendition.source_owners.begin_generation() {
+        Ok(dispatch) => dispatch,
+        Err(cause) => {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause.to_owned(),
+            );
+            return;
+        }
+    };
     if !recipe_engine_is_current(&rendition.recipe).await {
         record_failure(
             shared,
@@ -48,7 +63,7 @@ pub(super) async fn spawn_generation(
     // One ffmpeg, converting or not. The conversion happens on the far side of
     // the muxer now — `dvpipe` rewrites the RPUs inside the fragments this
     // process writes — so the producer is the producer it always was.
-    let (mut child, child_job, stdout, stderr) = {
+    let (child, child_job, stdout, stderr) = {
         let args = recipe_pipe_args(recipe, start_seconds, attested);
         #[cfg(unix)]
         let descriptors = crate::producer_spawn::Descriptors::from_files(
@@ -94,34 +109,65 @@ pub(super) async fn spawn_generation(
             spawned.stderr,
         )
     };
-    // The rendition can be closed between the spawn above and the attach
-    // below (a purge committing on the maintain task). Attaching would leave
-    // a live ffmpeg in a slot whose driver has already exited — a child
-    // nothing reaps until the Arc drops.
-    //
-    // A failure recorded in that same gap is the other half of the same
-    // hazard, and it was not guarded. The driver does not exit on a failure,
-    // it switches to reclaiming, and a reclaiming pass that has already read
-    // an absent belief will not look again until something kicks it — so an
-    // attach landing just behind it puts a live child in a slot whose only
-    // remaining reader answers `ProducerFailed`. Refuse the attach instead,
-    // here, where the child is still ours to kill.
-    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
-        let _ = child.kill().await;
-        return;
-    }
     rendition
         .last_child_pid
         .store(child.id().unwrap_or(0), Relaxed);
-    let (registration, writers) = rendition
-        .slot
-        .attach_registered_job_owned(
-            child,
-            child_job,
-            at,
-            permit.map(|permit| Box::new(permit) as Box<dyn Send>),
-        )
-        .await;
+    // Transfer the raw child and physical resources synchronously before the
+    // first registration await. Losing this caller can only lose its waiter.
+    let (registration_tx, registration_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn({
+        let rendition = Arc::clone(rendition);
+        async move {
+            rendition.hooks.before_producer_registration().await;
+            let (registration, writers) = rendition
+                .slot
+                .attach_registered_job_owned(
+                    child,
+                    child_job,
+                    at,
+                    permit.map(|permit| Box::new(permit) as Box<dyn Send>),
+                )
+                .await;
+            rendition
+                .source_owners
+                .registered(&source_dispatch, &registration);
+            drop(source_dispatch);
+            if let Err((registration, writers, stdout, stderr)) =
+                registration_tx.send((registration, writers, stdout, stderr))
+            {
+                drop(stdout);
+                drop(stderr);
+                writers.settled();
+                let _ = rendition
+                    .slot
+                    .request_registered_retirement(&registration)
+                    .await;
+                let _ = registration.wait_confirmed_reap().await;
+            }
+        }
+    });
+    let Ok((registration, writers, stdout, stderr)) = registration_rx.await else {
+        record_failure(
+            shared,
+            rendition,
+            crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+            "owned producer registration did not complete".to_owned(),
+        );
+        return;
+    };
+    // A child launched before a close/failure still belongs to the actual
+    // registered reaper. Wait errors retain its permit and descendant job.
+    if rendition.closed.load(Relaxed) || rendition.failure().is_some() {
+        drop(stdout);
+        drop(stderr);
+        writers.settled();
+        let _ = rendition
+            .slot
+            .request_registered_retirement(&registration)
+            .await;
+        let _ = registration.wait_confirmed_reap().await;
+        return;
+    }
     shared.pool.metrics_handle().count_producer_generation(
         if rendition.recipe.encoding.is_some() {
             VodProducerKind::Encoded

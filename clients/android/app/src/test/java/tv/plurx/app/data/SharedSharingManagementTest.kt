@@ -109,6 +109,69 @@ class SharedSharingManagementTest {
         assertTrue(matrix.groups.any { it.library_id == "7" && it.user_ids.isEmpty() })
     }
 
+    @Test fun endpointMutationsPreserveExactGenerationsAndRequireExplicitNewPins(): Unit = runBlocking {
+        val client = client()
+        val endpoint = SharedSharingEndpoint("100.64.1.2", null, "cinema.example.ts.net", 8443, "a".repeat(64))
+        body = """{"updated":true}"""
+        client.saveManifest(0, listOf(endpoint))
+        assertEquals("PUT", requests.last().method); assertEquals("/api/v1/sharing/endpoints", requests.last().url.encodedPath)
+        assertEquals(0L, requestJSON().getValue("expected_revision").jsonPrimitive.long)
+        client.saveManifest(precise, listOf(endpoint)); assertEquals(precise, requestJSON().getValue("expected_revision").jsonPrimitive.long)
+        val row = SharedSharingImportSummary(uuid, server, epoch, "A", uuid, uuid, "active", 1, 3, precise, null, listOf(endpoint))
+        val replacement = endpoint.copy(ipv4 = "100.64.1.3", spki_sha256 = "b".repeat(64))
+        requests.clear(); assertNotNull(runCatching { client.saveSourceEndpoints(row, listOf(replacement), false) }.exceptionOrNull()); assertTrue(requests.isEmpty())
+        client.saveSourceEndpoints(row, listOf(replacement), true)
+        assertEquals("/api/v1/sharing/imports/$uuid/endpoints", requests.last().url.encodedPath)
+        val wire = requestJSON(); assertEquals(precise, wire.getValue("expected_endpoint_generation").jsonPrimitive.long); assertTrue(wire.getValue("confirm_new_pins").jsonPrimitive.boolean)
+        val endpointWire = wire.getValue("endpoints").jsonArray[0].jsonObject
+        assertEquals(setOf("ipv4", "ipv6", "ts_fqdn", "port", "spki_sha256"), endpointWire.keys)
+        assertEquals(JsonNull, endpointWire.getValue("ipv6")); assertEquals(replacement.spki_sha256, endpointWire.getValue("spki_sha256").jsonPrimitive.content)
+        requests.clear(); status = 409; body = """{"code":"sharing_conflict","message":"Reload endpoint generation"}"""
+        assertNotNull(runCatching { client.saveSourceEndpoints(row, listOf(endpoint), false) }.exceptionOrNull()); assertEquals(1, requests.size)
+        status = 200; body = """{"updated":true}"""; beforeResponse = { Session.token = "replacement" }
+        assertNotNull(runCatching { client.saveManifest(precise, listOf(endpoint)) }.exceptionOrNull())
+    }
+    @Test fun endpointDraftRejectsPublicTargetsAndMalformedFieldsBeforeAnyRequest(): Unit = runBlocking {
+        val client = client()
+        val endpoint = SharedSharingEndpoint("100.127.255.254", "fd7a:115c:a1e0::1", "cinema.example.ts.net", 65535, "a".repeat(64))
+        val fields = SharedSharingEndpointFields(endpoint); assertEquals(endpoint, fields.validated())
+        for (invalid in listOf(fields.copy(port = "065535"), fields.copy(ipv4 = "100.128.0.0"), fields.copy(ipv6 = "fd00::1"), fields.copy(fqdn = "cinema.ts.net"), fields.copy(pin = "A".repeat(64)))) {
+            assertNotNull(runCatching { invalid.validated() }.exceptionOrNull())
+        }
+        requests.clear()
+        for (endpoints in listOf(emptyList(), List(5) { endpoint }, listOf(endpoint.copy(ipv4 = "127.0.0.1")))) {
+            assertNotNull(runCatching { client.saveManifest(0, endpoints) }.exceptionOrNull())
+        }
+        assertTrue(requests.isEmpty())
+    }
+
+    @Test fun currentManagementAuthorizationRefusalsRetireAllDraftsWithoutChangingSession(): Unit = runBlocking {
+        val client = client()
+        for (code in listOf(401, 403)) {
+            val first = SharedSharingSecretDraft(); val second = SharedSharingSecretDraft()
+            first.edit(invitation = "first-secret"); second.edit(pairingCode = "second-secret")
+            val auth = Session.playbackAuthorization(); status = code; body = if (code == 403) " ".repeat(131_073) else "{}"
+            assertNotNull(runCatching { client.endpoints() }.exceptionOrNull())
+            assertNull(first.snapshot()); assertNull(second.snapshot()); assertEquals(auth, Session.playbackAuthorization())
+            first.leave(); second.leave()
+        }
+    }
+    @Test fun oldAuthorizationRefusalCannotRetireNewAccountDraftAndLeaveRemovesRegistration(): Unit = runBlocking {
+        val old = client(); val oldAuth = Session.playbackAuthorization()
+        val left = SharedSharingSecretDraft(); left.edit(invitation = "retired-on-leave"); left.leave()
+        val leftRevision = left.invalidations.value
+        SharedSharingSecretDraft.retireAuthorization(oldAuth.generation)
+        assertEquals("left draft still received registry invalidations", leftRevision, left.invalidations.value)
+        var replacement: SharedSharingSecretDraft? = null
+        status = 401; body = "{}"; beforeResponse = {
+            Session.token = "replacement"; replacement = SharedSharingSecretDraft().also { it.edit(invitation = "new-account-secret") }
+        }
+        assertNotNull(runCatching { old.endpoints() }.exceptionOrNull())
+        assertNull(left.snapshot()); assertEquals("new-account-secret", replacement?.snapshot()?.invitation)
+        SharedSharingSecretDraft.retireAuthorization(oldAuth.generation)
+        assertEquals("new-account-secret", replacement?.snapshot()?.invitation); replacement?.leave()
+    }
+
     @After fun cleanup() { Session.origin = ""; Session.token = null }
     @Test fun actualInvitationImportRePairRotationAndExplicitDisconnectRoutes(): Unit = runBlocking {
         val client = client(); val token = "cinema-share-v1:Zml4dHVyZQ"

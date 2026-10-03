@@ -964,6 +964,37 @@ cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-te
 cargo clippy --locked -p plurxd --all-targets -- -D warnings
 ```
 
+## Complete Source decision and prepared recipe
+
+The daemon now shares its actual file decision engine and recipe resolver
+between Local playback and a Source preparation adapter. Source preparation
+uses the current peer grant and viewer pseudonym as its canonical principal,
+requires the complete current file witness and catalogue revision, and rechecks
+both after planning. It supplies no Local account or LAN network prior. The
+opaque prepared result retains the actual file, full decision response, recipe,
+principal and fingerprint for the physical owner to consume.
+
+The focused preparation regression compares the complete Source response with
+the Local engine on the same file, distinguishes fingerprints for Local and two
+Shared viewers, rejects injected network priors, and refuses changed Source,
+epoch, library, revision, file metadata and private-library movement. It leaves
+media sessions empty. This proves preparation and recipe identity; the peer
+HTTP consumer, physical producer admission and B relay remain open.
+
+Pinned Rust 1.97.1 passed the preparation test (one test, zero ignored), all 62
+stream decision tests, and the three existing recipe regressions. Daemon
+all-target check and Clippy with denied warnings passed with
+`plurx-core/hiqlite-contract-tests`; the four documentation index tests passed.
+The focused commands were:
+
+```sh
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::stream::tests::
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
+```
+
 ## Assigned worker failure before activation
 
 The candidate `settle_source_assigned_without_activation` callback takes the
@@ -1044,36 +1075,23 @@ Core feature all-target check in 30.66 seconds, and Core feature all-target
 Clippy with denied warnings in 35.81 seconds. Documentation index tests,
 catalogue lint and diff checks passed.
 
-## Complete Source decision and prepared recipe
+## Private Source decision ingress
 
-The daemon now shares its actual file decision engine and recipe resolver
-between Local playback and a Source preparation adapter. Source preparation
-uses the current peer grant and viewer pseudonym as its canonical principal,
-requires the complete current file witness and catalogue revision, and rechecks
-both after planning. It supplies no Local account or LAN network prior. The
-opaque prepared result retains the actual file, full decision response, recipe,
-principal and fingerprint for the physical owner to consume.
+The private peer router now accepts the bounded POST decision operation at
+`/sharing/v1/items/{item}/files/{file}/decision`. Its closed request carries the
+complete expected Source reference, v2 capabilities and request-local choices.
+A current grant-authorized file witness admits the actual planning snapshot;
+the adapter checks the sealed catalogue revision before and after the common
+engine and rechecks the current peer credential. It returns the complete engine
+decision in a protocol envelope, without a Local user or LAN throughput prior.
 
-The focused preparation regression compares the complete Source response with
-the Local engine on the same file, distinguishes fingerprints for Local and two
-Shared viewers, rejects injected network priors, and refuses changed Source,
-epoch, library, revision, file metadata and private-library movement. It leaves
-media sessions empty. This proves preparation and recipe identity; the peer
-HTTP consumer, physical producer admission and B relay remain open.
-
-Pinned Rust 1.97.1 passed the preparation test (one test, zero ignored), all 62
-stream decision tests, and the three existing recipe regressions. Daemon
-all-target check and Clippy with denied warnings passed with
-`plurx-core/hiqlite-contract-tests`; the four documentation index tests passed.
-The focused commands were:
-
-```sh
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::stream::tests::
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
-scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
-```
+The response uses the existing four-MiB JSON bound and accepted-connection
+monitor, including the exact library/item/file membership. The decision lane
+has sixteen nonqueued permits and a ten-second request deadline. It allocates
+no media session, resource admission permit or producer. The focused preparation
+regression now also exercises the peer decision adapter and compares every
+engine field, refusing a changed Source identity and empty capabilities. The
+B file-decision consumer and live Source starts remain separate open work.
 
 ## Supported bare Core proof surface
 
@@ -1142,3 +1160,51 @@ cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin
 cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
 cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
 ```
+
+
+## Registered VOD generation ownership before Source attachment
+
+On the merged `f06984bc5` base, actual VOD generation spawn transfers its
+child, job and physical permit to an owned registration task before the
+caller can await registration. Closing the rendition or cancelling that waiter
+therefore retires the exact registered generation through successful process
+wait and writer settlement. A failed wait retains the physical resources.
+Generation tokens expose a cancellation-independent confirmation waiter;
+advancing the producer slot does not invalidate the old generation's barrier.
+
+The private Source association ledger captures complete immutable assignments
+before asynchronous spawn preparation and retains each captured owner's
+obligation until actual registration or failed-spawn cleanup. Detachment
+serializes with capture. A new owner refuses attachment during dispatch;
+exact existing owners join the same association. Eight Source owners and
+64 unsettled generations per owner bound retained associations. Source
+attachment and worker creation remain closed at this checkpoint. The ledger
+barrier does not certify downstream response bodies or release SQL capacity.
+
+Pinned Rust 1.97.1 passed the actual FFmpeg close/cancel registration regression
+in 2.88 seconds, the actual registered process/permit/writer barrier regression
+in 1.85 seconds, all 12 producer-slot tests, and the existing Local cached-read
+admission regression in 1.86 seconds, each with zero ignored tests. Daemon
+feature all-target check passed in 48.48 seconds and denied-warning Clippy in
+59.31 seconds. All 13 Source Store unit tests passed in 28.49 seconds; the
+actual three-voter Source contract passed in 11.44 seconds after explicitly
+seeding the installed-purpose-key capability in its fixture. No fixture
+here dispatches a Shared viewer or qualifies full Source attachment during
+spawn; those cases belong to the owned actor handoff.
+
+```sh
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_generation_registration_close_and_cancel_retain_actual_resources -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_registered_producer_retains_real_permit_until_wait_and_writers -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd prodrun::tests::
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+An abrupt daemon restart loses in-memory actor and process barriers. Persisted
+unresolved generation-one associations must remain retained and unavailable;
+neither an absent registry nor lease expiry proves that old producers and
+writers have stopped. Crash recovery needs its own qualified shutdown receipt
+or Source process-lifetime guarantee before the feature can be complete.
