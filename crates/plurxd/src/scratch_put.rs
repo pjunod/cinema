@@ -1270,9 +1270,12 @@ mod tests {
         // The receiver may already have refused and closed; the reply is
         // what the assertion is about, not whether the last chunk went out.
         let _ = stream.write_all(b"0\r\n\r\n").await;
-        let mut reply = String::new();
-        let _ = stream.read_to_string(&mut reply).await;
-        reply
+        // A refusal can be followed by a reset while our remaining body is
+        // in flight. read_to_string discards bytes received before an I/O
+        // error; retain the actual HTTP response when that happens.
+        let mut reply = Vec::new();
+        let _ = stream.read_to_end(&mut reply).await;
+        String::from_utf8(reply).expect("HTTP reply is UTF-8")
     }
 
     async fn put(base: &str, name: &str, bytes: &[u8]) -> String {

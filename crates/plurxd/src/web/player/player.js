@@ -176,6 +176,7 @@
  * @property {number} [controlPresentedFrames]
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {()=>void} [controlFrameRearm] renews observation for the current seek
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]

@@ -417,6 +417,14 @@ Both are counted on `/metrics`:
 | `plurx_sqlite_connection_recoveries_total` | `pool` = `writer` \| `read`; `outcome` = `validated` \| `reopened` \| `failed` | A connection taken back after a panic. Anything above zero means a store call panicked; find it in the log (`recovered a sqlite connection poisoned by a panic`). `failed` means the slot is still unusable. |
 | `plurx_sqlite_integrity_checks_total` | `phase` = `boot` \| `background`; `outcome` = `ok` \| `corrupt` \| `deferred` (boot) \| `error` (background) | Integrity checks and their results. `deferred` means the boot check ran out of time and a background check is scheduled. |
 
+**Playback admission cleanup** checks for due preparation, drain and lease
+retirements before preparing their SQLite updates. Compiling these updates
+expands the session trigger graph even when no row qualifies; concurrent
+starts previously paid that cost while sharing the writer connection. The
+checks and original updates run in the same transaction, with the existing
+deadlines, batch limits and orphan cleanup. The replicated backend retains
+its existing idle-maintenance read check.
+
 ### Backing up and restoring an activated cluster
 
 Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),
