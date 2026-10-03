@@ -1430,7 +1430,15 @@ pub(crate) async fn resolve_plan_for_principal(
             "request_id must contain 1 to 128 characters".to_owned(),
         ));
     }
-    if !worker_session_request_is_valid(&request) {
+    let request_valid = match principal {
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. } => {
+            crate::media_sessions::source_session_request_is_valid(&request, principal)
+        }
+        plurx_core::playback_principal::PlaybackPrincipal::LocalUser { .. } => {
+            worker_session_request_is_valid(&request)
+        }
+    };
+    if !request_valid {
         return Err(ApiError::BadRequest(
             "media session request exceeds the supported cluster contract".to_owned(),
         ));

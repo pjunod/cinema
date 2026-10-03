@@ -1382,3 +1382,18 @@ response fields and refuses malformed incarnation/owner epochs (1 passed,
 zero ignored, 0.62 seconds on the integrated preadmission base, pinned Rust
 1.97.1). Its presentation fixture does not claim physical producer evidence;
 the actual actor must qualify this builder with its opaque pending observation.
+
+### Canonical zero in actual Source preparation
+
+The shared planner now validates Source requests against their actual Sharing
+principal and canonical nonnegative catalogue IDs. It retains every ordinary
+request bound and requires VOD presentation. Local worker ingress keeps its
+positive file-ID rule. Validation is request shape only; the complete current
+Source witness still authorizes preparation and guarded mutations.
+
+The complete Source preparation fixture now uses actual stored file ID zero.
+It proves full Local/Source decision parity, complete response projection,
+revision and library-move refusal, distinct viewers, absence of durable
+activation, Source negative-ID refusal and Local zero-ID refusal (1 passed,
+zero ignored, 0.67 seconds). The existing private Local worker contract also
+passed (1 passed, zero ignored). Both ran with pinned Rust 1.97.1.
