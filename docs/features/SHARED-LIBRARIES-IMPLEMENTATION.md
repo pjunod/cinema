@@ -3867,3 +3867,71 @@ login cannot authorize recovery of the retained binding.
 
 Final original-login refusal coverage passed in the same three-test reader
 filter (19.19 seconds), followed by exact-tree affected compilation and Clippy.
+
+### S5 session-bound ordered receiver progress
+
+`SharingReceiverProgressStore::save_receiver_progress` accepts server-only
+progress with an exact retained attachment and opaque fresh receiver authority.
+The body supplies position, optional duration, watched state and sequence;
+identity comes from the current B session and the Store captures the timestamp.
+The transaction repeats original-login/idle-policy, effective import/library,
+Source identity/epoch, exact published B owner/session/request/pointer/lease,
+recipe/file/revision and retained Source session/incarnation/envelope checks.
+Blocked, expired, replaced or revoked owners cannot write history. This is B
+metadata authority; the caller still owns fresh Source actor evidence.
+
+The existing history key remains `(source_server_id, catalogue_epoch,
+remote_item_id, user_id)`. It spans B sessions and import recreation for the
+same durable Source identity; simultaneous imports of the same Source/epoch
+are already prohibited. A higher sequence advances the row. An exact duplicate
+returns Replay without rewriting its timestamp; older sequences return Stale,
+and equal-sequence differences or changed-library history return Conflict.
+Neither outcome mutates history. A new session cannot reset the global sequence.
+Library moves still require explicit reconciliation, and no Local item ID,
+`watch_state`, `watched_outbox` or A household history is written.
+
+The leader reads a bounded watch preimage, rechecks captured proof/owner
+freshness after that read, and asserts the exact preimage in the mutation
+transaction. A concurrent history change therefore refuses for fresh retry,
+without overwriting newer data. The transaction then proves the exact accepted
+postimage and current authority before committing. Replay, stale and conflict
+transactions issue no history INSERT or UPDATE. Refusal evaluates before an
+INSERT trigger; ignored history writes and in-write scope revocation roll back.
+Replicated SQL uses no connection-local `changes()` or database clock. Position,
+duration and sequence use the existing nonnegative JavaScript-safe integer
+bound, while private stored library identifiers are capped before projection.
+
+Ownership is confined to the two receiver-progress Core modules, direct
+trait/module/catalog registrations, receiver guard helper visibility and the
+existing SQLite/replicated receiver fixtures. The older assignment-bound
+`save_remote_watch` remains a historical metadata fixture helper: all current
+daemon callers are test-only. The live HTTP progress route remains closed until
+the parent receiver actor integrates this session-bound writer and qualifies
+actual Source evidence and control delivery.
+
+Pinned Rust 1.97.1 final receiver regressions passed three tests with zero
+ignored (20.18 seconds), including both SQLite storage modes and principal
+layouts, invalid numeric bounds, stale/expired owners, complete original-login
+and attachment refusal, read-only duplicate timestamp preservation, sequence
+ordering across two published B sessions, ignored history writes, and scope
+revocation inside the write with rollback of both scope and history. The actual
+three-voter contract passed with zero ignored (9.80 seconds), including the
+replicated ignored-write and in-write revocation cases. A supplemental
+interleaving regression passed in all four SQLite combinations (2.65 seconds):
+a second published B owner advances history after the first owner's snapshot;
+the first write refuses and preserves the newer sequence/position. Affected
+feature-enabled compilation then passed in 1 minute 13 seconds; docs index
+passed four tests and the catalog passed 2704 audited files.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver_source_binding_publication_and_renewal_are_guarded_and_exact -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+Final affected feature-enabled Clippy with denied warnings passed in
+1 minute 30 seconds. These regressions qualify the B Store ordering and
+metadata boundary; they do not qualify a live HTTP progress/control route,
+Source physical work, two-NAT delivery or hardware playback.

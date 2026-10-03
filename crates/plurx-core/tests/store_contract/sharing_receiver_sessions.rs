@@ -693,6 +693,150 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 request_before.value, request_after.value,
                 "published request never rewritten by renewal"
             );
+            use plurx_core::sharing_receiver_progress::{
+                ReceiverProgress, ReceiverProgressOutcome,
+            };
+            use plurx_core::store::SharingReceiverProgressStore;
+            attachment.owner.lease_expires_at_ms = target;
+            attachment.owner.now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64;
+            let current = store
+                .prepare_receiver_session_authority(intent.clone())
+                .await
+                .expect("fresh progress proof")
+                .expect("original login");
+            let mut progress = ReceiverProgress {
+                attachment: attachment.clone(),
+                sequence: 10,
+                position_ms: 5000,
+                duration_ms: Some(60_000),
+                watched: false,
+            };
+            let watch_census="SELECT json_array((SELECT json_group_array(json_array(source_server_id,catalogue_epoch,remote_library_id,remote_item_id,user_id,position_ms,duration_ms,watched,sequence,updated_at_ms)) FROM sharing_watch),(SELECT count(*) FROM watch_state),(SELECT count(*) FROM watched_outbox)) AS value";
+            let watch_read =
+                || client.query_consistent_map::<SchemaText, _>(watch_census, hiqlite::params!());
+            client.execute("CREATE TRIGGER receiver_ignored_history BEFORE INSERT ON sharing_watch BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored insert fixture");
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual ignored insert refusal"),
+                ReceiverProgressOutcome::Refused
+            );
+            client
+                .execute("DROP TRIGGER receiver_ignored_history", hiqlite::params!())
+                .await
+                .expect("remove trigger");
+            client.execute("CREATE TRIGGER receiver_history_revokes_scope AFTER INSERT ON sharing_watch BEGIN UPDATE sharing_assignments SET enabled=0; END",hiqlite::params!()).await.expect("replicated within-write revocation");
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual post-write authority refusal"),
+                ReceiverProgressOutcome::Refused
+            );
+            let scope_rows:SchemaText=client.query_consistent_map("SELECT json_array(min(enabled),(SELECT count(*) FROM sharing_watch)) AS value FROM sharing_assignments",hiqlite::params!()).await.expect("actual scope/history rollback").pop().expect("row");
+            assert_eq!(scope_rows.value, "[1,0]");
+            client
+                .execute(
+                    "DROP TRIGGER receiver_history_revokes_scope",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("remove fixture");
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual ordered progress"),
+                ReceiverProgressOutcome::Applied
+            );
+            let before = watch_read()
+                .await
+                .expect("history")
+                .pop()
+                .expect("row")
+                .value;
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual duplicate"),
+                ReceiverProgressOutcome::Replay
+            );
+            assert_eq!(
+                watch_read()
+                    .await
+                    .expect("replay timestamp")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            progress.sequence = 9;
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual old update"),
+                ReceiverProgressOutcome::Stale
+            );
+            progress.sequence = 10;
+            progress.position_ms = 5001;
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual duplicate conflict"),
+                ReceiverProgressOutcome::Conflict
+            );
+            assert_eq!(
+                watch_read()
+                    .await
+                    .expect("no conflict mutation")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            progress.sequence = 11;
+            client.execute("CREATE TRIGGER receiver_ignored_history BEFORE UPDATE ON sharing_watch BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored update fixture");
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual ignored update refusal"),
+                ReceiverProgressOutcome::Refused
+            );
+            client
+                .execute("DROP TRIGGER receiver_ignored_history", hiqlite::params!())
+                .await
+                .expect("remove trigger");
+            for (change,restore) in [
+                (format!("UPDATE tokens SET token_hash='progress-revoked' WHERE token_hash='{hash}'"),format!("UPDATE tokens SET token_hash='{hash}' WHERE token_hash='progress-revoked'")),
+                ("UPDATE sharing_assignments SET enabled=0".into(),"UPDATE sharing_assignments SET enabled=1".into()),
+                ("UPDATE job_leases SET fence=fence+1".into(),"UPDATE job_leases SET fence=fence-1".into()),
+                ("UPDATE sharing_relay_upstream SET source_incarnation_id='00000000-0000-4000-a000-000000000001'".into(),format!("UPDATE sharing_relay_upstream SET source_incarnation_id='{}'",attachment.binding.source_incarnation_id)),
+                ("UPDATE media_sessions SET publication_ready_at_ms=9223372036854775807".into(),"UPDATE media_sessions SET publication_ready_at_ms=0".into()),
+            ] {
+                client.execute(change,hiqlite::params!()).await.expect("current progress authority loss");
+                client.execute("CREATE TRIGGER receiver_ignored_progress_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignored assertion fixture");
+                assert_eq!(store.save_receiver_progress(&current,&progress).await.expect("actual same-write refusal"),ReceiverProgressOutcome::Refused);
+                assert_eq!(watch_read().await.expect("history preserved").pop().expect("row").value,before);
+                client.execute("DROP TRIGGER receiver_ignored_progress_assertion",hiqlite::params!()).await.expect("remove trigger");
+                client.execute(restore,hiqlite::params!()).await.expect("restore authority");
+            }
+            assert_eq!(
+                store
+                    .save_receiver_progress(&current, &progress)
+                    .await
+                    .expect("actual next sequence"),
+                ReceiverProgressOutcome::Applied
+            );
+            let history_rows:SchemaText=client.query_consistent_map("SELECT json_array(count(*),max(sequence),(SELECT count(*) FROM watch_state),(SELECT count(*) FROM watched_outbox)) AS value FROM sharing_watch",hiqlite::params!()).await.expect("B private row only").pop().expect("row");
+            assert_eq!(history_rows.value, "[1,11,0,0]");
             let later = now + 7 * 24 * 60 * 60 * 1000;
             store
                 .maintain_media_sessions(later)
