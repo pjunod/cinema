@@ -56,6 +56,14 @@ fn route_projection(conn: &rusqlite::Connection) -> rusqlite::Result<&'static st
     }
 }
 
+fn local_owner_predicate(rebuilt: bool, parameter: usize) -> String {
+    if rebuilt {
+        format!("owner_key = ('local:' || ?{parameter})")
+    } else {
+        format!("user_id = ?{parameter}")
+    }
+}
+
 fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     let kind: String = row.get(22)?;
     let grant: Option<String> = row.get(23)?;
@@ -733,11 +741,17 @@ impl MediaSessionStore for SqliteStore {
         let incarnation_id = incarnation_id.to_owned();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
+            if rebuilt && !tx.query_row("SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)", [user_id], |row| row.get::<_, bool>(0))? {
+                return Ok(MediaSessionRequestClaim::Overloaded);
+            }
+            let owner_1 = local_owner_predicate(rebuilt, 1);
+            let owner_4 = local_owner_predicate(rebuilt, 4);
             let existing = tx
                 .query_row(
-                    "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
+                    &format!("SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
                             claim_expires_at_ms
-                       FROM media_session_requests WHERE user_id = ?1 AND request_id = ?2",
+                       FROM media_session_requests WHERE {owner_1} AND request_id = ?2"),
                     params![user_id, request_id],
                     |row| {
                         Ok((
@@ -765,25 +779,25 @@ impl MediaSessionStore for SqliteStore {
                         MediaSessionRequestClaim::Conflict
                     } else if state == "failed" || (state == "starting" && expires <= now_ms) {
                         let reacquired = tx.execute(
-                            "UPDATE media_session_requests
+                            &format!("UPDATE media_session_requests
                             SET state = 'starting', claim_expires_at_ms = ?1,
                                 incarnation_id = ?2, owner_node_id = NULL,
                                 response_json = NULL, updated_at_ms = ?3
-                          WHERE user_id = ?4 AND request_id = ?5
+                          WHERE {owner_4} AND request_id = ?5
                             AND (state = 'failed'
                               OR (state = 'starting' AND claim_expires_at_ms <= ?3))
                             AND request_fingerprint = ?6 AND playback_id = ?7
                             AND (SELECT COUNT(*) FROM media_session_requests
-                                  WHERE user_id = ?4 AND state = 'starting'
+                                  WHERE {owner_4} AND state = 'starting'
                                     AND claim_expires_at_ms > ?3) < ?8
                             AND (SELECT COUNT(*) FROM media_sessions
-                                  WHERE user_id = ?4 AND state IN ('starting', 'active')
+                                  WHERE {owner_4} AND state IN ('starting', 'active')
                                     AND lease_expires_at_ms > ?3
                                     AND incarnation_id != COALESCE((
                                       SELECT current_incarnation_id FROM media_playback_pointers
-                                       WHERE user_id = ?4 AND playback_id = ?7), '')) < ?9
+                                       WHERE {owner_4} AND playback_id = ?7), '')) < ?9
                             AND (SELECT COUNT(*) FROM media_sessions
-                                  WHERE user_id = ?4) < ?10",
+                                  WHERE {owner_4}) < ?10"),
                             params![
                                 claim_expires_at_ms,
                                 incarnation_id,
@@ -812,7 +826,13 @@ impl MediaSessionStore for SqliteStore {
                             route_from_row,
                         )
                         .optional()?
-                        .map(|route| MediaSessionRequestClaim::Resolved(Box::new(route)))
+                        .map(|route| {
+                            if route.principal.local_user_id() == Some(user_id) {
+                                MediaSessionRequestClaim::Resolved(Box::new(route))
+                            } else {
+                                MediaSessionRequestClaim::Conflict
+                            }
+                        })
                         .unwrap_or(MediaSessionRequestClaim::InFlight {
                             incarnation_id: existing_incarnation,
                             owner_node_id: owner,
@@ -831,28 +851,28 @@ impl MediaSessionStore for SqliteStore {
                 return Ok(outcome);
             }
             let in_flight: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_session_requests
-                  WHERE user_id = ?1 AND state = 'starting' AND claim_expires_at_ms > ?2",
+                &format!("SELECT COUNT(*) FROM media_session_requests
+                  WHERE {owner_1} AND state = 'starting' AND claim_expires_at_ms > ?2"),
                 params![user_id, now_ms],
                 |row| row.get(0),
             )?;
             let current: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_sessions
-                  WHERE user_id = ?1 AND state IN ('starting', 'active')
+                &format!("SELECT COUNT(*) FROM media_sessions
+                  WHERE {owner_1} AND state IN ('starting', 'active')
                     AND lease_expires_at_ms > ?2
                     AND incarnation_id != COALESCE((
                       SELECT current_incarnation_id FROM media_playback_pointers
-                       WHERE user_id = ?1 AND playback_id = ?3), '')",
+                       WHERE {owner_1} AND playback_id = ?3), '')"),
                 params![user_id, now_ms, playback_id],
                 |row| row.get(0),
             )?;
             let request_rows: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_session_requests WHERE user_id = ?1",
+                &format!("SELECT COUNT(*) FROM media_session_requests WHERE {owner_1}"),
                 [user_id],
                 |row| row.get(0),
             )?;
             let session_rows: i64 = tx.query_row(
-                "SELECT COUNT(*) FROM media_sessions WHERE user_id = ?1",
+                &format!("SELECT COUNT(*) FROM media_sessions WHERE {owner_1}"),
                 [user_id],
                 |row| row.get(0),
             )?;
@@ -865,11 +885,15 @@ impl MediaSessionStore for SqliteStore {
                 return Ok(MediaSessionRequestClaim::Overloaded);
             }
             tx.execute(
-                "INSERT INTO media_session_requests
+                if rebuilt { "INSERT INTO media_session_requests
+                    (user_id, request_id, request_fingerprint, playback_id, state,
+                     claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
+                     updated_at_ms, owner_key, principal_kind, share_grant_id, share_viewer_key)
+                 VALUES (?1, ?2, ?3, ?4, 'starting', ?5, ?6, NULL, NULL, ?7, 'local:' || ?1, 'local', NULL, NULL)" } else { "INSERT INTO media_session_requests
                     (user_id, request_id, request_fingerprint, playback_id, state,
                      claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
                      updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, 'starting', ?5, ?6, NULL, NULL, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, 'starting', ?5, ?6, NULL, NULL, ?7)" },
                 params![
                     user_id,
                     request_id,
@@ -910,18 +934,27 @@ impl MediaSessionStore for SqliteStore {
         let incarnation_id = incarnation_id.to_owned();
         let recipe_json = recipe_json.to_owned();
         self.with_conn(move |conn| {
+            let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+            let owner_1 = local_owner_predicate(rebuilt, 1);
+            let (columns, values, conflict, owner_exists) = if rebuilt {
+                ("owner_key, principal_kind, user_id, share_grant_id, share_viewer_key, request_id, incarnation_id, recipe_json, created_at_ms",
+                 "'local:' || ?1, 'local', ?1, NULL, NULL, ?2, ?3, ?4, ?5", "owner_key, request_id", "EXISTS(SELECT 1 FROM users WHERE id=?1)")
+            } else {
+                ("user_id, request_id, incarnation_id, recipe_json, created_at_ms",
+                 "?1, ?2, ?3, ?4, ?5", "user_id, request_id", "1")
+            };
             Ok(conn.execute(
-                "INSERT INTO library_channel_session_recipes
-                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
-                 SELECT ?1, ?2, ?3, ?4, ?5
+                &format!("INSERT INTO library_channel_session_recipes
+                    ({columns})
+                 SELECT {values}
                   WHERE EXISTS (SELECT 1 FROM media_session_requests
-                    WHERE user_id = ?1 AND request_id = ?2 AND incarnation_id = ?3
-                      AND state = 'starting' AND claim_expires_at_ms > ?5)
-                 ON CONFLICT(user_id, request_id) DO UPDATE SET
+                    WHERE {owner_1} AND request_id = ?2 AND incarnation_id = ?3
+                      AND state = 'starting' AND claim_expires_at_ms > ?5) AND {owner_exists}
+                 ON CONFLICT({conflict}) DO UPDATE SET
                     incarnation_id = excluded.incarnation_id,
                     recipe_json = excluded.recipe_json,
                     created_at_ms = excluded.created_at_ms
-                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id",
+                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id"),
                 params![user_id, request_id, incarnation_id, recipe_json, now_ms],
             )? == 1)
         })
@@ -952,11 +985,20 @@ impl MediaSessionStore for SqliteStore {
         let incarnation_id = incarnation_id.to_owned();
         let owner_node_id = owner_node_id.to_owned();
         self.with_conn(move |conn| {
+            let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+            let owner_3 = local_owner_predicate(rebuilt, 3);
+            let owner_exists = if rebuilt {
+                "EXISTS(SELECT 1 FROM users WHERE id=?3)"
+            } else {
+                "1"
+            };
             Ok(conn.execute(
-                "UPDATE media_session_requests SET owner_node_id = ?1, updated_at_ms = ?2
-                  WHERE user_id = ?3 AND request_id = ?4 AND incarnation_id = ?5
+                &format!(
+                    "UPDATE media_session_requests SET owner_node_id = ?1, updated_at_ms = ?2
+                  WHERE {owner_3} AND request_id = ?4 AND incarnation_id = ?5
                     AND state = 'starting' AND claim_expires_at_ms > ?2
-                    AND (owner_node_id IS NULL OR owner_node_id = ?1)",
+                    AND (owner_node_id IS NULL OR owner_node_id = ?1) AND {owner_exists}"
+                ),
                 params![owner_node_id, now_ms, user_id, request_id, incarnation_id],
             )? == 1)
         })
@@ -2741,11 +2783,15 @@ impl MediaSessionStore for SqliteStore {
         let request_id = request_id.to_owned();
         let incarnation_id = incarnation_id.to_owned();
         self.with_conn(move |conn| {
+            let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+            let owner_2 = local_owner_predicate(rebuilt, 2);
             Ok(conn.execute(
-                "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = ?1,
+                &format!(
+                    "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = ?1,
                         updated_at_ms = ?1
-                  WHERE user_id = ?2 AND request_id = ?3 AND incarnation_id = ?4
-                    AND state = 'starting'",
+                  WHERE {owner_2} AND request_id = ?3 AND incarnation_id = ?4
+                    AND state = 'starting'"
+                ),
                 params![now_ms, user_id, request_id, incarnation_id],
             )? == 1)
         })
@@ -4288,6 +4334,186 @@ mod sharing_route_decoder_tests {
                 .desired_selection(&first, "playback")
                 .await
                 .expect("sharing selection survives local deletion")
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn sharing_request_rebuilt_local_keys_replay_and_deleted_owner_refusal() {
+        let directory = tempfile::tempdir().expect("pooled request directory");
+        for store in [
+            SqliteStore::open_in_memory().expect("memory request store"),
+            SqliteStore::open(&directory.path().join("request.db")).expect("pooled request store"),
+        ] {
+            store
+                .with_conn(|conn| {
+                    conn.execute_batch(include_str!(
+                        "../../../tests/fixtures/session-principal-local.sql"
+                    ))?;
+                    conn.execute_batch("BEGIN IMMEDIATE")?;
+                    conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                    conn.execute_batch("COMMIT")?;
+                    conn.execute_batch(include_str!(
+                        "../../../tests/fixtures/session-principal-sharing.sql"
+                    ))?;
+                    Ok(())
+                })
+                .await
+                .expect("request candidate fixture");
+            let local = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+            let incarnation = uuid::Uuid::new_v4().to_string();
+            let fingerprint = "c".repeat(64);
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        &local,
+                        "new-request",
+                        &fingerprint,
+                        "new-playback",
+                        &incarnation,
+                        1000,
+                        2000
+                    )
+                    .await
+                    .expect("canonical local request insert"),
+                MediaSessionRequestClaim::Acquired { .. }
+            ));
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        &local,
+                        "new-request",
+                        &fingerprint,
+                        "new-playback",
+                        &incarnation,
+                        1001,
+                        2000
+                    )
+                    .await
+                    .expect("request replay"),
+                MediaSessionRequestClaim::InFlight { .. }
+            ));
+            assert!(store
+                .record_library_channel_session_recipe(
+                    &local,
+                    "new-request",
+                    &incarnation,
+                    "{}",
+                    1001
+                )
+                .await
+                .expect("canonical recipe insert"));
+            assert!(store
+                .record_library_channel_session_recipe(
+                    &local,
+                    "new-request",
+                    &incarnation,
+                    "{}",
+                    1002
+                )
+                .await
+                .expect("canonical recipe upsert"));
+            assert!(store
+                .assign_media_session_request_owner(
+                    &local,
+                    "new-request",
+                    &incarnation,
+                    "new-node",
+                    1001
+                )
+                .await
+                .expect("canonical owner assignment"));
+            assert!(!store
+                .assign_media_session_request_owner(
+                    &local,
+                    "new-request",
+                    &incarnation,
+                    "other-node",
+                    1002
+                )
+                .await
+                .expect("owner assignment remains fenced"));
+            assert!(store
+                .fail_media_session_request(&local, "new-request", &incarnation, 1002)
+                .await
+                .expect("canonical failure"));
+            let successor = uuid::Uuid::new_v4().to_string();
+            assert!(
+                matches!(store.claim_media_session_request(&local, "new-request", &fingerprint, "new-playback", &successor, 1003, 2000).await.expect("canonical reacquire"), MediaSessionRequestClaim::Acquired { incarnation_id } if incarnation_id == successor)
+            );
+            store.with_conn(|conn| {
+                let owner: String = conn.query_row("SELECT owner_key || ':' || principal_kind || ':' || user_id FROM media_session_requests WHERE request_id='new-request'", [], |row| row.get(0))?;
+                assert_eq!(owner, "local:1:local:1");
+                conn.execute("UPDATE media_session_requests SET state='resolved', incarnation_id='00000000-0000-4000-a000-000000000001' WHERE request_id='new-request'", [])?;
+                Ok(())
+            }).await.expect("cross-principal replay fixture");
+            assert!(
+                matches!(
+                    store
+                        .claim_media_session_request(
+                            &local,
+                            "new-request",
+                            &fingerprint,
+                            "new-playback",
+                            &successor,
+                            1004,
+                            2000
+                        )
+                        .await
+                        .expect("cross-principal replay refusal"),
+                    MediaSessionRequestClaim::Conflict
+                ),
+                "a resolved request cannot replay another principal's route"
+            );
+            let shared = crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant"),
+                &"a".repeat(64),
+            )
+            .expect("principal");
+            assert!(
+                store
+                    .claim_media_session_request(
+                        &shared,
+                        "shared-request",
+                        &fingerprint,
+                        "new-playback",
+                        &successor,
+                        1005,
+                        2000
+                    )
+                    .await
+                    .is_err(),
+                "shared writers wait for authority and floor integration"
+            );
+            store
+                .with_conn(|conn| {
+                    conn.execute("DELETE FROM users WHERE id=1", [])?;
+                    Ok(())
+                })
+                .await
+                .expect("delete request owner");
+            assert!(
+                matches!(
+                    store
+                        .claim_media_session_request(
+                            &local,
+                            "deleted-request",
+                            &fingerprint,
+                            "new-playback",
+                            &successor,
+                            1006,
+                            2000
+                        )
+                        .await
+                        .expect("deleted account refusal"),
+                    MediaSessionRequestClaim::Overloaded
+                ),
+                "deleted local account cannot create a request"
+            );
+            assert!(store
+                .media_session_route_by_incarnation("00000000-0000-4000-a000-000000000002")
+                .await
+                .expect("other grant retained")
                 .is_some());
         }
     }

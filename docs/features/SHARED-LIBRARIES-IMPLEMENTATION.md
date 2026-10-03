@@ -1936,3 +1936,28 @@ Other grants' selections survive local deletion. The six focused tests passed
 on memory and pooled SQLite (zero ignored, 0.99 seconds), and affected
 denied-warning Clippy passed. Shared desired writers still refuse admission;
 other writer operations, installation and the cluster floor remain open.
+
+
+**SQLite request-writer checkpoint:** rebuilt local request claims, replay,
+recipe persistence, owner assignment and failure cleanup use canonical owner
+keys and persist the complete local principal. The real user must exist in
+the claiming transaction. A deleted owner receives the existing overloaded
+refusal; a resolved request pointing to another principal returns conflict.
+Shared claims remain refused while grant admission and the member floor are
+unfinished. The focused regression passed in both SQLite modes (one test,
+zero ignored, 1.85 seconds). The 28 existing local/replicated session contracts
+also passed after the request SQL change (zero ignored, 257.86 seconds),
+before the final deleted-owner refusal alignment and positive-owner DDL check.
+
+The candidate rebuild now rejects zero and negative local IDs in all seven
+owner tables. Five candidate rebuild tests passed (zero ignored, 5.62 seconds),
+and both actual three-voter candidate contracts passed (zero ignored,
+18.49 seconds). Denied-warning Clippy passed with `hiqlite-contract-tests`.
+The changed DDL requires a fresh historical-store qualification; the schema
+is still uninstalled and these results do not qualify shared admission.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_request_rebuilt_local_keys_replay_and_deleted_owner_refusal -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
+```

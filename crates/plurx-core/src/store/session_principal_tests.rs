@@ -424,3 +424,35 @@ fn sharing_principal_rebuild_owner_deletion_and_revocation_retire_only_matching_
         0
     );
 }
+
+#[test]
+fn sharing_principal_rebuild_refuses_zero_and_negative_local_owners_in_every_family() {
+    let conn = current_database();
+    rebuild(&conn);
+    for table in OWNER_TABLES {
+        let present: i64 = conn
+            .query_row(
+                &format!("SELECT count(*) FROM {table} WHERE principal_kind='local'"),
+                [],
+                |row| row.get(0),
+            )
+            .expect("populated owner fixture");
+        assert!(
+            present > 0,
+            "{table}: test exercises a real populated ownership row"
+        );
+        for invalid_id in [0_i64, -1] {
+            let result = conn.execute(
+                &format!(
+                    "UPDATE {table} SET user_id=?1, owner_key=?2 WHERE principal_kind='local'"
+                ),
+                params![invalid_id, format!("local:{invalid_id}")],
+            );
+            let error = result.expect_err("invalid local owner must fail in the database");
+            assert!(
+                error.to_string().contains("CHECK constraint failed"),
+                "{table}: unexpected refusal {error}"
+            );
+        }
+    }
+}
