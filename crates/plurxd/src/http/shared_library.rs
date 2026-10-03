@@ -291,29 +291,88 @@ async fn item(
     Path(id): Path<String>,
 ) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
-    let record = state
+    use plurx_core::{
+        sharing_catalogue_details::{CatalogueRevisionKey, SourceItemDetails},
+        store::sharing_catalogue_details::SourceDetailsRead,
+    };
+    let snapshot = match state
         .store
-        .source_catalogue_batch(
-            &hash,
-            grant,
-            MetadataBatch {
-                item_ids: vec![source_id(&id)?],
-            },
-        )
+        .source_item_details_snapshot(&hash, grant, source_id(&id)?)
         .await
         .map_err(unavailable)?
-        .and_then(|mut v| v.pop())
-        .and_then(|v| v.record)
-        .ok_or_else(missing)?;
-    let visible = vec![(record.item.library_id.clone(), record.item.item_id.clone())];
-    source_json(
+    {
+        SourceDetailsRead::Authorized(value) => value,
+        SourceDetailsRead::Unavailable => return Err(missing()),
+        SourceDetailsRead::Capacity => {
+            return Err(fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_details_capacity",
+            ))
+        }
+    };
+    let envelope = state
+        .store
+        .source_catalogue_revision_key(snapshot.server, snapshot.epoch)
+        .await
+        .map_err(unavailable)?
+        .ok_or_else(|| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_revision_key_unavailable",
+            )
+        })?;
+    let key = CatalogueRevisionKey::open(
+        &state.sharing.key,
+        plurx_core::sharing::SharingIdentity {
+            server_id: snapshot.server,
+            catalogue_epoch: snapshot.epoch,
+            created_at_ms: 0,
+        },
+        &envelope,
+    )
+    .map_err(unavailable)?;
+    let files = snapshot
+        .files
+        .iter()
+        .map(|f| f.playable_file(&key))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(unavailable)?;
+    let tuples = files
+        .iter()
+        .map(|f| {
+            (
+                snapshot.record.item.library_id.clone(),
+                snapshot.record.item.item_id.clone(),
+                f.file_id.clone(),
+            )
+        })
+        .collect();
+    let visible = vec![(
+        snapshot.record.item.library_id.clone(),
+        snapshot.record.item.item_id.clone(),
+    )];
+    let details = SourceItemDetails {
+        item: snapshot.record.item,
+        files,
+    };
+    details.validate().map_err(unavailable)?;
+    let mut response = source_json(
         &state,
         grant,
-        serde_json::to_value(record.item).map_err(|_| invalid())?,
+        serde_json::to_value(details).map_err(|_| invalid())?,
         Vec::new(),
         visible,
     )
-    .await
+    .await?;
+    let authority = response
+        .extensions_mut()
+        .get_mut::<SourceContentAuthority>()
+        .ok_or_else(invalid)?;
+    if authority.server != snapshot.server || authority.epoch != snapshot.epoch {
+        return Err(missing());
+    }
+    authority.files = tuples;
+    Ok(response)
 }
 async fn batch(
     State(state): State<AppState>,
@@ -348,6 +407,7 @@ struct SourceContentAuthority {
     epoch: uuid::Uuid,
     libraries: Vec<SourceId>,
     items: Vec<(SourceId, SourceId)>,
+    files: Vec<(SourceId, SourceId, SourceId)>,
 }
 static CONTENT_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
@@ -363,14 +423,32 @@ async fn source_json(
         .sharing_identity(clock_ms())
         .await
         .map_err(unavailable)?;
-    let bytes = serde_json::to_vec(&value).map_err(|_| invalid())?;
-    if bytes.len() > 4 * 1024 * 1024 {
+    struct BoundedJson(Vec<u8>);
+    impl std::io::Write for BoundedJson {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self
+                .0
+                .len()
+                .checked_add(bytes.len())
+                .is_none_or(|n| n > 4 * 1024 * 1024)
+            {
+                return Err(std::io::Error::other("sharing response capacity"));
+            }
+            self.0.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut bytes = BoundedJson(Vec::new());
+    if serde_json::to_writer(&mut bytes, &value).is_err() {
         return Err(fail(
             StatusCode::SERVICE_UNAVAILABLE,
             "sharing_catalogue_response_unavailable",
         ));
     }
-    let mut response = Response::new(Body::from(bytes));
+    let mut response = Response::new(Body::from(bytes.0));
     response.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         axum::http::HeaderValue::from_static("application/json"),
@@ -381,6 +459,7 @@ async fn source_json(
         epoch: identity.catalogue_epoch,
         libraries,
         items,
+        files: Vec::new(),
     });
     Ok(response)
 }
@@ -400,7 +479,7 @@ async fn source_content_current(state: &AppState, authority: &SourceContentAutho
         {
             return Some(false);
         }
-        state
+        let items_current = state
             .store
             .source_content_authorized(
                 authority.grant,
@@ -408,6 +487,22 @@ async fn source_content_current(state: &AppState, authority: &SourceContentAutho
                 authority.epoch,
                 &authority.libraries,
                 &authority.items,
+            )
+            .await
+            .ok()?;
+        if !items_current {
+            return Some(false);
+        }
+        if authority.files.is_empty() {
+            return Some(true);
+        }
+        state
+            .store
+            .source_content_files_authorized(
+                authority.grant,
+                authority.server,
+                authority.epoch,
+                &authority.files,
             )
             .await
             .ok()
@@ -692,14 +787,44 @@ async fn viewer_item(
 ) -> Result<Json<Value>, ApiError> {
     let import = import_id(&import)?;
     let item = source_id(&item)?;
-    let (summary, metadata) = current_viewer_item(&state, user.id, import, item.clone()).await?;
+    let (summary, reply) = state
+        .sharing
+        .read_catalogue(
+            &state,
+            import,
+            user.id,
+            crate::sharing::CatalogueRead::Item(item.clone()),
+        )
+        .await
+        .map_err(peer_failure)?;
+    let crate::sharing::CatalogueReply::Item(details) = reply else {
+        return Err(invalid());
+    };
+    let metadata = details.item;
+    let files = details
+        .files
+        .into_iter()
+        .map(|file| {
+            let mut value = serde_json::to_value(&file).expect("closed serializable file");
+            let reference = SharedReference {
+                import_id: summary.id,
+                server_id: summary.source_server_id,
+                catalogue_epoch: summary.catalogue_epoch,
+                library_id: metadata.library_id.clone(),
+                item_id: metadata.item_id.clone(),
+            };
+            value["reference"] =
+                json!({"item":reference,"file_id":file.file_id,"revision":file.revision});
+            value
+        })
+        .collect::<Vec<_>>();
     let progress = state
         .store
         .remote_watch(import, metadata.library_id.clone(), item, user.id)
         .await
         .map_err(unavailable)?;
     Ok(Json(
-        json!({"item":shared_item(&summary,metadata),"watch":progress}),
+        json!({"item":shared_item(&summary,metadata),"files":files,"watch":progress,"delivery_status":"unavailable"}),
     ))
 }
 async fn viewer_progress(
@@ -989,7 +1114,8 @@ mod tests {
                                 )
                                 .ok();
                         }
-                        let tracked = request.uri().path().ends_with("/items");
+                        let tracked = request.uri().path().ends_with("/items")
+                            || request.uri().path().starts_with("/sharing/v1/items/");
                         let response = next.run(request).await;
                         if tracked {
                             let (parts, body) = response.into_parts();
@@ -1247,6 +1373,111 @@ mod tests {
             drop(client);
             stop.send(()).expect("fixture stop");
             served.await.expect("server task").expect("server result");
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_details_blocked_writer_closes_on_file_delete_or_move() {
+        use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
+        let _serial = BODY_FIXTURES.lock().await;
+        for moved in [false, true] {
+            let fixture = body_fixture().await;
+            let identity = fixture
+                .state
+                .store
+                .sharing_identity(1000)
+                .await
+                .expect("identity");
+            let envelope =
+                CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
+                    .expect("fixture purpose key");
+            let probe=json!({"chapters":(0..1024).map(|n|json!({"start_time":n.to_string(),"end_time":(n+1).to_string(),"tags":{"title":"x".repeat(512)}})).collect::<Vec<_>>(),"private_path":"/private/never-export"}).to_string();
+            let writer = rusqlite::Connection::open(&fixture.path).expect("fixture writer");
+            writer
+                .execute_batch(
+                    plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+                )
+                .expect("fixture-only key table");
+            writer
+                .execute(
+                    "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+                    rusqlite::params![
+                        identity.server_id.to_string(),
+                        identity.catalogue_epoch.to_string(),
+                        envelope.as_stored()
+                    ],
+                )
+                .expect("fixture-only key selection");
+            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(1,?1,'/private/movie.mkv',20,1000,?2)",rusqlite::params![fixture.item,probe]).expect("bounded large details");
+            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) SELECT 2,item_id,'/private/second.mkv',size,mtime,probe_json FROM files WHERE id=1",[]).expect("second bounded file");
+            writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) SELECT 3,item_id,'/private/third.mkv',size,mtime,probe_json FROM files WHERE id=1",[]).expect("third bounded file");
+            drop(writer);
+            let body_dropped = Arc::new(AtomicBool::new(false));
+            let data_dropped = Arc::new(AtomicBool::new(false));
+            let baseline = CONTENT_MONITORS.available_permits();
+            let (address, captured, stop, served) =
+                body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
+            let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+            socket
+                .set_recv_buffer_size(4096)
+                .expect("small receive buffer");
+            let mut client = socket.connect(address).await.expect("connect");
+            client.write_all(format!("GET /sharing/v1/items/{} HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",fixture.item,fixture.secret.expose()).as_bytes()).await.expect("details request");
+            let mut head = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(client.read_u8().await.expect("response head"));
+                }
+            })
+            .await
+            .expect("head deadline");
+            assert!(
+                head.starts_with(b"HTTP/1.1 200"),
+                "{}",
+                String::from_utf8_lossy(&head)
+            );
+            let connection = captured.await.expect("connection");
+            await_flag(&body_dropped, true).await;
+            assert!(
+                !data_dropped.load(Ordering::SeqCst),
+                "actual blocked DATA owner"
+            );
+            let writer = rusqlite::Connection::open(&fixture.path).expect("file writer");
+            writer
+                .execute(
+                    "UPDATE files SET path='/private/revised.mkv' WHERE id=1",
+                    [],
+                )
+                .expect("revision change");
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            assert!(
+                !connection.0.is_cancelled(),
+                "revision changes preserve metadata delivery"
+            );
+            if moved {
+                writer
+                    .execute("UPDATE files SET item_id=?1 WHERE id=1", [fixture.item + 1])
+                    .expect("move file to another exported item");
+            } else {
+                writer
+                    .execute("DELETE FROM files WHERE id=1", [])
+                    .expect("delete file");
+            }
+            drop(writer);
+            tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                .await
+                .expect("file revocation bound");
+            await_flag(&data_dropped, true).await;
+            await_flag(&body_dropped, true).await;
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while CONTENT_MONITORS.available_permits() != baseline {
+                    tokio::task::yield_now().await
+                }
+            })
+            .await
+            .expect("all permits release");
+            drop(client);
+            stop.send(()).expect("stop");
+            served.await.expect("task").expect("result");
         }
     }
     #[tokio::test]
