@@ -505,6 +505,18 @@ paths = [
   "crates/plurx-core/src/live_tv_resource.rs",
   "crates/plurx-core/src/store/hiqlite_live_tv_resource.rs",
   "crates/plurx-core/src/store/sqlite/live_tv_resource.rs",
+  "crates/plurx-core/src/store/jellyfin_identity.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_identity.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_identity.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_identity.rs",
+  "crates/plurx-core/src/store/jellyfin_login.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_login.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_login.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_login.rs",
+  "crates/plurx-core/src/store/jellyfin_play.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_play.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_play.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_play.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
   "crates/plurx-core/src/store/hiqlite_library_channels.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
@@ -986,6 +998,31 @@ paths = [
 ]
 checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["server.api", "api.contract", "playback.pipeline"]
+
+[[points]]
+id = "jellyfin.compatibility"
+title = "Jellyfin compatibility for pinned Infuse and Android TV clients"
+contract = "The Jellyfin protocol layer preserves checked time and opaque identity forms, refuses conflicting or scoped-key credentials, and participates in workspace validation. Physical acceptance and release qualification remain separate requirements."
+paths = [
+  "crates/plurx-compat-jellyfin/**",
+  "crates/plurx-core/src/store/jellyfin_identity.rs",
+  "crates/plurx-core/src/store/jellyfin_login.rs",
+  "crates/plurx-core/src/store/jellyfin_play.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_play.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_play.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_login.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_login.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_login.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_play.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_identity.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_identity.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_identity.rs",
+  "validation/jellyfin_identity_guard.py",
+  "tests/operations/test_jellyfin_identity_guard.py",
+  "docs/clients/JELLYFIN-*.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract", "security-boundaries"]
+depends_on = ["server.api", "identity.access", "playback.pipeline"]
 
 [[points]]
 id = "web.experience"

@@ -31,7 +31,23 @@ mod fragment_index_cluster;
 mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
+mod jellyfin_identity;
+mod jellyfin_login;
+mod jellyfin_play;
+pub use jellyfin_play::{
+    JellyfinPlay, JellyfinPlayActivation, JellyfinPlayScope, JellyfinPlayStore, NewJellyfinPlay,
+    JELLYFIN_PENDING_PLAYS_PER_LOGIN, JELLYFIN_PENDING_PLAYS_SERVER, JELLYFIN_PENDING_PLAY_TTL_MS,
+    JELLYFIN_TERMINAL_PLAY_TTL_MS,
+};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_play;
+pub use jellyfin_login::{JellyfinClientFamily, JellyfinLoginStore, JellyfinLoginWrite};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_login;
 mod renditionplan;
+pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdentityStore};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_identity;
 mod sqlite;
 mod telemetry;
 mod timeline_annotations;
@@ -5291,6 +5307,9 @@ pub trait TimelineAnnotationStore: Send + Sync + 'static {
 pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SettingsStore
+    + JellyfinIdentityStore
+    + JellyfinLoginStore
+    + JellyfinPlayStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5328,6 +5347,9 @@ pub trait Store:
 impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SettingsStore
+        + JellyfinIdentityStore
+        + JellyfinLoginStore
+        + JellyfinPlayStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore

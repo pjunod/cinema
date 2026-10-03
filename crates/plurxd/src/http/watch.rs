@@ -35,6 +35,17 @@ pub async fn progress(
     Path(id): Path<i64>,
     Json(req): Json<ProgressRequest>,
 ) -> Result<Json<WatchDto>, ApiError> {
+    Ok(Json(apply_progress(&state, user.id, id, req).await?.into()))
+}
+
+/// Native progress semantics shared by protocol adapters: item validation,
+/// coalescing/offline ordering, activity, telemetry, Trakt and watched outbox.
+pub(crate) async fn apply_progress(
+    state: &AppState,
+    user_id: i64,
+    id: i64,
+    req: ProgressRequest,
+) -> Result<plurx_core::domain::WatchState, ApiError> {
     if state.store.get_item(id).await?.is_none() {
         return Err(ApiError::NotFound("item"));
     }
@@ -43,23 +54,23 @@ pub async fn progress(
     // are distinguishable — otherwise every beat after the crossing would
     // re-notify. The same row is the cluster-wide previous beat the watched
     // seconds ledger credits from when another node wrote it.
-    let durable_before = state.store.watch_state(user.id, id).await?;
+    let durable_before = state.store.watch_state(user_id, id).await?;
     let was_watched = durable_before.as_ref().is_some_and(|w| w.watched);
     let (watch, reported_position_ms, reported_duration_ms) = if req.recorded_at.is_some() {
         // Imported/offline facts carry their own ordering clock and are rare,
         // semantically complete writes rather than an active player's beat.
         let watch = state
             .store
-            .put_progress_at(user.id, id, position, req.duration_ms, req.recorded_at)
+            .put_progress_at(user_id, id, position, req.duration_ms, req.recorded_at)
             .await?;
         (watch, watch.position_ms, watch.duration_ms)
     } else {
         let update = state
             .progress
-            .put(user.id, id, position, req.duration_ms)
+            .put(user_id, id, position, req.duration_ms)
             .await?;
         if !update.committed {
-            tracing::trace!(user_id = user.id, item_id = id, "coalesced progress beat");
+            tracing::trace!(user_id = user_id, item_id = id, "coalesced progress beat");
         }
         (
             update.watch,
@@ -76,18 +87,18 @@ pub async fn progress(
     // synchronous — a hash lookup, not a store read — because every open
     // player in the house arrives here every few seconds.
     if req.recorded_at.is_none() {
-        state.direct_plays.touch_item(user.id, id);
+        state.direct_plays.touch_item(user_id, id);
         // And the play it belongs to stays one start attempt however long
         // the viewer is paused (C-08 M5 row 4).
         state
             .start_attempts
-            .progress_beat(user.id, id, std::time::Instant::now());
+            .progress_beat(user_id, id, std::time::Instant::now());
         // The denominator for stalled seconds and bytes per watched minute
         // (C-08 M5). Live beats only: an offline replay's position did not
         // advance in front of this node.
         crate::telemetry::record_progress_beat(
             &state.watch_ledger,
-            user.id,
+            user_id,
             id,
             position,
             req.method.as_deref(),
@@ -101,16 +112,16 @@ pub async fn progress(
         None => 0.0,
     };
     if applied {
-        state.trakt.on_progress(user.id, id, pct, watch.watched);
+        state.trakt.on_progress(user_id, id, pct, watch.watched);
     }
     // The 95% crossing is what makes this the interesting hook: it is the
     // moment somebody finished something, without them pressing anything.
     // `put_progress` only flips `watched` on the crossing, so this fires
     // once per item rather than on every 5-second beat.
     if applied && watch.watched && !was_watched {
-        state.watched.on_watched(user.id, id).await;
+        state.watched.on_watched(user_id, id).await;
     }
-    Ok(Json(watch.into()))
+    Ok(watch)
 }
 
 /// POST /api/v1/items/:id/scrobble — mark watched. On a show, season, or
@@ -122,20 +133,8 @@ pub async fn scrobble(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    if state.store.get_item(id).await?.is_none() {
-        return Err(ApiError::NotFound("item"));
-    }
-    let changed = state.store.set_watched_tree(user.id, id, true).await?;
-    // Notify per episode that actually flipped. Re-marking a finished series
-    // changes nothing and so says nothing — the alternative is re-announcing
-    // forty episodes every time somebody clicks the button twice.
-    for item in &changed {
-        state.watched.on_watched(user.id, *item).await;
-    }
-    state.trakt.request_sync(); // propagate the manual mark promptly
-    Ok(Json(
-        serde_json::json!({ "ok": true, "updated": changed.len() }),
-    ))
+    let changed = apply_watched(&state, user.id, id, true).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "updated": changed })))
 }
 
 /// POST /api/v1/items/:id/unscrobble — mark unwatched (clears progress).
@@ -145,12 +144,27 @@ pub async fn unscrobble(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let changed = apply_watched(&state, user.id, id, false).await?;
+    Ok(Json(serde_json::json!({ "ok": true, "updated": changed })))
+}
+
+/// Share cascading manual marks and their notification/sync side effects.
+/// Binding revision fences are an additional compatibility ingress contract.
+pub(crate) async fn apply_watched(
+    state: &AppState,
+    user_id: i64,
+    id: i64,
+    watched: bool,
+) -> Result<usize, ApiError> {
     if state.store.get_item(id).await?.is_none() {
         return Err(ApiError::NotFound("item"));
     }
-    let changed = state.store.set_watched_tree(user.id, id, false).await?;
-    state.trakt.request_sync(); // an explicit un-watch removes on Trakt too
-    Ok(Json(
-        serde_json::json!({ "ok": true, "updated": changed.len() }),
-    ))
+    let changed = state.store.set_watched_tree(user_id, id, watched).await?;
+    if watched {
+        for item in &changed {
+            state.watched.on_watched(user_id, *item).await;
+        }
+    }
+    state.trakt.request_sync();
+    Ok(changed.len())
 }

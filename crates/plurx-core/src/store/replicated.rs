@@ -158,6 +158,33 @@ pub struct SqliteTransactionSite {
 /// Rust-driven backfills remain separate audit populations. Keeping explicit
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
+    // Expired non-active rows and bounded conditional admission are fixed SQL.
+    SqliteTransactionSite {
+        module: "jellyfin_play.rs",
+        method: "create_jellyfin_play",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    // The password-matched mint admits both replacement writes; a collision
+    // or later statement failure rolls the whole scoped replacement back.
+    SqliteTransactionSite {
+        module: "jellyfin_login.rs",
+        method: "replace_jellyfin_login",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    // One read expands the missing page IDs into conditional inserts; read-back
+    // returns the durable winners. The replicated twin batches missing inserts
+    // in one Raft entry and consistently reads the winning mappings afterward.
+    SqliteTransactionSite {
+        module: "jellyfin_identity.rs",
+        method: "jellyfin_entity_ids",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
     SqliteTransactionSite {
         module: "background_jobs.rs",
         method: "queue_transaction",
@@ -1004,6 +1031,15 @@ mod tests {
         ),
         ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("housekeeping.rs", include_str!("sqlite/housekeeping.rs")),
+        (
+            "jellyfin_identity.rs",
+            include_str!("sqlite/jellyfin_identity.rs"),
+        ),
+        ("jellyfin_play.rs", include_str!("sqlite/jellyfin_play.rs")),
+        (
+            "jellyfin_login.rs",
+            include_str!("sqlite/jellyfin_login.rs"),
+        ),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -1201,7 +1237,7 @@ mod tests {
         // links together so a failed delete remains retryable.
         // Reconciliation adds one atomic successor-insert / predecessor-retire
         // batch. Its SQL predicates own all branching, as in the replicated twin.
-        assert_eq!(methods.len(), 96);
+        assert_eq!(methods.len(), 99);
     }
 
     #[test]

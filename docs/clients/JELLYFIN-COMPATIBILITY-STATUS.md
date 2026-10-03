@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0 implementation admission approved with Infuse repeat deferred; J1 next · **Updated:** 2026-10-02 EDT.
+**Status:** open · J0 integrated; J1 foundations in verification; physical Infuse repeat deferred · **Updated:** 2026-10-02 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -430,3 +430,30 @@ The delayed HTTP regression passes, and the full browser fixture passes with
 the same injected delay in worker and inline-fallback modes on Headless Chrome
 154 with vendored hls.js 1.6.16. No application seek behavior or playback
 assertion changed. The new candidate still requires its complete effort gate.
+
+
+## 9. J0 integrated; J1 foundations under verification
+
+[Effort run 3947](http://192.168.4.7:3000/noirr/plurx/actions/runs/3947)
+passed every required lane on `adf0d5e89`: policy/contracts, Rust, Windows,
+web, Apple, Android and the aggregate Effort development gate.
+[PR #747](http://192.168.4.7:3000/noirr/plurx/pulls/747) merged into the effort
+as `0331f5686`, retaining all thirteen checked regression fields in the landing
+message. This closes the J0 integration failures described above. It does not
+qualify the remaining physical Infuse recovery or the production facade.
+
+[PR #763](http://192.168.4.7:3000/noirr/plurx/pulls/763) consolidates the J1
+[protocol forms](JELLYFIN-PROTOCOL-FOUNDATION.md),
+[durable identities](JELLYFIN-DURABLE-IDENTITIES.md),
+[shared services](JELLYFIN-SHARED-SERVICES.md) and
+[play bindings](JELLYFIN-PLAY-BINDINGS.md). The foundations include scoped
+password-fenced login replacement, exact native capability references,
+source-incarnation checks, terminal tombstones and atomic pending admission
+limits. J1 merged the current J0 effort base in `b154a5055`; its focused
+regressions and mandatory checks are being repeated against that combined tree
+before publishing the candidate for the blocking effort gate.
+
+Public routes, native resource-release adapters and manual-watch revision
+fences remain subsequent milestone work. No public compatibility playback is
+exposed by J1. The Apple TV remains untouched under Paul's explicit deferral;
+its availability does not block implementation or the J1 integration gate.

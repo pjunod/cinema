@@ -378,6 +378,21 @@ async fn receive_source<T>(
 
 const TABLES: &[TablePlan] = &[
     TablePlan {
+        name: "jellyfin_entity_ids",
+        columns: &[
+            "wire_id",
+            "entity_kind",
+            "native_id",
+            "incarnation",
+            "retired",
+        ],
+        order_by: "wire_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_jobs",
         columns: &[
             "id",
@@ -541,6 +556,41 @@ const TABLES: &[TablePlan] = &[
         ],
         order_by: "token_hash",
         minimum_schema: 2,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_login_tokens",
+        columns: &["token_hash", "user_id", "device_digest", "client_family"],
+        order_by: "token_hash",
+        minimum_schema: 93,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "jellyfin_plays",
+        columns: &[
+            "play_id",
+            "user_id",
+            "token_digest",
+            "device_digest",
+            "client_family",
+            "playback_id",
+            "item_id",
+            "file_id",
+            "item_wire_id",
+            "file_wire_id",
+            "payload",
+            "state",
+            "expires_at_ms",
+            "manual_revision",
+            "native_incarnation_id",
+            "direct_grant_id",
+        ],
+        order_by: "play_id",
+        minimum_schema: 94,
         import_filter: None,
         sealed_columns: &[],
         parent_first: false,
@@ -3429,7 +3479,10 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 70, "review every imported durable table");
+        assert!(names.contains(&"jellyfin_login_tokens"));
+        assert!(names.contains(&"jellyfin_entity_ids"));
+        assert!(names.contains(&"jellyfin_plays"));
+        assert_eq!(names.len(), 73, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

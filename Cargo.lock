@@ -2827,6 +2827,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-compat-jellyfin"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uuid",
+]
+
+[[package]]
 name = "plurx-compat-plex"
 version = "0.3.0"
 dependencies = [
