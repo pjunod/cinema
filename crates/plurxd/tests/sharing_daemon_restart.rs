@@ -348,7 +348,10 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         Some(json!({})),
     )
     .await;
-    eprintln!("initial credential rotation completed");
+    // Publish a new authenticated manifest revision before restarting. The
+    // recipient must recover its rotated credential to retrieve this revision;
+    // its retained active label cannot satisfy this assertion.
+    call(&client, &source, Method::PUT, "/api/v1/sharing/endpoints", Some(&source_token), Some(json!({"expected_revision":1,"endpoints":[{"ipv4":address.to_string(),"ts_fqdn":"source.fixture.ts.net","port":peer_port,"spki_sha256":source_pin}]}))).await;
     source.restart();
     recipient.restart();
     ready(&client, &mut source).await;
@@ -356,7 +359,6 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
     let recovered_source = sharing_status(&client, &mut source, &source_token).await;
     assert_eq!(recovered_source["certificate"]["spki_sha256"], source_pin);
     sharing_status(&client, &mut recipient, &recipient_token).await;
-    eprintln!("both restarted sharing listeners ready");
     let after = import_state(&client, &mut recipient, &recipient_token, "active").await;
     assert_eq!(after["import"]["id"], active["import"]["id"]);
     assert_eq!(
@@ -367,17 +369,18 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         after["import"]["catalogue_epoch"],
         active["import"]["catalogue_epoch"]
     );
-    // A second rotation authenticates with the credential recovered from disk;
-    // a retained "active" label alone would not prove that it can still dial.
-    call(
-        &client,
-        &recipient,
-        Method::POST,
-        &format!("/api/v1/sharing/imports/{import_id}/rotate"),
-        Some(&recipient_token),
-        Some(json!({})),
-    )
-    .await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let recovered = import_state(&client, &mut recipient, &recipient_token, "active").await;
+        if recovered["import"]["observed_endpoint_revision"] == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recovered credential must authenticate the new manifest"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     let exports_after = call(
         &client,
         &source,

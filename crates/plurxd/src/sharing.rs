@@ -860,13 +860,13 @@ impl SharingManager {
         };
         let (mut peer, _) = PeerConnection::verified(self, &import.summary.endpoints, &source)
             .await
-            .inspect_err(|_| {
-                tracing::warn!(phase = "verify_peer", "sharing rotation failed");
+            .inspect_err(|error| {
+                tracing::warn!(?error, phase = "verify_peer", "sharing rotation failed");
             })?;
         self.ensure_current(state, &import.summary)
             .await
-            .inspect_err(|_| {
-                tracing::warn!(phase = "current_import", "sharing rotation failed");
+            .inspect_err(|error| {
+                tracing::warn!(?error, phase = "current_import", "sharing rotation failed");
             })?;
         // Status is the only request allowed with the old credential after a
         // committed swap. Try recovery before issuing another mutation.
@@ -892,15 +892,19 @@ impl SharingManager {
             );
             peer.rotate(&current.credential, &payload)
                 .await
-                .inspect_err(|_| {
-                    tracing::warn!(phase = "peer_swap", "sharing rotation failed");
+                .inspect_err(|error| {
+                    tracing::warn!(?error, phase = "peer_swap", "sharing rotation failed");
                 })?;
         }
         let confirmed: GrantResponse = peer
             .grant(&replacement_credential.credential)
             .await
-            .inspect_err(|_| {
-                tracing::warn!(phase = "confirm_replacement", "sharing rotation failed");
+            .inspect_err(|error| {
+                tracing::warn!(
+                    ?error,
+                    phase = "confirm_replacement",
+                    "sharing rotation failed"
+                );
             })?;
         if confirmed.id != grant_id
             || confirmed.recipient_server_id != local.server_id
