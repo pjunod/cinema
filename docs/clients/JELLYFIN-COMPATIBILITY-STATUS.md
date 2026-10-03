@@ -395,3 +395,19 @@ records each exact delta and its owner. The passive grant creates no producer,
 process or independent timer; existing maintenance and durable owner renewal
 remain its lifecycle owners. The failed run is not integration evidence;
 rerun the local preflight and the manual effort gate on the corrected tree.
+
+## 7. Integration gate — Windows compiler resource recovery
+
+The corrected ownership tree at `e9dfdc6fc` passed effort policy/contracts,
+Rust, web, Apple and Android compilation. The Windows lane reached its
+cross-build but its daemon compiler was killed with `SIGKILL`; that failed
+candidate is not merge evidence. An earlier attempt failed while resolving the
+pinned toolchain action, before source compilation.
+
+The shared Windows compile action now sets one Cargo build job and omits
+Dev/Test debug symbols to reduce simultaneous compiler/linker memory pressure.
+It still builds the entire workspace and all targets with the lockfile,
+repository-pinned compiler, pinned Windows SDK/CRT and embedded manifest.
+The existing workflow contract checks these resource bounds alongside target
+coverage. No shared runner cache was cleared and no toolchain pin was changed.
+Rerun the effort gate on the updated candidate before merging J0.
