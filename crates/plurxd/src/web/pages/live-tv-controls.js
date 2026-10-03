@@ -172,7 +172,7 @@ async function liveTvAttachSession(info,index,serial,generation){
       video.error&&[3,4].includes(video.error.code)?{failed_video:true,failed_audio:true,failed_container:true}:null);
     video.onended=()=>failed({code:"stream_failed"});
     if(window.Hls&&Hls.isSupported()){
-      const hls=new Hls({liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
+      const hls=new Hls({preferManagedMediaSource:false,liveSyncDurationCount:2,liveMaxLatencyDurationCount:4,maxBufferLength:12,maxMaxBufferLength:18,backBufferLength:0});
       LIVE_TV.hls=hls;
       hls.on(Hls.Events.MANIFEST_PARSED,()=>{ liveTvRefreshCaptionControls(); play(); });
       hls.on(Hls.Events.ERROR,(_,data)=>{ if(data.fatal) failed({code:data.type===Hls.ErrorTypes.MEDIA_ERROR?"codec_unsupported":"stream_failed"},

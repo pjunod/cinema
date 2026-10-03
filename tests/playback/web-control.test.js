@@ -216,7 +216,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",(?:async)?\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100,{epoch:PLAYER.controlPresentationEpoch||0,attachment:PLAYER.mediaAttachment,intent:PLAYER.controlSeek?.sequence}),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -857,7 +857,7 @@ async function main() {
     shippedSource("settlePlaybackControlSeek"),
     shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
     "return {begin(p,target){PLAYER=p;return beginPlaybackControlSeek(p,target);},mark:markPlaybackControlSeekExecuted,"+
-      "settle:settlePlaybackControlSeek,sample:samplePlaybackPresentationClock,"+
+      "settle(v,p,time,frames){return settlePlaybackControlSeek(v,p,time,frames,{epoch:p.controlPresentationEpoch||0,attachment:p.mediaAttachment,intent:p.controlSeek?.sequence});},sample:samplePlaybackPresentationClock,"+
       "notifications:()=>notifications};",
   ].join("\n"))({now:()=>presentationNow});
   const intentPlayer={started:true,offset:0,source:{video_codec:"h264"},
@@ -937,10 +937,9 @@ async function main() {
     seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
     callbacks[0](presentationNow,{mediaTime:80});
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
-    callbacks[1](presentationNow,{mediaTime:80});
-    assert.notEqual(epochs[0],p.controlPresentationEpoch,
-      "a callback queued by the predecessor cannot settle the new execution");
-    assert.equal(epochs[1],p.controlPresentationEpoch);
+    callbacks[2](presentationNow,{mediaTime:80});
+    assert.deepEqual(epochs,[p.controlPresentationEpoch],
+      "execution cancels the old observer and renews the sole destination frame");
     presentationNow+=1000;
     assert.equal(seekIntentAdapter.settle(v,p,81,1),true,
       "delayed video presentation is checked against the active media timeline");

@@ -177,6 +177,7 @@
  * @property {number} [controlPresentedFrames]
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {()=>void} [controlFrameRearm] renews observation for the current seek
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]
@@ -949,7 +950,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
