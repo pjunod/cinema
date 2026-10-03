@@ -485,6 +485,9 @@ mod hls_codecs;
 use hls_codecs::*;
 // split: end hls-codecs
 
+#[path = "transcode/source_actor.rs"]
+pub(crate) mod source_actor;
+
 // split: begin cluster-adoption
 #[path = "transcode/cluster_adoption.rs"]
 mod cluster_adoption;
