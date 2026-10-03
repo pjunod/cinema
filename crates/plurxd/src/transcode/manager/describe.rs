@@ -91,13 +91,32 @@ impl TranscodeManager {
     /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
     /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
     pub(super) async fn pacing(&self, for_copy: bool) -> Pacing {
-        let rate = self
-            .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
-            .await;
-        let burst = self
-            .num_setting(keys::HLS_BURST_SECS, HLS_BURST_SECS_DEFAULT)
-            .await;
-        pacing_caps().await.resolve(rate, burst, for_copy)
+        let started_at = Instant::now();
+        // A seek successor must not combine values from two different
+        // committed policies or pay for two serial consensus barriers.
+        let settings = self
+            .store
+            .get_settings(&[keys::HLS_READRATE, keys::HLS_BURST_SECS])
+            .await
+            .unwrap_or_default();
+        let number = |key: &str, default: f64| {
+            settings
+                .get(key)
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|value| *value >= 0.0)
+                .unwrap_or(default)
+        };
+        let pacing = pacing_caps().await.resolve(
+            number(keys::HLS_READRATE, HLS_READRATE_DEFAULT),
+            number(keys::HLS_BURST_SECS, HLS_BURST_SECS_DEFAULT),
+            for_copy,
+        );
+        tracing::info!(
+            target: "plurxd::transcode", phase = "pacing_policy", for_copy,
+            elapsed_ms = started_at.elapsed().as_millis() as u64, settings_reads = 1u8,
+            "playback startup phase completed"
+        );
+        pacing
     }
 
     /// Hardware slots in use, and the cap. The pair is the diagnostic: "2"

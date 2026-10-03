@@ -2512,3 +2512,48 @@ use crate::queue_fixture::QueueFixture;
             "every superseded and stopped live permit returned"
         );
     }
+
+    #[tokio::test]
+    async fn native_successor_settings_preserve_track_policy_and_pacing_defaults() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let mut file = store.get_file(file_id).await.expect("file read").expect("file");
+        let work = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            Arc::clone(&store), work.path().to_path_buf(), EncoderCaps::default(), Pipeline::Cpu,
+        );
+        file.audio_streams = ["eng", "fra"].into_iter().enumerate().map(|(index, language)| {
+            plurx_core::domain::AudioStream {
+                index: index as i64, codec: "aac".into(), channels: Some(2), sample_rate: Some(48_000),
+                language: Some(language.into()), title: None, default: index == 0,
+            }
+        }).collect();
+        store.put_setting(keys::AUDIO_LANG, "fra").await.expect("preference");
+        for explicit in [0, 1, -1, 17] {
+            assert_eq!(manager.copy_audio_index(&file, Some(explicit), false).await, Some(explicit));
+        }
+        assert_eq!(manager.copy_audio_index(&file, None, false).await, Some(1),
+            "an unspecified copy track still follows the saved language");
+        file.audio_streams[1].language = Some("jpn".into());
+        store.put_setting(keys::AUDIO_LANG, "eng").await.expect("English preference");
+        assert_eq!(manager.copy_audio_index(&file, None, true).await, Some(1),
+            "automatic dual-audio anime still selects original Japanese");
+        let caps = pacing_caps().await;
+        for (rate, burst, expected_rate, expected_burst) in [
+            (" 3.5 ", " 12 ", 3.5, 12.0),
+            ("0", "0", 0.0, 0.0),
+            ("-1", "broken", HLS_READRATE_DEFAULT, HLS_BURST_SECS_DEFAULT),
+            ("NaN", "-5", HLS_READRATE_DEFAULT, HLS_BURST_SECS_DEFAULT),
+        ] {
+            store.put_settings(&[(keys::HLS_READRATE, rate), (keys::HLS_BURST_SECS, burst)])
+                .await.expect("atomic policy");
+            for for_copy in [true, false] {
+                let actual = manager.pacing(for_copy).await;
+                let expected = caps.resolve(expected_rate, expected_burst, for_copy);
+                assert_eq!(actual.readrate, expected.readrate);
+                assert_eq!(actual.initial_burst, expected.initial_burst);
+                assert_eq!(actual.legacy_re, expected.legacy_re);
+            }
+        }
+    }

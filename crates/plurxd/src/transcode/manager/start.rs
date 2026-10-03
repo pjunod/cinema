@@ -1292,10 +1292,16 @@ impl TranscodeManager {
             ),
             true,
         );
+        let track_selection_at = Instant::now();
         let audio_index = self
-            .select_tracks(&file, audio_override, None, copy_delivers_hdr)
-            .await
-            .audio_index;
+            .copy_audio_index(&file, audio_override, copy_delivers_hdr)
+            .await;
+        tracing::info!(
+            target: "plurxd::transcode", phase = "copy_track_selection",
+            elapsed_ms = track_selection_at.elapsed().as_millis() as u64,
+            settings_reads = u8::from(audio_override.is_none()),
+            "playback startup phase completed"
+        );
         let item_title = self
             .store
             .get_item(file.item_id)
