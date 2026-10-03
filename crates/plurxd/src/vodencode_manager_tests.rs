@@ -41,7 +41,8 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -52,7 +53,8 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
         ..reopen_request(file_id, "encoded-manager", "unused", "unused")
     };
     let missing = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
         ..req.clone()
@@ -221,6 +223,7 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
             Pipeline::Cpu,
         );
         let request = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             request_id: None,
             previous_session_id: None,
@@ -357,7 +360,8 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
         Pipeline::Cpu,
     );
     let request = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: None,
         previous_session_id: None,
         reopen_reason: None,
@@ -449,7 +453,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -489,7 +494,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let plain = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
                 ..req.clone()
@@ -522,7 +528,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let burned = manager
         .prepare_vod_encoding(
             &SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
             },
@@ -625,7 +632,8 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -708,7 +716,8 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     )
     .with_dovi_reshape(true);
     let req = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -740,7 +749,7 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     .with_dovi_reshape(true);
     let before = spawns_of(background);
     assert!(offline
-        .effective_rate_control_for_new_offline_package(&file)
+        .effective_rate_control_for_new_offline_package(&file, 1080, false)
         .await
         .is_err());
     assert!(
@@ -799,7 +808,8 @@ async fn encoding_shipped_shape() {
         Pipeline::Cpu,
     );
     let req = SessionRequest {
-        candidate_context: None,
+        quality_catalog: None,
+            candidate_context: None,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
         reopen_reason: None,

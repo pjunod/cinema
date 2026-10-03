@@ -323,24 +323,37 @@ let AUTOPLAY=null;
 // player resolves it later regardless of which layout drew the page, so it is
 // data, not presentation, and a layout that forgot to do it would break
 // playback rather than just look different.
-async function loadItem(id,isCurrent=()=>true){
-  const [d, libs]=await Promise.all([api(`/items/${id}`), libsCached()]);
+async function loadItem(id,isCurrent=()=>true,preparedPage=null){
+  let page=preparedPage&&preparedPage.id===String(id)?preparedPage:null;
+  if(!page){
+    const [d,libs]=await Promise.all([api(`/items/${id}`),libsCached()]);
+    if(!isCurrent())return null;
+    page=itemPageModel(id,d,libs);
+  }
   if(!isCurrent())return null;
-  const it=d.item;
-  // A pre-play track choice belongs to the item it was made on. Arriving at
-  // another one starts from the server's defaults again — the alternative is a
-  // French audio track chosen for one film quietly applying to the next.
+  acceptItemPage(page);
+  return page;
+}
+// Preparing another episode must not clear this episode's track selection or
+// publish file mappings. Model construction is read-only; acceptance owns those
+// effects when the existing item/playback lifecycle actually takes the page.
+function acceptItemPage(page){
   clearPrePlay();
+  page.files.forEach(f=>{ITEM_FOR_FILE[f.id]=page.id;});
+}
+function itemPageModel(id,d,libs){
+  const it=d.item;
   const lib=libs.find(l=>l.id===it.library_id);
-  d.files.forEach(f=>{
-    ITEM_FOR_FILE[f.id]=String(id);
+  const files=d.files.map(original=>{
+    const f={...original};
     // File DTOs are item-scoped and do not repeat their library id. The
     // conversion status endpoint publishes modes per library, so bind the
     // already-loaded item authority once instead of issuing per-file reads.
     f.library_id=it.library_id;
     f.subtitle_search_enabled=it.kind==="movie"||it.kind==="episode";
+    return f;
   });
-  const files=d.files, children=d.children||[], ancestors=d.ancestors||[];
+  const children=d.children||[], ancestors=d.ancestors||[];
   const best=files[0], multi=files.length>1;
   const runtime=it.runtime_ms||(best&&best.duration_ms)||0;
   // Resume threshold in ONE place. Three seconds is "you actually started it"
@@ -469,7 +482,7 @@ function bookByline(it){
 }
 const DV_PROGRESS_POLL_MS=10000, DV_CONVERSION_LEDGER_READ_MAX=256;
 const DV_CONVERSION_LEDGER_BATCH_MAX=4;
-let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=false, DV_SETTINGS_POLL_AT=0;
+let DV_FILE_PAGE_FILES=[], DV_FILE_POLLING=null, DV_SETTINGS_POLL_AT=0;
 function dvConversionIsActive(conversion){
   return !!conversion&&["queued","running","verified"].includes(conversion.state);
 }
@@ -496,19 +509,24 @@ function dvFileActionMount(file){
   return `<div class="dv-file-action px-admin th-admin" id="dv-file-${id}" aria-live="polite"><span class="muted">Checking on-disk conversion…</span></div>`;
 }
 function dvConversionStateHtml(file,snapshot){
-  const conversion=snapshot.conversion;
+  let conversion=snapshot.conversion;
   const capability=snapshot.capabilities||{};
   const id=exactWireId(file);
   const mode=(snapshot.library_modes||{})[String(file.library_id)]||"off";
   const modeOff=mode==="off";
   const modeReason="library Dolby Vision conversion mode is Off — choose Manual or Automatic in Settings → Libraries";
+  // A historical automatic failure is not an outstanding manual request.
+  // Keep recovery information visible even when policy hides the old error.
+  const hiddenFailure=conversion?.state==="failed"&&(modeOff||(mode==="manual"&&conversion.requested_manually!==true));
+  const recovery=hiddenFailure?dvRecoveryGuardStatusHtml(conversion.recovery_guard):"";
+  if(hiddenFailure) conversion=null;
   if(!conversion){
-    if(!snapshot.eligible) return "";
+    if(!snapshot.eligible) return recovery?`<div class="muted" style="margin-top:8px">Recovery status${recovery}</div>`:"";
     const reason=modeOff?modeReason
       :capability.available===false?capability.reason||"dovi_tool or mkvmerge is unavailable":"";
     return `<div class="row" style="margin-top:8px;gap:8px"><span class="muted">Profile 7 can be permanently converted to Profile 8.1.</span>
       <button class="ghost sm" aria-label="Convert file ${esc(id)} from Dolby Vision Profile 7 to Profile 8.1 on disk" onclick='queueDvFile(${JSON.stringify(id)},this)'${reason?' disabled':''}>Convert on disk</button>
-      ${reason?`<span class="problem">Unavailable: ${esc(reason)}</span>`:""}</div>`;
+      ${reason?`<span class="${modeOff?"muted":"problem"}">${modeOff?"":"Unavailable: "}${esc(reason)}</span>`:""}${recovery}</div>`;
   }
   const state=conversion.state;
   const bytes=(conversion.bytes_before||conversion.bytes_after)
@@ -533,7 +551,7 @@ function dvConversionStateHtml(file,snapshot){
   const labels={queued:"Queued for on-disk conversion",running:"Converting Profile 7",verified:"Replacement verified; publishing"};
   return `<div class="muted" style="margin-top:8px">${esc(labels[state]||state)}${bytes}${dvRecoveryGuardStatusHtml(conversion.recovery_guard)}</div>`;
 }
-async function hydrateDvFileActions(files){
+async function hydrateDvFileActions(files,generation=PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin) return false;
   const targets=(files||[]).filter(file=>document.getElementById(`dv-file-${exactWireId(file)}`));
   if(!targets.length) return false;
@@ -559,6 +577,7 @@ async function hydrateDvFileActions(files){
     for(const batch of batches){
       snapshots.push(await api(`/dv-conversions?file_ids=${encodeURIComponent(batch.join(","))}`));
     }
+    if(generation!==PAGE_RENDER_GENERATION) return false;
     const conversions={}, eligibility={};
     for(const snapshot of snapshots){
       Object.assign(conversions,snapshot.conversions_by_file||{});
@@ -586,6 +605,7 @@ async function hydrateDvFileActions(files){
     }
     return anyActive;
   }catch(e){
+    if(generation!==PAGE_RENDER_GENERATION) return false;
     let anyActive=false;
     for(const file of selectedTargets){
       const mount=document.getElementById(`dv-file-${exactWireId(file)}`);
@@ -596,15 +616,21 @@ async function hydrateDvFileActions(files){
     return anyActive;
   }
 }
-async function pollDvFileActions(files,generation){
-  if(DV_FILE_POLLING||generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||document.visibilityState==="hidden") return;
-  DV_FILE_POLLING=true;
-  try{
-    const active=await hydrateDvFileActions(files);
-    if(!active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")){
-      clearInterval(PAGE_TIMER); PAGE_TIMER=null;
-    }
-  }finally{ DV_FILE_POLLING=false; }
+async function pollDvFileActions(files,generation,force=false){
+  if(generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/item/")||(!force&&document.visibilityState==="hidden")) return;
+  // Manual, initial and timer refreshes join the same flight for this page.
+  if(DV_FILE_POLLING?.generation===generation) return DV_FILE_POLLING.promise;
+  const flight={generation,promise:null};
+  DV_FILE_POLLING=flight;
+  flight.promise=(async()=>{
+    try{
+      const results=await Promise.all([hydrateDvFileActions(files,generation),hydrateMediaPreparation(files,generation)]);
+      if(DV_FILE_POLLING!==flight||generation!==PAGE_RENDER_GENERATION) return;
+      if(results.some(Boolean)) armDvFilePoll(files,generation);
+      else { clearInterval(PAGE_TIMER); PAGE_TIMER=null; }
+    }finally{ if(DV_FILE_POLLING===flight) DV_FILE_POLLING=null; }
+  })();
+  return flight.promise;
 }
 function armDvFilePoll(files,generation=PAGE_RENDER_GENERATION){
   DV_FILE_PAGE_FILES=files||[];
@@ -644,16 +670,15 @@ function chapterList(p){
 }
 async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
+  const prepared=takeAutoplayNextPreparation(id);
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`);
+  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`,prepared?.page);
   if(!page)return;
   if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   WATCH_ITEM_PAGE=page;
   document.getElementById("main").innerHTML=layoutView("item",page);
   DV_FILE_PAGE_FILES=page.files||[];
-  hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
-    if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
-  });
+  pollDvFileActions(DV_FILE_PAGE_FILES,generation,true);
   restoreScroll();
   // One-click play from an episode list lands here and starts immediately.
   if(AUTOPLAY===String(id)){
@@ -691,7 +716,7 @@ function classicItemBody(p){
   if(it.recorded_at){ chips.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`); }
   if(p.years){ const y=p.years; chips.push(`<span>${y.from}${y.to>y.from?'–'+y.to:''}</span>`); }
   if(runtime) chips.push(`<span>${fmtDur(runtime)}</span>`);
-  if(it.kind) chips.push(`<span>${esc(it.kind)}</span>`);
+  if(it.kind) chips.push(`<span>${esc(itemKindLabel(it))}</span>`);
   // A container has no watch flag of its own, so say what it's made of:
   // "3 of 10 watched" is the thing the mark-watched buttons below act on.
   if(it.rollup&&it.rollup.leaves){

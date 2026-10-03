@@ -2064,6 +2064,7 @@
         use plurx_core::playback::audio::{AudioAction, AudioClaim, AudioDelivery, AudioSink};
         let mut request = SessionRequest {
             control_sequence: None, file_id: 1, playback_id: "player".into(), request_id: None,
+            quality_catalog: None,
             candidate_context: None,
             automatic: false, previous_session_id: None, reopen_reason: None,
             kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,
@@ -2120,6 +2121,7 @@
             codec: "aac".into(), max_channels: 6, passthrough: false, sample_rates_hz: vec![48_000] }] };
         let mut request = SessionRequest {
             control_sequence: None, file_id: file.id, playback_id: "integration".into(), request_id: None,
+            quality_catalog: None,
             candidate_context: None, automatic: true, previous_session_id: None, reopen_reason: None,
             kind: SessionKind::Transcode { height: 1440 }, start_seconds: 0.0, audio_index: Some(0),
             audio_delivery: None, audio_claim: Some(claim), subtitle_burn: None, audio_offset_ms: 0,
@@ -2135,8 +2137,8 @@
                 request.audio_delivery.as_ref(), request.presentation, base.clone()).expect("catalog");
             let execution = manager.encoded_start_audio_options(&request, &file, base.clone()).expect("execution");
             assert!(catalog.audio.is_some(), "the catalog must not silently omit claimed audio");
-            let advertised = manager.candidate_recipe_digest(&integration_quality_plan(&file, &catalog), request.presentation).expect("catalog digest");
-            let actual = manager.candidate_recipe_digest(&integration_quality_plan(&file, &execution), request.presentation).expect("execution digest");
+            let advertised = manager.candidate_recipe_digest(&integration_quality_plan(&file, &catalog), request.presentation, false).expect("catalog digest");
+            let actual = manager.candidate_recipe_digest(&integration_quality_plan(&file, &execution), request.presentation, false).expect("execution digest");
             assert_eq!(advertised, actual);
             assert_eq!(plurx_core::playback::candidate::CandidateId::for_recipe_digest(advertised),
                 plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual));
@@ -2194,6 +2196,7 @@
         }, downmix: None, reason: "retained actual producer".into() };
         let mut request = SessionRequest {
             control_sequence: None, file_id: file.id, playback_id: "retained-player".into(), request_id: None,
+            quality_catalog: None,
             candidate_context: None,
             automatic: false, previous_session_id: None, reopen_reason: None,
             kind: SessionKind::Transcode { height: 720 }, start_seconds: 0.0,

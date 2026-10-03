@@ -59,6 +59,7 @@ ARG JELLYFIN_FFMPEG_VERSION=8.1.3-1-bookworm
 # ffprobe cannot be its trusted input. Build a separate static local-file
 # probe; keep the ordinary Jellyfin probe and hardware encoder intact.
 COPY scripts/build-static-ffprobe /usr/local/libexec/build-static-ffprobe
+COPY scripts/build-static-vmaf-scorer /usr/local/libexec/build-static-vmaf-scorer
 # plurxd shells out to ffmpeg/ffprobe for scanning, remux, and transcode; TLS
 # roots are for TMDB/AniList.
 #
@@ -114,14 +115,16 @@ RUN sed -i \
     && printf 'Acquire::Check-Valid-Until "false";\n' > /etc/apt/apt.conf.d/99plurx-snapshot \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config nasm curl ca-certificates xz-utils \
+        build-essential pkg-config nasm curl ca-certificates xz-utils meson ninja-build xxd \
         zlib1g-dev libbz2-dev liblzma-dev \
     && sh /usr/local/libexec/build-static-ffprobe \
         /usr/local/lib/plurx/ffprobe /usr/share/doc/plurx/ffprobe \
-    && apt-get purge -y build-essential pkg-config nasm xz-utils \
+    && sh /usr/local/libexec/build-static-vmaf-scorer \
+        /usr/local/lib/plurx/vmaf-ffmpeg /usr/share/doc/plurx/vmaf-scorer \
+    && apt-get purge -y build-essential pkg-config nasm xz-utils meson ninja-build xxd \
         zlib1g-dev libbz2-dev liblzma-dev \
     && apt-get autoremove -y \
-    && rm /usr/local/libexec/build-static-ffprobe \
+    && rm /usr/local/libexec/build-static-ffprobe /usr/local/libexec/build-static-vmaf-scorer \
     && apt-get install -y --no-install-recommends \
         ffmpeg ca-certificates mesa-va-drivers curl \
         "mkvtoolnix=${MKVTOOLNIX_VERSION}" \

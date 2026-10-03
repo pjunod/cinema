@@ -1,0 +1,43 @@
+{
+  "source_commit": "b3b256445c458643407150865df66973b474c4e8",
+  "original_ci_source_commit": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "base_main_commit": "3197d0c58c079e485667da20e949f7275cb92cb9",
+  "changed_files": [
+    "crates/plurx-core/tests/store_contract.rs"
+  ],
+  "change_kind": "tests only: method inventory and cross-backend publication regression",
+  "test_source_blob": "dbe4dd63575d87a60697f112b14ebe28d109584a",
+  "original_failure": {
+    "run_id": 3993,
+    "job_id": 41502,
+    "test": "contract_inventory_matches_every_store_method",
+    "declared_count": 453,
+    "expected_count": 452,
+    "uncovered_method": "merge_file_probe_content_encoding"
+  },
+  "checks": [
+    {
+      "command": "cargo test -p plurx-core --test store_contract --features hiqlite-contract-tests --locked --offline contract_inventory_matches_every_store_method -- --exact",
+      "result": "passed",
+      "tests_passed": 1,
+      "failed": 0,
+      "log": "store-inventory-selective.log",
+      "log_sha256": "566dbf81394b171b4eaa5520457d7d31cd277a2c9352088f89b95269b1ae385b"
+    },
+    {
+      "command": "cargo test -p plurx-core --test store_contract --features hiqlite-contract-tests --locked --offline content_encoding_report_publication_is_source_fenced_on_every_backend -- --exact --nocapture",
+      "result": "passed",
+      "tests_passed": 1,
+      "failed": 0,
+      "log": "store-content-report-contract.log",
+      "log_sha256": "33594474715147202da8e4f6582211990d50cd1ba3e0abdfa4da61beab58c774"
+    }
+  ],
+  "backends": [
+    "SQLite memory",
+    "SQLite file",
+    "Hiqlite three-voter separate-process cluster"
+  ],
+  "hook": "normal pre-commit passed: catalog, fmt, workspace/all-target Clippy, served JavaScript syntax",
+  "successful_tests_repeated": false
+}

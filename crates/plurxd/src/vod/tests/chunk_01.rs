@@ -443,6 +443,7 @@ use crate::queue_fixture::QueueFixture;
 
     fn request(playback_id: &str, start_seconds: f64) -> SessionRequest {
         SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,

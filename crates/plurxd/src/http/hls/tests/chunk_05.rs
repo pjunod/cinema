@@ -7,7 +7,7 @@
     /// already retryable, and a takeover for the player still waits on the
     /// gate. The worker is published as the guard's own incarnation at owner
     /// epoch 1, so the cleanup's owner-fenced abort reaches it.
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
         let dir = crate::test_tempdir().expect("state dir");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
@@ -42,6 +42,7 @@
             MediaSessionRequestClaim::Acquired { .. }
         ));
         let request = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -72,7 +73,12 @@
             )
             .await
             .expect("replacement gate");
-        let settled = crate::seam_hooks::AsyncPause::new("started session cleanup settled");
+        // This hold includes real SQLite work, so its watchdog must tolerate
+        // a loaded runner. It is a deadlock bound, not a cleanup latency SLA.
+        let settled = crate::seam_hooks::AsyncPause::with_bound(
+            "started session cleanup settled",
+            Duration::from_secs(60),
+        );
         let (released_tx, released_rx) = tokio::sync::oneshot::channel();
         let mut guard = StartedSessionGuard::new(
             fixture.state.clone(),
@@ -92,7 +98,8 @@
             "the cleanup aborts the worker before it settles"
         );
         let retry_incarnation = uuid::Uuid::new_v4().to_string();
-        let retry_now_ms = unix_ms();
+        // Lease expiry cannot stand in for actual claim settlement.
+        let retry_now_ms = now_ms;
         let retried = fixture
             .state
             .store
@@ -114,64 +121,34 @@
             ),
             "the cleanup settles the request claim before it settles: {retried:?}"
         );
-        assert!(fixture
-            .state
-            .store
-            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
-            .await
-            .expect("settle retry claim"));
-
-        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
-        let blocked = tokio::spawn({
-            let state = fixture.state.clone();
-            let request = request.clone();
-            async move {
-                let blocked = tokio::time::timeout(
-                    Duration::from_secs(1),
-                    state.transcode.acquire_cluster_takeover_replacement(
-                        &request,
-                        7,
-                        tokio::time::Instant::now() + Duration::from_secs(10),
-                    ),
-                );
-                tokio::pin!(blocked);
-                let mut entered_tx = Some(entered_tx);
-                std::future::poll_fn(|context| {
-                    let result = std::future::Future::poll(blocked.as_mut(), context);
-                    if result.is_pending() {
-                        if let Some(entered_tx) = entered_tx.take() {
-                            let _ = entered_tx.send(());
-                        }
-                    }
-                    result
-                })
-                .await
-            }
-        });
-        entered_rx
-            .await
-            .expect("replacement waiter registered behind the cleanup-owned gate");
-        tokio::time::advance(Duration::from_secs(1)).await;
+        // Poll in this task so registration cannot race a spawned task or a
+        // virtual clock. Start after the database work: the production gate
+        // may reclaim an abandoned holder after its own three-second wait.
+        let replacement_wait = fixture.state.transcode.acquire_cluster_takeover_replacement(
+            &request,
+            7,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
+        tokio::pin!(replacement_wait);
         assert!(
-            blocked.await.expect("replacement waiter task").is_err(),
-            "cleanup must retain the replacement gate"
+            futures_util::poll!(replacement_wait.as_mut()).is_pending(),
+            "cleanup must retain the replacement gate while its hook is held"
         );
 
         held.release();
         released_rx
             .await
             .expect("replacement guard was dropped after cleanup settlement");
-        let reacquired = fixture
-            .state
-            .transcode
-            .acquire_cluster_takeover_replacement(
-                &request,
-                7,
-                tokio::time::Instant::now() + Duration::from_secs(1),
-            )
+        let reacquired = replacement_wait
             .await
-            .expect("cleanup settlement releases the replacement gate");
+            .expect("cleanup settlement releases the gate to the registered waiter");
         drop(reacquired);
+        assert!(fixture
+            .state
+            .store
+            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms())
+            .await
+            .expect("settle retry claim"));
 
         let replacement = fixture
             .state
@@ -216,6 +193,7 @@
         let dir = crate::test_tempdir().expect("state dir");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "cleanup-shape").await;
         let request = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 1,
@@ -457,9 +435,13 @@
             incarnation_id,
         ));
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        // Cleanup may retry for its entire settlement budget. Allow scheduling
+        // slack on a busy runner instead of imposing a shorter test deadline.
+        let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET * 2;
         loop {
-            let retry_now_ms = unix_ms();
+            // Keep the original lease live regardless of wall-clock delays:
+            // only guard cleanup, never lease expiry, may enable this retry.
+            let retry_now_ms = now_ms;
             match state
                 .store
                 .claim_media_session_request(
@@ -2976,4 +2958,60 @@
             std::sync::Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (state, user, file_id)
+    }
+
+    #[tokio::test]
+    async fn storage_batch_drains_without_a_producer_round_trip_per_proof_unit() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let size = MEDIA_BODY_ACK_GRANULARITY * 3 + 17;
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; size]));
+        sender.send(batch)
+            .await.expect("batch queued");
+        drop(sender);
+        let mut body = resident_local_body(receiver, StreamedBodyTerminal::new(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        // No producer or acknowledgement receiver is polled between pieces.
+        for expected in [MEDIA_BODY_ACK_GRANULARITY, MEDIA_BODY_ACK_GRANULARITY,
+            MEDIA_BODY_ACK_GRANULARITY, 17] {
+            let piece = body.next().await.expect("piece").expect("body data");
+            assert_eq!(piece.len(), expected);
+        }
+        assert_eq!(accepted_bytes(), size, "last count survives sender drop");
+        assert!(body.next().await.is_none());
+        drop(body);
+        assert_eq!(accepted_bytes(), size, "the final prefix survives body drop");
+    }
+
+    #[tokio::test]
+    async fn storage_batch_drop_retains_only_the_polled_prefix() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]));
+        sender.send(batch).await.expect("batch queued");
+        let mut body = resident_local_body(receiver, StreamedBodyTerminal::new(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
+        drop(body);
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY, "accepted prefix survives body drop");
+        assert!(sender.is_closed());
+    }
+
+    #[tokio::test]
+    async fn terminal_failure_discards_the_unpolled_part_of_a_storage_batch() {
+        use futures_util::StreamExt;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (batch, accepted_bytes) = test_resident_chunk(Bytes::from(vec![7; MEDIA_BODY_READ_BUFFER]));
+        sender.send(batch).await.expect("batch queued");
+        let terminal = StreamedBodyTerminal::new();
+        let mut body = resident_local_body(receiver, terminal.clone(),
+            tokio::time::Instant::now() + Duration::from_secs(60)).into_data_stream();
+        assert_eq!(body.next().await.expect("body piece").expect("body data").len(), MEDIA_BODY_ACK_GRANULARITY);
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY, "prefix acknowledgement");
+        terminal.fail(std::io::ErrorKind::TimedOut, "producer expired".to_owned());
+        assert!(body.next().await.expect("terminal frame").is_err());
+        assert!(body.next().await.is_none());
+        drop(body);
+        assert!(sender.is_closed());
+        assert_eq!(accepted_bytes(), MEDIA_BODY_ACK_GRANULARITY);
     }

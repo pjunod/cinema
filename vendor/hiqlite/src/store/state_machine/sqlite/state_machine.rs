@@ -178,6 +178,37 @@ use tokio::{fs, task, time};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
+/// Static, bounded diagnostic classes. Never expose SQL or bind values.
+fn apply_operation_class(payload: &EntryPayload<TypeConfigSqlite>) -> &'static str {
+    let is_prune = |sql: &str| {
+        sql.trim_start()
+            .starts_with("DELETE FROM cluster_fragment_index_jobs")
+    };
+    match payload {
+        EntryPayload::Blank => "blank",
+        EntryPayload::Membership(_) => "membership",
+        EntryPayload::Normal(QueryWrite::Execute(query))
+        | EntryPayload::Normal(QueryWrite::ExecuteReturning(query)) => {
+            if is_prune(&query.sql) {
+                "fragment_index_prune"
+            } else {
+                "execute"
+            }
+        }
+        EntryPayload::Normal(QueryWrite::Transaction(queries)) => {
+            if queries.iter().any(|query| is_prune(&query.sql)) {
+                "fragment_index_prune"
+            } else {
+                "transaction"
+            }
+        }
+        EntryPayload::Normal(QueryWrite::Batch(_)) => "batch",
+        EntryPayload::Normal(QueryWrite::Migration(_)) => "migration",
+        EntryPayload::Normal(QueryWrite::Backup(_)) => "backup",
+        EntryPayload::Normal(QueryWrite::RTT) => "rtt",
+    }
+}
+
 type Entry = openraft::Entry<TypeConfigSqlite>;
 type SnapshotData = tokio::fs::File;
 
@@ -1092,6 +1123,8 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
             #[cfg(feature = "backup")]
             let backup_owner = committed_backup_owner(&entry.log_id);
             let last_applied_log_id = Some(entry.log_id);
+            let apply_started = std::time::Instant::now();
+            let operation_class = apply_operation_class(&entry.payload);
 
             #[cfg(feature = "validation-test-helpers")]
             {
@@ -1294,6 +1327,15 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 }
             };
 
+            if apply_started.elapsed() >= Duration::from_millis(100) {
+                warn!(
+                    raft_index = entry.log_id.index,
+                    term = entry.log_id.leader_id.term,
+                    operation_class,
+                    elapsed_ms = apply_started.elapsed().as_millis() as u64,
+                    "slow database state-machine apply"
+                );
+            }
             replies.push(resp);
         }
 

@@ -13,6 +13,7 @@ import kotlinx.serialization.Serializable
 
 @Serializable
 data class Server(
+    val decoder_compaction_contract: String? = null,
     val setup_required: Boolean = false,
     val name: String? = null,
     val version: String? = null,

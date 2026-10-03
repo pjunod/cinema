@@ -165,6 +165,7 @@ async fn durable_completion_requires_actual_trailer_and_refuses_mixed_or_repeate
     let sink = RenditionSink { shared: Arc::clone(&serve.shared), rendition: Arc::clone(&rendition), epoch: 0 };
     let outcome = crate::vodgen::run(&output.stdout[..cut], crate::vodgen::Generation {
         plan: rendition.plan.clone(), index: Some(index), encoded_audio_anchor: None,
+        encoded_frame_ticks: None,
         identity: identity.clone(), convert_dolby_vision: false,
         retain_hevc_parameter_sets: false, start_entry: 0, policy,
     }, &sink, "durable-trailer-negative").await;

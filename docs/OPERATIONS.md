@@ -416,6 +416,14 @@ Both are counted on `/metrics`:
 | `plurx_sqlite_connection_recoveries_total` | `pool` = `writer` \| `read`; `outcome` = `validated` \| `reopened` \| `failed` | A connection taken back after a panic. Anything above zero means a store call panicked; find it in the log (`recovered a sqlite connection poisoned by a panic`). `failed` means the slot is still unusable. |
 | `plurx_sqlite_integrity_checks_total` | `phase` = `boot` \| `background`; `outcome` = `ok` \| `corrupt` \| `deferred` (boot) \| `error` (background) | Integrity checks and their results. `deferred` means the boot check ran out of time and a background check is scheduled. |
 
+**Playback admission cleanup** checks for due preparation, drain and lease
+retirements before preparing their SQLite updates. Compiling these updates
+expands the session trigger graph even when no row qualifies; concurrent
+starts previously paid that cost while sharing the writer connection. The
+checks and original updates run in the same transaction, with the existing
+deadlines, batch limits and orphan cleanup. The replicated backend retains
+its existing idle-maintenance read check.
+
 ### Backing up and restoring an activated cluster
 
 Set `backup.destination`, `backup.schedule_utc` (UTC `HH:MM`, default `02:30`),
@@ -5199,6 +5207,9 @@ Hiqlite operation.
 
 Playback telemetry writer metrics are also node-local and fixed-cardinality;
 they never label a session, file, user, network, or path.
+Each store instance owns a separate writer registration. Expired store
+registrations are discarded when a new writer is registered, so a replacement
+store cannot inherit an abandoned event queue.
 
 | Metric | How to read it |
 |---|---|
@@ -5389,6 +5400,34 @@ sample.
 
 ### Putting a failed queue back to work
 
+**Unfinished requests after a worker update:** Open **Activity → Content
+analysis → Reconcile analysis…**, then **Preview reconciliation**. The preview
+walks the whole unfinished backlog, independent of the history page and its
+filters. Review the reasons and target nodes, then choose **Apply N repairs**.
+Obsolete requests are replaced with current work or joined to an existing
+current request. Completed indexes stay available; attempts remain historical
+records under the usual retention policy.
+
+The saved `foreground_preempted` reason is displayed as **Analysis deferred**.
+It means the last attempt yielded for media capacity or paused analysis. It
+does not say a node is playing anything now. A current request may legitimately
+keep waiting; reconciliation only repairs obsolete request identities.
+
+Leave **Move requests whose target cannot report its worker version…** unchecked
+for an offline node you intend to restore. Enable it when you intend this node
+to take over and the source is accessible here. Old server versions cannot
+report their engine identity, so updating a reachable peer can resolve an
+unknown target without moving its work. A forced rebuild already using the
+current engine needs its original node restored, or cancellation followed by a
+new rebuild; the preview calls this out instead of replacing its active slot.
+
+**How to read the result:** `reconciled` means current work was secured before
+the old request was retired. `changed or already handled` means the preview no
+longer applied, a worker claimed it, or live playback/another request prevented
+replacement. Run a fresh preview after an interruption or to inspect what
+remains. Running work and worker retry schedules continue normally. This action
+does not reopen terminal failures; use the separate action below for those.
+
 When the verdict turns green again after an outage, the work that failed during
 it is still terminal. Nothing reopens it on its own: a `failed` row is a durable
 statement that the queue tried and stopped, and the queue is right not to
@@ -5503,6 +5542,8 @@ the loading overlay a few seconds longer, then playback).
 | Web HLS says the playlist could not be loaded | No manifest parsed inside the attachment's absolute startup deadline | In browser logs, join `hls_manifest_dispatch`, `hls_retry`, and `hls_fatal` by playback/session and attachment. The dispatch ordinal is the actual-send count; elapsed and remaining milliseconds show whether the 16-send or time ceiling won |
 | Web HLS says video data did not arrive | The manifest parsed, but no fragment completed before startup expired | Read `hls_fatal` and server segment/publication lines. Do not diagnose this by fetching the playlist again; the player already proved that phase completed |
 | Web HLS says playback did not start | Manifest and media arrived, but neither an advancing audio clock nor the required clock-plus-frame evidence appeared | Check browser decoder/media errors and presentation telemetry. This generic exhaustion is deliberately not `decoder_failed` without decoder evidence |
+| Native web HLS remains preparing | Current master or selected child is not ready under the fixed startup allowance; this is not decoder proof | Join `native_hls_readiness` and `hls_startup_presenting` by the existing playback/session context. Do not count Safari’s opaque sends as application dispatches. The master uses the playlist preparation bound and keeps final response admission within its separate five-second phase; no outer deadline is renewed |
+| Native startup says no compatible encode route is available | Ready media was rejected after the one same-session reload, but the current selected-track catalog contains no decoder-compatible encode candidate | No rescue create is sent and no decoder limit is learned. Inspect the current candidate/source/track evidence; retry cannot invent an unavailable route |
 | Master playlist returns `hls_init_invalid` or `hls_init_unsupported` | The exact published init contradicts the session's codec claim, is incomplete/malformed, or uses a valid layout plurx cannot describe | Treat the session as terminal. Inspect the producer/muxer and init publication; repeated client polling cannot change immutable invalid bytes |
 | Master playlist returns `init_inspection_unavailable` | Storage or inspection capacity prevented a trustworthy bounded read | Retry within the client startup allowance, then inspect storage and node-capacity logs. Unlike an invalid init, this response does not convict the media |
 | A transcode start returns HTTP 503 with `transcode capacity is temporarily unavailable` | The five-second foreground admission window expired before configured **live** hardware/software capacity became available, or the class cannot run in software and every hardware slot is held | Retry after the named work releases. Background ownership no longer produces this: a live start that waits out the window with only background work in the way is admitted over it (since 2026-09-28, [LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA](streaming/LIVE-TV-SLOTS-BUSY-OVER-BACKGROUND-RCA.md)), so if the sentence says background encoding did not yield the start was speculative, not a viewer's |
@@ -5531,6 +5572,19 @@ the loading overlay a few seconds longer, then playback).
 | A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
 
+**Reading the tone-map speed ratio.** The ratio compares elapsed time for the
+whole short HDR10 probe against the CPU tone-map chain on this node, including
+decode, frame transfers, encode and process startup. It is not the speed of
+the tone-map filter alone or a promise that another GPU's result will match.
+A candidate must produce valid BT.709 output, pass the picture comparison,
+and exceed the reference throughput by 20%.
+
+With a VA-API encoder the probe tries `tonemap_vaapi`, then
+`libplacebo_vaapi` (VA-API decode → Vulkan tone-map → VA-API encode with
+hardware frame mapping), then the existing `libplacebo` path with CPU frame
+transfers, then OpenCL. Unsupported mapping, incorrect output or insufficient
+speed declines only that candidate. Subtitle burns still download the mapped
+SDR frames for composition and upload them to the encoder afterward.
 
 ### Library channel search and classification
 

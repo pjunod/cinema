@@ -353,7 +353,7 @@ function preparedHlsAttach(p,state,spare){
   const tgt=bufferTargets(p&&p.bufSegSecs);
   const voluntary=!!(p.directedChange&&p.directedChange.autoMove&&p.directedChange.autoMove.retainIncumbent);
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:voluntary?Math.min(12,tgt.fwd):tgt.fwd,
     ...(voluntary?{maxMaxBufferLength:12}:{}),
     backBufferLength:voluntary?0:tgt.back,

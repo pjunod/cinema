@@ -24,6 +24,8 @@ pub struct StartResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivered_audio: Option<plurx_core::playback::audio::AudioDelivery>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quality_catalog_status: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_aware_auto_protocol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quality_candidate_id: Option<plurx_core::playback::candidate::CandidateId>,

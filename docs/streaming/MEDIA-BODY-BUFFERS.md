@@ -4,7 +4,8 @@
 Decision 1 taken on Paul's behalf and his to overturn: the shared read is
 128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
 HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
-M2 implementation built 2026-09-30; controlled acceptance pending ·
+M2 implemented on the architecture effort 2026-09-30 and on main in PR #766;
+combined-source integration and controlled runtime acceptance pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
@@ -245,7 +246,7 @@ The 2026-09-30 contract replaces the original one-large-chunk/one-batch-ack
 recipe, which contradicted Decision 5. It does not select an implemented
 data structure or claim an unmeasured throughput or socket-write reduction.
 
-**Implementation choice, 2026-09-30:** one resident storage backing supplies
+**Architecture-effort implementation, 2026-09-30:** one resident storage backing supplies
 up to 32 consecutive proof frames. Gathering stops at one 128 KiB backing,
 including a short read; that is a smaller cap within the 1 MiB maximum,
 not a fill target. This keeps each `reader.next()` elapsed sample separate
@@ -321,6 +322,40 @@ force coalescing. This contract keeps ready body frames, not a new transport
 wrapper. Multiple body polls may precede a socket flush: neither the current
 ack nor M2 proves TCP delivery, client receipt or presentation. A strict
 4 KiB wire-level disconnect bound would need a separate explicit decision.
+**Published main implementation, PR #766:** the video-quality batch
+reconciles M2 with Decision 5: each storage read
+(up to 128 KiB) crosses the existing capacity-one channel once. The body
+retains that batch and emits at most 4 KiB per poll, updating one watch channel
+with the cumulative number of bytes actually taken. The producer accounts
+only the delta between observed counts; multiple consumer polls can coalesce
+into one producer wakeup without crediting any unpolled bytes.
+
+This replaces 32 per-piece acknowledgement channels with one per full storage
+read and removes the mandatory task round trip between adjacent pieces. It does not claim fewer socket writes or packets:
+the public body still yields 4 KiB frames. No new buffering threshold, timer,
+watchdog, queue capacity or speculative read is introduced.
+
+Both lifetime and producer-failure fences run before every body piece,
+including pieces retained across polls. The producer continues to own the
+file, authorization, completion permit and no-progress deadline. A dropped
+body leaves its final cumulative count observable before the acknowledgement
+channel closes, so the exact accepted prefix is counted. Only the advertised
+full length settles completion. Storage latency is reported once per read,
+after the first acknowledged piece, using the original read length and time.
+
+Earlier text proposing a 1 MiB delivery acknowledgement is superseded by this
+protocol. Increasing the delivery-proof unit remains inadmissible. Existing
+partial-read, expiry, cancellation and completion regressions remain; added
+cases exercise draining without producer round trips, coalesced final counts,
+partial drop and failure while a batch is pending. Runtime/performance checks
+follow the final review under the programme's user-approved batch workflow.
+
+These are two implementation records, not two pumps to install together.
+The combined source must have one body/pump owner preserving the accepted
+prefix, actual acceptance times, independent deadlines, retained terminal
+classification and completion/permit fences above. Its final representation
+must keep the additional draining/drop/failure assertions below; neither
+implementation record qualifies an unresolved combined tree.
 
 ## 4. Guardrails (non-goals)
 
@@ -648,7 +683,13 @@ The implementation tests use
 run in `make unit` without files. Keep §5.1's existing small-object proof
 tests and fixtures unchanged; passing larger fixtures is not acceptance.
 
-| Test | Asserts |
+PR #766 adds the cumulative-prefix draining/drop/failure regressions below.
+The earlier 1 MiB acknowledgement proposal is retired, not the effort's
+already implemented ownership/deadline regressions. A combined source must
+retain both sets of behavioral assertions using its single body owner.
+Deployed telemetry remains a separate acceptance obligation.
+
+| Regression | Contract |
 |---|---|
 | `a_batch_counts_only_its_accepted_prefix` | each body poll yields at most 4 KiB; each accepted piece is counted once, never a resident/unpolled tail; retain each storage read's real size/time and note it once after its first accepted piece |
 | `the_final_batch_completes_exactly_once` | a 3 MiB body under the 1 MiB resident-payload cap still yields 4 KiB frames; completion runs once only after the exact final acceptance, remains owned after receiver drop, and retains authorization fences |
@@ -656,9 +697,13 @@ tests and fixtures unchanged; passing larger fixtures is not acceptance.
 | `a_dropped_receiver_ends_the_pump_without_a_failure` | drop mid-payload: reconcile its accepted prefix once, discard unaccepted tail, return without terminal failure and release pump ownership/permit unless exact EOF already transferred completion; no late frame after a cancellation/terminal fence, and a partial/Pending socket write is not another acceptance |
 | `the_downstream_deadline_still_fires_across_a_batch` | after the first piece the body stops polling: `downstream_no_progress` at 30 s (paused time), regardless of queued data; absolute 300 s lifetime and per-frame deadline/terminal fences still hold across resident pieces |
 | `a_batch_never_waits_for_more_bytes_than_the_reader_has` | reader Pending after 100 KiB: expose that prefix as consecutive at-most-4 KiB frames, not one acked batch or bytes held for a timer/cap; body Pending only when no next resident frame is ready, with bounded data and ack bookkeeping |
+| `storage_batch_drains_without_a_producer_round_trip_per_proof_unit` | One queued read drains in 4 KiB polls without producer participation, with an exact cumulative final count. |
+| `storage_batch_drop_retains_only_the_polled_prefix` | Dropping a partially consumed batch credits only the accepted prefix and closes producer ownership. |
+| `terminal_failure_discards_the_unpolled_part_of_a_storage_batch` | A producer failure fences already-buffered bytes before the next acknowledgement. |
+| `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` | Existing HTTP proof granularity remains 4 KiB. |
 
-Acceptance: those six plus the M1 tests green; the §5.1 protocol re-run on
-lab4 with HLS p99 not worse than M1's.
+Existing VOD/rolling EOF, timeout, cancellation and completion tests remain the
+end-to-end ownership controls. No whole-read acknowledgement is introduced.
 
 ## 6. Verification and rollout
 
@@ -671,9 +716,9 @@ lab4 with HLS p99 not worse than M1's.
   `segment_delivery_counts_reads_and_names_incomplete_storage`, the three
   proof-granularity tests tabled in §5.1, and, since Decision 1,
   `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` and
-  `accepted_http_connections_have_nagle_disabled`. Run the six M2 tests by name when
-  implementing that milestone. **2026-09-30 effort amendment:** run these
-  six and the retained M1 proof regressions as focused development evidence;
+  `accepted_http_connections_have_nagle_disabled`. Preserve the M2 behavioral
+  assertions tabled above. **2026-09-30 effort amendment:** the six effort M2
+  tests and retained M1 proof regressions are focused development evidence;
   defer the full Rust suites to the final effort promotion qualification.
 - Lane: `make unit` before promoting the one plan PR. The implementation
   session did not run it while P-01 was repairing that lane; this is pending

@@ -210,6 +210,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                                 Session.displayAwareAuto = recovered.info.playback_display_aware_auto
                                 Session.autoAbr = recovered.info.playback_auto_abr
                                 Session.displayAwareAutoProtocol = recovered.info.display_aware_auto_protocol
+                                Session.decoderCompactionContract = recovered.info.decoder_compaction_contract
                                 settings.saveServerIdentity(
                                     recovered.origin,
                                     recovered.info.instance_id,
@@ -488,6 +489,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = false
         Session.autoAbr = false
         Session.displayAwareAutoProtocol = null
+        Session.decoderCompactionContract = null
         currentUser = null
         currentUserId = null
         serverInstanceId = null
@@ -747,12 +749,17 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // ---- Suspend loaders used by individual screens --------------------------
 
     /**
-     * Walk a library's pages, handing each one over as it arrives.
+     * Walk every page of one library in the server's order, handing each page
+     * over as it arrives.
      *
-     * The grid used to wait for every page of a thousand-item library behind a
-     * spinner; it now paints the first page after one round trip and fills in
-     * behind. Sorting is the client's job (`sortMerged`), so the server sort is
-     * fixed and a sort change never re-fetches.
+     * No screen calls this any more. The library grid pages on demand through
+     * [LibraryPager] (built by [libraryPager]): it sends the grid's own sort to
+     * the server, merges the server-sorted cursors by the DTO's `sort_title`,
+     * and a sort change builds a new pager that re-fetches. `sortMerged` no
+     * longer exists. The whole-walk path for a server without `sort_title` is
+     * `LibraryPager.loadLegacyWholeCollection`, not this function.
+     * NATIVE-LIBRARY-PAGING §6 deletes that legacy walk one release after the
+     * 5.1 server; this function should go with it.
      */
     suspend fun libraryPages(id: Long, sort: String = "title", onPage: (List<Item>) -> Unit) {
         var offset = 0
@@ -962,6 +969,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = info.playback_display_aware_auto
         Session.autoAbr = info.playback_auto_abr
         Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+        Session.decoderCompactionContract = info.decoder_compaction_contract
         settings.saveOrigin(normalized, info.instance_id)
         _phase.value = Phase.NeedLogin
     }
@@ -1012,6 +1020,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.displayAwareAuto = info.playback_display_aware_auto
         Session.autoAbr = info.playback_auto_abr
         Session.displayAwareAutoProtocol = info.display_aware_auto_protocol
+        Session.decoderCompactionContract = info.decoder_compaction_contract
         settings.saveServerIdentity(origin, info.instance_id)
         refreshClusterIngress()
     }

@@ -433,6 +433,8 @@ function developerPanel(settings,readiness){
       ${destinations}
       <div class="setsection" id="enable-live-tv"><h2>Enable Live TV</h2><p>Cluster use of the network tuner, with advisory prerequisites.</p></div>${liveTvEnableCard(settings)}
       <div class="setsection"><h2>Cluster work</h2><p>Remote media placement and replica catalogue reads.</p></div>${clusterPlacementCard(settings)}${boundedCatalogueCard(settings,readiness)}${clusterClockCard(readiness)}
+      <div class="setsection" id="enable-content-encoding"><h2>Content-aware encoding</h2><p>Measured choices for cached and offline video, with baseline fallback.</p></div>${contentEncodingCard(settings)}
+      <div class="setsection" id="enable-vod-reorder"><h2>VOD compression</h2><p>Software x264 reordered frames.</p></div>${vodReorderCard(settings)}
       <div class="setsection" id="enable-hevc-copy"><h2>Enable HEVC copy</h2><p>The saved choice controls playback. Requirements below are advisory and never prevent enabling.</p></div>${hevcCopyCard(settings)}
       <div class="setsection"><h2>Live TV video</h2><p>Output choices whose device and node capacity evidence remains advisory.</p></div>${liveTvDeinterlaceCard(settings)}
       <div class="setsection"><h2>Recovery</h2><p>Portable backup scheduling and visible readiness. Saving is never gated by these observations.</p></div>${clusterBackupCard(settings,readiness)}
@@ -573,4 +575,43 @@ async function saveHevcCopy(btn){
     const card=document.getElementById("hevc-copy-card"); if(card)card.outerHTML=hevcCopyCard(saved);
     toast("HEVC copy preference saved");
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
+}
+
+function contentEncodingCard(settings){
+  const ready=settings.content_encoding_scorer_ready;
+  const applicability=settings.content_encoding_applicability||{};
+  const selected=String(applicability.selected_encoder||"not reported");
+  const override=applicability.explicit_rate_control;
+  return setCard(`${cardHead("Measured per-title encoding","Idle producers compare three short SDR samples before choosing a quality recipe.","")}
+    ${togRow("content-encoding","Enable content-aware encoding","Applies measured choices to cached outputs and subsequent offline requests. Explicit rate-control overrides are preserved.",!!settings.content_aware_encoding)}
+    ${devStaticReq("VMAF scorer on this node",ready===true?"met":ready===false?"not available":"not checked yet","The container includes a separate static libvmaf scorer with the vmaf_v0.6.1 model. Native installs use their configured FFmpeg. The first background analysis checks automatically; missing scoring retains the normal recipe.",ready===false?"warn":"")}
+    ${devStaticReq("Current encoder",esc(selected),"Only software x264 jobs use these measured choices. Hardware jobs retain their existing recipe.",selected==="software"?"":"warn")}
+    ${devStaticReq("Operator rate control",override===true?"explicit override retained":override===false?"automatic policy":"not reported","An explicit bitrate or quality setting takes precedence. Content-aware encoding never changes your saved rate-control choice.",override===true?"warn":"")}
+    ${devStaticReq("Software quality mode",applicability.software_quality_supported===true?"available":applicability.software_quality_supported===false?"not available":"not reported","Uses the node’s already-published encoder capability result. Saving this preference never runs a new probe.",applicability.software_quality_supported===false?"warn":"")}
+    ${devStaticReq("Current scope","SDR software x264","Tagged BT.709, progressive square-pixel video without burned subtitles. Three two-second samples, the producer’s admitted thread count (at most six), and a three-minute budget. Every sample must preserve mean and lower-tail VMAF, with at least 10% byte savings.","")}
+    <div class="hint">The first offline package keeps its accepted recipe and prepares evidence for later requests. Sampling is not a whole-title quality guarantee. These observations never prevent saving the switch.</div>
+    ${devGraduation("representative real-title quality and cost evidence is recorded across supported sources and deployment FFmpeg builds.","the preference moves to Settings → Playback if a permanent switch remains useful.")}
+    <div class="err" id="content-encoding-error" role="alert"></div>${setCardFoot("saveContentEncoding")}`,{id:"content-encoding-card"});
+}
+async function saveContentEncoding(btn){
+  const err=document.getElementById("content-encoding-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{content_aware_encoding:(/** @type {HTMLInputElement} */ (document.getElementById("content-encoding"))).checked}}));
+    const card=document.getElementById("content-encoding-card");if(card)card.outerHTML=contentEncodingCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+}
+function vodReorderCard(settings){
+  return setCard(`${cardHead("Reordered VOD frames","Allow two B-frames in software x264 VOD encodes.","")}
+    ${togRow("vod-reorder","Enable reordered VOD frames","Saves the requested recipe directly. Other encoders retain their existing frame order.",Number(settings.vod_reorder_frames)===2)}
+    ${devStaticReq("Supported encoder","software x264","Hardware encoder qualification is separate. Reordered frames require both decode and presentation timestamps in the VOD fragments.","")}
+    ${devStaticReq("Physical-client qualification","pending","Browser and native-client presentation continuity and measured compression receipts remain to be recorded.","warn")}
+    ${devGraduation("the software x264 compression and client presentation matrix is recorded.","the switch is removed if reordered frames become the normal VOD recipe, otherwise it moves to Playback.")}
+    <div class="err" id="vod-reorder-error" role="alert"></div>${setCardFoot("saveVodReorder")}`,{id:"vod-reorder-card"});
+}
+async function saveVodReorder(btn){
+  const err=document.getElementById("vod-reorder-error");if(err)err.textContent="";btn.disabled=true;
+  try{
+    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
+    const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
+  }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
 }

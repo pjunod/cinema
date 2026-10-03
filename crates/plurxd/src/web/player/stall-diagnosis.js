@@ -858,8 +858,9 @@ async function stallDiagnose(){
   const hlsStartup=hlsStartupIncomplete(p);
   if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
   if(hlsStartup&&p.hlsStartup.state==='paused') return;
-  const generation=p._seekToken||0, action=p.controlIntentGeneration||0;
+  const generation=p._seekToken||0, action=p.controlIntentGeneration||0, attachment=p.mediaAttachment;
   const current=()=>playbackOwnsAttachedMedia(p)&&(hlsStartupIncomplete(p)||!p.started)
+    &&p.mediaAttachment===attachment
     &&(p._seekToken||0)===generation
     &&(p.controlIntentGeneration||0)===action;
   const from=(p.stallFrom!=null)?p.stallFrom:0;
@@ -868,7 +869,7 @@ async function stallDiagnose(){
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
   const url=p.probeUrl;
   const explained=currentStreamFailureOverlay();
-  const terminalFailure=explained&&!explained.retryable;
+  const terminalFailure=!!explained;
   let verdict=terminalFailure?explained.title:"Playback hasn't started.";
   let detail=terminalFailure?explained.detail:"Open Settings → Logs and read the last plurxd::stream / transcode line.";
   if(hlsStartup&&!terminalFailure){
@@ -876,13 +877,17 @@ async function stallDiagnose(){
     verdict=diagnosis.title; detail=diagnosis.detail;
   }else if(url&&!terminalFailure){
     try{
-      const {status,segState}=await probePlaybackSource(url,hdrs,{inspectMedia:p.method==='transcode'});
+      const ordinal=p._streamProbeOrdinal=(p._streamProbeOrdinal||0)+1;
+      const {status,segState,body,failureStatus}=await probePlaybackSource(url,hdrs,{inspectMedia:p.method==='transcode'});
       if(!current()) return;
+      if(body!=null) noteStreamFailure(failureStatus,body,
+        {attachment,resource:'playback_probe',request_ordinal:ordinal});
       const serverErr = status>=500 || (typeof segState==='number'&&segState>=500);
-      const reached   = status>=200 && status<400 && segState!=='blocked' && !(typeof segState==='number'&&segState>=400);
-      if(serverErr){ verdict="The server couldn't build the stream."; detail="ffmpeg failed on this file — open Settings → Logs and read the last remux/transcode line, it names the real cause."; }
-      else if(reached){ verdict="The stream reaches the browser but won't play."; detail="Usually a codec this browser can't decode, or an extension interfering. Try a private window with extensions off; if it still fails, the ffmpeg line in Settings → Logs will say why."; }
-      else { verdict="The stream request looks blocked."; detail="A privacy/ad-blocker extension is the usual cause — it eats /stream.mp4 and /hls/*.ts requests. Open in a private window with extensions disabled, or allowlist this site, then play again."; }
+      const reached = status>=200 && status<400 && !(typeof segState==='number'&&segState>=400);
+      const refused = typeof segState==='number'&&segState>=400?segState:status;
+      if(serverErr){ verdict="The server could not provide the stream."; detail=`The playback request returned HTTP ${refused}. Retry, or inspect Settings → Logs for the server's cause.`; }
+      else if(reached){ verdict="The stream reaches the browser but playback did not start."; detail="No presentation progress was observed. Retry, or inspect Settings → Logs; the decoder cause is not known."; }
+      else { verdict="The stream request was refused."; detail=`The playback request returned HTTP ${refused}. Your place is saved; retry, or inspect Settings → Logs.`; }
     }catch(e){
       if(!current()) return;
       verdict=e.name==='TimeoutError'?"The stream probe timed out.":"The stream request failed.";
@@ -890,11 +895,15 @@ async function stallDiagnose(){
     }
   }
   if(!current()) return;
+  // Authority may have arrived during the probe. Its same-attachment sentence
+  // wins over status-only guesses and remains armed for the reopen owner.
+  const authoritative=currentStreamFailureOverlay();
+  if(authoritative){verdict=authoritative.title;detail=authoritative.detail;}
   if(hlsStartup){
     const episode=p.hlsStartup;
     episode.state='exhausted';
     clearTimeout(episode.retry.timer); episode.retry.timer=null;
-    abortHlsStartupLoaders(episode);
+    abortHlsStartupLoaders(episode,true);
     try{episode.hls.stopLoad()}catch(e){}
   }
   const episode=hlsStartup?p.hlsStartup:null;
@@ -941,18 +950,39 @@ async function probePlaybackSource(url,headers,evidence){
     return await Promise.race([deadline,(async()=>{
       const res=await fetch(url,{headers,signal:ctl.signal});
       const status=res.status;
-      let segState=null;
-      if(evidence&&evidence.inspectMedia){
+      let segState=null, body=null, failureStatus=status;
+      // Error responses are small typed refusals. Read at most the parser's
+      // bound and cancel the body under this probe's existing deadline.
+      async function refusalBody(response){
+        if(!response.body||!response.body.getReader) return null;
+        const reader=response.body.getReader(), chunks=[];
+        let bytes=0;
+        try{
+          while(true){
+            const part=await reader.read();
+            if(part.done) break;
+            bytes+=part.value.byteLength;
+            if(bytes>PlaybackPolicy.STREAM_FAILURE_BODY_MAX_CHARS) return null;
+            chunks.push(part.value);
+          }
+          const data=new Uint8Array(bytes);let offset=0;
+          for(const chunk of chunks){data.set(chunk,offset);offset+=chunk.byteLength;}
+          return new TextDecoder().decode(data);
+        }finally{await reader.cancel().catch(()=>{});}
+      }
+      if(status>=400) body=await refusalBody(res);
+      else if(evidence&&evidence.inspectMedia){
         const txt=await res.text();
         const seg=(txt.split('\n').find(l=>l&&!l.startsWith('#')&&/\.(?:ts|m4s)(\?|$)/.test(l))||"").trim();
         if(seg){
           const segUrl=(seg[0]==='/'||/^https?:/.test(seg))?seg:url.replace(/[^/]*$/,seg);
           const response=await fetch(segUrl,{headers,signal:ctl.signal});
           segState=response.status;
+          if(segState>=400){body=await refusalBody(response);failureStatus=segState;}
           if(response.body) response.body.cancel().catch(()=>{});
         }
       }
-      return {status,segState};
+      return {status,segState,body,failureStatus};
     })()]);
   }finally{clearTimeout(timer);ctl.abort();}
 }

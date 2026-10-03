@@ -817,6 +817,31 @@ pub(super) async fn render_caps(state: &AppState) -> playback::RenderCaps {
     }
 }
 
+pub(super) fn render_caps_from_snapshot(
+    state: &AppState,
+    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+) -> playback::RenderCaps {
+    playback::RenderCaps {
+        dv_strippable: state.system.dovi_rpu,
+        dolby_vision_p5_render: state.system.dovi_passthrough,
+        hdr10_passthrough: state.system.hdr10_passthrough,
+        hdr10_max_height: state.transcode.hdr10_ceiling_with_preference(
+            snapshot
+                .settings
+                .get(plurx_core::store::keys::HWACCEL)
+                .map(String::as_str)
+                .unwrap_or_default(),
+        ),
+        dolby_vision_convert: plurx_core::store::stored_switch(
+            snapshot
+                .settings
+                .get(plurx_core::store::keys::DV_CONVERT)
+                .map(String::as_str),
+            true,
+        ),
+    }
+}
+
 /// Narrow one request's producer facts without changing the persisted switch.
 ///
 /// Profile 7 conversion exists only in the copy-HLS producer. A decision made
@@ -2094,6 +2119,26 @@ pub struct DecisionBody {
 /// Validate the additive packaging claim before any caller can fall through
 /// to a legacy trust path or allocate playback work.
 pub(crate) fn validate_device_caps(caps: &playback::DeviceCaps) -> Result<(), ApiError> {
+    if let Some(contract) = caps.decoder_compaction.as_deref() {
+        if contract != playback::DECODER_COMPACTION_CONTRACT
+            || caps.v != playback::DeviceCaps::VERSION
+        {
+            return Err(ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                "invalid_capabilities",
+                "unsupported decoder compaction contract",
+            ));
+        }
+        if caps.video.len() > playback::MAX_CLIENT_DECODER_ENTRIES {
+            return Err(ApiError::typed_detail(
+                StatusCode::BAD_REQUEST,
+                "invalid_capabilities",
+                "compacted decoder evidence exceeds its negotiated bound",
+                serde_json::json!({"clause": "video_entries", "observed": caps.video.len(), "limit": playback::MAX_CLIENT_DECODER_ENTRIES}),
+            ));
+        }
+    }
+
     if let Err(message) = caps.validate_audio_sinks() {
         return Err(ApiError::typed(
             StatusCode::BAD_REQUEST,
@@ -2477,9 +2522,52 @@ pub async fn decision(
                 .media_pool
                 .quality_candidates(&state, request.clone())
                 .await;
-            measured_candidate_outputs =
-                super::hls::link_receipts::measured_outputs(&state, &file, &request, &accepted)
-                    .await;
+            // Costs are advisory, but their source/settings must be the exact
+            // accepted local row. Acquisition and projection share one deadline.
+            measured_candidate_outputs = tokio::time::timeout_at(
+                crate::media_pool::create_stage_deadline(std::time::Duration::from_millis(100)),
+                async {
+                    let planning = state
+                        .store
+                        .playback_planning_snapshot(
+                            file.id,
+                            &crate::transcode::QUALITY_PLANNING_KEYS,
+                        )
+                        .await
+                        .ok()??;
+                    let binding = crate::media_pool::PlanningBinding::from_snapshot(&planning);
+                    if planning.file.id != file.id
+                        || planning.file.size != file.size
+                        || planning.file.mtime != file.mtime
+                        || !accepted.iter().any(|entry| {
+                            entry.node_id == state.node_id
+                                && entry.binding.as_ref() == Some(&binding)
+                        })
+                    {
+                        return None;
+                    }
+                    let local: Vec<_> = accepted
+                        .iter()
+                        .filter(|entry| {
+                            entry.node_id == state.node_id
+                                && entry.binding.as_ref() == Some(&binding)
+                        })
+                        .cloned()
+                        .collect();
+                    super::hls::link_receipts::measured_outputs(
+                        &state,
+                        &file,
+                        &request,
+                        &local,
+                        Some(&planning),
+                    )
+                    .await
+                },
+            )
+            .await
+            .ok()
+            .flatten();
+
             Some(
                 accepted
                     .into_iter()
@@ -4222,6 +4310,22 @@ mod tests {
             profile.presents["hevc"].contains(&playback::Transfer::Unknown),
             "the unknown curve is carried and grades nothing"
         );
+    }
+
+    #[test]
+    fn decoder_bound_is_negotiated_and_legacy_documents_remain_admissible() {
+        for count in [63, 64, 65] {
+            let mut caps: playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+                "v": 2, "video": (0..count).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
+            })).expect("decoder document");
+            assert!(validate_device_caps(&caps).is_ok(), "legacy count {count}");
+            caps.decoder_compaction = Some(playback::DECODER_COMPACTION_CONTRACT.to_owned());
+            assert_eq!(validate_device_caps(&caps).is_ok(), count <= 64);
+            assert_eq!(
+                crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).is_ok(),
+                count <= 64
+            );
+        }
     }
 
     #[test]

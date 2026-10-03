@@ -1,0 +1,7 @@
+{
+  "vaapi_host": "m6",
+  "container_removed": true,
+  "remote_scratch_removed": true,
+  "production_mutations": false,
+  "scorer_cleanup": "scorer/qualification.json"
+}

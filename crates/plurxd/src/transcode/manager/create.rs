@@ -364,7 +364,7 @@ impl TranscodeManager {
                         None => {
                             return Err(replacement_wait_error(
                                 "it has not finished releasing this player",
-                            ))
+                            ));
                         }
                     },
                 };
@@ -493,6 +493,37 @@ impl TranscodeManager {
         Ok(Some((successor, permit)))
     }
 
+    pub(crate) async fn validate_candidate_planning_binding(
+        &self,
+        request: &SessionRequest,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), String> {
+        let Some(binding) = request
+            .candidate_context
+            .as_ref()
+            .and_then(|context| context.planning_binding.as_ref())
+        else {
+            return Ok(());
+        };
+        let deadline = deadline
+            .unwrap_or_else(|| crate::media_pool::create_stage_deadline(Duration::from_secs(2)));
+        let snapshot = tokio::time::timeout_at(
+            deadline,
+            self.store
+                .playback_planning_snapshot(request.file_id, &super::QUALITY_PLANNING_KEYS),
+        )
+        .await
+        .map_err(|_| catalog_input_error("planning revalidation deadline"))?
+        .map_err(|error| catalog_input_error(error.to_string()))?
+        .ok_or_else(|| catalog_input_error("candidate source missing"))?;
+        if *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot) {
+            return Err(catalog_input_error(
+                "candidate source or settings changed before admission",
+            ));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn create_session_inner(
         &self,
@@ -514,7 +545,7 @@ impl TranscodeManager {
             _ => {
                 return Err(invalid_reopen_error(
                     "previous_session_id and reopen_reason must be sent together",
-                ))
+                ));
             }
         }
         if req.reopen_reason.is_some() && req.request_id.is_none() {
@@ -557,6 +588,9 @@ impl TranscodeManager {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
+
+        self.validate_candidate_planning_binding(req, replacement_deadline)
+            .await?;
 
         let startup_create_at = Instant::now();
         // Immutable VOD remains first. During the index backfill, a typed
@@ -711,7 +745,7 @@ impl TranscodeManager {
         takeover: Option<SessionTakeoverStart>,
         priority: Priority,
     ) -> Result<StartInfo, String> {
-        match req.kind {
+        let started = match req.kind {
             SessionKind::Transcode { height } => {
                 self.start_with_audio_offset(
                     req.file_id,
@@ -728,7 +762,7 @@ impl TranscodeManager {
                     &req.playback_id,
                     req.automatic,
                     req.hdr10,
-                    req.candidate_context.as_ref(),
+                    req.candidate_context.as_deref(),
                     priority,
                     req.audio_claim.as_ref(),
                     req.audio_delivery.as_ref(),
@@ -761,7 +795,16 @@ impl TranscodeManager {
                 )
                 .await
             }
+        }?;
+        let session = self.sessions.lock().await.get(&started.session_id).cloned();
+        if let Some(session) = session {
+            session
+                .publication
+                .lock()
+                .await
+                .bind_startup_transport(req.transport.as_deref());
         }
+        Ok(started)
     }
 
     /// Whether the subtitle-source store holds this track as a real track
@@ -779,6 +822,84 @@ impl TranscodeManager {
             crate::subtitle_source::Live::Path(&file.path),
         )
         .await
+    }
+
+    /// Retain the accepted inputs or acquire one real bounded atomic snapshot.
+    /// Revalidation can reject it, but cannot silently replace its choice.
+    pub(super) async fn vod_preparation_snapshot(
+        &self,
+        req: &SessionRequest,
+        file: &plurx_core::domain::MediaFile,
+    ) -> Result<Arc<plurx_core::store::PlaybackPlanningSnapshot>, String> {
+        let context = req.candidate_context.as_ref();
+        if context.is_some_and(|context| context.planning_binding.is_none()) {
+            return Err(catalog_input_error(
+                "selected candidate planning binding missing",
+            ));
+        }
+        let snapshot = if let Some(snapshot) =
+            context.and_then(|context| context.planning_snapshot.as_ref())
+        {
+            if context.and_then(|context| context.planning_binding.as_ref())
+                != Some(&crate::media_pool::PlanningBinding::from_snapshot(snapshot))
+            {
+                return Err(catalog_input_error("accepted planning snapshot is unbound"));
+            }
+            Arc::clone(snapshot)
+        } else {
+            Arc::new(
+                tokio::time::timeout_at(
+                    crate::media_pool::create_stage_deadline(Duration::from_secs(2)),
+                    self.store
+                        .playback_planning_snapshot(req.file_id, &super::QUALITY_PLANNING_KEYS),
+                )
+                .await
+                .map_err(|_| catalog_input_error("VOD planning snapshot deadline"))?
+                .map_err(|error| catalog_input_error(error.to_string()))?
+                .ok_or_else(|| catalog_input_error("VOD planning source missing"))?,
+            )
+        };
+        if req.file_id != file.id
+            || snapshot.file.id != file.id
+            || snapshot.file.size != file.size
+            || snapshot.file.mtime != file.mtime
+            || !matches!((Self::plan_source_identity(file), Self::plan_source_identity(&snapshot.file)),
+                (Ok(expected), Ok(actual)) if expected == actual)
+        {
+            return Err(catalog_input_error("VOD planning source changed"));
+        }
+        if context
+            .and_then(|context| context.planning_binding.as_ref())
+            .is_some_and(|binding| {
+                *binding != crate::media_pool::PlanningBinding::from_snapshot(&snapshot)
+            })
+        {
+            return Err(catalog_input_error("VOD planning binding changed"));
+        }
+        Ok(snapshot)
+    }
+
+    /// The same equality seam checked before the frozen Encoding is built.
+    pub(super) fn validate_prepared_candidate_recipe(
+        &self,
+        plan: &ResolvedTranscode,
+        presentation: super::Presentation,
+        reorder_frames: bool,
+        context: &CandidateExecutionContext,
+    ) -> Result<[u8; 32], String> {
+        let actual = self
+            .candidate_recipe_digest(plan, presentation, reorder_frames)
+            .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
+        if actual != context.recipe_digest
+            || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
+                != context.candidate_id
+        {
+            return Err(vod_refusal_error(
+                "candidate_recipe_changed",
+                "the resolved source/route no longer matches the selected candidate",
+            ));
+        }
+        Ok(actual)
     }
 
     /// Freeze an executable encoded recipe before any rendition is named.
@@ -837,7 +958,7 @@ impl TranscodeManager {
                 return Err(vod_refusal_error(
                     "vod_invalid_height",
                     "the requested height must be positive",
-                ))
+                ));
             }
         }
         .max(2)
@@ -887,15 +1008,31 @@ impl TranscodeManager {
             .map_err(|error| {
                 start_infrastructure_error(format!("reading the stored source probe: {error}"))
             })?;
-        let held_probe =
-            crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
-                .await
-                .map_err(|error| {
-                    vod_refusal_error(
-                        "vod_source_rescan_required",
-                        format!("the held source could not be verified against its scan: {error}"),
-                    )
-                })?;
+        let held_plan_handle = source.handle.try_clone().map(Arc::new).map_err(|error| {
+            vod_refusal_error(
+                "vod_source_rescan_required",
+                format!("the held source could not be retained for verification: {error}"),
+            )
+        })?;
+        let collected = self.probe_vod_source_once(file, held_plan_handle).await?;
+        let (held_probe, held_decode_facts) = match collected {
+            Some(mut collected) => (std::mem::take(&mut collected.document), Some(collected)),
+            // Platforms without a sealed probe keep their existing source
+            // verification and stored-facts planning behavior.
+            None => (
+                crate::ffmpeg::held_source_probe_json(&source.handle, VOD_START_HELD_PROBE)
+                    .await
+                    .map_err(|error| {
+                        vod_refusal_error(
+                            "vod_source_rescan_required",
+                            format!(
+                                "the held source could not be verified against its scan: {error}"
+                            ),
+                        )
+                    })?,
+                None,
+            ),
+        };
         let comparison = probe
             .as_deref()
             .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
@@ -1011,10 +1148,10 @@ impl TranscodeManager {
             }
             None => (None, None),
         };
-        let software_threads = Workload::of(file, target_height)
-            .software_threads()
-            .min(self.software_budget().await)
-            .max(1) as u32;
+        let software_threads = crate::vodencode::frozen_software_threads(
+            &Workload::of(file, target_height),
+            self.software_budget().await,
+        );
         let mut options = self.live_lookup_options(
             self.rate_control_snapshot(),
             encoder,
@@ -1061,9 +1198,13 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
-            .await?;
+        let plan = if let Some(prepared) = held_decode_facts {
+            self.resolve_vod_prepared_source(file, &options, encoder, held_plan_handle, prepared)
+                .await?
+        } else {
+            self.resolve_vod_movie_plan(file, &options, encoder, held_plan_handle)
+                .await?
+        };
         if let Some(frame_rate) = plan
             .output_contract()
             .normalized_geometry()
@@ -1092,19 +1233,15 @@ impl TranscodeManager {
             .then(|| transcode::Rational::new(grid.numerator, grid.denominator))
             .flatten();
         let plan = plan.with_sdr_avc_qualification(&self.caps, cadence, options.force_idr);
+        let planning = self.vod_preparation_snapshot(req, file).await?;
+        let reorder_frames = Self::vod_reorder_from_snapshot(&planning);
         if let Some(context) = req.candidate_context.as_ref() {
-            let actual = self
-                .candidate_recipe_digest(&plan, req.presentation)
-                .map_err(|error| vod_refusal_error("candidate_recipe_unavailable", error))?;
-            if actual != context.recipe_digest
-                || plurx_core::playback::candidate::CandidateId::for_recipe_digest(actual)
-                    != context.candidate_id
-            {
-                return Err(vod_refusal_error(
-                    "candidate_recipe_changed",
-                    "the resolved source/route no longer matches the selected candidate",
-                ));
-            }
+            self.validate_prepared_candidate_recipe(
+                &plan,
+                req.presentation,
+                reorder_frames,
+                context,
+            )?;
         }
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
@@ -1143,6 +1280,7 @@ impl TranscodeManager {
             resources,
             options,
             grid,
+            reorder_frames,
             subtitle,
             subtitle_digest,
             ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
@@ -1251,7 +1389,11 @@ impl TranscodeManager {
             );
             let (actual, route) = if let Some(encoding) = &encoding {
                 (
-                    self.candidate_recipe_digest(&encoding.plan, req.presentation)?,
+                    self.candidate_recipe_digest(
+                        &encoding.plan,
+                        req.presentation,
+                        encoding.reorder_frames,
+                    )?,
                     CandidateRoute::Encode,
                 )
             } else if let SessionKind::Copy {

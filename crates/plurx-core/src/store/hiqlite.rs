@@ -159,13 +159,21 @@ const RECEIPT_PRESSURE_SCHEMA_VERSION: i64 = 64;
 const RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE: i64 = JOB_RETENTION_SCHEMA_VERSION;
 const VIEWER_ANALYSIS_SCHEMA_VERSION: i64 = 65;
 const VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE: i64 = RECEIPT_PRESSURE_SCHEMA_VERSION;
-const OFFLINE_AUDIO_SCHEMA_VERSION: i64 = 66;
-const OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
-const COPY_OUTPUT_SCHEMA_VERSION: i64 = 67;
+const ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION: i64 = 66;
+const ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE: i64 = VIEWER_ANALYSIS_SCHEMA_VERSION;
+const PREPARATION_INDEX_SCHEMA_VERSION: i64 = 67;
+const PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION;
+const DV_REQUEST_PROVENANCE_SCHEMA_VERSION: i64 = 68;
+const DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE: i64 = PREPARATION_INDEX_SCHEMA_VERSION;
+const PLAYBACK_INPUT_SCHEMA_VERSION: i64 = 69;
+const PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE: i64 = DV_REQUEST_PROVENANCE_SCHEMA_VERSION;
+const OFFLINE_AUDIO_SCHEMA_VERSION: i64 = 70;
+const OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE: i64 = PLAYBACK_INPUT_SCHEMA_VERSION;
+const COPY_OUTPUT_SCHEMA_VERSION: i64 = 71;
 const COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_AUDIO_SCHEMA_VERSION;
-const CANDIDATE_RECOVERY_SCHEMA_VERSION: i64 = 68;
+const CANDIDATE_RECOVERY_SCHEMA_VERSION: i64 = 72;
 const CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE: i64 = COPY_OUTPUT_SCHEMA_VERSION;
-const ENCODED_OUTPUT_SCHEMA_VERSION: i64 = 69;
+const ENCODED_OUTPUT_SCHEMA_VERSION: i64 = 73;
 const ENCODED_OUTPUT_SCHEMA_MIGRATION_SOURCE: i64 = CANDIDATE_RECOVERY_SCHEMA_VERSION;
 pub const AUTH_SCHEMA_VERSION: i64 = ENCODED_OUTPUT_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
@@ -1805,6 +1813,9 @@ impl HiqliteAuthStore {
         // installed here too: the store contract
         // `fresh_bootstrap_matches_the_migration_chain_from_a_frozen_v42_tree`
         // compares the two object for object and fails when they drift.
+        for result in timeout_store(client.batch(super::PLAYBACK_INPUT_SCHEMA)).await? {
+            result.map_err(database_error)?;
+        }
         super::hiqlite_catalog::install_schema(&client).await?;
         super::hiqlite_durable::install_schema(&client).await?;
         super::hiqlite_dv_conversion::install_schema(&client).await?;
@@ -1949,6 +1960,7 @@ impl HiqliteAuthStore {
         &self,
         admission: SchemaMigrationAdmission<'_>,
     ) -> Result<(), StoreError> {
+        self.bridge_private_lineage(admission).await?;
         loop {
             let sql = "SELECT schema_version, protocol_min, protocol_max \
                        FROM cluster_meta WHERE singleton = 1";
@@ -3377,6 +3389,57 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(vec![
+                        (super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION, now, ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(vec![
+                        (super::background_jobs::PREPARATION_INDEX_SCHEMA.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(PREPARATION_INDEX_SCHEMA_VERSION, now, PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    admit_schema_migration(admission)?;
+                    let attempt = self.client().txn(vec![
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN.to_owned(), params!()),
+                        ("DROP TRIGGER dv_queue_admission_settings_ai".to_owned(), params!()),
+                        (super::dv_conversion::DV_REQUEST_PROVENANCE_TRIGGER.to_owned(), params!()),
+                        ("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                            params!(DV_REQUEST_PROVENANCE_SCHEMA_VERSION, now, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE)),
+                    ]).await;
+                    self.settle_migration_attempt(
+                        DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE) => {
+                    Box::pin(self.migrate_playback_inputs(admission)).await?;
+                }
                 SchemaMigrationAction::MigrateFrom(OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE) => {
                     let now = self.now()?;
                     // Like the desired-selection/drain migrations, tolerate
@@ -3443,6 +3506,267 @@ impl HiqliteAuthStore {
                 }
             }
         }
+    }
+
+    // Isolate each new migration state machine from the large version dispatcher.
+    async fn bridge_private_lineage(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        self.bridge_private_lineage_inner(admission, false).await
+    }
+
+    async fn read_lineage_snapshot(&self) -> Result<LineageSnapshot, StoreError> {
+        use super::schema_lineage::{self, SchemaObject};
+        // Metadata and schema must come from one SQLite statement snapshot.
+        let sql = format!(
+            "SELECT schema_version,protocol_min,protocol_max,({}) AS fingerprint FROM cluster_meta WHERE singleton=1",
+            schema_lineage::FINGERPRINT_QUERY,
+        );
+        let mut rows = self
+            .client()
+            .query_consistent_map::<LineageReadRow, _>(sql, params!())
+            .await?;
+        if rows.len() != 1 {
+            return Err(StoreError::Migration(format!(
+                "expected one cluster lineage marker, found {}",
+                rows.len()
+            )));
+        }
+        let row = rows.remove(0);
+        let objects = serde_json::from_str::<Vec<[String; 3]>>(&row.fingerprint)
+            .map_err(|error| {
+                StoreError::Migration(format!("invalid lineage fingerprint: {error}"))
+            })?
+            .into_iter()
+            .map(|[kind, name, sql]| SchemaObject { kind, name, sql })
+            .collect();
+        Ok(LineageSnapshot {
+            compatibility: row.compatibility,
+            objects,
+            fingerprint: row.fingerprint,
+        })
+    }
+
+    async fn bridge_private_lineage_inner(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+        fail_before_stamp: bool,
+    ) -> Result<(), StoreError> {
+        use super::schema_lineage::{self, Backend};
+        let snapshot = self.read_lineage_snapshot().await?;
+        let rows = [snapshot.compatibility];
+        // Keep the existing protocol/range refusal before any bridge write.
+        schema_migration_action(&rows, ClusterCompatibility::CURRENT)?;
+        let marker = rows
+            .first()
+            .ok_or_else(|| StoreError::Migration("missing cluster lineage marker".to_owned()))?
+            .schema_version;
+        if marker < ANALYSIS_RESULT_LOOKUP_SCHEMA_VERSION {
+            return Ok(());
+        }
+        let objects = snapshot.objects;
+        let Some(plan) = schema_lineage::bridge_plan(Backend::Hiqlite, marker, &objects)? else {
+            return Ok(());
+        };
+        let before = snapshot.fingerprint;
+        let expected = schema_lineage::expected_fingerprint(Backend::Hiqlite, &objects, &plan)?;
+        let guard = format!("SELECT CASE WHEN (SELECT COUNT(*) FROM cluster_meta WHERE singleton=1 AND schema_version=$1 AND protocol_min=$2 AND protocol_max=$3)=1 AND ({})=$4 THEN 1 ELSE json('lineage marker/schema CAS mismatch') END", schema_lineage::FINGERPRINT_QUERY);
+        let post = format!("SELECT CASE WHEN ({})=$1 AND (SELECT COUNT(*) FROM pragma_foreign_key_check)=0 THEN 1 ELSE json('lineage post-schema/integrity mismatch') END", schema_lineage::FINGERPRINT_QUERY);
+        let mut statements = vec![(
+            guard,
+            params!(marker, rows[0].protocol_min, rows[0].protocol_max, before),
+        )];
+        statements.extend(plan.into_iter().map(|sql| (sql, params!())));
+        statements.push((post, params!(expected.clone())));
+        if fail_before_stamp {
+            statements.push((
+                "SELECT json('validation-only lineage rollback')".to_owned(),
+                params!(),
+            ));
+        }
+        statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(), params!(AUTH_SCHEMA_VERSION, self.now()?, marker)));
+        // Every query is a single prepared statement. The vendored writer
+        // executes sequentially within ONE transaction and rolls back on any
+        // preparation/execution failure, including either read-only CAS guard.
+        // There is no partially committed bridge or private-marker rewind.
+        admit_schema_migration(admission)?;
+        let attempt = self.client().txn(statements).await;
+        let failure = match attempt {
+            Ok(results) => results
+                .into_iter()
+                .collect::<Result<Vec<_>, _>>()
+                .err()
+                .map(database_error),
+            Err(error) => Some(error),
+        };
+        let Some(failure) = failure else {
+            return Ok(());
+        };
+        // A concurrently accepted identical bridge is success only when BOTH
+        // its final marker and exact schema are durable. Preserve the original
+        // transaction error for all other outcomes, including failed rereads.
+        if let Ok(current) = self.read_lineage_snapshot().await {
+            if current.compatibility.schema_version == AUTH_SCHEMA_VERSION
+                && current.compatibility.protocol_min == rows[0].protocol_min
+                && current.compatibility.protocol_max == rows[0].protocol_max
+                && current.fingerprint == expected
+            {
+                return Ok(());
+            }
+        }
+        Err(failure)
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_coherent_lineage_snapshot(&self) -> Result<(i64, String), StoreError> {
+        use super::schema_lineage::{self, Backend};
+        let snapshot = self.read_lineage_snapshot().await?;
+        schema_migration_action(
+            std::slice::from_ref(&snapshot.compatibility),
+            ClusterCompatibility::CURRENT,
+        )?;
+        schema_lineage::bridge_plan(
+            Backend::Hiqlite,
+            snapshot.compatibility.schema_version,
+            &snapshot.objects,
+        )?;
+        Ok((snapshot.compatibility.schema_version, snapshot.fingerprint))
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_lineage_bridge_rollback(&self) -> Result<(), StoreError> {
+        self.bridge_private_lineage_inner(None, true).await
+    }
+
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_lineage_union_fingerprint(&self) -> Result<String, StoreError> {
+        let objects = self
+            .client()
+            .query_consistent_map::<super::schema_lineage::SchemaObject, _>(
+                super::schema_lineage::OBJECT_QUERY,
+                params!(),
+            )
+            .await?;
+        super::schema_lineage::verify_union(super::schema_lineage::Backend::Hiqlite, &objects)?;
+        super::schema_lineage::fingerprint(&objects)
+    }
+
+    /// Source-derived synthetic shape; never represents a captured database.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub async fn validation_set_schema_lineage(
+        &self,
+        marker: i64,
+        private: bool,
+        fresh_encoded_omission: bool,
+    ) -> Result<(), StoreError> {
+        if !(66..=69).contains(&marker) || (fresh_encoded_omission && (!private || marker != 69)) {
+            return Err(StoreError::Migration(
+                "invalid synthetic Hiqlite lineage".to_owned(),
+            ));
+        }
+        let main = if private { 0 } else { marker - 65 };
+        let effort = if private { marker - 65 } else { 0 };
+        let mut sql = Vec::new();
+        if main < 1 {
+            sql.push("DROP INDEX analysis_requests_result_target_force".to_owned());
+        }
+        if main < 2 {
+            sql.push("DROP INDEX background_jobs_file_source".to_owned());
+        }
+        if main < 4 {
+            for trigger in [
+                "playback_settings_insert",
+                "playback_settings_update",
+                "playback_settings_delete",
+            ] {
+                sql.push(format!("DROP TRIGGER {trigger}"));
+            }
+            sql.push("DROP TABLE playback_input_generation".to_owned());
+        }
+        if main < 3 {
+            sql.push("DROP TRIGGER dv_queue_admission_settings_ai".to_owned());
+            sql.push("ALTER TABLE dv_conversions DROP COLUMN requested_manually".to_owned());
+            sql.push(super::dv_conversion::DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.to_owned());
+        }
+        if effort < 1 {
+            sql.push("ALTER TABLE offline_packages DROP COLUMN audio_recipe".to_owned());
+        }
+        if effort < 3 {
+            sql.push("DROP TABLE candidate_recovery".to_owned());
+        }
+        if effort < 2 {
+            sql.push("DROP TRIGGER background_job_copy_output_target".to_owned());
+            sql.push("DROP TRIGGER background_job_publish_copy_output_command".to_owned());
+        }
+        if effort < 4 || fresh_encoded_omission {
+            sql.push("DROP TRIGGER background_job_encoded_output_target".to_owned());
+        }
+        sql.push("DROP TRIGGER background_job_source_changed".to_owned());
+        sql.push("DROP TRIGGER background_job_source_deleted".to_owned());
+        let guards = if effort >= 4 && !fresh_encoded_omission {
+            super::background_jobs::ENCODED_OUTPUT_SCHEMA
+        } else if effort >= 2 {
+            super::background_jobs::COPY_OUTPUT_SCHEMA
+        } else {
+            super::background_jobs::SCHEMA
+        };
+        for name in [
+            "background_job_source_changed",
+            "background_job_source_deleted",
+        ] {
+            let statement = guards
+                .split("-- next statement\n")
+                .find(|statement| {
+                    statement.contains(&format!(
+                        "CREATE TRIGGER {}{name}",
+                        if guards == super::background_jobs::SCHEMA {
+                            "IF NOT EXISTS "
+                        } else {
+                            ""
+                        }
+                    ))
+                })
+                .ok_or_else(|| {
+                    StoreError::Migration("missing synthetic guard source".to_owned())
+                })?;
+            sql.push(statement.to_owned());
+        }
+        let mut statements: Vec<_> = sql.into_iter().map(|sql| (sql, params!())).collect();
+        statements.push((
+            "UPDATE cluster_meta SET schema_version=$1 WHERE singleton=1".to_owned(),
+            params!(marker),
+        ));
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(())
+    }
+
+    async fn migrate_playback_inputs(
+        &self,
+        admission: SchemaMigrationAdmission<'_>,
+    ) -> Result<(), StoreError> {
+        let now = self.now()?;
+        admit_schema_migration(admission)?;
+        for result in self.client().batch(super::PLAYBACK_INPUT_SCHEMA).await? {
+            result.map_err(database_error)?;
+        }
+        admit_schema_migration(admission)?;
+        let attempt = self.client().txn(vec![(
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 WHERE singleton = 1 AND schema_version = $3".to_owned(),
+                        params!(PLAYBACK_INPUT_SCHEMA_VERSION, now, PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE),
+                    )]).await;
+        self.settle_migration_attempt(PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE, attempt)
+            .await?;
+        Ok(())
     }
 
     /// A second voter can observe the same predecessor before the first
@@ -5532,6 +5856,10 @@ fn schema_migration_action(
         | JOB_RETENTION_SCHEMA_MIGRATION_SOURCE
         | RECEIPT_PRESSURE_SCHEMA_MIGRATION_SOURCE
         | VIEWER_ANALYSIS_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_RESULT_LOOKUP_SCHEMA_MIGRATION_SOURCE
+        | PREPARATION_INDEX_SCHEMA_MIGRATION_SOURCE
+        | DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE
+        | PLAYBACK_INPUT_SCHEMA_MIGRATION_SOURCE
         | OFFLINE_AUDIO_SCHEMA_MIGRATION_SOURCE
         | COPY_OUTPUT_SCHEMA_MIGRATION_SOURCE
         | CANDIDATE_RECOVERY_SCHEMA_MIGRATION_SOURCE
@@ -5592,6 +5920,40 @@ struct CompatibilityRow {
     schema_version: i64,
     protocol_min: i64,
     protocol_max: i64,
+}
+
+struct LineageReadRow {
+    compatibility: CompatibilityRow,
+    fingerprint: String,
+}
+
+struct LineageSnapshot {
+    compatibility: CompatibilityRow,
+    objects: Vec<super::schema_lineage::SchemaObject>,
+    fingerprint: String,
+}
+
+impl From<&mut Row<'_>> for LineageReadRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            compatibility: CompatibilityRow {
+                schema_version: row.get("schema_version"),
+                protocol_min: row.get("protocol_min"),
+                protocol_max: row.get("protocol_max"),
+            },
+            fingerprint: row.get("fingerprint"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for super::schema_lineage::SchemaObject {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            kind: row.get("kind"),
+            name: row.get("name"),
+            sql: row.get("sql"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for CompatibilityRow {
@@ -6029,6 +6391,51 @@ dump_row!(MediaSessionTerminalAckDumpRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playback_generation_covers_tied_updates_deletes_import_and_rollback() {
+        let conn = rusqlite::Connection::open_in_memory().expect("database");
+        conn.execute_batch("CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL);").expect("settings");
+        conn.execute_batch(super::super::PLAYBACK_INPUT_SCHEMA)
+            .expect("generation schema");
+        let generation = || {
+            conn.query_row(
+                "SELECT generation FROM playback_input_generation WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("generation")
+        };
+        conn.execute(
+            "INSERT INTO settings VALUES('playback.audio_lang', 'eng', 1)",
+            [],
+        )
+        .expect("insert");
+        assert_eq!(generation(), 1);
+        conn.execute(
+            "UPDATE settings SET value = 'fra' WHERE key = 'playback.audio_lang'",
+            [],
+        )
+        .expect("tied update");
+        assert_eq!(generation(), 2);
+        conn.execute("DELETE FROM settings WHERE key = 'playback.audio_lang'", [])
+            .expect("delete");
+        assert_eq!(generation(), 3);
+        conn.execute_batch(
+            "BEGIN; INSERT INTO settings VALUES('transcode.hwaccel', 'vaapi', 1); ROLLBACK;",
+        )
+        .expect("rollback");
+        assert_eq!(generation(), 3);
+        conn.execute_batch("INSERT INTO settings VALUES('jobs.last_scan', '2', 1);")
+            .expect("job write");
+        assert_eq!(generation(), 3);
+        // Raw SQL is the import/migration path, so it must also bump atomically.
+        conn.execute_batch(
+            "BEGIN; INSERT INTO settings VALUES('transcode.hwaccel', 'qsv', 1); COMMIT;",
+        )
+        .expect("import");
+        assert_eq!(generation(), 4);
+    }
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
@@ -7967,9 +8374,18 @@ mod tests {
             "v64 advances to the viewer-analysis schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 61,
+            PREPARATION_INDEX_SCHEMA_VERSION, DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE,
+            "request provenance starts from the preparation-index schema"
+        );
+        assert_eq!(
+            DV_REQUEST_PROVENANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            DV_REQUEST_PROVENANCE_SCHEMA_VERSION,
+            "v67 advances exactly one step to request provenance"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 68,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v66 step"
+            "this implementation contains every additive v5→v73 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

@@ -537,6 +537,9 @@ impl<T: Store + ?Sized> QueueFixture for T {}
 /// never production migration.
 #[allow(dead_code)]
 pub(crate) fn remove_common_queue_schema(connection: &rusqlite::Connection) {
+    connection
+        .execute_batch("ALTER TABLE dv_conversions DROP COLUMN requested_manually;")
+        .expect("remove later DV request provenance");
     for kind in ["trigger", "view", "table"] {
         let names: Vec<String> = connection
             .prepare(

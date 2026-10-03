@@ -392,7 +392,11 @@ pub async fn create(
     let output_size = plurx_core::transcode::output_size(&file, rung.height);
     let effective_rate_control = state
         .transcode
-        .effective_rate_control_for_new_offline_package(&file)
+        .effective_rate_control_for_new_offline_package(
+            &file,
+            rung.height,
+            subtitle_mode == "burned",
+        )
         .await
         .map_err(|message| {
             typed(

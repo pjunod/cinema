@@ -153,7 +153,14 @@ object Caps {
                     ua = Build.MODEL.take(160),
                 ),
                 audioSinks = audioSinks,
-            ),
+            ).let { document ->
+                if (Session.decoderCompactionContract == DECODER_COMPACTION_CONTRACT && document.video.size <= MAX_CLIENT_DECODER_ENTRIES) {
+                    document.copy(decoder_compaction = DECODER_COMPACTION_CONTRACT)
+                } else {
+                    if (document.video.size > MAX_CLIENT_DECODER_ENTRIES) Log.w(LOG_TAG, "decoder compaction exceeds contract: observed=${document.video.size} limit=$MAX_CLIENT_DECODER_ENTRIES")
+                    document
+                }
+            },
         )
     }
 

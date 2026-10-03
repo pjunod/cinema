@@ -67,3 +67,13 @@ pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
     }
     Some((code, message))
 }
+
+/// Catalog evidence became unavailable before dispatch; the existing create
+/// owner may retry discovery, while request identity and selection remain.
+pub(crate) fn catalog_input_error(message: impl AsRef<str>) -> String {
+    format!("catalog_input_unavailable: {}", message.as_ref())
+}
+
+pub(crate) fn is_catalog_input_error(error: &str) -> bool {
+    error.starts_with("catalog_input_unavailable: ")
+}

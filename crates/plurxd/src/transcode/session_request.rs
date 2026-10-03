@@ -483,6 +483,13 @@ pub struct CandidateExecutionContext {
     /// Private exact artifact chosen using a live measured-cost proof. The
     /// actual dispatch reacquires it; this is never client-supplied authority.
     pub(crate) retained_output: Option<super::RetainedOutputFacts>,
+    pub(crate) canonical_caps: Option<plurx_core::playback::DeviceCaps>,
+    pub(crate) selected_candidate: plurx_core::playback::candidate::QualityCandidate,
+    pub(crate) planning_binding: Option<crate::media_pool::PlanningBinding>,
+    /// Actual accepted atomic inputs, process-private like this whole context.
+    /// Worker restore reconstructs them from the authenticated binding.
+    pub(crate) planning_snapshot:
+        Option<std::sync::Arc<plurx_core::store::PlaybackPlanningSnapshot>>,
     /// Dispatch location for the exact process-bound recipe, never client wire.
     pub owner_node_id: Option<String>,
     pub candidate_id: plurx_core::playback::candidate::CandidateId,
@@ -496,7 +503,9 @@ pub struct CandidateExecutionContext {
 #[serde(deny_unknown_fields)]
 pub struct SessionRequest {
     #[serde(skip)]
-    pub candidate_context: Option<CandidateExecutionContext>,
+    pub(crate) quality_catalog: Option<std::sync::Arc<crate::media_pool::QualityCatalogResult>>,
+    #[serde(skip)]
+    pub candidate_context: Option<Box<CandidateExecutionContext>>,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,

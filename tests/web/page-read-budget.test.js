@@ -954,7 +954,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => mounts.get(id) || null },
@@ -988,7 +988,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => cappedMounts.get(id) || null },
@@ -1024,7 +1024,7 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "ME", "document", "exactWireId", "api", "dvConversionIsActive",
     "dvConversionStateHtml", "esc", "DV_CONVERSION_LEDGER_READ_MAX",
     "DV_CONVERSION_LEDGER_BATCH_MAX",
-    `${hydrate}; return hydrateDvFileActions;`,
+    `const PAGE_RENDER_GENERATION=1; ${hydrate}; return hydrateDvFileActions;`,
   )(
     { is_admin: true },
     { getElementById: (id) => cappedMounts.get(id) || null },
@@ -1057,11 +1057,10 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
   assert.match(tick, /paintDvConversionProgress\(snapshot\)/);
 
   const item = shippedSource("viewItem");
-  assert.match(item, /hydrateDvFileActions\(DV_FILE_PAGE_FILES\)\.then\(active=>/);
-  assert.match(item, /if\(active[\s\S]*armDvFilePoll/,
-    "the item timer starts only after an active ledger row is observed");
+  assert.match(item, /pollDvFileActions\(DV_FILE_PAGE_FILES,generation,true\)/);
+
   const poll = shippedSource("pollDvFileActions");
-  assert.match(poll, /if\(!active[\s\S]*clearInterval\(PAGE_TIMER\)/,
+  assert.match(poll, /results\.some\(Boolean\)[\s\S]*armDvFilePoll[\s\S]*clearInterval\(PAGE_TIMER\)/,
     "the item timer stops after the first all-terminal snapshot");
   const loadItem = shippedSource("loadItem");
   assert.match(loadItem, /f\.library_id=it\.library_id/,
@@ -1153,6 +1152,28 @@ test("Dolby Vision progress polling runs only for active durable work", async ()
     "library queue success never depends on an immediate progress refresh");
   assert.deepEqual(libraryEvents, ["2 Dolby Vision files queued", "rendered"],
     "an accepted queue is displayed as success without depending on a refresh");
+});
+
+test("Dolby Vision failures follow library policy and explicit request provenance", () => {
+  const render = new Function("exactWireId", "fmtBytes", "dvRecoveryGuardStatusHtml", "esc",
+    `${shippedSource("dvConversionStateHtml")}; return dvConversionStateHtml;`)(
+    f => String(f.id), () => "0 B", g => g ? " · recovery original retained" : "", String);
+  for(const mode of ["off", "manual", "auto"]){
+    for(const requested_manually of [undefined, false, true]){
+      const html=render({id:42,library_id:7},{eligible:true,capabilities:{available:true},
+        library_modes:{7:mode},conversion:{state:"failed",error:"read-only mount",requested_manually,recovery_guard:{state:"active"}}});
+      const showFailure=mode==="auto"||(mode==="manual"&&requested_manually===true);
+      assert.equal(html.includes("Conversion failed: read-only mount"),showFailure,`${mode}/${requested_manually}`);
+      assert.equal(html.includes("Retry conversion"),showFailure);
+      assert.match(html,/recovery original retained/,"hiding historical errors must retain recovery information");
+      if(mode==="off") assert.doesNotMatch(html,/class="problem"/);
+      if(mode==="manual"&&!showFailure) assert.match(html,/>Convert on disk<\/button>/);
+    }
+  }
+  for(const state of ["queued","running","verified","committed"]){
+    const html=render({id:42,library_id:7},{eligible:false,library_modes:{7:"off"},conversion:{state,recovery_guard:{state:"active"}}});
+    assert.match(html,/recovery original retained/,"real work and retained originals stay visible after disabling new work");
+  }
 });
 
 test("Dolby Vision settings controls have accessible names", () => {
@@ -1248,9 +1269,10 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedIneligible = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: false,
       capabilities: { available: true },
+      library_modes: { "7": "manual" },
     },
   );
   assert.match(failedIneligible,
@@ -1260,7 +1282,7 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedEligible = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: true,
       capabilities: { available: true },
       library_modes: { "7": "manual" },
@@ -1271,14 +1293,14 @@ test("Dolby Vision settings controls have accessible names", () => {
   const failedOff = renderFile(
     { id: 42, library_id: 7 },
     {
-      conversion: { state: "failed", error: "controlled failure" },
+      conversion: { state: "failed", error: "controlled failure", requested_manually: true },
       eligible: true,
       capabilities: { available: true },
       library_modes: {},
     },
   );
-  assert.match(failedOff, /<button[^>]* disabled>Retry conversion<\/button>/,
-    "a failed row cannot retry while its library mode is Off");
+  assert.doesNotMatch(failedOff, /Conversion failed|Retry conversion|class="problem"/,
+    "Off hides old failure and retry without presenting disabled policy as an error");
   assert.match(failedOff, /library Dolby Vision conversion mode is Off/);
   const guardStatus = new Function(
     "esc",
@@ -1358,6 +1380,8 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisPageUrl")}
      ${shippedSource("analysisAttentionGroups")}
+     const ANALYSIS_RECONCILE={open:false};
+     ${shippedSource("analysisReconcileHtml")}
      ${shippedSource("paintAnalysis")}
      return {
        paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
@@ -1575,6 +1599,8 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisAttentionGroups")}
+     const ANALYSIS_RECONCILE={open:false};
+     ${shippedSource("analysisReconcileHtml")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);
@@ -2001,6 +2027,8 @@ test("A failed row lists the code every charged attempt ended with", () => {
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisAttentionGroups")}
+     const ANALYSIS_RECONCILE={open:false};
+     ${shippedSource("analysisReconcileHtml")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);

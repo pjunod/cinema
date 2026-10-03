@@ -1199,6 +1199,69 @@ their rates can become wire facts. Exact first-master facts for an unseen tail
 without a whole-film foreground wait, and original fleet/device/corpus
 qualification, remain explicit acceptance boundaries rather than guessed costs.
 
+**2026-10-03 private union canonical-carrier repair (source prepared, not
+qualified):** compiler inspection of the historical `814888d4` + `34252101`
+union exposed that the stored automatic preparation intent retained an id and
+digest but could not recreate the accepted client caps, row and atomic planning
+binding. The original manual encoded once-pass above deliberately had no
+candidate context; it is not evidence for automatic reconstruction.
+
+The two existing private preparation payloads now optionally retain the existing
+strict `CandidateCatalogContext` at enqueue. Absent carriers are omitted during
+serialization, preserving legacy/manual payload bytes and dedupe identity. The
+entire payload still has the existing 16 KiB bound; canonical caps/count checks,
+closed intent checks and worker unknown-field refusal are not relaxed. No
+worker/public reorder field, schema migration, setting or scheduler is added.
+The effective reorder choice stays bound to the same atomic planning snapshot,
+planning binding and VOD recipe digest. The private response-cost sidecar is
+not selected-candidate authority and is deliberately absent on internal jobs.
+
+Claimed automatic work reconstructs the exact current authority through the
+shared restore/catalog chain before opening a producer, then checks the stored
+source, audio, route, geometry, grade, owner and execution intent. An older
+automatic task without original canonical evidence cannot manufacture it from
+a digest. Its existing fence stops that single unverifiable task; a genuine
+fresh foreground enqueue is the existing replan path. Old records remain
+parseable/listable/cancellable, manual work is unchanged, and backend failure
+continues through the retry lifecycle. Older strict readers cannot accept
+carrier-containing automatic payloads: mixed-reader eligibility is **not
+claimed**, and this source record is not deployment acceptance.
+
+Selected reconstruction preserves availability errors from the actual catalog
+computation: failed source opens, executable/runtime capture, encoder/probe
+selection and unavailable recipe identity are retryable, not a missing-row
+permanent stop. The claimed worker's actual Store row lookup distinguishes
+missing/changed source metadata (fenced `source_changed`) from a Store error
+(retry). Library/source-open unavailability does not prove disappearance.
+
+**2026-10-03 inherited ingress-deadline amendment (source only):** worker Start
+passes its original early-handler deadline into canonical restore, before the
+startup-budget scope is installed. Takeover passes its existing deadline while
+retaining the outer timeout. Restore clamps that remaining caller allowance to
+the existing 2-second catalog cap rather than starting an independent new
+allowance. The compatibility/test wrapper retains the existing bounded entry;
+the same still-unexecuted combined metadata control covers an expired explicit
+entry and current-authority compatibility restoration. Authentication,
+ownership, strict wire, restart drain and startup policy are unchanged.
+
+The `/decision` measured-cost projection acquires an actual source/settings
+snapshot matching the accepted local row's binding, within one existing 100 ms
+advisory deadline. A mismatch removes only the advisory cost, not the catalog,
+manual choice or ordinary playback. The catalog and restore checks preserve
+the newer signed composition offsets, frame grids, quality and selected audio.
+
+The existing new combined reorder/metadata control is extended but remains
+unexecuted. One distinct real automatic canonical-carrier enqueue → claim →
+completed output → compatible new attachment regression is added in
+[encoded_preparation.rs](../../crates/plurxd/src/vod/tests/encoded_preparation.rs)
+and also remains unexecuted. Three typed-recovery/decision controls have changed
+source semantics and their earlier successes remain historical, not current
+qualification. The original twenty-error compiler raw and subsequent controller
+cleanup failure remain retained; no new compiler success, test success,
+current-parent qualification, corpus/device observation or M5 completion is
+claimed by this preparation. Current-parent integration and exact-tree checks
+must precede the first observations of these new controls.
+
 Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;

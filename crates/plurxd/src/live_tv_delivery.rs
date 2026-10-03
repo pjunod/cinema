@@ -84,7 +84,7 @@ impl LivePlaybackRequest {
             return Err("live playback request version must be 1".into());
         }
         if self.hls_formats.len() > MAX_ENTRIES
-            || self.video_limits.len() > MAX_ENTRIES
+            || self.video_limits.len() > plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
             || self.audio_limits.len() > MAX_ENTRIES
         {
             return Err("live playback capability arrays may contain at most 32 entries".into());
@@ -130,7 +130,7 @@ impl LivePlaybackRequest {
         if caps.v != DeviceCaps::VERSION {
             return Err("live playback caps version must be 2".into());
         }
-        if caps.video.len() > MAX_ENTRIES
+        if caps.video.len() > plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES
             || caps.audio.len() > MAX_ENTRIES
             || caps.containers.len() > MAX_ENTRIES
             || caps.transports.len() > MAX_ENTRIES

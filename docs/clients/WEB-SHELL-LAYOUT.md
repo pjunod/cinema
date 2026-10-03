@@ -151,8 +151,8 @@ had to be edited.
 | 19 | [`layouts/library-grids.js`](../../crates/plurxd/src/web/layouts/library-grids.js) | `classicLibraryShell`, `classicLibraryItems`, `classicLibraryCount` — the one incremental route. | 5393–5657 |
 | 20 | [`detail/helpers.js`](../../crates/plurxd/src/web/detail/helpers.js) | Detail-screen helpers, and the four inlined Material icon paths. | 5658–5697 |
 | 21 | [`detail/dynamic-range.js`](../../crates/plurxd/src/web/detail/dynamic-range.js) | Source vs delivered vs rendered HDR/DV, and the badges that say which. | 5698–5859 |
-| 22 | [`detail/track-facts.js`](../../crates/plurxd/src/web/detail/track-facts.js) | `codecLabel`, `premiumAudio`, `fmtChannels` — the shared track vocabulary. | 5860–6005 |
-| 23 | [`detail/preplay-selection.js`](../../crates/plurxd/src/web/detail/preplay-selection.js) | Pre-play audio and subtitle selection, and `classicItemBody`. | 6006–6744 |
+| 22 | [`detail/track-facts.js`](../../crates/plurxd/src/web/detail/track-facts.js) | Shared track facts and the read-only media-preparation panel. | 5860–6005 |
+| 23 | [`detail/preplay-selection.js`](../../crates/plurxd/src/web/detail/preplay-selection.js) | Pre-play choices, shared preparation/conversion refresh, and `classicItemBody`. | 6006–6744 |
 | 24 | [`detail/edit.js`](../../crates/plurxd/src/web/detail/edit.js) | Editing metadata and home libraries (admin), including the tag-chip field. | 6745–6854 |
 | 25 | [`player/player.js`](../../crates/plurxd/src/web/player/player.js) | `PLAYER`, opening and closing a stream, the play/pause transport core. | 6855–7714 |
 | 26 | [`player/session.js`](../../crates/plurxd/src/web/player/session.js) | Session lifecycle: start, keepalive, teardown. | 7715–7949 |

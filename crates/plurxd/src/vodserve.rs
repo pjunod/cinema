@@ -583,7 +583,7 @@ impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
 }
 
 /// Private dispatch-attested identity, never a client proof or catalog budget.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RetainedCandidateBinding {
     pub(crate) kind: SessionKind,
     pub(crate) normalized_geometry: bool,

@@ -1,0 +1,37 @@
+{
+  "source_commit": "1cc9468936e3737a3e6993269cc18e06ace8e534",
+  "wrapper_commit": "07f631b3771f3d0c6ad797532e70ea0391f7fbc7",
+  "run_id": 4005,
+  "ui_index": 3984,
+  "job_id": 41591,
+  "task_id": 15546,
+  "job_result": "success",
+  "runner_name": "gha-rogg16-general-04",
+  "runner_uuid": "6be22307-b6a4-49b7-a8d2-02990b22726c",
+  "started_at": "2026-10-03T07:34:54.8608777Z",
+  "completed_at": "2026-10-03T07:50:23.2758043Z",
+  "configured_timeout_minutes": 30,
+  "environment": {
+    "container": "ubuntu:26.04",
+    "rust": "1.97.1",
+    "cargo_xwin": "0.23.1",
+    "target": "x86_64-pc-windows-msvc"
+  },
+  "command": "cargo xwin build --workspace --all-targets --locked --exclude plurx-cluster-check --target x86_64-pc-windows-msvc",
+  "scope": "Only previously failed Windows compilation; no successful Rust/web/operations suites rerun.",
+  "prior_failure": {
+    "job_id": 41558,
+    "receipt": "selective-windows-41558-receipt.json",
+    "reason": "m6 runner went offline with no compiler completion; runner pool changed only."
+  },
+  "log": "windows-retry-41591.log.gz",
+  "log_sha256": "5c0e6fd92dc96d2d6e2a5a21eea9723c91536b679d217bcac3ae997e64c5a9a0",
+  "compiler_summaries": [
+    "2026-10-03T07:35:45.6739861Z   1.97.1-x86_64-unknown-linux-gnu installed - rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "2026-10-03T07:35:45.7764068Z   1.97.1-x86_64-unknown-linux-gnu unchanged - rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "2026-10-03T07:35:46.1946055Z rustc 1.97.1 (8bab26f4f 2026-07-14)",
+    "2026-10-03T07:36:14.1648892Z     Finished `release` profile [optimized] target(s) in 23.79s",
+    "2026-10-03T07:50:20.8443360Z     Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 52s",
+    "2026-10-03T07:50:23.2758043Z \ud83c\udfc1  Job succeeded"
+  ]
+}

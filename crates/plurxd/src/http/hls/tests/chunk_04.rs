@@ -337,6 +337,7 @@
     ) -> plurx_core::domain::MediaSessionPreparation {
         let staged_session_id = uuid::Uuid::new_v4().to_string();
         let staged_request = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: route.playback_id.clone(),
@@ -345,6 +346,7 @@
         };
         let response = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -384,6 +386,7 @@
             recipe_json: serde_json::to_string(&RemoteStartRequest {
                 retained_output: None,
                 retained_output_receiver: None,
+                candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -452,6 +455,7 @@
         let session_id = uuid::Uuid::new_v4().to_string();
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let request = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             file_id: fixture.file_id(),
             playback_id: predecessor.playback_id.clone(),
@@ -462,6 +466,7 @@
         let recipe = RemoteStartRequest {
             retained_output: None,
             retained_output_receiver: None,
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -476,6 +481,7 @@
         };
         let start = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -744,7 +750,8 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -817,7 +824,8 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 playback_id: ending_playback.clone(),
                 ..staged_candidate_request()
             },
@@ -1058,6 +1066,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -1251,7 +1260,8 @@
             &route,
             &staged_predecessor_recipe(&route),
             &crate::transcode::SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 playback_id: playback_id.clone(),
                 ..staged_candidate_request()
             },
@@ -1411,6 +1421,7 @@
         let staging_session = session_id.clone();
         let staging_route = route.clone();
         let candidate = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -1763,6 +1774,7 @@
         RemoteStartRequest {
             retained_output: None,
             retained_output_receiver: None,
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -1815,6 +1827,7 @@
 
     fn staged_candidate_request() -> crate::transcode::SessionRequest {
         crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: 11,
@@ -2063,6 +2076,7 @@
                 .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id)),
                 response_json: serde_json::to_string(&StartResponse {
                     delivered_audio: None,
+        quality_catalog_status: None,
                     display_aware_auto_protocol: Some("route-v1".to_owned()),
                     quality_candidate_id: None,
                     quality_candidates: None,

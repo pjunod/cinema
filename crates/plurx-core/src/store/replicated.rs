@@ -351,7 +351,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "invalidate_cache_entry",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "cache.rs",
@@ -529,7 +529,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
-        method: "claim_analysis_request_compatible",
+        method: "claim_analysis_request_for_capacity",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -749,7 +749,7 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         method: "maintain_media_sessions",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
-        shape: TransactionShape::VerbatimBatch,
+        shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
         module: "mod.rs",
@@ -858,6 +858,15 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "reconcile_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        // Both conditional writes always run; SQL secures the successor before
+        // retiring its predecessor. The final row count is returned after commit.
+        shape: TransactionShape::BatchWrite,
     },
 ];
 
@@ -1190,7 +1199,9 @@ mod tests {
         // E2 retires the unfenced manifest-cursor transaction.
         // DVR catalog cleanup removes the linked rows and clears the recording
         // links together so a failed delete remains retryable.
-        assert_eq!(methods.len(), 95);
+        // Reconciliation adds one atomic successor-insert / predecessor-retire
+        // batch. Its SQL predicates own all branching, as in the replicated twin.
+        assert_eq!(methods.len(), 96);
     }
 
     #[test]

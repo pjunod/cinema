@@ -300,6 +300,51 @@ fn format_name(format: crate::subtitle_source::RepresentationFormat) -> &'static
     }
 }
 
+static QUALITY_CATALOG_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+pub(crate) async fn quality_candidates_v2(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, StatusCode> {
+    authorize(
+        &state,
+        &headers,
+        "POST",
+        crate::media_pool::QUALITY_CANDIDATES_V2_PATH,
+        &body,
+    )
+    .await?;
+    let request: crate::media_pool::BudgetedCatalogRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.budget_ms == 0 {
+        return Ok((
+            private_no_store_headers(),
+            Json(crate::media_pool::QualityCatalogResult::unavailable(
+                crate::media_pool::CatalogCause::PeerDeadline,
+            )),
+        )
+            .into_response());
+    }
+    let _permit = QUALITY_CATALOG_READS
+        .try_acquire()
+        .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_millis(u64::from(request.budget_ms).min(1500));
+    let result = crate::media_pool::local_quality_catalog(
+        &state,
+        &request.request,
+        deadline,
+        request.expected_binding.as_ref(),
+    )
+    .await;
+    let mut response = (private_no_store_headers(), Json(result)).into_response();
+    if !request.request.is_valid() {
+        *response.status_mut() = StatusCode::BAD_REQUEST;
+    }
+    Ok(response)
+}
+
 pub(crate) async fn quality_candidates(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -323,16 +368,26 @@ pub(crate) async fn quality_candidates(
         .ok()
         .filter(crate::media_pool::QualityCatalogRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    static READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
-    let _permit = READS
+    let _permit = QUALITY_CATALOG_READS
         .try_acquire()
         .map_err(|_| StatusCode::TOO_MANY_REQUESTS)?;
-    let candidates = tokio::time::timeout(
-        crate::media_pool::QUALITY_CATALOG_DEADLINE,
-        crate::media_pool::local_quality_candidates(&state, &request),
+    let result = crate::media_pool::local_quality_catalog(
+        &state,
+        &request,
+        tokio::time::Instant::now() + crate::media_pool::QUALITY_CATALOG_DEADLINE,
+        None,
     )
-    .await
-    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?;
+    .await;
+    if !result.complete {
+        return Err(StatusCode::GATEWAY_TIMEOUT);
+    }
+    let mut candidates = result.candidates;
+    for candidate in &mut candidates {
+        candidate.binding = None;
+        candidate.partial = false;
+        candidate.dispatch_supported = false;
+    }
+
     Ok((private_no_store_headers(), Json(candidates)))
 }
 

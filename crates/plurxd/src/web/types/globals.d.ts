@@ -27,5 +27,8 @@ declare var CinemaNative: any;
 
 /** Assigned by pages/reader.js for the native shells to call. */
 interface Window {
+  /** Safari and older WebKit expose these optional browser constructors. */
+  ManagedMediaSource?: typeof MediaSource;
+  WebKitMediaSource?: typeof MediaSource;
   startNativeReader?: any;
 }

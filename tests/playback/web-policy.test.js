@@ -5108,6 +5108,9 @@ function carryHarness(player) {
       shippedSource("setPrePlay"),
       shippedSource("rememberPlaybackSelection"),
       "function clearPlaybackControlWaiters(){}",
+      "let AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
+      shippedSource("cancelNextEpisodePreparation"),
+      shippedSource("clearAutoplayNextPreparation"),
       shippedSource("supersedePlaybackControlIntent"),
       transportTelemetrySources(),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
@@ -5119,7 +5122,7 @@ function carryHarness(player) {
       shippedSource("beginPlaybackPreparation"),"function play(){}",
       shippedSource("retirePlaybackPredecessor"),
       "return {prePlaySelection, clearPrePlay, playbackSelection, setPrePlay," +
-        " rememberPlaybackSelection, closePlayer};",
+        " rememberPlaybackSelection, closePlayer,nextPrepared:()=>AUTOPLAY_NEXT_PREPARED};",
     ].join("\n"),
   );
   const harness = build(
@@ -5149,12 +5152,17 @@ function carryHarness(player) {
 }
 
 test("closing the player ends its track choice instead of arming the next play", () => {
-  const player = { fileId: 42, preplay: { audio: 1, subtitle: null } };
+  let nextEpisodeCancelled = 0;
+  const player = { fileId: 42, preplay: { audio: 1, subtitle: null },
+    nextEpisodePreparation: { owner: { cancel() { nextEpisodeCancelled++; } } } };
   const h = carryHarness(player);
   // While it is open, this playback's own tracks are the answer — that is the
   // carry a quality change depends on.
   assert.deepEqual(h.playbackSelection(player, 42), { audio: 1, subtitle: null });
   h.closePlayer();
+  assert.equal(nextEpisodeCancelled, 1, "closing cancels its pending episode preparation");
+  assert.equal(player.nextEpisodePreparation, null);
+  assert.equal(h.nextPrepared(), null, "closing drops transferable successor metadata");
   assert.equal(h.mediaSessionCleared(), 1,
     "closing left the OS media keys installed for a player that is gone");
   // loadItem() empties the pickers on the way back to the detail screen, so
@@ -7036,4 +7044,35 @@ test("the browser claims its output's channels for the codecs it decodes, never 
   assert.deepEqual(claimed.audio_sinks, sinks);
   const legacy = capsDocument({ vcodec: "h264", acodec: "aac", container: "mp4", audioSinks: [] }, {});
   assert.equal("audio_sinks" in legacy, false, "an empty claim stays the legacy contract");
+});
+
+test("fenced retirement followed by native error 3 reopens once without codec blame", () => {
+  for (const reason of ['serving_fenced','authority_fenced']) {
+    const build=new Function('PlaybackPolicy','reason',[
+      "let PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0}; const callbacks={},reopens=[],rescues=[];",
+      "PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:PLAYER.mediaAttachment,reason};",
+      "const document={getElementById:()=>({})},console={warn(){}},performance={now:()=>1};",
+      "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function notifyPlaybackControl(){}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}",
+      "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}",
+      "function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}",
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
+      "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
+      "wirePlayerMedia(v);callbacks.error();callbacks.error();return {player:PLAYER,reopens,rescues};",
+    ].join('\n'));
+    const h=build(policy,reason);
+    assert.equal(h.reopens.length,1);assert.equal(h.reopens[0][0],42);
+    assert.equal(h.rescues.length,0);assert.equal(h.player.triedFallback,undefined);
+  }
+});
+
+test("fenced recovery cannot inherit a predecessor attachment or session", () => {
+  const build=new Function([
+    "const attachment={},PLAYER={sessionId:'new',mediaAttachment:attachment};",
+    "function playbackOwnsAttachedMedia(){return true;}",shippedSource('recoverServingFencedAttachment'),
+    "return p=>recoverServingFencedAttachment({},p);",
+  ].join('\n'))();
+  for(const terminal of [
+    {sessionId:'old',attachment:{},reason:'serving_fenced'},
+    {sessionId:'new',attachment:{},reason:'serving_fenced'},
+  ]) assert.equal(build({sessionId:'new',mediaAttachment:{},sessionTerminal:terminal}),false);
 });
