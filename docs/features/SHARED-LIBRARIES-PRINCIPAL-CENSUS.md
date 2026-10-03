@@ -1516,3 +1516,88 @@ The affected daemon all-target denied-warning Clippy passed in 61 seconds.
 The existing Local cached-rendition proof regression passed, zero ignored,
 in 0.92 seconds (`hevc_vod_checks_proof_before_reusing_a_cached_rendition`).
 Documentation index checks and validation catalog lint also passed.
+
+### Source cold index — admitted preparation remains a physical obligation
+
+The first cold-index lane accepts H264 with bounded, stored completion evidence.
+It does not invoke live FFprobe, the ordinary Local index builder queue, HEVC
+packet probing, subtitle extraction or anonymous viewer demand. Missing or
+unverified completion evidence refuses this lane. The existing FragmentReader
+must still verify the complete output before an index can be cached.
+
+The actual Source actor acquires the existing governor's conservative CPU4
+permit before starting the scan. Source-only FFmpeg arguments bound decoder,
+audio encoder and filter pools to one thread each; CPU4 remains a resource
+estimate rather than an operating-system CPU quota. This preparation permit is
+separate from the actual copy producer's subsequent permit. Local admission
+and index behavior retain their existing paths.
+
+The scan owns its actual held Source descriptor, ChildJob, child, fragment
+reader and stderr task. Immediately before spawn it reopens the Source path
+without following links, compares the exact held object version and stored
+size/mtime, checks the original observation's five-second age and absolute
+start deadline, and executes the same-write Source guard. The guard requires
+the exact immutable held g1 binding and starting request, current Source node,
+full floor/master/schema/saved-switch/grant/file witness, and no incarnation
+route, lease, media-session pin or staged preparation. SQL permission does not
+prove that a physical child has settled.
+
+Stored probe evidence is byte-bounded in SQL before allocation. A completed
+index is inert local cache data: current Source authority and physical file
+identity are checked around its cache write, and first media activation still
+checks the full private witness atomically. Cache presence never grants Source
+admission, publication or resource authority.
+
+The owner records the scan operation before awaiting its result. Cancelling a
+waiter or reaching the HTTP/start deadline requests scan cancellation but does
+not abandon the detached physical owner. A failed or timed-out child wait
+retains the actual permit and job, kills the child, and retries until a wait
+confirms reaping. Reader and stderr settlement precede the private settlement
+event. An unexpected task failure leaves the operation unresolved and its
+permit retained; it cannot mint a successful settlement receipt.
+
+The sealed scan receipt contains the complete immutable dispatch assignment.
+Actual actor terminal cleanup validates that association and waits for scan
+settlement before invoking assigned-but-never-media-activated SQL cleanup.
+Once a scan child has started, absence of a media route is never classified as
+having done no physical work. A revoked grant or disabled sharing can prevent
+publication while still permitting this actual owned cleanup.
+
+The finite lane does not qualify cold HEVC/probe fallback, encoded or subtitle
+preparation, abrupt-process recovery, restarted cache reuse, or CPU profiling.
+Those remain separate Source ownership and qualification stages.
+
+```sh
+cargo check -p plurxd --all-targets
+cargo test -p plurxd --bin plurxd source_copy_ -- --nocapture
+cargo test -p plurx-core --features hiqlite-store --lib \
+  sharing_source_index_permission_and_bounded_evidence_preserve_lineage \
+  -- --nocapture
+```
+
+On the exact integrated `b8f9c9d08` base plus this cold-index candidate, the
+pinned Rust 1.97.1 daemon all-target check passed in 76 seconds. The Source
+filter passed 13 tests, zero ignored, in 36.21 seconds on normal stacks. Its
+actual one-voter/FFmpeg cases include cold complete scan and ready media,
+post-spawn waiter cancellation followed by sharing-off, pre-spawn switch-off,
+actual file-object drift, lost PurposeKeys proof, expired original observation,
+and an injected initial child-wait failure. The injected error case parks the
+actual owner before its successful reap retry and proves that CPU4 remains held
+and SQL settlement stays absent; it does not claim a naturally occurring OS
+wait error. Existing real producer/Body/idle retirement cases pass in the same
+run. The fixture's explicit candidate capability/schema setup still does not
+replace the separate production Source installer and HTTP qualification.
+
+The replicated-feature core guard regression passed, zero ignored, in 1.08
+seconds through actual memory and pooled SQLite Stores. It verifies current
+preactivation permission, SQL-bounded probe refusal, changed private witness,
+foreign retained lease preservation, wrong request fingerprint, no route
+allocation, and propagation of a genuine missing-table database fault. The
+existing Local cached-rendition proof regression passed, zero ignored, in 0.48
+seconds.
+Documentation index checks passed all four tests; catalog lint covered 2,703
+audited files.
+The affected daemon all-target denied-warning Clippy passed in 88 seconds.
+The supported bare-core `cargo check -p plurx-core --no-default-features`
+surface also compiled in 14.53 seconds; its existing unused-code warnings
+remain, so this is compile evidence rather than a bare-core denied-lint claim.

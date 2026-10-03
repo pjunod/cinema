@@ -1769,3 +1769,111 @@ async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back(
         }
     }
 }
+
+#[tokio::test]
+async fn sharing_source_index_permission_and_bounded_evidence_preserve_lineage() {
+    let dir = tempfile::tempdir().expect("directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("source-index-permission.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET probe_json='{}' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("stored bounded completion data");
+        let request = intent(&store, grant, &key, "index-permission").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("binding")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("worker");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("authority")
+        else {
+            panic!("current authority")
+        };
+        assert!(store
+            .authorize_source_index_preparation(&authority)
+            .await
+            .expect("current preactivation permission"));
+        assert_eq!(
+            store
+                .source_index_probe_evidence(&authority)
+                .await
+                .expect("bounded evidence"),
+            Some("{}".into())
+        );
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET probe_json=$1 WHERE id=1".into(),
+                vec!["x".repeat(1048577).into()],
+            )])
+            .await
+            .expect("concurrent oversized probe");
+        assert_eq!(
+            store
+                .source_index_probe_evidence(&authority)
+                .await
+                .expect("bounded SQL refusal"),
+            None
+        );
+        assert!(!store
+            .authorize_source_index_preparation(&authority)
+            .await
+            .expect("changed witness refusal"));
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET probe_json='{}' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("restore exact file evidence");
+        assert!(store
+            .authorize_source_index_preparation(&authority)
+            .await
+            .expect("exact witness"));
+        let resource = format!("session:{}", binding.incarnation_id);
+        store.sharing_txn(vec![("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES($1,'foreign-node',7,9,1,1)".into(),vec![resource.clone().into()])])
+            .await.expect("foreign retained physical lineage");
+        assert!(!store
+            .authorize_source_index_preparation(&authority)
+            .await
+            .expect("foreign lease refuses preparation"));
+        assert_eq!(count(&store, "job_leases").await, 1);
+        store.sharing_txn(vec![("DELETE FROM job_leases WHERE resource=$1".into(),vec![resource.into()]),("UPDATE media_session_requests SET request_fingerprint=$1 WHERE incarnation_id=$2".into(),vec!["e".repeat(64).into(),binding.incarnation_id.into()])])
+            .await.expect("request lineage corruption");
+        assert!(!store
+            .authorize_source_index_preparation(&authority)
+            .await
+            .expect("foreign fingerprint refuses"));
+        assert_eq!(count(&store, "media_sessions").await, 0);
+        assert_eq!(count(&store, "sharing_source_session_bindings").await, 1);
+        store
+            .sharing_txn(vec![(
+                "DROP TABLE cluster_node_capabilities".into(),
+                vec![],
+            )])
+            .await
+            .expect("actual schema fault");
+        assert!(
+            store
+                .authorize_source_index_preparation(&authority)
+                .await
+                .is_err(),
+            "genuine database failure must not become an authority refusal"
+        );
+    }
+}

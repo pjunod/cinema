@@ -401,8 +401,39 @@ fn lost_proposal(error: &StoreError) -> bool {
         .contains("NOT NULL constraint failed: sharing_source_session_bindings.incarnation_id")
 }
 
-/// Must be first in the existing atomic lifecycle transaction. This command
-/// writes nothing on success and aborts the transaction on authority refusal.
+/// Current SQL permission for the assigned worker's admitted preparation.
+/// This asserts no media route exists yet; it never proves physical settlement.
+async fn source_index_permission<B: Backend>(
+    backend: &B,
+    authority: &SourceSessionWriteAuthority,
+) -> Result<bool, StoreError> {
+    let members = &authority.assignment.members;
+    let Ok((floor, roster, cutoff, observed)) = members.write_guard(now_ms()?, 1, 2, 3) else {
+        return Ok(false);
+    };
+    let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
+        return Ok(false);
+    };
+    let mut values = claim_values(&authority.intent, roster, cutoff, observed);
+    values.extend([
+        raft.into(),
+        authority.assignment.owner_node_id.clone().into(),
+        authority.assignment.dispatch_generation.into(),
+        source_owner_removal_key(members, &authority.assignment.owner_node_id).into(),
+    ]);
+    let guard = authority_guard(&floor);
+    let exact = "b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.dispatch_generation=$23 AND $23=1 AND b.start_resolved_at_ms IS NULL";
+    let request = "r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='starting' AND r.claim_expires_at_ms=$19 AND r.claim_expires_at_ms>$3 AND r.owner_node_id=$22";
+    let condition = format!("EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON {request} WHERE {exact} AND {guard} AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id=$21 AND node_id=$22 AND removed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$24)) AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$10) AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$10) AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$10) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$10)");
+    let assertion = format!("INSERT INTO sharing_source_session_bindings(incarnation_id) SELECT NULL WHERE NOT ({condition})");
+    match backend.sharing_txn(vec![(assertion, values)]).await {
+        Ok(counts) if counts.as_slice() == [0] => Ok(true),
+        Ok(_) => Err(invalid()),
+        Err(error) if lost_proposal(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn source_activation_guard(
     authority: &SourceSessionWriteAuthority,
     activation: &crate::domain::MediaSessionActivation,
@@ -1183,7 +1214,8 @@ pub trait SharingSourceSessionStore: Send + Sync {
         terminal: &crate::domain::MediaSessionRoute,
     ) -> Result<SourceReleaseOutcome, StoreError>;
     /// SQL permission only; called exclusively by the private daemon owner
-    /// after its actual assigned worker is proven never spawned. It permits
+    /// after its assigned media producer is proven unspawned and any admitted
+    /// preparation children/writers have confirmed settlement. It permits
     /// cleanup while disabled or revoked and does not infer physical settlement.
     async fn settle_source_assigned_without_activation(
         &self,
@@ -1207,6 +1239,18 @@ pub trait SharingSourceSessionStore: Send + Sync {
         credential: &CredentialKey,
         members: &SourceAdmissionMembers,
     ) -> Result<SourceOwnedRouteAuthorityRead, StoreError>;
+    /// Same-write permission for admitted, preactivation Source index work.
+    /// No route, lease, pin or staged preparation may already exist.
+    /// Bounded stored evidence only; this does not authorize a child or cache.
+    /// The actual spawn still checks the original proof in a guarded write.
+    async fn source_index_probe_evidence(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<Option<String>, StoreError>;
+    async fn authorize_source_index_preparation(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<bool, StoreError>;
     async fn prepare_source_activation_authority(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -1289,6 +1333,28 @@ impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
                 DispatchPreparedRead::Unavailable | DispatchPreparedRead::Capacity => None,
             },
         )
+    }
+
+    async fn source_index_probe_evidence(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<Option<String>, StoreError> {
+        let rows = self.sharing_read(
+            "SELECT json_quote(CASE WHEN typeof(probe_json)='text' AND length(CAST(probe_json AS BLOB))<=1048576 THEN probe_json ELSE NULL END) AS payload FROM files WHERE CAST(id AS TEXT)=$1 LIMIT 2",
+            vec![authority.assignment.binding.file_id.as_str().to_owned().into()],
+        ).await?;
+        match rows.as_slice() {
+            [] => Ok(None),
+            [row] => serde_json::from_str(row).map_err(|_| invalid()),
+            _ => Err(invalid()),
+        }
+    }
+
+    async fn authorize_source_index_preparation(
+        &self,
+        authority: &SourceSessionWriteAuthority,
+    ) -> Result<bool, StoreError> {
+        source_index_permission(self, authority).await
     }
 
     async fn prepare_source_activation_authority(

@@ -28,6 +28,28 @@ async fn source_copy_actor_stops_owned_renewal_after_actual_viewer_idle_reap() {
     Box::pin(source_copy_preadmission_fixture(4)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_actor_builds_cold_index_under_actual_owned_admission() {
+    Box::pin(source_copy_preadmission_fixture(5)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_index_owned_child_survives_cancelled_waiter_and_revoke() {
+    Box::pin(source_copy_preadmission_fixture(6)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_index_refuses_sharing_off_before_actual_child() {
+    Box::pin(source_copy_preadmission_fixture(7)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_index_retains_actual_permit_after_injected_wait_failure() {
+    Box::pin(source_copy_preadmission_fixture(8)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_copy_cold_index_refuses_expired_original_observation_before_child() {
+    Box::pin(source_copy_preadmission_fixture(9)).await;
+}
+
 fn source_fixture_state() -> Arc<crate::state::AppState> {
     Arc::new(crate::http::source_actor_test_state())
 }
@@ -375,26 +397,45 @@ async fn source_copy_preadmission_fixture(mode: u8) {
         .expect("assignment")
         .expect("actual local assignment");
     let media = store.get_file(1).await.expect("file read").expect("file");
-    let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
-        &media,
-        plurx_core::transcode::CopyVideoOptions::new(false, false),
-        directory.path(),
-        Duration::from_secs(30),
-    ))
-    .await
-    else {
-        panic!("actual scan index")
-    };
-    store
-        .put_fragment_index(1, &index)
+    if mode < 5 {
+        let crate::fragindex::IndexOutcome::Built(index) = Box::pin(crate::fragindex::build(
+            &media,
+            plurx_core::transcode::CopyVideoOptions::new(false, false),
+            directory.path(),
+            Duration::from_secs(30),
+        ))
         .await
-        .expect("actual scan index retained");
+        else {
+            panic!("actual scan index")
+        };
+        store
+            .put_fragment_index(1, &index)
+            .await
+            .expect("actual scan index retained");
+    } else {
+        assert!(store
+            .fragment_index(
+                1,
+                &crate::fragindex::identity_for(
+                    &media,
+                    plurx_core::transcode::CopyVideoOptions::new(false, false)
+                )
+            )
+            .await
+            .expect("actual cold index read")
+            .is_none());
+    }
     let manager = Arc::new(TranscodeManager::new(
         Arc::clone(store),
         directory.path().join("workers"),
         EncoderCaps::default(),
         Pipeline::Cpu,
     ));
+    if mode >= 5 {
+        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
+        selected.shutdown().await.expect("actual voter shutdown");
+        return;
+    }
     let settings = manager
         .vod_settings(prepared.request())
         .await
@@ -432,7 +473,7 @@ async fn source_copy_preadmission_fixture(mode: u8) {
     drop(admitted);
     assert_eq!(manager.admissions.software_in_use(), 0);
     if (2..=4).contains(&mode) {
-        source_actual_actor_boxed(state, manager, prepared, assignment, mode).await;
+        source_actual_actor_boxed(state, manager, prepared, assignment, mode, client.clone()).await;
         selected.shutdown().await.expect("actual voter shutdown");
         return;
     }
@@ -678,9 +719,10 @@ fn source_actual_actor_boxed(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    client: hiqlite::Client,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     Box::pin(source_actual_actor(
-        state, manager, prepared, assignment, mode,
+        state, manager, prepared, assignment, mode, client,
     ))
 }
 async fn source_actual_actor(
@@ -689,6 +731,7 @@ async fn source_actual_actor(
     prepared: crate::http::hls::PreparedSourcePlayback,
     assignment: SourceDispatchAssignment,
     mode: u8,
+    client: hiqlite::Client,
 ) {
     if mode == 3 {
         state
@@ -711,6 +754,17 @@ async fn source_actual_actor(
     else {
         panic!("activation hint")
     };
+    let index_pause = match mode {
+        6 => Some(manager.source_workers.index_hooks.pause_after_spawn()),
+        7 | 9 | 10 | 11 => Some(manager.source_workers.index_hooks.pause_before_spawn()),
+        8 => Some(
+            manager
+                .source_workers
+                .index_hooks
+                .pause_after_wait_failure(),
+        ),
+        _ => None,
+    };
     let actor = Box::pin(manager.start_source_worker(
         Arc::clone(&state),
         assignment.clone(),
@@ -724,6 +778,103 @@ async fn source_actual_actor(
         .lookup_source_worker(&assignment)
         .expect("full assignment lookup");
     assert!(Arc::ptr_eq(&actor.0, &joined.0));
+    if let Some(pause) = index_pause {
+        let held = pause.reached().await;
+        assert_eq!(manager.admissions.software_in_use(), 4);
+        assert!(manager.vod.session_ids().await.is_empty());
+        assert!(state
+            .store
+            .media_session_route_by_incarnation(&assignment.binding().incarnation_id().to_string())
+            .await
+            .expect("no preactivation media route")
+            .is_none());
+        let pid = manager.source_workers.index_hooks.spawned_pid();
+        if matches!(mode, 6 | 8) {
+            assert!(pid > 0, "actual Source index child started");
+        } else {
+            assert_eq!(pid, 0, "refusal point precedes any actual child");
+        }
+        assert!(matches!(
+            actor.wait_ready(Instant::now()).await,
+            Err(SourceWorkerError::Deadline)
+        ));
+        drop(joined); // A disconnected waiter cannot abandon the scan owner.
+        if matches!(mode, 6 | 7) {
+            state
+                .store
+                .put_setting(keys::SHARING_ENABLED, "false")
+                .await
+                .expect("actual saved sharing off");
+        }
+        if mode == 10 {
+            let file = state
+                .store
+                .get_file(1)
+                .await
+                .expect("file")
+                .expect("actual file");
+            std::fs::write(&file.path, b"changed physical Source before scan")
+                .expect("actual held Source object drift");
+        }
+        if mode == 11 {
+            client
+                .execute(
+                    "DELETE FROM cluster_node_capabilities WHERE capability=$1",
+                    hiqlite::params!(
+                        plurx_core::cluster::membership::SHARING_PURPOSE_KEYS_CAPABILITY
+                    ),
+                )
+                .await
+                .expect("actual purpose capability disappearance after observation");
+        }
+        if mode == 9 {
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+        }
+        assert_eq!(
+            manager.admissions.software_in_use(),
+            4,
+            "no confirmed child/writer settlement yet"
+        );
+        assert_eq!(actor.settlement_status(), None);
+        drop(held);
+        assert!(actor
+            .wait_ready(Instant::now() + Duration::from_secs(10))
+            .await
+            .is_err());
+        tokio::time::timeout(Duration::from_secs(10), actor.retire())
+            .await
+            .expect("actual index retirement budget")
+            .expect("confirmed scan/no-media-producer cleanup");
+        assert_eq!(manager.admissions.software_in_use(), 0);
+        assert!(manager.lookup_source_worker(&assignment).is_none());
+        let file = state
+            .store
+            .get_file(1)
+            .await
+            .expect("retained file")
+            .expect("actual file");
+        assert!(state
+            .store
+            .fragment_index(
+                1,
+                &crate::fragindex::identity_for(
+                    &file,
+                    plurx_core::transcode::CopyVideoOptions::new(false, false)
+                )
+            )
+            .await
+            .expect("refused index publication")
+            .is_none());
+        assert_eq!(
+            state
+                .store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("already physically settled exact replay"),
+            SourceReleaseOutcome::ExactReplay
+        );
+        return;
+    }
     if mode == 3 {
         assert!(actor
             .wait_ready(Instant::now() + Duration::from_secs(10))
@@ -762,6 +913,27 @@ async fn source_actual_actor(
         .await
         .expect("actual published actor");
     assert!(response.control.is_some());
+    if mode == 5 {
+        let file = state
+            .store
+            .get_file(1)
+            .await
+            .expect("actual file")
+            .expect("retained file");
+        let index = state
+            .store
+            .fragment_index(
+                1,
+                &crate::fragindex::identity_for(
+                    &file,
+                    plurx_core::transcode::CopyVideoOptions::new(false, false),
+                ),
+            )
+            .await
+            .expect("actual Source scan result")
+            .expect("complete cold index retained");
+        assert!(!index.rows.is_empty());
+    }
     let incarnation = assignment.binding().incarnation_id().to_string();
     let route = state
         .store
@@ -923,4 +1095,14 @@ async fn source_actual_actor(
         .expect("postreap, postbody release");
     assert_eq!(manager.admissions.software_in_use(), 0);
     assert!(manager.lookup_source_worker(&assignment).is_none());
+}
+
+#[tokio::test]
+async fn source_copy_cold_index_refuses_changed_actual_file_before_child() {
+    source_copy_preadmission_fixture(10).await;
+}
+
+#[tokio::test]
+async fn source_copy_cold_index_refuses_purpose_floor_loss_before_child() {
+    source_copy_preadmission_fixture(11).await;
 }

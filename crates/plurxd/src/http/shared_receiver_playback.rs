@@ -31,6 +31,7 @@ pub(crate) struct ReceiverStartRegistry {
 }
 struct ReceiverStartInner {
     intent: ReceiverSessionIntent,
+    peer_session: crate::sharing_client::SourcePeerSession,
     request_id: String,
     fingerprint: String,
     state: Mutex<ReceiverStartState>,
@@ -43,14 +44,17 @@ struct ReceiverStartState {
     source: Option<ReceiverSourceAttachment>,
     received: Option<Arc<ReceivedSource>>,
     dispatched: Option<Arc<DispatchedSource>>,
+    confirmed_source_end: Option<Arc<crate::sharing_client::SourceEndReceipt>>,
 }
 struct DispatchedSource {
     credential: plurx_core::secrets::Secret,
     viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
 }
 struct ReceivedSource {
     credential: plurx_core::secrets::Secret,
     viewer_hash: String,
+    endpoint: plurx_core::sharing::Endpoint,
     incarnation: Uuid,
     response: StartResponse,
 }
@@ -88,8 +92,11 @@ impl ReceiverStartRegistry {
         playback_id: &str,
         source_wrapper: &str,
     ) -> Result<(Arc<ReceiverStartInner>, bool), ReceiverStartError> {
-        crate::sharing::receiver_source_request(&intent, source_wrapper)
+        let reference = crate::sharing::receiver_source_request(&intent, source_wrapper)
             .map_err(|_| ReceiverStartError::Conflict)?;
+        let peer_session =
+            crate::sharing_client::SourcePeerSession::new(reference, source_wrapper.as_bytes())
+                .map_err(|_| ReceiverStartError::Conflict)?;
         let original: serde_json::Value = serde_json::from_str(&intent.recipe.request_json)
             .map_err(|_| ReceiverStartError::Conflict)?;
         if original
@@ -131,6 +138,7 @@ impl ReceiverStartRegistry {
         }
         let entry = Arc::new(ReceiverStartInner {
             intent,
+            peer_session,
             request_id,
             fingerprint,
             state: Mutex::new(ReceiverStartState::default()),
@@ -141,6 +149,56 @@ impl ReceiverStartRegistry {
     }
 }
 impl ReceiverStartActor {
+    // Called only by the independently owned retirement task. This exchange
+    // retains Source facts; it cannot release B metadata or body ownership.
+    async fn request_source_end(
+        &self,
+        state: &AppState,
+    ) -> Result<Arc<crate::sharing_client::SourceEndReceipt>, ReceiverStartError> {
+        let (dispatched, received) = {
+            let owner = self.0.state.lock().expect("receiver owner");
+            if let Some(receipt) = &owner.confirmed_source_end {
+                return Ok(receipt.clone());
+            }
+            (
+                owner
+                    .dispatched
+                    .clone()
+                    .ok_or(ReceiverStartError::Unresolved)?,
+                owner.received.clone(),
+            )
+        };
+        let known = received
+            .as_ref()
+            .map(|source| {
+                crate::sharing_client::SourcePeerLineage::from_start(
+                    source.incarnation,
+                    &source.response,
+                )
+            })
+            .transpose()
+            .map_err(|_| ReceiverStartError::Unresolved)?;
+        let mut connection = crate::sharing_client::CleanupPeerConnection::connect(
+            &state.sharing,
+            &dispatched.endpoint,
+        )
+        .await
+        .map_err(|_| ReceiverStartError::Unresolved)?;
+        let receipt = Arc::new(
+            connection
+                .end(
+                    &dispatched.credential,
+                    &dispatched.viewer_hash,
+                    &self.0.peer_session,
+                    known.as_ref(),
+                )
+                .await
+                .map_err(|_| ReceiverStartError::Unresolved)?,
+        );
+        // Preserve the authenticated result before a subsequent Store await.
+        let mut owner = self.0.state.lock().expect("receiver owner");
+        Ok(owner.confirmed_source_end.get_or_insert(receipt).clone())
+    }
     pub(crate) async fn wait_ready(
         &self,
         deadline: Instant,
@@ -263,7 +321,7 @@ async fn run_owner(
         intent,
         &dispatch_owner,
         &source_wrapper,
-        move |credential, viewer| {
+        move |credential, viewer, endpoint| {
             dispatch_entry
                 .state
                 .lock()
@@ -271,6 +329,7 @@ async fn run_owner(
                 .dispatched = Some(Arc::new(DispatchedSource {
                 credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
                 viewer_hash: viewer.to_owned(),
+                endpoint: endpoint.clone(),
             }));
         },
     );
@@ -302,6 +361,7 @@ async fn run_owner(
     let received = Arc::new(ReceivedSource {
         credential: result.credential,
         viewer_hash: result.viewer_hash,
+        endpoint: result.endpoint,
         incarnation: source_incarnation,
         response,
     });
@@ -328,6 +388,7 @@ async fn run_owner(
             "file_revision":intent.recipe.file_revision, "source_request_id":incarnation,
             "source_session_id":source_session, "source_incarnation_id":source_incarnation,
             "source_owner_epoch":source_epoch, "viewer_hash":received.viewer_hash,
+            "endpoint":received.endpoint,
             "credential":received.credential.expose(),
         }))
         .map_err(|_| ReceiverStartError::Unresolved)?,
@@ -446,7 +507,6 @@ async fn run_owner(
             return Err(ReceiverStartError::Unresolved);
         }
         attachment.owner.lease_expires_at_ms = new_lease;
-        entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
         entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
     }
 }
