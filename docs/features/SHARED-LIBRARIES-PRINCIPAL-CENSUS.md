@@ -994,3 +994,83 @@ scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/h
 scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
 scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
 ```
+
+## Assigned worker failure before activation
+
+The candidate `settle_source_assigned_without_activation` callback takes the
+closed complete dispatch assignment, not a node string or caller boolean. It
+checks the immutable generation-one binding, the exact canonical request and
+assigned node, and absence of every incarnation route, lease, pin, preparation,
+recipe and playback pointer. It atomically records failed request settlement
+and releases only that held reservation. A timestamp CAS makes an ignored
+request write fail the final assertion even when revocation had already marked
+the request failed. Exact settlement replay preserves the original receipt.
+
+This callback is SQL permission only. Its sole intended production caller is
+the private daemon actor after that actor proves it never spawned or queued a
+producer. Route absence alone is not physical proof. It deliberately works
+while Sharing is disabled or revoked. An activated route refuses this callback;
+its physical retirement requires a separate exact owned producer barrier and
+terminal route transition. Ordinary generation-zero release refuses assigned
+workers. No expiry or terminal ACK releases capacity.
+
+Based on `830e735c8`, the memory and pooled regression passed with one test and
+zero ignored tests in 0.97 seconds. It preserves an actual foreign lease,
+rolls back a suppressed request write, and settles/replays while disabled and
+revoked. The actual three-voter contract passed with one test and zero ignored
+tests in 11.53 seconds; it proves activated-route refusal, suppressed-write
+rollback, exact assigned no-spawn accounting replay, and preservation of the
+other seven held obligations. These fixtures dispatch no producer and do not
+qualify the private actor handoff.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_of_grant -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+```
+
+Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 21 seconds,
+Core feature all-target check in 31.00 seconds, and Core feature all-target
+Clippy with denied warnings in 35.15 seconds. Documentation index tests,
+catalogue lint and diff checks passed.
+
+## Exact terminal worker accounting
+
+The candidate `settle_source_terminal_worker` takes a closed dispatch assignment
+and its server-held typed terminal route. It agrees on the full principal,
+incarnation, playback, fingerprint, assigned node, generation-one session and
+owner epoch, exact terminal reason, lease and route timestamp. It captures the
+current request timestamp and lease revision before the same-write assertions.
+It rejects foreign lease owner/fence, foreign pin epoch, any preparation,
+recipe or pointer, and a changed terminal route. Only matching terminal lease
+and pin rows can be removed, in the same transaction as request settlement and
+held reservation release. A suppressed accounting writer rolls those deletions
+back. Start settlement already recorded by publication is preserved.
+
+This is SQL permission, not physical proof. The sole intended production caller
+is the private Source worker actor after actual registered process reap and all
+associated reader/writer barriers. The actor first uses the existing exact
+`end_media_session_if_owner` lifecycle method; no second media lifecycle is
+introduced. A terminal SQL state, zero lease after revoke, expiration or ACK
+never establishes physical settlement. Cleanup can complete after disable or
+revoke. Disabled published cleanup retains resolved replay metadata; revoke
+retains the canonical failed state produced by the existing trigger.
+
+Based on `5c6a0369a`, the focused SQLite regression passed with one test and zero
+ignored tests in 2.51 seconds, exercising blocked and published routes in both
+memory and pooled modes. It preserves actual foreign lease/pin rows, refuses a
+wrong session, proves rollback of terminal lease deletion, and replays exact
+settlement. The actual three-voter regression passed with one test and zero
+ignored tests in 11.63 seconds, including real revoke cleanup, active-route
+refusal, foreign pin preservation, deletion rollback, exact replay and the
+other grants' six held obligations. No producer is dispatched by these fixtures;
+physical actor installation and its downstream settlement remain unqualified.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+```
+
+Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 19 seconds,
+Core feature all-target check in 30.66 seconds, and Core feature all-target
+Clippy with denied warnings in 35.81 seconds. Documentation index tests,
+catalogue lint and diff checks passed.

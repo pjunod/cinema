@@ -1423,3 +1423,291 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
         assert_eq!(held, vec!["\"held\"".to_owned()]);
     }
 }
+
+#[tokio::test]
+async fn sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_of_grant() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("no-spawn.db")).expect("pooled"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let intent = intent(&store, grant, &key, "no-spawn").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&intent, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("acquired")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("actual worker");
+        assert_eq!(
+            store
+                .release_source_never_dispatched(&binding)
+                .await
+                .expect("ordinary release"),
+            SourceReleaseOutcome::Refused
+        );
+        let resource = format!("session:{}", binding.incarnation_id());
+        let now = now_ms().expect("clock");
+        store.sharing_txn(vec![("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES($1,'foreign',1,1,$2,$3)".into(),vec![resource.clone().into(),(now+60000).into(),now.into()])]).await.expect("foreign physical obligation");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("fenced"),
+            SourceReleaseOutcome::Refused
+        );
+        assert_eq!(count(&store, "job_leases").await, 1);
+        store.sharing_txn(vec![("DELETE FROM job_leases WHERE resource=$1".into(),vec![resource.into()]),("UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),vec![]),("UPDATE sharing_exports SET state='revoked' WHERE id=$1".into(),vec![grant.into()]),("CREATE TRIGGER refuse_no_spawn_request BEFORE UPDATE OF state ON media_session_requests WHEN NEW.state='failed' BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("disabled revoked accounting fault");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("atomic rollback"),
+            SourceReleaseOutcome::Refused
+        );
+        let state=store.sharing_read("SELECT reservation_state AS payload FROM sharing_source_session_bindings WHERE incarnation_id=$1",vec![binding.incarnation_id().into()]).await.expect("binding");
+        assert_eq!(state, ["held"]);
+        store
+            .sharing_txn(vec![(
+                "DROP TRIGGER refuse_no_spawn_request".into(),
+                vec![],
+            )])
+            .await
+            .expect("restore writer");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("owned SQL settlement"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("exact replay"),
+            SourceReleaseOutcome::ExactReplay
+        );
+        let state = store
+            .sharing_read(
+                "SELECT state AS payload FROM media_session_requests WHERE incarnation_id=$1",
+                vec![binding.incarnation_id().into()],
+            )
+            .await
+            .expect("request");
+        assert_eq!(state, ["failed"]);
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_terminal_settlement_fences_physical_rows_and_rolls_back() {
+    let dir = tempfile::tempdir().expect("directory");
+    for published in [false, true] {
+        for store in [
+            SqliteStore::open_in_memory().expect("memory"),
+            SqliteStore::open(&dir.path().join(format!("terminal-{published}.db")))
+                .expect("pooled"),
+        ] {
+            let (grant, key) = setup(&store).await;
+            let intent = intent(&store, grant, &key, "terminal-worker").await;
+            let SourceClaimOutcome::Acquired(binding) = store
+                .claim_source_media_session(&intent, &proof())
+                .await
+                .expect("claim")
+            else {
+                panic!("acquired")
+            };
+            let assignment = store
+                .assign_source_dispatch(&binding, &key, &proof())
+                .await
+                .expect("assign")
+                .expect("owned");
+            let SourceWriteAuthorityRead::Ready(authority) = store
+                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .await
+                .expect("authority")
+            else {
+                panic!("ready")
+            };
+            let now = now_ms().expect("clock");
+            let activation = crate::domain::MediaSessionActivation {
+                incarnation_id: binding.incarnation_id().to_string(),
+                session_id: Uuid::new_v4().to_string(),
+                principal: binding.principal().clone(),
+                playback_id: binding.playback_id().to_owned(),
+                recovery_epoch: String::new(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: true,
+                request_id: Some(binding.request_id().to_owned()),
+                request_fingerprint: binding.request_fingerprint().to_owned(),
+                owner_node_id: "voter".into(),
+                recipe_json: "{}".into(),
+                response_json: "{}".into(),
+                publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: now,
+                lease_expires_at_ms: now + 60000,
+                expected_desired_revision: None,
+            };
+            let mut route = store
+                .activate_source_media_session(&authority, &activation)
+                .await
+                .expect("activate")
+                .expect("route")
+                .route;
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &route)
+                    .await
+                    .expect("live refusal"),
+                SourceReleaseOutcome::Refused
+            );
+            if published {
+                let SourcePublicationAuthorityRead::Ready(permission) = store
+                    .prepare_source_publication_authority(&assignment, &key, &proof())
+                    .await
+                    .expect("publication")
+                else {
+                    panic!("publication permission")
+                };
+                route = store
+                    .complete_source_media_session_publication(&permission)
+                    .await
+                    .expect("publish")
+                    .expect("published route");
+            }
+            store
+                .sharing_txn(vec![(
+                    "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                    vec![],
+                )])
+                .await
+                .expect("off");
+            if !published {
+                // Canonical revoke makes route and job lease zero and fails
+                // the request. Published disabled cleanup keeps replay data.
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_exports SET state='revoked' WHERE id=$1".into(),
+                        vec![grant.into()],
+                    )])
+                    .await
+                    .expect("revoked unpublished start");
+            }
+            let terminal = store
+                .end_media_session_if_owner(&crate::domain::MediaSessionEnd {
+                    incarnation_id: route.incarnation_id.clone(),
+                    session_id: route.session_id.clone(),
+                    expected_owner_node_id: route.owner_node_id.clone(),
+                    expected_owner_epoch: route.owner_epoch,
+                    expected_lease_expires_at_ms: route.lease_expires_at_ms,
+                    terminal_reason: if published { "deleted" } else { "revoked" }.into(),
+                    now_ms: now_ms().expect("clock"),
+                })
+                .await
+                .expect("exact terminal")
+                .expect("retained terminal");
+            assert_eq!(terminal.lease_expires_at_ms == 0, !published);
+            let mut foreign = terminal.clone();
+            foreign.session_id = Uuid::new_v4().to_string();
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &foreign)
+                    .await
+                    .expect("foreign session refuses"),
+                SourceReleaseOutcome::Refused
+            );
+            store
+                .sharing_txn(vec![(
+                    "UPDATE job_leases SET owner_node_id='foreign' WHERE resource='session:'||$1"
+                        .into(),
+                    vec![binding.incarnation_id().into()],
+                )])
+                .await
+                .expect("foreign lease corruption");
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("foreign lease refuses"),
+                SourceReleaseOutcome::Refused
+            );
+            assert_eq!(count(&store, "job_leases").await, 1);
+            store.sharing_txn(vec![("UPDATE job_leases SET owner_node_id='voter' WHERE resource='session:'||$1".into(),vec![binding.incarnation_id().into()]),("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session',$1,2,0)".into(),vec![binding.incarnation_id().into()])]).await.expect("foreign pin");
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("foreign pin refuses"),
+                SourceReleaseOutcome::Refused
+            );
+            assert_eq!(count(&store, "cache_consumer_pins").await, 1);
+            store.sharing_txn(vec![("DELETE FROM cache_consumer_pins WHERE storage_id='foreign'".into(),vec![]),("CREATE TRIGGER ignore_terminal_request BEFORE UPDATE OF updated_at_ms ON media_session_requests BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("accounting fault");
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("rollback"),
+                SourceReleaseOutcome::Refused
+            );
+            assert_eq!(
+                count(&store, "job_leases").await,
+                1,
+                "lease deletion rolls back"
+            );
+            let held = store
+                .sharing_read(
+                    "SELECT reservation_state AS payload FROM sharing_source_session_bindings",
+                    vec![],
+                )
+                .await
+                .expect("held");
+            assert_eq!(held, ["held"]);
+            store
+                .sharing_txn(vec![(
+                    "DROP TRIGGER ignore_terminal_request".into(),
+                    vec![],
+                )])
+                .await
+                .expect("restore accounting");
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("SQL accounting permission"),
+                SourceReleaseOutcome::Released
+            );
+            assert_eq!(
+                store
+                    .settle_source_terminal_worker(&assignment, &terminal)
+                    .await
+                    .expect("exact terminal replay"),
+                SourceReleaseOutcome::ExactReplay
+            );
+            assert_eq!(count(&store, "job_leases").await, 0);
+            let request_state = store
+                .sharing_read(
+                    "SELECT state AS payload FROM media_session_requests WHERE incarnation_id=$1",
+                    vec![binding.incarnation_id().into()],
+                )
+                .await
+                .expect("retained request");
+            assert_eq!(
+                request_state,
+                [if published { "resolved" } else { "failed" }]
+            );
+
+            assert_eq!(
+                count(&store, "media_sessions").await,
+                1,
+                "canonical terminal route retained"
+            );
+        }
+    }
+}

@@ -414,13 +414,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         "UPDATE files SET path='/private/synthetic.mkv' WHERE id=1",
     )
     .await;
-    assert!(matches!(
-        store
-            .claim_source_media_session(&third, &observation(&client).await)
-            .await
-            .expect("Source candidate fixture operation"),
-        SourceClaimOutcome::Acquired(_)
-    ));
+    let SourceClaimOutcome::Acquired(third_binding) = store
+        .claim_source_media_session(&third, &observation(&client).await)
+        .await
+        .expect("third actual claim")
+    else {
+        panic!("acquired third")
+    };
     for index in 1..=4 {
         let other = Uuid::new_v4();
         let invitation = Uuid::new_v4();
@@ -841,4 +841,122 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     ));
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("renewal retains physical obligations");
     assert_eq!(rows[0].value, "8");
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&assignment)
+            .await
+            .expect("live route cannot settle"),
+        SourceReleaseOutcome::Refused
+    );
+    let no_spawn = store
+        .assign_source_dispatch(&third_binding, &credential, &observation(&client).await)
+        .await
+        .expect("actual assigned no-spawn worker")
+        .expect("assigned");
+    exec(
+        &client,
+        "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+    )
+    .await;
+    exec(&client,"CREATE TRIGGER source_no_spawn_ignore BEFORE UPDATE OF state ON media_session_requests WHEN NEW.state='failed' BEGIN SELECT RAISE(IGNORE); END").await;
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("rollback missing request settlement"),
+        SourceReleaseOutcome::Refused
+    );
+    exec(&client, "DROP TRIGGER source_no_spawn_ignore").await;
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("owned SQL no-spawn accounting"),
+        SourceReleaseOutcome::Released
+    );
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("exact no-spawn replay"),
+        SourceReleaseOutcome::ExactReplay
+    );
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("only settled obligation released");
+    assert_eq!(rows[0].value, "7");
+    assert_eq!(
+        store
+            .settle_source_terminal_worker(&assignment, &renewed)
+            .await
+            .expect("active worker SQL cannot settle"),
+        SourceReleaseOutcome::Refused
+    );
+    let terminal = store
+        .end_media_session_if_owner(&plurx_core::domain::MediaSessionEnd {
+            incarnation_id: renewed.incarnation_id.clone(),
+            session_id: renewed.session_id.clone(),
+            expected_owner_node_id: renewed.owner_node_id.clone(),
+            expected_owner_epoch: renewed.owner_epoch,
+            expected_lease_expires_at_ms: renewed.lease_expires_at_ms,
+            terminal_reason: "deleted".into(),
+            now_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock")
+                .as_millis() as i64,
+        })
+        .await
+        .expect("exact existing lifecycle End")
+        .expect("retained ended route");
+    client
+        .execute(
+            "UPDATE sharing_exports SET state='revoked' WHERE id=$1",
+            hiqlite::params!(grant.to_string()),
+        )
+        .await
+        .expect("revoked cleanup");
+    client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('terminal-foreign','foreign','foreign','media_session',$1,2,0)",hiqlite::params!(terminal.incarnation_id.clone())).await.expect("foreign terminal pin");
+    assert_eq!(
+        store
+            .settle_source_terminal_worker(&assignment, &terminal)
+            .await
+            .expect("foreign pin preserved"),
+        SourceReleaseOutcome::Refused
+    );
+    exec(
+        &client,
+        "DELETE FROM cache_consumer_pins WHERE storage_id='terminal-foreign'",
+    )
+    .await;
+    exec(&client,"CREATE TRIGGER source_terminal_ignore BEFORE UPDATE OF updated_at_ms ON media_session_requests BEGIN SELECT RAISE(IGNORE); END").await;
+    assert_eq!(
+        store
+            .settle_source_terminal_worker(&assignment, &terminal)
+            .await
+            .expect("terminal accounting rollback"),
+        SourceReleaseOutcome::Refused
+    );
+    let rows = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(count(*) AS TEXT) AS value FROM job_leases WHERE resource='session:'||$1",
+            hiqlite::params!(terminal.incarnation_id.clone()),
+        )
+        .await
+        .expect("lease removal rolled back");
+    assert_eq!(rows[0].value, "1");
+    exec(&client, "DROP TRIGGER source_terminal_ignore").await;
+    assert_eq!(
+        store
+            .settle_source_terminal_worker(&assignment, &terminal)
+            .await
+            .expect("owned SQL terminal accounting"),
+        SourceReleaseOutcome::Released
+    );
+    assert_eq!(
+        store
+            .settle_source_terminal_worker(&assignment, &terminal)
+            .await
+            .expect("exact terminal accounting replay"),
+        SourceReleaseOutcome::ExactReplay
+    );
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("other grants retained");
+    assert_eq!(rows[0].value, "6");
 }
