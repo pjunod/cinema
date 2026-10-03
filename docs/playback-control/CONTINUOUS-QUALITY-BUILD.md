@@ -4225,3 +4225,29 @@ node after the older daemon and producer monitor ended. The old receipt does
 not qualify this integrated tree. Producer census is preserved in the ignored
 owned report directory. Final adversarial review and the Fable stop remain
 pending.
+
+
+### 10.142 Exact-source focused manual and actual Auto qualification passes
+
+The focused `c8484d19b` campaign passed three manual changes followed by five
+actual Auto changes: 1080 → 720 → 1080 → 720 → 1080, with the lower link derived
+from the real catalog peaks and restored only after actual presentation.
+All eight transitions measured at most 66.8 ms callback gap; all Auto
+transaction/removal checks passed. There were zero stalls or hitches and the
+final media clock measured 1.001x. The complete run took 648.706 s. This is
+browser video evidence, not physical display or audible output qualification.
+Receipt: `continuous-chrome-mixed-auto-linux-c8484d19b-focused-baseline-auto.json`.
+
+End was measured while the same owned daemon remained alive: two FFmpeg
+children before End, zero at the 0/1/3/5-second samples, with exact daemon
+identity checked each time. The bounded producer census is retained as
+`continuous-chrome-mixed-c8484d19b-focused-baseline-auto-census.jsonl`.
+The earlier fifteen-manual receipt remains failed; it is not relabelled green.
+The focused pass resolves the preload baseline defect but does not replace the
+full current-source browser/operation matrix or intermittent startup evidence.
+
+The committed continuous-suite CLI is now running twenty manual changes using
+owned Linux Firefox, the generated AVC/shared-AAC fixture and daemon
+`c8484d19b`. Chrome and its isolated daemon closed before Firefox started.
+No units executed. Final adversarial review has not started; the human's Fable
+stop remains immediately after that review and before fast-lane units or merge.
