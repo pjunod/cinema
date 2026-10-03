@@ -92,7 +92,7 @@ pub struct LoginResponse {
     pub user: UserDto,
 }
 
-pub(super) struct ClientPeer(Option<SocketAddr>);
+pub(super) struct ClientPeer(pub(super) Option<SocketAddr>);
 
 impl<S: Send + Sync> FromRequestParts<S> for ClientPeer {
     type Rejection = Infallible;
@@ -315,9 +315,29 @@ pub async fn login(
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, ApiError> {
+    let login = login_user(&state, peer, &headers, req).await?;
+    Ok(Json(LoginResponse {
+        token: login.token,
+        user: login.user.into(),
+    }))
+}
+
+/// Shared password authentication, admission, CAS minting and proof bookkeeping.
+/// Transport adapters convert the native user to their own response DTO.
+pub(crate) struct AuthenticatedLogin {
+    pub(crate) token: String,
+    pub(crate) user: plurx_core::domain::User,
+}
+
+pub(crate) async fn login_user(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    req: LoginRequest,
+) -> Result<AuthenticatedLogin, ApiError> {
     validate_password_size(&req.password)?;
     validate_device_label(req.device.as_deref())?;
-    let address = client_ip(&headers, peer, &state.trusted_proxies);
+    let address = client_ip(headers, peer, &state.trusted_proxies);
     state
         .login_throttle
         .observe_proxy_shape(address, headers.contains_key("x-forwarded-for"));
@@ -377,10 +397,7 @@ pub async fn login(
         .cache_only_admin_proofs
         .record_authenticated(proof_ticket, hash, &user);
 
-    Ok(Json(LoginResponse {
-        token,
-        user: user.into(),
-    }))
+    Ok(AuthenticatedLogin { token, user })
 }
 
 fn client_ip(headers: &HeaderMap, peer: Option<SocketAddr>, trusted: &[ipnet::IpNet]) -> IpAddr {
@@ -450,17 +467,30 @@ pub async fn logout(
                 .as_secs() as i64,
         )
         .await?;
+    revoke_token_under_exclusion(&state, &hash, proof_revocation).await?;
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Token-only commit shared by native and compatibility logout. Caller must
+/// authenticate the presented token and begin its exact digest exclusion.
+/// Native logout revokes user file grants before this boundary; a facade
+/// caller can end only its own plays and leave other devices' grants intact.
+pub(crate) async fn revoke_token_under_exclusion(
+    state: &AppState,
+    hash: &str,
+    proof_revocation: ClusterCacheRevocation,
+) -> Result<(), ApiError> {
     if !state
         .store
-        .delete_token_with_cache_admin_claim(&hash, proof_revocation.mutation_claim())
+        .delete_token_with_cache_admin_claim(hash, proof_revocation.mutation_claim())
         .await?
     {
         return Err(ApiError::ServiceUnavailable(
             "logout lost its cache-revocation exclusion; retry the request".into(),
         ));
     }
-    proof_revocation.finish(&state).await?;
-    Ok(Json(serde_json::json!({ "ok": true })))
+    proof_revocation.finish(state).await?;
+    Ok(())
 }
 
 /// GET /api/v1/me

@@ -8706,6 +8706,101 @@ mod tests {
         (router(state.clone()), state, fixture)
     }
 
+    #[tokio::test]
+    async fn shared_token_only_revocation_preserves_other_device_reader_grants() {
+        let (app, state) = test_app_with_state();
+        let reader_token = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let login = auth::login_user(
+            &state,
+            None,
+            &axum::http::HeaderMap::new(),
+            auth::LoginRequest {
+                username: "paul".into(),
+                password: "supersecret".into(),
+                device: Some("compatibility fixture".into()),
+            },
+        )
+        .await
+        .expect("shared login");
+        let reader_hash = plurx_core::auth::hash_token(&reader_token);
+        let compat_hash = plurx_core::auth::hash_token(&login.token);
+        let reader_grant = plurx_core::auth::hash_token("fixture-reader-grant");
+        let compat_grant = plurx_core::auth::hash_token("fixture-compat-grant");
+        for (id, token_hash, source_token_hash) in [
+            ("reader", &reader_grant, &reader_hash),
+            ("compat", &compat_grant, &compat_hash),
+        ] {
+            state
+                .store
+                .create_file_grant(plurx_core::store::NewFileGrant {
+                    id: id.into(),
+                    token_hash: token_hash.clone(),
+                    file_id: seeded.file,
+                    user_id: login.user.id,
+                    source_token_hash: source_token_hash.clone(),
+                    created_at: 1_000,
+                    expires_at: i64::MAX,
+                })
+                .await
+                .expect("file grant");
+        }
+        assert_eq!(
+            extract::authenticate_user_token(&state, &login.token)
+                .await
+                .expect("shared authority")
+                .id,
+            login.user.id
+        );
+        let exclusion =
+            internal_auth_revocation::ClusterCacheRevocation::begin_digest(&state, &compat_hash)
+                .await
+                .expect("exact revocation exclusion");
+        auth::revoke_token_under_exclusion(&state, &compat_hash, exclusion)
+            .await
+            .expect("token-only revoke");
+        assert!(extract::authenticate_user_token(&state, &login.token)
+            .await
+            .is_err());
+        assert_eq!(
+            extract::authenticate_user_token(&state, &reader_token)
+                .await
+                .expect("other device stays signed in")
+                .id,
+            login.user.id
+        );
+        let reader = state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("reader lookup")
+            .expect("reader row");
+        assert!(reader.source_active);
+        assert_eq!(reader.revoked_at, None);
+        let retired = state
+            .store
+            .file_grant_by_hash(&compat_grant)
+            .await
+            .expect("own grant lookup")
+            .expect("own grant row");
+        assert!(!retired.source_active);
+        // Native logout retains its existing broader file-grant revocation.
+        let (status, body) = call(
+            &app,
+            post("/api/v1/auth/logout", Some(&reader_token), json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(state
+            .store
+            .file_grant_by_hash(&reader_grant)
+            .await
+            .expect("native scope lookup")
+            .expect("reader row")
+            .revoked_at
+            .is_some());
+    }
+
     async fn login_device(app: &Router, device: &str) -> String {
         let (status, body) = call(
             app,

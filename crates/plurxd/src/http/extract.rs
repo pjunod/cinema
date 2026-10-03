@@ -707,24 +707,33 @@ impl FromRequestParts<AppState> for AuthUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         let token = token_from_parts(parts).ok_or(ApiError::Unauthorized)?;
-        let hash = auth::hash_token(&token);
-        let ticket = state.cache_only_admin_proofs.authentication_ticket();
-        let user = match state.store.authenticate_token(&hash).await? {
-            TokenAuthentication::Authenticated(user) => user,
-            TokenAuthentication::Expired { idle_days } => {
-                state.cache_only_admin_proofs.invalidate_digest(&hash);
-                return Err(session_expired(idle_days));
-            }
-            TokenAuthentication::Unknown => {
-                state.cache_only_admin_proofs.invalidate_digest(&hash);
-                return Err(ApiError::Unauthorized);
-            }
-        };
-        state
-            .cache_only_admin_proofs
-            .record_authenticated(ticket, hash, &user);
-        Ok(AuthUser(user))
+        authenticate_user_token(state, &token).await.map(AuthUser)
     }
+}
+
+/// Shared user-token authority, including typed idle expiry and proof fencing.
+/// A transport parser grants no authority until this function succeeds.
+pub(crate) async fn authenticate_user_token(
+    state: &AppState,
+    token: &str,
+) -> Result<plurx_core::domain::User, ApiError> {
+    let hash = auth::hash_token(token);
+    let ticket = state.cache_only_admin_proofs.authentication_ticket();
+    let user = match state.store.authenticate_token(&hash).await? {
+        TokenAuthentication::Authenticated(user) => user,
+        TokenAuthentication::Expired { idle_days } => {
+            state.cache_only_admin_proofs.invalidate_digest(&hash);
+            return Err(session_expired(idle_days));
+        }
+        TokenAuthentication::Unknown => {
+            state.cache_only_admin_proofs.invalidate_digest(&hash);
+            return Err(ApiError::Unauthorized);
+        }
+    };
+    state
+        .cache_only_admin_proofs
+        .record_authenticated(ticket, hash, &user);
+    Ok(user)
 }
 
 /// Stable code every client matches to land on its sign-in screen with the
