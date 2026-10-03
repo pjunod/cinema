@@ -381,3 +381,17 @@ are already implemented, but facade identity/watch storage and the complete
 physical/cluster matrix remain substantial work. Re-estimate after J1's
 storage seams and J4's production transport tests; passing the J0 spike does
 not make those milestones complete.
+
+## 6. Native ownership inventory — J0 additions reviewed
+
+The first manual effort run failed the mechanical ownership census. Its ten
+count changes were reviewed against the contract base: existing resurrection,
+supersession, publication and release calls added only by the new regressions;
+two aborted-and-joined fixture tasks; three bounded fixture waits; one
+monotonic `Instant` import for grant expiry; and one Axum response-status
+assertion which launches no process. The
+[ownership inventory](../../tests/playback/rolling-producer-owners.toml) now
+records each exact delta and its owner. The passive grant creates no producer,
+process or independent timer; existing maintenance and durable owner renewal
+remain its lifecycle owners. The failed run is not integration evidence;
+rerun the local preflight and the manual effort gate on the corrected tree.
