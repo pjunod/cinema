@@ -5,13 +5,13 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> tracing the first reservation mismatch. The
-<code>9ca90cf0f</code> rerun retained 720p through HLS error recovery, but still
-failed before its first frame on an unreserved fragment. Video load frontier
-advanced; no SourceBuffer was created. The refusal now distinguishes audio
-from video and names actual versus reserved tick/byte shapes. The Firefox
-333 ms backward step and earlier 133.66 ms p95 failure remain open. No units
-have run.</p>
+<p><strong>Working now:</strong> closing a publication gap found while tracing
+the current-main startup mismatch. A completed fragment could be overwritten
+before its quality reservation; regeneration now retains every completed
+publication. The <code>4489dbf2a</code> failure identifies AAC with matching
+reserved ticks but a different artifact identity. Startup and the independent
+steady Firefox backward step remain unresolved pending the exact-source
+rerun. The new regression is authored and unrun. No units have run.</p>
 <p><strong>Physical iOS:</strong> the user unlocked 17promax; the fresh launch first
 failed the Apple remoteService connection, then its bounded retry ended Locked.
 No CQ Lab process launched. The isolated runtime was removed. Physical

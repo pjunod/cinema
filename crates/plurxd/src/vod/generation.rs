@@ -931,22 +931,14 @@ impl vodgen::Sink for RenditionSink {
                 .filter(|state| state.is_materialized())
                 .map(|state| state.bytes())
         };
-        let planned = self.rendition.plan.entry(entry).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "publication is outside the media plan",
-            )
-        })?;
-        let retain_reserved = retained.is_some()
-            && dependencies.iter().any(|dependency| {
-                dependency.from_tick < planned.end_ticks()
-                    && planned.start_ticks < dependency.through_tick
-            });
-        if retain_reserved {
-            // A restarted encoder may traverse a cached interval with different
-            // rate-control history. Keep its original physical artifact, never
-            // publish these new bytes under the reserved URI/digest.
-            let expected = retained.expect("materialized reserved interval");
+        // A completed URI may already be in an HTTP client's hands before its
+        // Scheduled acknowledgement pins the bytes. Publication, not that
+        // later acknowledgement, makes the cached artifact immutable.
+        let retain_published = retained.is_some();
+        if retain_published {
+            // A restarted encoder can use different rate-control history.
+            // Traverse the original publication instead of replacing it.
+            let expected = retained.expect("materialized published interval");
             let cached = super::vod_serve_serve::read_quality_artifact(
                 &self
                     .rendition
@@ -982,7 +974,7 @@ impl vodgen::Sink for RenditionSink {
             );
             return Err(io::Error::new(io::ErrorKind::InvalidData, cause));
         }
-        if retain_reserved {
+        if retain_published {
             {
                 let _manifest = self.rendition.manifest.lock().await;
                 if self.rendition.gen_epoch.load(Relaxed) != self.epoch {

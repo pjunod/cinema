@@ -4516,3 +4516,51 @@ either owner. Upstream also updates the vendored HLS seek loader lifecycle
 and bounded storage/startup work. The current `4f70eabc6` diagnostic run
 remains a pre-integration receipt; it will not qualify the combined source.
 No units are run during this integration.
+
+
+### 10.153 A steady 720p control reproduces the Firefox backward step
+
+The pre-integration `4f70eabc6` control started in 3056 ms and played for
+120 seconds without any quality request, keeping HLS start/load/current/next
+level 1 and the same attachment/VOD session. No refusal observations were
+recorded. Its clock advanced 119.995 seconds (1.000x), with zero waits,
+reopens or stalls and one dropped frame out of 2883. It nevertheless failed
+on one backward frame step: film 1032.666666 to 1032.333333, 50.4 ms apart,
+with presentedFrames advancing 1027 to 1028 and actual currentTime
+1032.324258. The video was neither paused nor seeking. Both observers agree.
+
+This demonstrates that the 333 ms Firefox fault can occur without a quality
+change; it does not identify its underlying decoder, media or clock cause.
+The strict failed receipt remains failed. End observed no owned FFmpeg
+children at each alive-daemon 0/1/3/5-second sample, and the supervisor
+removed the runtime. JSON, JUnit, console, supervisor and bounded generated
+media copies are retained. Current-main integration `4489dbf2a` passed the
+pinned workspace/all-target Clippy, formatting, catalog and served-script
+hook; its exact-source Linux rebuild and steady control are underway.
+The next control also retains at most 256 KiB of its owned browser log for
+backend diagnosis. No units ran, and the final review/Fable stop is ahead.
+
+
+### 10.154 Keep completed publications immutable before reservation
+
+The exact current-main `4489dbf2a` control failed at startup with a missing
+AAC artifact identity for ticks 47454208–47550464/48000, 38,812 bytes. Its
+ledger already contained that same tick range, so this is an artifact identity
+mismatch rather than an absent timeline window. HLS retained manual 720p.
+The bounded browser log has no observed audio-backend refusal. Offline
+software SHA-256 inspection of three copied AAC objects agrees with native
+SHA-256; this is a media diagnostic, not a unit-suite run.
+
+The sink preserved cached bytes only if a durable quality reservation already
+covered them. That leaves a window between completed HTTP publication and
+Scheduled acknowledgment in which a restarted encoder can overwrite the URI
+with different rate-control history. Regeneration now traverses any completed
+materialized publication without replacing or recharging it. Existing reserved
+identity checks still reject corrupt or missing artifacts. This closes that
+static publication gap; the observed startup mismatch and Firefox backward
+step remain unresolved until exact-source qualification succeeds.
+
+Authored, unrun regression:
+`crates/plurxd/src/vod/tests/chunk_03.rs::restarted_sink_keeps_published_bytes_before_quality_reservation`.
+It restarts a sink before any quality pin, checks original bytes survive, and
+checks no extra working-set or publication credit. No units have run.

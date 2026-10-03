@@ -3770,6 +3770,33 @@
     }
 
     #[tokio::test]
+    async fn restarted_sink_keeps_published_bytes_before_quality_reservation() {
+        use crate::vodgen::Sink;
+        let base = crate::test_tempdir().expect("unreserved traversal");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = local_serve(base.path().to_path_buf(), store.clone());
+        let mut rendition = synthetic_rendition(base.path()).await;
+        Arc::get_mut(&mut rendition).expect("private rendition").key = "b".repeat(64);
+        let sink = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        let original = b"already-delivered-before-scheduled-ack";
+        sink.materialize(0, original.to_vec()).await.expect("first publication");
+        assert!(store.quality_reserved_intervals(&rendition.key).await.expect("no pins").is_empty());
+        let charged = serve.shared.working_set.load(Relaxed);
+        let publication = rendition.publication_serial.load(Relaxed);
+        rendition.gen_epoch.fetch_add(1, Relaxed);
+        let restarted = RenditionSink { shared: Arc::clone(&serve.shared),
+            rendition: Arc::clone(&rendition), epoch: rendition.gen_epoch.load(Relaxed) };
+        restarted.materialize(0, b"different-encoder-history-before-pin".to_vec())
+            .await.expect("traverse existing publication");
+        assert_eq!(tokio::fs::read(rendition.dir.path().join(segment_name(0)))
+            .await.expect("original publication"), original);
+        assert_eq!(serve.shared.working_set.load(Relaxed), charged);
+        assert_eq!(rendition.publication_serial.load(Relaxed), publication,
+            "traversal must not mint a second publication");
+    }
+
+    #[tokio::test]
     async fn restarted_sink_keeps_verified_reserved_bytes_and_refuses_corruption() {
         use crate::vodgen::Sink;
         use plurx_core::playback::continuous_quality::{QualityAttachment, QualityLedger,
