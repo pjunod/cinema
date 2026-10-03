@@ -54,17 +54,36 @@ pub struct RemoteWatchUpdate {
 }
 
 /// Captured receiver authority; no credential or remote item data is persisted.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReceiverCatalogueScope {
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub import_id: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub source_server_id: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub catalogue_epoch: Uuid,
     pub lifecycle_generation: i64,
     pub assignment_generation: i64,
     pub endpoint_generation: i64,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub claim_id: Uuid,
+    #[serde(deserialize_with = "crate::sharing::canonical_uuid")]
     pub remote_grant_id: Uuid,
     pub libraries: Vec<SourceId>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteContinueItem {
+    pub library_id: SourceId,
+    pub item_id: SourceId,
+    pub watch: RemoteWatch,
+}
+#[derive(Clone)]
+pub struct RemoteContinueGroup {
+    pub scope: ReceiverCatalogueScope,
+    pub source_name: String,
+    pub items: Vec<RemoteContinueItem>,
 }
 #[async_trait]
 pub trait SharingCatalogueStore: Send + Sync {
@@ -78,6 +97,14 @@ pub trait SharingCatalogueStore: Send + Sync {
         scopes: &[ReceiverCatalogueScope],
         now_s: i64,
     ) -> Result<bool, StoreError>;
+    /// Recent unfinished B-owned history and current effective imports/assignments
+    /// in one bounded read. More than 200 eligible rows or 32 groups refuses;
+    /// a requested smaller limit selects that many newest rows after the census.
+    async fn remote_continue_watch_groups(
+        &self,
+        user: i64,
+        limit: usize,
+    ) -> Result<Vec<RemoteContinueGroup>, StoreError>;
     /// One consistent, generation-bound receiver authority query per operation.
     async fn assigned_catalogue_libraries(
         &self,
@@ -173,6 +200,84 @@ impl<T: Backend> SharingCatalogueStore for T {
             row.since.as_deref(),
         )
         .is_some_and(|p| p.is_expired(row.last_seen, now_s)))
+    }
+
+    async fn remote_continue_watch_groups(
+        &self,
+        user: i64,
+        limit: usize,
+    ) -> Result<Vec<RemoteContinueGroup>, StoreError> {
+        if user <= 0 || !(1..=200).contains(&limit) {
+            return Err(invalid());
+        }
+        // Bounds precede JSON construction. A 201st row is an explicit overflow
+        // sentinel; no server-side history snapshot or silent truncation exists.
+        let sql="SELECT CASE WHEN length(CAST(i.source_name AS BLOB))<=128 AND length(w.remote_library_id)<=19 AND length(w.remote_item_id)<=19 AND length(i.id)=36 AND length(i.source_server_id)=36 AND length(i.catalogue_epoch)=36 AND length(i.claim_id)=36 AND length(i.remote_grant_id)=36 THEN json_object('scope',json_object('import_id',i.id,'source_server_id',i.source_server_id,'catalogue_epoch',i.catalogue_epoch,'lifecycle_generation',i.lifecycle_generation,'assignment_generation',i.assignment_generation,'endpoint_generation',i.endpoint_generation,'claim_id',i.claim_id,'remote_grant_id',i.remote_grant_id,'libraries',json_array(w.remote_library_id)),'source_name',i.source_name,'item',json_object('library_id',w.remote_library_id,'item_id',w.remote_item_id,'watch',json_object('position_ms',w.position_ms,'duration_ms',w.duration_ms,'watched',json(CASE WHEN w.watched=1 THEN 'true' ELSE 'false' END),'sequence',w.sequence,'updated_at_ms',w.updated_at_ms))) ELSE NULL END AS payload FROM sharing_watch w JOIN sharing_imports i ON i.source_server_id=w.source_server_id AND i.catalogue_epoch=w.catalogue_epoch JOIN sharing_assignments a ON a.import_id=i.id AND a.remote_library_id=w.remote_library_id AND a.user_id=w.user_id JOIN sharing_viewers v ON v.user_id=w.user_id JOIN users u ON u.id=v.user_id WHERE u.id=$1 AND i.state='active' AND a.enabled=1 AND w.watched=0 AND w.position_ms>0 ORDER BY w.updated_at_ms DESC,i.id COLLATE BINARY,w.remote_library_id COLLATE BINARY,CAST(w.remote_item_id AS INTEGER) DESC LIMIT 201";
+        let rows = self.sharing_read(sql, vec![user.into()]).await?;
+        if rows.len() > 200 {
+            return Err(StoreError::Identity(
+                "sharing continue-watching capacity".into(),
+            ));
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Row {
+            scope: ReceiverCatalogueScope,
+            source_name: String,
+            item: RemoteContinueItem,
+        }
+        let mut groups: Vec<RemoteContinueGroup> = Vec::new();
+        let mut census =
+            std::collections::BTreeMap::<Uuid, std::collections::BTreeSet<SourceId>>::new();
+        // Validate the entire bounded result before applying the caller's limit.
+        for (index, row) in rows.into_iter().enumerate() {
+            let row: Row = serde_json::from_str(&row).map_err(|_| invalid())?;
+            row.item.watch.validate()?;
+            if row.scope.lifecycle_generation <= 0
+                || row.scope.assignment_generation <= 0
+                || row.scope.endpoint_generation <= 0
+                || row.source_name.chars().any(char::is_control)
+            {
+                return Err(invalid());
+            }
+            if !census.contains_key(&row.scope.import_id) && census.len() == 32 {
+                return Err(StoreError::Identity(
+                    "sharing continue-watching import capacity".into(),
+                ));
+            }
+            let libraries = census.entry(row.scope.import_id).or_default();
+            libraries.insert(row.item.library_id.clone());
+            if libraries.len() > 64 {
+                return Err(invalid());
+            }
+            if index >= limit {
+                continue;
+            }
+            if let Some(group) = groups
+                .iter_mut()
+                .find(|g| g.scope.import_id == row.scope.import_id)
+            {
+                if !group.scope.libraries.contains(&row.item.library_id) {
+                    if group.scope.libraries.len() == 64 {
+                        return Err(invalid());
+                    }
+                    group.scope.libraries.push(row.item.library_id.clone());
+                }
+                group.items.push(row.item);
+            } else {
+                if groups.len() == 32 {
+                    return Err(StoreError::Identity(
+                        "sharing continue-watching import capacity".into(),
+                    ));
+                }
+                groups.push(RemoteContinueGroup {
+                    scope: row.scope,
+                    source_name: row.source_name,
+                    items: vec![row.item],
+                });
+            }
+        }
+        Ok(groups)
     }
 
     async fn assigned_catalogue_libraries(
@@ -291,6 +396,100 @@ fn decode_watch(row: &str) -> Result<RemoteWatch, StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn sharing_continue_reader_refuses_corrupt_import_census_and_oversized_projection() {
+        use crate::store::{SqliteStore, UserStore};
+        let directory = tempfile::tempdir().expect("history fixtures");
+        for store in [
+            SqliteStore::open_in_memory().expect("memory"),
+            SqliteStore::open(&directory.path().join("history.sqlite")).expect("pooled"),
+        ] {
+            let user = store
+                .create_user("history-reader", "synthetic-hash", false)
+                .await
+                .expect("user");
+            store
+                .sharing_txn(vec![(
+                    "INSERT INTO sharing_viewers VALUES($1,$2)".into(),
+                    vec![user.id.into(), Uuid::new_v4().into()],
+                )])
+                .await
+                .expect("viewer fixture");
+            let mut first = None;
+            for n in 0..33 {
+                let import = Uuid::new_v4();
+                let source = Uuid::new_v4();
+                let epoch = Uuid::new_v4();
+                first.get_or_insert(import);
+                // Raw corruption fixture deliberately bypasses the production 32-import
+                // admission limit. Its fake envelope is never decoded or sent externally.
+                store.sharing_txn(vec![
+                    ("INSERT INTO sharing_imports(id,source_server_id,catalogue_epoch,source_name,claim_id,remote_grant_id,credential_envelope,endpoints_json,assignment_generation,lifecycle_generation,endpoint_generation,state,created_at_ms,updated_at_ms) VALUES($1,$2,$3,'Configured Source',$4,$5,'reader-only fixture','[]',1,1,1,'active',1000,1000)".into(),vec![import.into(),source.into(),epoch.into(),Uuid::new_v4().into(),Uuid::new_v4().into()]),
+                    ("INSERT INTO sharing_assignments VALUES($1,'12',$2,1)".into(),vec![import.into(),user.id.into()]),
+                    ("INSERT INTO sharing_watch VALUES($1,$2,'12','9007199254740993',$3,1000,60000,0,1,$4)".into(),vec![source.into(),epoch.into(),user.id.into(),(1000_i64+n).into()]),
+                ]).await.expect("reader corruption fixture");
+                if n == 31 {
+                    assert_eq!(
+                        store
+                            .remote_continue_watch_groups(user.id, 200)
+                            .await
+                            .expect("32 bounded imports")
+                            .len(),
+                        32
+                    );
+                }
+            }
+            assert!(
+                store
+                    .remote_continue_watch_groups(user.id, 1)
+                    .await
+                    .is_err(),
+                "small limit cannot hide 33rd import"
+            );
+            let first = first.expect("first import");
+            store
+                .sharing_txn(vec![
+                    (
+                        "DELETE FROM sharing_imports WHERE id<>$1".into(),
+                        vec![first.into()],
+                    ),
+                    (
+                        "UPDATE sharing_imports SET source_name=$2 WHERE id=$1".into(),
+                        vec![first.into(), "x".repeat(129).into()],
+                    ),
+                ])
+                .await
+                .expect("oversized projection fixture");
+            assert!(
+                store
+                    .remote_continue_watch_groups(user.id, 1)
+                    .await
+                    .is_err(),
+                "oversized name refused before JSON projection"
+            );
+            store
+                .sharing_txn(vec![
+                    (
+                        "UPDATE sharing_imports SET source_name='Configured Source' WHERE id=$1"
+                            .into(),
+                        vec![first.into()],
+                    ),
+                    (
+                        "UPDATE sharing_watch SET remote_item_id='01'".into(),
+                        vec![],
+                    ),
+                ])
+                .await
+                .expect("malformed canonical ID fixture");
+            assert!(
+                store
+                    .remote_continue_watch_groups(user.id, 1)
+                    .await
+                    .is_err(),
+                "malformed item ID refused"
+            );
+        }
+    }
     #[tokio::test]
     async fn sharing_receiver_idle_authority_never_touches_activity_and_refuses_expiry_or_bad_policy(
     ) {
