@@ -4092,3 +4092,73 @@ Final affected feature-enabled Clippy with denied warnings passed in
 1 minute 30 seconds. These regressions qualify the B Store ordering and
 metadata boundary; they do not qualify a live HTTP progress/control route,
 Source physical work, two-NAT delivery or hardware playback.
+
+### B confirmed retirement metadata (S4 follow-up)
+
+The receiver retirement Store takes a `ReceiverRetirementWitness` implemented
+by a private daemon factory. That factory must retain an actual settled Source
+End lineage receipt, or an owned never-dispatched compare-and-set, and join all
+accepted B bodies and tasks before presenting the witness. Core fixtures
+implement metadata witnesses only; they do not qualify physical termination.
+Expiry, terminal JSON, missing pointers and missing leases cannot manufacture
+this witness. Daemon factory and HTTP wiring remain separate outstanding work.
+
+The cleanup transaction repeats the original RemoteSource recipe and login
+hash, B request/session/incarnation/node/epoch, captured lease and retained full
+Source attachment. An all-NULL pending attachment accepts either confirmed
+Source request retirement or an owned no-send disposition; a partial attachment
+refuses. Current login enablement and import assignment are deliberately not
+required for this exact cleanup, so logout, import revocation and the existing
+user-delete trigger cannot strand confirmed obligations. Foreign pins, lease
+owners and pointers refuse; a displaced successor is preserved.
+
+A bounded canonical terminal receipt replaces only the ended RemoteSource
+route response. It binds a purpose-separated context digest, the stable actual
+confirmation identity, disposition and reason. It is terminal metadata, never
+Source proof or a live Start/delivery response. The original resolved Start
+request reply and terminal acknowledgement remain intact; a starting request
+becomes failed, while existing trigger-produced NULL replies stay NULL. Matching
+lease, pins, old pointer and upstream adjunct are removed atomically. Exact
+receipt retry uses assertions only and does not mutate timestamps; a different
+context or confirmation refuses. Commit-unknown is returned as an error and the
+actor must retain its receipt for retry. Local route responses are unaffected.
+
+After confirmed Source/body/task settlement the daemon may refresh terminal B
+route metadata, checking the same original incarnation, session, node, epoch
+and recipe. This refresh is metadata only, never settlement evidence. A live
+route requires lease deadline equality; an already-ended route permits only a
+matching-owner/fence job deadline at or before the captured terminal route
+deadline. The actual maintenance sweep advances the terminal route timestamp
+while retaining an older expired job deadline, and user deletion can set both
+to zero. Future lease extensions and foreign owners remain refusal. The first
+existing terminal cause is preserved.
+
+The focused Core matrix uses actual guarded same-playback successor activation
+before retiring the old owner, and compares every other route/request/lease and
+pointer before and after cleanup. It also retains an acknowledgement written by
+the real terminal-ack API, then checks that Source-confirmed metadata retirement
+and retry preserve it. A later user-delete trigger may clear the original Start
+reply; that current reply is repeated as a transaction preimage and is never
+restored. The receipt identity binds immutable lineage rather than this mutable
+trigger result.
+
+Qualification uses pinned Rust 1.97.1 on the exact `06c3f4c60` intended ancestor:
+
+- `cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver -- --nocapture`:
+  three tests, zero ignored; pending and attached retirement matrices run in
+  memory/pooled SQLite with both retained and rebuilt principal layouts.
+- `cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture`:
+  actual three-voter metadata matrix. Both features are required for test
+  registration; a zero-test filter is not qualification.
+- Core/daemon feature compilation, all-target Core feature Clippy with denied
+  warnings, documentation index and catalog lint precede the normal tracked
+  commit hook. These checks do not qualify the private physical witness
+  factory, HTTP retirement wiring, production deployment or a two-NAT fleet.
+
+Final native receipt: Core receiver filter **3 PASS, 0 ignored, 22.66s**;
+actual three-voter receiver filter **1 PASS, 0 ignored, 9.85s**. Core/daemon
+feature check passed in 48.45s and all-target Core feature Clippy in 33.83s.
+Documentation index passed four tests; catalog lint covered 2708 files. The
+same-playback successor, real terminal acknowledgement, trigger-cleared reply,
+partial pending attachment, foreign pin epoch and ignored cleanup-write cases
+are inside the named Core receiver regressions above.

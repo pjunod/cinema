@@ -30,6 +30,8 @@ pub mod sharing_purpose_keys;
 pub use sharing_file_locators::SharingFileLocatorStore;
 pub use sharing_purpose_keys::SharingPurposeKeyStore;
 pub mod sharing_receiver_progress;
+pub mod sharing_receiver_retirement;
+pub use sharing_receiver_retirement::SharingReceiverRetirementStore;
 pub mod sharing_receiver_sessions;
 pub use sharing_receiver_progress::SharingReceiverProgressStore;
 #[cfg(feature = "hiqlite-store")]
@@ -5378,6 +5380,7 @@ pub trait Store:
     + SharingSourceDetailsStore
     + SharingReceiverSessionStore
     + SharingReceiverProgressStore
+    + SharingReceiverRetirementStore
     + SharingSourceSessionStore
     + SettingsStore
     + BackgroundJobStore
@@ -5425,6 +5428,7 @@ impl<T> Store for T where
         + SharingSourceDetailsStore
         + SharingReceiverSessionStore
         + SharingReceiverProgressStore
+        + SharingReceiverRetirementStore
         + SharingSourceSessionStore
         + SettingsStore
         + BackgroundJobStore

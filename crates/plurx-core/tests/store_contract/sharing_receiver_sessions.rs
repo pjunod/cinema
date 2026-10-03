@@ -52,7 +52,7 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
         )
         .await
         .expect("saved choice");
-    for refusal in ["none", "assignment", "login", "policy", "epoch"] {
+    for refusal in ["assignment", "login", "policy", "epoch", "none"] {
         let user = store
             .create_user(&format!("B-{refusal}"), "fixture-password-hash", false)
             .await
@@ -860,13 +860,124 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 .await
                 .expect("no replacement of unknown Source start");
             assert!(!matches!(claim, MediaSessionRequestClaim::Acquired { .. }));
-            client
-                .execute(
-                    "DELETE FROM sharing_relay_upstream WHERE incarnation_id=$1",
-                    hiqlite::params!(activation.incarnation_id.as_str()),
-                )
+            use plurx_core::{
+                sharing_receiver_retirement::{
+                    ReceiverRetirementDisposition, ReceiverRetirementOutcome,
+                    ReceiverRetirementReason, ReceiverRetirementWitness,
+                },
+                store::SharingReceiverRetirementStore,
+            };
+            // Metadata-only witness fixture: no Source worker/End proof claimed.
+            struct MetadataWitness {
+                intent: ReceiverSessionIntent,
+                attachment: ReceiverSourceAttachment,
+                confirmation: String,
+            }
+            impl ReceiverRetirementWitness for MetadataWitness {
+                fn intent(&self) -> &ReceiverSessionIntent {
+                    &self.intent
+                }
+                fn owner(&self) -> &ReceiverSourceOwner {
+                    &self.attachment.owner
+                }
+                fn binding(&self) -> Option<&ReceiverSourceBinding> {
+                    Some(&self.attachment.binding)
+                }
+                fn disposition(&self) -> ReceiverRetirementDisposition {
+                    ReceiverRetirementDisposition::SourceSettled
+                }
+                fn reason(&self) -> ReceiverRetirementReason {
+                    ReceiverRetirementReason::AdminStop
+                }
+                fn confirmation_id(&self) -> &str {
+                    &self.confirmation
+                }
+            }
+            let retained = store
+                .media_session_route_by_incarnation(&activation.incarnation_id)
                 .await
-                .expect("missing adjunct corruption fixture");
+                .expect("retained swept route")
+                .expect("Source obligation retained");
+            attachment.owner.lease_expires_at_ms = retained.lease_expires_at_ms;
+            let mut witness = MetadataWitness {
+                intent: intent.clone(),
+                attachment: attachment.clone(),
+                confirmation: "a".repeat(64),
+            };
+            let node = witness.attachment.owner.owner_node_id.clone();
+            witness.attachment.owner.owner_node_id = "foreign-retirement-owner".into();
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("foreign owner refuses"),
+                ReceiverRetirementOutcome::Refused
+            );
+            witness.attachment.owner.owner_node_id = node;
+            client.execute("CREATE TRIGGER retirement_ignore_delete BEFORE DELETE ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END",hiqlite::params!()).await.expect("ignore deletion fixture");
+            let before = read().await.expect("preimage").pop().expect("row").value;
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("ignored delete refuses"),
+                ReceiverRetirementOutcome::Refused
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("atomic rollback")
+                    .pop()
+                    .expect("row")
+                    .value,
+                before
+            );
+            client
+                .execute("DROP TRIGGER retirement_ignore_delete", hiqlite::params!())
+                .await
+                .expect("remove fixture");
+            client
+                .execute("DELETE FROM users WHERE id=$1", hiqlite::params!(user.id))
+                .await
+                .expect("real user-delete trigger");
+            let deleted = store
+                .media_session_route_by_incarnation(&activation.incarnation_id)
+                .await
+                .expect("deleted route retained")
+                .expect("Source metadata retained");
+            witness.attachment.owner.lease_expires_at_ms = deleted.lease_expires_at_ms;
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("confirmed cleanup without login"),
+                ReceiverRetirementOutcome::Applied
+            );
+            let after = read().await.expect("receipt").pop().expect("row").value;
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("exact retry"),
+                ReceiverRetirementOutcome::Replay
+            );
+            assert_eq!(
+                read()
+                    .await
+                    .expect("readonly retry")
+                    .pop()
+                    .expect("row")
+                    .value,
+                after
+            );
+            witness.confirmation = "b".repeat(64);
+            assert_eq!(
+                store
+                    .retire_receiver_session(&witness)
+                    .await
+                    .expect("no receipt rebind"),
+                ReceiverRetirementOutcome::Refused
+            );
             assert!(store
                 .activate_receiver_media_session(&authority, &activation)
                 .await
