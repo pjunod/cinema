@@ -790,13 +790,17 @@ impl TranscodeManager {
             );
             return Ok(OutputGrade::Sdr);
         }
-        // A hardware encoder this rung was never measured on. Only libx265 and
-        // hevc_qsv have Main10 routes here, so an NVENC or VA-API node would
+        // A hardware encoder this rung has no recipe for must not silently
+        // fall back to software. Plain HDR additionally has a VAAPI Main10
+        // route; Dolby reshaping still supports software/QSV only. Others would
         // fall back to software x265 — measured at 11 fps for 1080p on two
         // cores, under realtime, against the 20.3 fps the SDR chain it
         // replaced runs at. Losing the grade is a worse picture; losing
         // realtime is a stall, and the viewer notices that one.
-        if !matches!(preferred, Encoder::Software | Encoder::Qsv) {
+        if !matches!(preferred, Encoder::Software | Encoder::Qsv)
+            && !(preferred == Encoder::Vaapi
+                && route == plurx_core::playback::HdrRoute::Passthrough)
+        {
             tracing::info!(
                 target: "plurxd::transcode",
                 file = file.id,
@@ -807,7 +811,7 @@ impl TranscodeManager {
             return Ok(OutputGrade::Sdr);
         }
         if route == plurx_core::playback::HdrRoute::Passthrough {
-            if !self.hdr10_passthrough {
+            if encoder != Encoder::Vaapi && !self.hdr10_passthrough {
                 tracing::info!(
                     target: "plurxd::transcode",
                     file = file.id,
@@ -828,6 +832,9 @@ impl TranscodeManager {
                     "this node did not prove the QSV Main10 encode for a plain HDR source; using \
                      the measured software/SDR route"
                 );
+                return Ok(OutputGrade::Sdr);
+            }
+            if encoder == Encoder::Vaapi && !self.hdr10_passthrough_vaapi {
                 return Ok(OutputGrade::Sdr);
             }
             // No RPU to prove: the graph reads no metadata, so the boot proof
@@ -949,6 +956,13 @@ impl TranscodeManager {
             };
             if preferred == Encoder::Qsv && qsv_proved {
                 Encoder::Qsv
+            } else if preferred == Encoder::Vaapi
+                && self.hdr10_passthrough_vaapi
+                && plurx_core::playback::hdr_route(file)
+                    == Some(plurx_core::playback::HdrRoute::Passthrough)
+                && target_height == HDR10_HEIGHT
+            {
+                Encoder::Vaapi
             } else {
                 Encoder::Software
             }

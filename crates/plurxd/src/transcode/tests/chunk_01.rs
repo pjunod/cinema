@@ -3147,3 +3147,44 @@
             "different durable users remain distinct"
         );
     }
+
+    #[tokio::test]
+    async fn vaapi_plain_hdr10_proof_does_not_admit_dolby_burns_or_four_k() {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let mut file = profile5_file();
+        file.hdr = Some("hdr10".to_owned());
+        file.hdr_format = None;
+        let manager = TranscodeManager::new(store, dir.path().to_owned(),
+            EncoderCaps { vaapi: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+            .with_hdr10_passthrough_vaapi(true);
+        assert_eq!(manager.hdr10_ceiling_with_preference("vaapi"), HDR10_HEIGHT);
+        for (source, height, burn, expected) in [
+            (file.clone(), HDR10_HEIGHT, false, OutputGrade::Hdr10),
+            (file.clone(), HDR10_HEIGHT, true, OutputGrade::Sdr),
+            (file.clone(), HDR10_4K_HEIGHT, false, OutputGrade::Sdr),
+            (profile5_file(), HDR10_HEIGHT, false, OutputGrade::Sdr),
+        ] {
+            assert_eq!(manager.hdr10_grade_for_with_preference(&source, true, height,
+                Encoder::Vaapi, burn, Encoder::Vaapi).await.expect("grade"), expected);
+        }
+        let manager = manager.with_hdr10_passthrough_vaapi(false);
+        assert_eq!(manager.hdr10_ceiling_with_preference("vaapi"), 0);
+        assert_eq!(manager.hdr10_grade_for_with_preference(&file, true, HDR10_HEIGHT,
+            Encoder::Vaapi, false, Encoder::Vaapi).await.expect("unavailable graph"), OutputGrade::Sdr);
+    }
+
+    #[tokio::test]
+    async fn plain_qsv_hdr_ceiling_does_not_require_a_dolby_renderer() {
+        let store: Arc<dyn Store> = Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let mut file = profile5_file();
+        file.hdr = Some("hdr10".to_owned());
+        file.hdr_format = None;
+        let manager = TranscodeManager::new(store, dir.path().to_owned(),
+            EncoderCaps { qsv: true, ..EncoderCaps::default() }, Pipeline::Cpu)
+            .with_hdr10_passthrough(true).with_hdr10_passthrough_qsv(true);
+        assert!(!manager.dovi_passthrough_qsv);
+        assert_eq!(manager.capability_height_ceiling_for_request(Some(&file), true).await,
+            HDR10_4K_HEIGHT);
+    }

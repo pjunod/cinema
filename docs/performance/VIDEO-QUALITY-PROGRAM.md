@@ -156,9 +156,11 @@ synthetic evidence separately from representative real-title evidence.
 
 ### 5.2 C2 makes analysis useful to cached and offline encoding
 
-Only after C1 establishes useful recommendations on representative titles,
-implement durable background analysis through existing job ownership and resource
-admission. Bind the result to held source identity, encoder/tool/metric policy
+Implement bounded background analysis through existing cached/offline job
+ownership and resource admission. Only valid measured recommendations may
+alter an output policy; unsupported scoring or a losing candidate retains the
+ordinary recipe. Representative-title benefit remains an evidence requirement,
+not an excuse to infer a generic bitrate bias. Bind the result to held source identity, encoder/tool/metric policy
 and output recipe. A missing, stale or failed analysis uses the ordinary recipe;
 Play must never wait for analysis. Preserve requested audio, subtitles, grade
 and geometry, and snapshot the resolved policy in offline/pretranscode work.

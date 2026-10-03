@@ -58,6 +58,37 @@ lane. Milestones are logical commits and Execution-log rows in that PR; M0 and
 M6 are measurement milestones whose deliverable includes a table in this
 document.
 
+## Video-quality batch continuation — 2026-10-03
+
+[PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) adds one candidate
+plain-HDR10 path: software decode/10-bit scale, P010 upload, `hevc_vaapi`
+Main10 at the existing 1080p rung. The installed m6 Jellyfin encoder advertises
+that profile and P010 hardware surfaces; advertisement alone is not a
+qualification. Source implementation and compile checks precede the final
+adversarial review and once-only validation/measurement pass.
+
+The old coupling was concrete: grade selection knew only software/QSV,
+VAAPI's upload always selected 8-bit NV12, and the HDR argument builder applied
+software `-preset`/`-x265-params` to every non-QSV family. The new family recipe
+uses P010, Main10 and VAAPI IDR controls, with its own existing-style boot
+capability result threaded through system diagnostics, planning and ceilings.
+A refused graph uses the ordinary SDR route. No new playback retry or watchdog
+owns it. Its encoder, pipeline and grade remain inputs to existing immutable
+recipe/cache identity.
+
+The scope is plain PQ/BT.2020 at 1080p. Dolby RPU reshaping, 4K VAAPI HDR and
+HDR subtitle burn are not advertised: burning subtitles still selects SDR
+composition, avoiding nominal subtitle white at the PQ peak. The HDR ceiling
+now asks for the selected route's own proof; plain QSV HDR no longer
+accidentally requires the unrelated Dolby QSV proof. The output remains the
+existing HEVC Main10/PQ client contract rather than a new client codec.
+
+`encoder-calibration-args --grade hdr10 --family vaapi` exports the production
+encoder/upload arguments and 1080p plain-HDR filter for an isolated capture.
+The exporter is evidence plumbing, not a capability or qualification verdict.
+The execution ledger will distinguish encoder/decoded output evidence from
+physical panel or native-device evidence that has not been obtained.
+
 ## 2. Contract today
 
 Re-verify line numbers at build time; they are from `0f02b7ea`.

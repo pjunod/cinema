@@ -851,27 +851,26 @@ impl TranscodeManager {
         file: Option<&plurx_core::domain::MediaFile>,
         hdr10_requested: bool,
     ) -> i64 {
-        // The exact Profile-5 → HDR10 → QSV chain was measured above realtime
-        // at both 1080p and 2160p. This branch is intentionally narrower than
-        // generic "hardware HDR": it requires the selected QSV family and the
-        // boot proof of its Main10 upload/encode graph.
-        let hdr10_renderer_proved = match file.and_then(plurx_core::playback::hdr_route) {
-            Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough,
-            Some(plurx_core::playback::HdrRoute::Passthrough) => {
-                self.hdr10_passthrough && self.hdr10_passthrough_qsv
-            }
-            None => false,
-        };
-        if hdr10_requested
-            && hdr10_renderer_proved
-            && self.dovi_passthrough_qsv
-            && self.encoder().await == Encoder::Qsv
-        {
+        let preferred = self.encoder().await;
+        let hdr10_renderer_proved =
+            match (file.and_then(plurx_core::playback::hdr_route), preferred) {
+                (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Qsv) => {
+                    self.dovi_passthrough && self.dovi_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Qsv) => {
+                    self.hdr10_passthrough && self.hdr10_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Vaapi) => {
+                    self.hdr10_passthrough_vaapi
+                }
+                _ => false,
+            };
+        if hdr10_requested && hdr10_renderer_proved {
             if let Some(file) = file {
-                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, preferred) {
                     return HDR10_4K_HEIGHT;
                 }
-                if hdr10_rung_fits(file, HDR10_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_HEIGHT, preferred) {
                     return HDR10_HEIGHT;
                 }
             }

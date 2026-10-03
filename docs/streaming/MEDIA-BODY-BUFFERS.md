@@ -229,8 +229,8 @@ with the cumulative number of bytes actually taken. The producer accounts
 only the delta between observed counts; multiple consumer polls can coalesce
 into one producer wakeup without crediting any unpolled bytes.
 
-This removes up to 32 per-piece channel allocations and mandatory task round
-trips per full storage read. It does not claim fewer socket writes or packets:
+This replaces 32 per-piece acknowledgement channels with one per full storage
+read and removes the mandatory task round trip between adjacent pieces. It does not claim fewer socket writes or packets:
 the public body still yields 4 KiB frames. No new buffering threshold, timer,
 watchdog, queue capacity or speculative read is introduced.
 
@@ -565,22 +565,20 @@ accepts, and Paul can overturn it.
 
 ### 5.2 M2 — acknowledgement batching
 
-Same plan PR, after the M1 candidate has been exercised on media1 for a week
-with no `segment_delivery` regressions in the telemetry (§6). Code: §3.2.
-Tests all run against `driven_local_body` plus a pump built from a `Cursor`
-reader, so they run in `make unit` without files:
+The implementation now follows §3.2's cumulative acknowledgement protocol in
+the consolidated video-quality PR. The earlier 1 MiB acknowledgement proposal
+and its hypothetical test names are retired. Source validation is deferred to
+the final review/fast lane; deployed telemetry remains a post-deploy obligation.
 
-| Test | Asserts |
+| Regression | Contract |
 |---|---|
-| `a_batch_is_counted_once_after_its_ack` | `delivery.note` called with the batch total, after the body yielded it, not before |
-| `the_final_batch_completes_exactly_once` | a 3 MiB body with a 1 MiB cap: three chunks, `settle_streamed_response_completion` once, after the third ack |
-| `a_short_source_is_still_unexpected_eof` | reader ends at 2.5 MiB of an advertised 3 MiB: terminal error `UnexpectedEof`, no completion |
-| `a_dropped_receiver_ends_the_pump_without_a_failure` | drop the body mid-batch: pump returns, terminal has no error, permit released |
-| `the_downstream_deadline_still_fires_across_a_batch` | body stops polling after the first chunk: `downstream_no_progress` at 30 s (paused time) |
-| `a_batch_never_waits_for_more_bytes_than_the_reader_has` | reader returns `Pending` after 100 KiB: that 100 KiB is sent as a batch, not held |
+| `storage_batch_drains_without_a_producer_round_trip_per_proof_unit` | One queued read drains in 4 KiB polls without producer participation, with an exact cumulative final count. |
+| `storage_batch_drop_retains_only_the_polled_prefix` | Dropping a partially consumed batch credits only the accepted prefix and closes producer ownership. |
+| `terminal_failure_discards_the_unpolled_part_of_a_storage_batch` | A producer failure fences already-buffered bytes before the next acknowledgement. |
+| `a_media_body_is_proved_in_acknowledgement_units_not_storage_read_units` | Existing HTTP proof granularity remains 4 KiB. |
 
-Acceptance: those six plus the M1 tests green; the §5.1 protocol re-run on
-lab4 with HLS p99 not worse than M1's.
+Existing VOD/rolling EOF, timeout, cancellation and completion tests remain the
+end-to-end ownership controls. No whole-read acknowledgement is introduced.
 
 ## 6. Verification and rollout
 
@@ -593,7 +591,7 @@ lab4 with HLS p99 not worse than M1's.
   `segment_delivery_counts_reads_and_names_incomplete_storage`, the three
   proof-granularity tests tabled in §5.1, and, since Decision 1,
   `the_shared_media_read_is_128_kib_and_the_delivery_proof_stays_4_kib` and
-  `accepted_http_connections_have_nagle_disabled`. Run the six M2 tests by name when
+  `accepted_http_connections_have_nagle_disabled`. Run the M2 regressions above when
   that milestone becomes eligible.
 - Lane: `make unit` before promoting the one plan PR. The implementation
   session did not run it while P-01 was repairing that lane; this is pending

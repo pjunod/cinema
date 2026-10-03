@@ -1,11 +1,12 @@
-//! Export the production SDR encoder options for offline calibration tools.
+//! Export production encoder options for offline calibration tools.
 //! This exports arguments, not a capability verdict or a qualified playback plan.
 
-use plurx_core::transcode::{EffectiveRateControl, Encoder, OutputGrade};
+use plurx_core::transcode::{EffectiveRateControl, Encoder, OutputGrade, Pipeline};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut family = None;
+    let mut grade = None;
     let mut bitrate = None;
     let mut quality = None;
     let mut threads = None;
@@ -14,6 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let value = args.next().ok_or("each option requires a value")?;
         match arg.as_str() {
             "--family" if family.is_none() => family = Some(value),
+            "--grade" if grade.is_none() => grade = Some(value),
             "--bitrate-kbps" if bitrate.is_none() => bitrate = Some(value.parse::<u32>()?),
             "--quality" if quality.is_none() => quality = Some(value.parse::<u8>()?),
             "--threads" if threads.is_none() => threads = Some(value.parse::<u32>()?),
@@ -28,6 +30,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("videotoolbox") => Encoder::VideoToolbox,
         _ => return Err("--family must name software, qsv, vaapi, nvenc or videotoolbox".into()),
     };
+    let grade = match grade.as_deref() {
+        None | Some("sdr") => OutputGrade::Sdr,
+        Some("hdr10") => OutputGrade::Hdr10,
+        _ => return Err("--grade must be sdr or hdr10".into()),
+    };
+    if encoder.video_codec_for(grade).is_none() {
+        return Err("the encoder has no recipe for this grade".into());
+    }
     let bitrate = bitrate
         .filter(|v| (1..=100_000).contains(v))
         .ok_or("--bitrate-kbps must be 1..100000")?;
@@ -43,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = |rc: EffectiveRateControl| {
         json!({
             "recipe_value": rc.recipe_value(),
-            "encoder_args": encoder.encode_args_for(OutputGrade::Sdr, bitrate, rc, true, Some(threads)),
+            "encoder_args": encoder.encode_args_for(grade, bitrate, rc, true, Some(threads)),
         })
     };
     println!(
@@ -55,9 +65,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "bitrate_kbps": bitrate,
             "quality": quality,
             "software_threads": threads,
-            "output_grade": "sdr",
+            "output_grade": grade.name(),
+            "hdr10_1080_filter": if grade == OutputGrade::Hdr10 {
+                Pipeline::Hdr10Passthrough.filters(Some(1920), 1080, Some("hdr10"))
+            } else { None },
             "input_args": encoder.init_args(),
-            "upload_filter": encoder.filter_suffix(),
+            "upload_filter": encoder.filter_suffix_for(grade),
             "modes": {
                 "vbr": mode(EffectiveRateControl::Vbr),
                 "qvbr": mode(EffectiveRateControl::Qvbr { quality }),

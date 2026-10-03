@@ -1,6 +1,6 @@
 # Video quality status — what is built, measured and merged
 
-**Status:** building consolidated batch · **Updated:** 2026-10-02
+**Status:** building consolidated batch · **Updated:** 2026-10-03
 
 Companion to [the programme](VIDEO-QUALITY-PROGRAM.md), which owns scope,
 acceptance and order. This ledger records actual execution. Empty evidence is
@@ -90,11 +90,11 @@ effort or main, and no runner/action pin was changed to bypass the failure.
 
 | Priority | Work | State |
 |---|---|---|
-| 1 | Next-episode preparation | Queued after the first wave |
-| 2 | Apply qualified encoder policies / retain measured baseline | Depends on A; no duplicate campaign |
-| 5 | HLS acknowledgement batching | Queued; M1 buffer changes already exist |
-| 6 | VOD B-frames | Queued; no-reorder remains production contract |
-| 3 | Broader codec/HDR output | Queued; reconcile active S11 work first |
+| 1 | Next-episode preparation | Implemented in `f632af81d`; metadata only, fresh authoritative playback decision, regressions deferred. |
+| 2 | Apply qualified encoder policies / retain measured baseline | Retain bitrate: QSV Q22 failed every fixture quality comparison. No justified default change. |
+| 5 | HLS acknowledgement batching | Implemented in `157f31ab9`; 128 KiB coordination with unchanged 4 KiB proof. Hook passed; tests deferred. |
+| 6 | VOD B-frames | Building strict presentation-grid validation and a software reordered recipe with existing generation ownership. |
+| 3 | Broader codec/HDR output | Building plain HDR10 VAAPI Main10 at 1080p; m6 inventory confirms encoder/options, qualification remains pending. Does not extend Dolby processing or HDR subtitle burn. |
 | 4 | Remaining cold-start latency | Queued; reconcile PR #745 and descendants first |
 
 ## 4. Evidence interpretation

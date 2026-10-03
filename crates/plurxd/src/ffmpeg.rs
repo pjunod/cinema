@@ -1606,6 +1606,7 @@ static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::co
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static HDR10_PASSTHROUGH_VAAPI: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 static ENCODED_PROCESS_IDENTITY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -3226,6 +3227,55 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
                 );
             }
             passed
+        })
+        .await
+}
+
+/// Plain PQ/BT.2020 scale and P010 upload into the VAAPI Main10 encoder.
+/// This proof does not advertise Dolby RPU processing or 4K throughput.
+pub async fn has_hdr10_passthrough_vaapi() -> bool {
+    *HDR10_PASSTHROUGH_VAAPI
+        .get_or_init(|| async {
+            let encoder = Encoder::Vaapi;
+            let Some(filter) = Pipeline::Hdr10Passthrough.filters(Some(1920), 1080, Some("hdr10"))
+            else {
+                return false;
+            };
+            let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
+                return false;
+            };
+            let mut command = tokio::process::Command::new(ffmpeg_bin());
+            command
+                .kill_on_drop(true)
+                .args(["-hide_banner", "-loglevel", "error", "-filter_threads", "1"])
+                .args(encoder.init_args())
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=size=1920x1080:rate=24:color=black",
+                ])
+                .args(["-frames:v", "24", "-vf"])
+                .arg(format!("{filter},{upload}"))
+                .args(encoder.encode_args_for(
+                    OutputGrade::Hdr10,
+                    20_000,
+                    EffectiveRateControl::Vbr,
+                    false,
+                    None,
+                ))
+                .args(["-bf", "0", "-f", "null", "-"]);
+            tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::status_job_owned(
+                    &mut command,
+                    crate::process_control::ChildWork::background(
+                        "HDR10 VAAPI passthrough capability probe",
+                    ),
+                ),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok_and(|status| status.success()))
         })
         .await
 }
