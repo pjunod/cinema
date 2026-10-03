@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 279
+One binary serves everything on one port (`:32400` by default). plurx has 282
 routes across the five surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -3208,6 +3208,9 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | GET | `/jellyfin/UserViews/GroupingOptions` | Supported logical library IDs and names |
 | GET | `/jellyfin/Library/VirtualFolders` | Logical library folders, without native scan roots |
 | GET | `/jellyfin/DisplayPreferences/{id}` | Initial client presentation; no native persisted per-client preferences |
+| GET | `/jellyfin/Items/{item_id}/Intros` | Authenticated live media item; empty native pre-roll collection |
+| GET | `/jellyfin/MediaSegments/{item_id}` | Authenticated native skip markers; bounded segment-type filter, source-relative ticks |
+| GET | `/jellyfin/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}` | Authentication on every request; exact source membership and global subtitle index; native extracted VTT or bounded SRT representation; extraction and bitmap failures propagate |
 | GET | `/jellyfin/Items/{item_id}/LocalTrailers` | Live item; empty array because native Movies/TV has no classified trailer records |
 | GET | `/jellyfin/Items/{item_id}/SpecialFeatures` | Live item; empty array because native Movies/TV has no classified extra records |
 | GET | `/jellyfin/UserViews` | Compatibility token; same library views |

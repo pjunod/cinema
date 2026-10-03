@@ -5,3 +5,5 @@ pub mod identity;
 pub mod profile;
 pub mod query;
 pub mod ticks;
+
+pub mod subtitle;

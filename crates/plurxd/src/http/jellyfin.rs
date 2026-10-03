@@ -1,4 +1,5 @@
 //! Jellyfin connection and catalog facade over native authentication and Store.
+mod ancillary;
 mod playback;
 use super::{auth, error::ApiError};
 use crate::state::AppState;
@@ -64,6 +65,12 @@ pub(super) fn router() -> Router<AppState> {
         .route("/UserViews/GroupingOptions", get(grouping_options))
         .route("/Library/VirtualFolders", get(virtual_folders))
         .route("/DisplayPreferences/{id}", get(display_preferences))
+        .route("/Items/{item_id}/Intros", get(ancillary::intros))
+        .route("/MediaSegments/{item_id}", get(ancillary::segments))
+        .route(
+            "/Videos/{item_id}/{source_id}/Subtitles/{index}/{filename}",
+            get(ancillary::subtitles),
+        )
         .route("/Items/{item_id}/LocalTrailers", get(local_extras))
         .route("/Items/{item_id}/SpecialFeatures", get(local_extras))
         .route("/UserViews", get(current_views))
@@ -1128,14 +1135,25 @@ mod tests {
         let store = std::sync::Arc::new(
             plurx_core::store::SqliteStore::open(&root.path().join("state.db")).expect("store"),
         );
+        let canonical_root = root.path().canonicalize().expect("canonical fixture dirs");
         let dirs = crate::state::Dirs {
-            artwork: root.path().join("artwork"),
-            transcode: root.path().join("transcode"),
-            cache: root.path().join("cache"),
-            subs: root.path().join("subs"),
-            runtime_cache: root.path().join("runtime"),
-            renditions: root.path().join("renditions"),
+            artwork: canonical_root.join("artwork"),
+            transcode: canonical_root.join("transcode"),
+            cache: canonical_root.join("cache"),
+            subs: canonical_root.join("subs"),
+            runtime_cache: canonical_root.join("runtime"),
+            renditions: canonical_root.join("renditions"),
         };
+        for path in [
+            &dirs.artwork,
+            &dirs.transcode,
+            &dirs.cache,
+            &dirs.subs,
+            &dirs.runtime_cache,
+            &dirs.renditions,
+        ] {
+            std::fs::create_dir_all(path).expect("fixture cache root");
+        }
         let state = AppState::new_unhooked(
             "playback-contract".into(),
             store,
@@ -1554,6 +1572,277 @@ mod tests {
             );
         }
     }
+    #[tokio::test]
+    async fn jellyfin_ancillary_routes_share_native_markers_and_refuse_unbound_requests() {
+        let f = playback_fixture().await;
+        let id = f
+            .state
+            .store
+            .jellyfin_resolve_entity(JellyfinEntityKind::File, &f.source)
+            .await
+            .expect("mapping")
+            .expect("file");
+        f.state
+            .store
+            .merge_file_probe_chapters(
+                id,
+                &json!([
+                    {"start_time":"0.000","end_time":"10.000","tags":{"title":"Intro"}},
+                    {"start_time":"90.000","end_time":"100.000","tags":{"title":"Credits"}}
+                ])
+                .to_string(),
+            )
+            .await
+            .expect("chapters");
+        let path = format!("/jellyfin/MediaSegments/{}", f.item);
+        let (status, body) =
+            json_call(&f.app, request("GET", &path, Some(&f.token), json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["TotalRecordCount"], 2);
+        assert_eq!(body["Items"][0]["Type"], "Intro");
+        assert_eq!(body["Items"][0]["StartTicks"], 0);
+        assert_eq!(body["Items"][0]["EndTicks"], 100_000_000);
+        let (_, filtered) = json_call(
+            &f.app,
+            request(
+                "GET",
+                &format!("{path}?includeSegmentTypes=Outro"),
+                Some(&f.token),
+                json!({}),
+            ),
+        )
+        .await;
+        assert_eq!(filtered["TotalRecordCount"], 1);
+        assert_eq!(filtered["Items"][0], body["Items"][1]);
+        let intro = format!("/jellyfin/Items/{}/Intros", f.item);
+        let (status, empty) =
+            json_call(&f.app, request("GET", &intro, Some(&f.token), json!({}))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["TotalRecordCount"], 0);
+        for (path, token, expected) in [
+            (path.clone(), None, StatusCode::UNAUTHORIZED),
+            (
+                format!("{path}?includeSegmentTypes=MadeUp"),
+                Some(f.token.as_str()),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                format!("{intro}?UserId={}", "1".repeat(32)),
+                Some(f.token.as_str()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                format!("/jellyfin/MediaSegments/{}", "1".repeat(32)),
+                Some(f.token.as_str()),
+                StatusCode::NOT_FOUND,
+            ),
+        ] {
+            let (status, _) = json_call(&f.app, request("GET", &path, token, json!({}))).await;
+            assert_eq!(status, expected, "{path}");
+        }
+        f.state
+            .store
+            .set_jellyfin_compatibility(false)
+            .await
+            .expect("disable");
+        let (status, _) = json_call(&f.app, request("GET", &path, Some(&f.token), json!({}))).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn jellyfin_subtitle_native_failures_and_bitmap_refusals_are_not_empty_success() {
+        use plurx_core::domain::{ProbeResult, SubtitleStream};
+        let f = playback_fixture().await;
+        let path = f
+            .root
+            .path()
+            .canonicalize()
+            .expect("root")
+            .join("movie.mp4");
+        for (codec, expected) in [
+            ("subrip", StatusCode::INTERNAL_SERVER_ERROR),
+            ("hdmv_pgs_subtitle", StatusCode::BAD_REQUEST),
+        ] {
+            f.state.store.upsert_file(f.native_item, path.to_str().expect("path"), 16, 1, &ProbeResult {
+                duration_ms: Some(100_000), container: Some("mp4".into()),
+                subtitle_streams: vec![SubtitleStream { index: 2, codec: codec.into(), language: None, title: None, default: false, forced: false, hearing_impaired: false }],
+                raw_json: Some(json!({"streams":[{"index":2,"codec_type":"subtitle","codec_name":codec}]}).to_string()),
+                ..Default::default()
+            }).await.expect("probe");
+            for format in ["vtt", "srt"] {
+                let route = format!(
+                    "/jellyfin/Videos/{}/{}/Subtitles/2/Stream.{format}",
+                    f.item, f.source
+                );
+                let (status, body) =
+                    json_call(&f.app, request("GET", &route, Some(&f.token), json!({}))).await;
+                assert_eq!(status, expected, "{body}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn jellyfin_subtitle_aliases_reuse_native_extraction_with_global_indices_and_source_times(
+    ) {
+        use plurx_core::testfixtures;
+        testfixtures::require_ffmpeg();
+        let f = playback_fixture().await;
+        let caption = f.root.path().join("source.srt");
+        std::fs::write(
+            &caption,
+            "1\n00:00:00,000 --> 00:00:02,125\nFirst\n\n2\n00:00:03,456 --> 00:00:05,789\nSecond\n",
+        )
+        .expect("caption");
+        let movie = f
+            .root
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root")
+            .join("movie.mp4");
+        let staged = f.root.path().join("captions.mkv");
+        testfixtures::run(
+            std::process::Command::new(testfixtures::ffmpeg())
+                .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i"])
+                .arg(testfixtures::source("clean-cra"))
+                .arg("-i")
+                .arg(&caption)
+                .args([
+                    "-map", "0:v:0", "-map", "0:a:0?", "-map", "1:0", "-c", "copy", "-c:s", "srt",
+                ])
+                .arg(&staged),
+        );
+        std::fs::rename(&staged, &movie).expect("replace fixture source");
+        let probe = plurx_core::scan::probe::probe(&movie)
+            .await
+            .expect("real probe");
+        let raw: Value = serde_json::from_str(probe.raw_json.as_deref().expect("raw probe"))
+            .expect("probe JSON");
+        let global_index = raw["streams"]
+            .as_array()
+            .expect("streams")
+            .iter()
+            .find(|s| s["codec_type"] == "subtitle")
+            .expect("caption stream")["index"]
+            .as_i64()
+            .expect("global index");
+        assert!(
+            global_index > 0,
+            "subtitle zero ordinal must not be confused with its global stream index"
+        );
+        let metadata = std::fs::metadata(&movie).expect("source identity");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        f.state
+            .store
+            .upsert_file(
+                f.native_item,
+                movie.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("updated probe");
+        for (format, content_type, timing) in [
+            ("vtt", "text/vtt", "00:00.000 --> 00:02.125"),
+            (
+                "srt",
+                "application/x-subrip",
+                "00:00:00,000 --> 00:00:02,125",
+            ),
+        ] {
+            let path = format!(
+                "/jellyfin/Videos/{}/{}/Subtitles/{global_index}/Stream.{format}",
+                f.item, f.source
+            );
+            let response = f
+                .app
+                .clone()
+                .oneshot(request("GET", &path, Some(&f.token), json!({})))
+                .await
+                .expect("subtitle");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(response.headers()["content-type"]
+                .to_str()
+                .expect("type")
+                .starts_with(content_type));
+            let bytes = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let text = std::str::from_utf8(&bytes).expect("subtitle UTF8");
+            assert!(text.contains(timing), "{text}");
+            assert!(text.contains("First") && text.contains("Second"));
+            let response = f
+                .app
+                .clone()
+                .oneshot(request("GET", &path, None, json!({})))
+                .await
+                .expect("auth refusal");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let invalid = format!(
+            "/jellyfin/Videos/{}/{}/Subtitles/0/Stream.vtt",
+            f.item, f.source
+        );
+        let response = f
+            .app
+            .clone()
+            .oneshot(request("GET", &invalid, Some(&f.token), json!({})))
+            .await
+            .expect("wrong index");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let old = f
+            .state
+            .store
+            .get_item(f.native_item)
+            .await
+            .expect("item")
+            .expect("live");
+        let other = f
+            .state
+            .store
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: old.library_id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Other source membership".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("other item");
+        f.state
+            .store
+            .upsert_file(
+                other,
+                movie.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("move source");
+        let route = format!(
+            "/jellyfin/Videos/{}/{}/Subtitles/{global_index}/Stream.vtt",
+            f.item, f.source
+        );
+        let (status, _) =
+            json_call(&f.app, request("GET", &route, Some(&f.token), json!({}))).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a moved source cannot serve through its old item"
+        );
+    }
+
     #[tokio::test]
     async fn jellyfin_logout_releases_only_presented_login_and_preserves_other_device() {
         let f = playback_fixture().await;

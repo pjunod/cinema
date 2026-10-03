@@ -1859,7 +1859,7 @@ async fn pause_marker_fallback_for_test(path: &Path) {
     }
 }
 
-async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+pub(crate) async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
     let source_identity = annotation_source_identity(file);
     match state
         .store
