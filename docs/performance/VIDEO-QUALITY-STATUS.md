@@ -310,3 +310,19 @@ per-check continuation without a full promotion rerun. Previously skipped
 operations, player-contract and affected compile/test jobs run once. The
 [selective-repair receipt](../evidence/video-quality-2026-10-03/preflight-selective-repair.json)
 and linked PR hold the resulting evidence without relabelling failed CI as green.
+
+The operations suite ran once (614 methods): 604 passed. The explicit native
+qualification increased the reasoned-ignore inventory from 20 to 21; that
+failed method is corrected and passed once. Nine environment-dependent methods
+move to the Linux runner: local loopback/process inspection was sandbox-denied,
+and macOS lacks the Linux janitor's GNU timeout. Their original errors remain
+in the [operations receipt](../evidence/video-quality-2026-10-03/operations-selective-repair.json).
+Five of seven player-contract commands passed. Two extracted-function fixtures
+need the new successor cancellation dependency wired into their harness.
+
+Main's seek repair `3197d0c58` merged cleanly as `408297c01` before the first
+Rust/Windows/web compiler jobs. Rust source is unchanged by that merge. The
+disposable validation branch executes only still-unrun job definitions against
+an explicit batch source revision; it will be deleted after receipts are retained.
+This avoids repeating successful preflight methods or claiming its original
+failed aggregate job passed. PR #766 owns the latest continuation/merge outcome.
