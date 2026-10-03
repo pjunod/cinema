@@ -1,0 +1,25 @@
+{
+  "outcome": "pass",
+  "scope": "actual runtime-assets Docker stage including static scorer build/model smoke",
+  "host": "nuc3",
+  "seconds": 398,
+  "builder_cpu_limit": 2,
+  "builder_memory_bytes": 3221225472,
+  "image_id": "sha256:5b939d2305ec4fbcdc33ca99ddf30b7f5e448b7fd29c3f025b7569f6cc39e658",
+  "log_sha256": "2d6a42bcc2134f844ec5be71cac8fbc3c20e68cfb8c58e04d85194824d0fa7c4",
+  "source_revision": "555c7defb61113b2a2a7127df55c85a6df5566ca",
+  "source_files_sha256": {
+    "Dockerfile": "0cf36a67b92aeb4c699c8e00b257c0d3d83703a052141b0de7e25b35186bdc50",
+    "scripts/build-static-ffprobe": "069b53ed3bbde20571ca6fba99394cdab8ebfa0183db6290b47048f3a6ef7a76",
+    "scripts/build-static-vmaf-scorer": "4076a47dfd321ac2a02ef45d0c4522711a8de73a7cd8bc476084586632509d9f"
+  },
+  "scorer_binary_sha256": "ae6815ebad4afcb8e2cd98f523e92fbc5702c80b89b482a190974f021ccc2c2d",
+  "cleanup": {
+    "builder_removed": true,
+    "image_removed": true,
+    "containers_removed": true,
+    "volumes_removed": true,
+    "selected_builder_preserved": "default",
+    "active_sessions_after": 0
+  }
+}

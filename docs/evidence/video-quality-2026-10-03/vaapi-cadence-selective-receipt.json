@@ -1,0 +1,25 @@
+{
+  "source_commit": "c7509b199eccd333669e515ceb34b02b178b98bb",
+  "original_ci_source_commit": "bd24f27679faf68bf8815915b488a3e7ac2e7461",
+  "changed_files": [
+    "crates/plurxd/src/transcode/tests/chunk_01.rs"
+  ],
+  "change_kind": "test fixture only, production source unchanged",
+  "test_source_blob": "051ce4a0cff771e441942ceeb71ce6888e1cfd0a",
+  "original_failure": {
+    "run_id": 3993,
+    "job_id": 41502,
+    "assertion": "seed_file_with_probe_at: UNIQUE constraint failed: libraries.name",
+    "cause": "The helper creates library L on every call; the second cadence case reused its Store."
+  },
+  "fix": "Use an independent in-memory Store and manager for each cadence case. Keep all six cadence expectations and missing-source check unchanged.",
+  "command": "cargo test -p plurxd --bin plurxd --locked --offline transcode::tests::vaapi_hdr10_cadence_contract_preserves_high_rate_sdr_and_refuses_stale_plans -- --exact",
+  "result": "passed",
+  "tests_passed": 1,
+  "tests_failed": 0,
+  "duration_seconds": 1.08,
+  "log": "vaapi-cadence-selective.log",
+  "log_sha256": "e7e3ea7ce788e7e4678fb8b7c20df93c7ff762bdbfa60ca63820238cbccd990d",
+  "normal_commit_hook": "passed catalog, fmt, workspace all-target Clippy, served JavaScript syntax",
+  "successful_tests_repeated": false
+}

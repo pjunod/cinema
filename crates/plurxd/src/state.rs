@@ -149,6 +149,8 @@ pub struct SystemInfo {
     /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
     /// gated behind a Dolby Vision filter this route does not use.
     pub hdr10_passthrough_qsv: bool,
+    /// Independent plain-HDR10 P010/Main10 VAAPI graph proof (1080p).
+    pub hdr10_passthrough_vaapi: bool,
     /// Whether this build converts Dolby Vision Profile 7 to Profile 8.1 on
     /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
     ///
@@ -1095,6 +1097,7 @@ impl AppState {
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
+            .with_hdr10_passthrough_vaapi(system.hdr10_passthrough_vaapi)
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),

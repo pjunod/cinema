@@ -477,6 +477,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
+      shippedSource("contentEncodingCard"), shippedSource("vodReorderCard"),
       shippedSource("subtitleNotReadyCard"),
       shippedSource("pgsOverlayCard"),
       // The fifth time: #517 put the automatic playback-ranges card at the

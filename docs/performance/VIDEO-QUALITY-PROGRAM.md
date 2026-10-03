@@ -1,6 +1,6 @@
 # Video quality programme — measured improvements and their build order
 
-**Status:** plan merged as PR #758; first three implementation lanes active
+**Status:** implementation built; qualification and landing recorded in the execution ledger
 · **Written:** 2026-10-02 · **Source census:** `4fa50b79e`
 
 Companion to [the execution ledger](VIDEO-QUALITY-STATUS.md), which records
@@ -45,7 +45,7 @@ these symbols on the intended branch before implementing a milestone.
 | Area | Current contract and existing owner |
 |---|---|
 | Rate control | `Encoder::default_rate_mode`, `default_quality` and `encode_args_for` in [encoder.rs](../../crates/plurx-core/src/transcode/encoder.rs); [encoder defaults](../streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) owns the per-family acceptance contract. [scripts/bench](../../scripts/bench) already has deterministic SDR fixtures, VMAF scoring, provenance and benefit gates. |
-| Content analysis | [Performance II §5](PERF2-PLAN.md#5-n2--per-title-intelligence) is the broader N2 design. This programme narrows its first delivery to offline evidence; it does not claim the durable analysis or rate bias is built. `PretranscodePolicySnapshot` and `OfflineSpec` already snapshot encoding policy and must remain explicit boundaries. |
+| Content analysis | [Performance II §5](PERF2-PLAN.md#5-n2--per-title-intelligence) is the broader N2 design. The first delivery established offline evidence; C2 now implements bounded durable measurements for cached and offline production, without generic complexity bias. `PretranscodePolicySnapshot` and `OfflineSpec` already snapshot encoding policy and must remain explicit boundaries. |
 | HDR reference | [Tone-map corrections](../streaming/TONE-MAP-CHAIN-CORRECTIONS.md) still distinguishes source changes from image and fleet evidence. [Codec/GPU qualification](../streaming/CODEC-AND-GPU-QUALIFICATION.md) owns expanded graph acceptance. CPU filter construction is in [core transcode](../../crates/plurx-core/src/transcode/mod.rs); the reference boot probe is [pipeprobe.rs](../../crates/plurxd/src/pipeprobe.rs). |
 | Existing HDR work | Main already contains PR #750's resident VAAPI/Vulkan path. Open [PR #753](http://192.168.4.7:3000/noirr/plurx/pulls/753) owns codec-corpus reference associations at census time. Reuse that work after it lands; do not publish a competing HDR scorer or claim another PR's evidence as this programme's. |
 | Next episode | [autoplay-next.js](../../crates/plurxd/src/web/player/autoplay-next.js) resolves after the end; Performance II N3 already proposes pre-resolution. Inspect native continuation paths and current preparation leases before adding a new owner. |
@@ -58,11 +58,16 @@ or deployment claims match today's fleet. Capture the actual binary and route.
 
 ## 3. Parallel ownership — one integration branch
 
-Merge this documentation-only PR into `main` first. Create
-`effort/video-quality` from that merged main. Task branches use
-`codex/video-quality-<task>` and target the current effort. The coordinator owns
-integration, rebases, the index and shared documentation; workers use isolated
-checkouts and never modify the user's working tree.
+The planning and first evidence documents are merged into `main`. Implementation
+is complete within the measured scope in the execution ledger; the original
+acceptance goals below remain explicit where client or representative-title
+measurements are unavailable. No measured end-to-end latency reduction is
+claimed from a structural optimization alone. Following
+Paul's workflow override, implementation now collects logical commits on
+`codex/video-quality-batch` for one main-bound PR. Workers use independent
+clones and hand commits to the coordinator, who owns integration, the index,
+shared documentation, the final review and fast-lane receipt. Earlier task
+PRs are superseded once their source is retained on the batch branch.
 
 | Lane | Initial exclusive files | Shared integration boundary |
 |---|---|---|
@@ -155,9 +160,11 @@ synthetic evidence separately from representative real-title evidence.
 
 ### 5.2 C2 makes analysis useful to cached and offline encoding
 
-Only after C1 establishes useful recommendations on representative titles,
-implement durable background analysis through existing job ownership and resource
-admission. Bind the result to held source identity, encoder/tool/metric policy
+Implement bounded background analysis through existing cached/offline job
+ownership and resource admission. Only valid measured recommendations may
+alter an output policy; unsupported scoring or a losing candidate retains the
+ordinary recipe. Representative-title benefit remains an evidence requirement,
+not an excuse to infer a generic bitrate bias. Bind the result to held source identity, encoder/tool/metric policy
 and output recipe. A missing, stale or failed analysis uses the ordinary recipe;
 Play must never wait for analysis. Preserve requested audio, subtitles, grade
 and geometry, and snapshot the resolved policy in offline/pretranscode work.
@@ -176,6 +183,41 @@ operator policy and the separate HDR10 VBR policy.
 **Acceptance:** stale-source, retry, restart, cancellation, resource contention,
 cache separation and settings lifecycle tests; matched end-to-end encodes show
 benefit without sample-analysis cost on the interactive start path.
+
+### C2 operator and implementation notes
+
+The batch's native analyser runs as a bounded phase of the existing retained-HLS cached or
+offline producer, under its admission, source descriptor and cancellation
+ownership. It persists a source/engine/scorer/recipe-bound report in the
+existing probe document. Cached construction can use a measured winner before
+naming its artifact. Retained-HLS playback can select a completed measured
+artifact through the existing cache owner; a miss preserves its live recipe,
+with no analysis, media hash or new encode on the lookup path. Modern immutable
+VOD remains a separate encoding contract.
+An offline request keeps its accepted immutable recipe;
+its worker can prepare evidence for a later request. Play never waits for this
+analysis, and a missing, changed, unsupported or failed measurement retains the
+ordinary recipe.
+
+Settings → Developer → Measured per-title encoding saves
+`transcode.content_aware_encoding`; readiness is advisory. Start with tagged
+BT.709, progressive square-pixel SDR software x264 without burned subtitles.
+Three two-second windows, bounded media/scratch, a three-minute job budget and
+existing background-yield rules limit work. Every window's mean and lower-tail
+VMAF must preserve baseline quality, each candidate window's mean must reach
+93, aggregate bytes must fall at least 10%,
+and the candidate encode-time total may not exceed baseline by more than 10%.
+These sampled results do not promise whole-title quality or hardware-family
+benefits. Explicit operator rate-control choices take precedence.
+
+The container packages a separately pinned static FFmpeg/libvmaf scorer;
+Jellyfin remains the capture/playback encoder. Both binary identities and the
+actual encoder/GOP/thread recipe are bound into the report. Scoring-only
+packaging avoids replacing the GPU driver/decoder stack to add a metric.
+Native installations use their configured FFmpeg when no packaged scorer is
+available. A missing scorer is visible in Developer and retains baseline; it
+never rejects saving the feature preference. Child cancellation waits for reap
+before releasing source, scratch or CPU ownership.
 
 ## 6. HDR-to-SDR calibration — autonomous reference and image evidence
 
@@ -219,18 +261,39 @@ from Paul and are not silently converted to pass results.
 
 ## 8. Integration, evidence and limits
 
-Use normal commits and the tracked hook. Run the smallest meaningful regression
-before push; record its command and `Regression-Test:` lines in behavioral task
-PRs and landing commit messages. Use `fix(` or `perf(` for user-visible behavior.
-Task PRs target the effort; dispatch and pass the required effort development
-gate. Freeze task merges for promotion, merge current main, and qualify the
-exact resulting candidate under the repository's current promotion rules.
-Main-bound PRs receive exactly one adversarial review, its fixes, then the
-ready fast lane; no merge happens on a stale or missing required result.
+**Workflow amendment, 2026-10-03:** Paul explicitly replaced this effort's
+per-task tests, task PRs/effort gates and full promotion qualification with a
+single larger batch PR. This is an effort-specific override of the earlier
+AGENTS/development-pipeline rules, not a change to unrelated work. Retain pinned
+Rust compile checks and normal logical commits; combine work on
+`codex/video-quality-batch` in an independent agent-owned Forgejo clone.
 
-The initial documentation PR is ordinary docs-only work into main. It does not
-change settings, recipes, production service state or the rules for later code.
-Merge authority is granted by Paul's request; deployment is a separate action.
+Build the whole batch before obtaining its one adversarial agent review.
+Address the findings, then run the fast lane. Maintain a per-check receipt:
+every required check must pass on the code being merged. Retry failed checks
+individually; do not replay successful suites just because another check failed.
+Compilation is still established before Rust changes and never delegated to CI
+as the first compiler. Broader pre-existing unit failures belong to the separate
+repair process; record them accurately instead of expanding this programme.
+
+Use `fix(` or `perf(` for user-visible changes. Preserve the applicable
+`Regression-Test:` lines in the batch description and landing message. Do not
+merge before its required fast-lane results are green. Prior measurement/tool
+reviews and tests remain historical evidence, not substitutes for the final
+batch review. Superseded small PRs close only after their source is retained in
+the batch. No additional per-task CI campaign is dispatched.
+
+The existing ledger remains the status page. Each implemented change names its
+concrete cause, the existing architectural owner it extends, the measured or
+structural cost removed, outstanding evidence, and decisions made without Paul.
+Do not add independent playback watchdogs, retry loops, feature gates, or hidden
+readiness switches. An unavoidable optional control belongs in Developer;
+readiness is advisory and cannot reject or override the saved enable choice.
+
+Never use Paul's checkout. Agent clones have no alternates or dependencies on
+it. Retain source/evidence in the remote batch before removing owned temporary
+clones, containers, fixtures, logs and compiler scratch; do not remove another
+process's files. Merge is authorized; production deployment remains separate.
 
 **Non-goals:** AI enhancement, sharpening by default, motion interpolation,
 full pre-encoding of the library, a new playback owner, a second independent
@@ -242,3 +305,14 @@ The [ledger](VIDEO-QUALITY-STATUS.md) is the single progress record. It separate
 planned, built, locally tested, measured, merged and production-qualified work.
 A merged tool is not a calibrated fleet; an enabled encoder is not proof of a
 better picture.
+
+### Final review corrections
+
+The final adversarial review identified two integration issues. Application-owned
+content reports are now excluded from source-probe comparison, preserving the
+comparison of actual media fields. The plain VAAPI HDR point is constrained by
+known source cadence at or below 30 fps as well as its existing geometry bound;
+50/60 fps, variable and unknown rates retain the original SDR route and cadence.
+The facts-aware planner checks the same contract before naming an artifact.
+The isolated output qualification also compares actual hvcC profile, tier, level
+and constraint bytes with the advertised codec declaration.

@@ -1,0 +1,301 @@
+#!/usr/bin/env python3
+"""Bounded, offline SDR encoder screening; never writes daemon settings.
+
+Capture on a reserved host using exported production encoder arguments, then
+score copied captures on a controller with libvmaf. The existing bench owns
+fixture generation, VMAF scoring and the benefit threshold. This screen cannot
+qualify a production default: it has no served-segment or fleet speed evidence.
+"""
+
+import argparse
+import json
+import math
+from pathlib import Path
+import re
+import runpy
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+BENCH = runpy.run_path(str(ROOT / "scripts/bench"))
+CORPUS = ROOT / "scripts/perf2-rate-control-n2-corpus.json"
+SCOPE = "offline_encoder_screen_non_acceptance"
+LIMITATIONS = [
+    "Synthetic fixtures are not representative movie or sports evidence.",
+    "No production daemon, transport, served-segment peak or fleet p10-speed qualification.",
+    "Single-run encode elapsed times include process startup; no default change is authorized.",
+    "Software decode, video-only MP4, fixed GOP and no frame reordering are screening overrides.",
+]
+
+
+def write_json(path, value):
+    Path(path).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def bounded_run(argv, timeout=180):
+    start = time.monotonic()
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+    if result.returncode:
+        raise ValueError(f"command failed ({result.returncode}): {result.stderr[-4000:]}")
+    return result, time.monotonic() - start
+
+
+def load_export(path):
+    value = json.loads(Path(path).read_text())
+    if (value.get("schema_version") != 1 or value.get("scope") != "encoder_arguments_only"
+            or value.get("output_grade") != "sdr"):
+        raise ValueError("expected version-1 production SDR argument export")
+    if value.get("family") not in {"software", "qsv", "vaapi", "nvenc", "videotoolbox"}:
+        raise ValueError("unknown encoder family")
+    for name in ("vbr", "qvbr"):
+        mode = value.get("modes", {}).get(name, {})
+        if not isinstance(mode.get("encoder_args"), list) or not mode["encoder_args"]:
+            raise ValueError("missing production encoder arguments")
+        if not all(isinstance(arg, str) for arg in mode["encoder_args"]):
+            raise ValueError("encoder arguments must be strings")
+    if not isinstance(value.get("input_args"), list):
+        raise ValueError("missing production hardware initialization arguments")
+    return value
+
+
+def fixture_row(name):
+    rows = json.loads(CORPUS.read_text())["fixtures"]
+    matches = [row for row in rows if row["identity"] == name]
+    if len(matches) != 1:
+        raise ValueError("fixture must be one identity from the n2 SDR corpus")
+    return matches[0]
+
+
+def capture(args):
+    if not math.isfinite(args.duration) or not 1 <= args.duration <= 30:
+        raise ValueError("duration must be 1..30 seconds")
+    if not 32 <= args.max_temp_mib <= 1024:
+        raise ValueError("max-temp-mib must be 32..1024")
+    exported = load_export(args.encoder_args)
+    fixture = fixture_row(args.fixture)
+    expected_bitrate = 4000 if fixture["rung"] == 720 else 8000
+    if exported.get("bitrate_kbps") != expected_bitrate:
+        raise ValueError("export bitrate differs from the fixture's production rung")
+    directory = Path(args.output).resolve()
+    directory.mkdir(parents=True, exist_ok=False)
+    report = {
+        "schema_version": 1, "scope": SCOPE, "acceptance_eligible": False,
+        "limitations": LIMITATIONS, "fixture": fixture,
+        "source_revision": args.source_revision,
+        "encoder_export": exported,
+        "encoder_export_sha256": BENCH["sha256_file"](args.encoder_args),
+        "bench_sha256": BENCH["sha256_file"](ROOT / "scripts/bench"),
+        "corpus_sha256": BENCH["sha256_file"](CORPUS),
+        "duration_seconds": args.duration, "modes": {},
+        "resource_limits": {"process_timeout_seconds": 180, "one_encode_at_a_time": True,
+                            "max_media_bytes": args.max_temp_mib * 1024 * 1024,
+                            "cpu_threads": 2},
+        "status": "incomplete",
+    }
+    try:
+        for key, tool in (("encoder", args.ffmpeg), ("fixture_generator", args.fixture_ffmpeg)):
+            version, _ = bounded_run([tool, "-version"], 10)
+            report[key] = {"executable": tool, "build": version.stdout.splitlines()[0]}
+        if args.provenance:
+            report["capture_environment"] = json.loads(Path(args.provenance).read_text())
+        reference = directory / "reference.mkv"
+        generator = BENCH["fixture_command"]
+        original_duration = generator.__globals__["DURATION"]
+        generator.__globals__["DURATION"] = args.duration
+        try:
+            command = generator(str(reference), BENCH["FIXTURES"][Path(fixture["filename"]).stem])
+        finally:
+            generator.__globals__["DURATION"] = original_duration
+        command[0] = args.fixture_ffmpeg
+        media_budget = args.max_temp_mib * 1024 * 1024
+        command[-1:-1] = ["-fs", str(media_budget * 3 // 4)]
+        report["active_command"] = command
+        result, elapsed = bounded_run(command)
+        report["reference"] = {
+            "file": reference.name, "sha256": BENCH["sha256_file"](reference),
+            "argv": command, "elapsed_seconds": elapsed,
+            "matches_pinned_n2": BENCH["sha256_file"](reference) == fixture["reference_sha256"],
+        }
+        for mode in ("vbr", "qvbr"):
+            output = directory / f"{mode}.mp4"
+            filters = "format=nv12"
+            if exported.get("upload_filter"):
+                filters += "," + exported["upload_filter"]
+            command = [args.ffmpeg, "-hide_banner", "-nostdin", "-y", "-loglevel", "info",
+                       "-threads", "2", *exported["input_args"], "-i", str(reference),
+                       "-map", "0:v:0", "-an", "-sn", "-t", str(args.duration),
+                       "-vf", filters, *exported["modes"][mode]["encoder_args"],
+                       "-bf", "0", "-g", "48", "-force_key_frames", "expr:gte(t,n_forced*2)",
+                       "-map_metadata", "-1", "-fs", str(media_budget // 8), str(output)]
+            report["active_command"] = command
+            result, elapsed = bounded_run(command)
+            (directory / f"{mode}.log").write_text(result.stderr)
+            report["modes"][mode] = {
+                "file": output.name, "sha256": BENCH["sha256_file"](output),
+                "bytes": output.stat().st_size, "argv": command,
+                "encode_elapsed_seconds": elapsed,
+            }
+        report["status"] = "captured"
+        report.pop("active_command", None)
+    except Exception as error:
+        report["error"] = str(error)
+        report["status"] = "failed"
+        for filename in ("reference.mkv", "vbr.mp4", "qvbr.mp4"):
+            (directory / filename).unlink(missing_ok=True)
+        report["partial_media_removed"] = True
+        raise
+    finally:
+        write_json(directory / "capture.json", report)
+    return report
+
+
+def inspect_video(ffprobe, path):
+    result, _ = bounded_run([ffprobe, "-v", "error", "-select_streams", "v:0",
+                            "-count_frames", "-show_entries",
+                            "stream=width,height,nb_read_frames,avg_frame_rate,pix_fmt,color_transfer,color_primaries,color_space",
+                            "-of", "json", str(path)])
+    streams = json.loads(result.stdout).get("streams", [])
+    if len(streams) != 1:
+        raise ValueError("expected one decoded video stream")
+    stream = streams[0]
+    if int(stream.get("nb_read_frames", 0)) <= 0:
+        raise ValueError("missing decoded frame count")
+    if stream.get("color_transfer") in {"smpte2084", "arib-std-b67"}:
+        raise ValueError("HDR cannot be scored as SDR")
+    return stream
+
+
+def score_vmaf_bounded(*args):
+    """Reuse bench's scorer with a deadline; never leave an unbounded child."""
+    scorer = BENCH["score_vmaf"]
+    original = scorer.__globals__["sh"]
+    def limited(command, **kwargs):
+        kwargs["timeout"] = 180
+        return subprocess.run(command, capture_output=True, text=True, **kwargs)
+    scorer.__globals__["sh"] = limited
+    try:
+        return scorer(*args)
+    finally:
+        scorer.__globals__["sh"] = original
+
+
+def validate_frame_match(reference, candidate, duration):
+    for field in ("width", "height", "nb_read_frames"):
+        if candidate.get(field) != reference.get(field):
+            raise ValueError(f"candidate and reference differ in {field}")
+    rate = candidate.get("avg_frame_rate", "0/1").split("/")
+    fps = float(rate[0]) / float(rate[1])
+    if not math.isfinite(fps) or fps <= 0 or abs(int(candidate["nb_read_frames"]) - duration * fps) > 1:
+        raise ValueError("capture is truncated or does not span its declared duration")
+
+
+def score(args):
+    directory = Path(args.capture)
+    report = json.loads((directory / "capture.json").read_text())
+    if report.get("status") != "captured" or report.get("scope") != SCOPE:
+        raise ValueError("capture is incomplete or has an unknown evidence scope")
+    scorer = BENCH["scoring_executable"](args.scorer)
+    probe = BENCH["probe_vmaf_scorer"](scorer, "vmaf_v0.6.1")
+    report["scorer"] = {"build": BENCH["tool_build"](scorer),
+                        "sha256": BENCH["sha256_file"](scorer), "probe": probe,
+                        "model": "vmaf_v0.6.1", "n_subsample": 1}
+    facts = {}
+    for name, item in [("reference", report["reference"]), *report["modes"].items()]:
+        if Path(item["file"]).name != item["file"]:
+            raise ValueError("capture filenames must be local basenames")
+        path = directory / item["file"]
+        if BENCH["sha256_file"](path) != item["sha256"]:
+            raise ValueError(f"changed capture: {name}")
+        facts[name] = inspect_video(args.ffprobe, path)
+    for mode in ("vbr", "qvbr"):
+        validate_frame_match(facts["reference"], facts[mode], report["duration_seconds"])
+        item = report["modes"][mode]
+        item["vmaf"] = score_vmaf_bounded(
+            scorer, directory / item["file"], directory / report["reference"]["file"],
+            0, report["duration_seconds"], "vmaf_v0.6.1", 1)
+    for item in [report["reference"], *report["modes"].values()]:
+        if BENCH["sha256_file"](directory / item["file"]) != item["sha256"]:
+            raise ValueError("capture changed during scoring")
+    report["decoded_video"] = facts
+    report["status"] = "scored"
+    write_json(args.json, report)
+    return report
+
+
+def summarize(reports):
+    canonical = {row["identity"]: row for row in json.loads(CORPUS.read_text())["fixtures"]}
+    expected = set(canonical)
+    rows = []
+    identities = set()
+    identity = None
+    for report in reports:
+        if report.get("status") != "scored" or report.get("scope") != SCOPE:
+            raise ValueError("all reports must be completed offline screens")
+        fixture = report["fixture"]
+        if fixture != canonical.get(fixture.get("identity")):
+            raise ValueError("fixture metadata differs from the canonical n2 corpus")
+        environment = report.get("capture_environment", {})
+        binary_hash = environment.get("encoder_sha256", "")
+        if not re.fullmatch(r"[0-9a-f]{64}", binary_hash):
+            raise ValueError("actual encoder binary SHA-256 is required")
+        if report.get("corpus_sha256") != BENCH["sha256_file"](CORPUS):
+            raise ValueError("corpus provenance differs from the canonical n2 manifest")
+        if fixture["identity"] in identities:
+            raise ValueError("duplicate fixture evidence")
+        identities.add(fixture["identity"])
+        current = (report["encoder_export"]["family"], report["encoder_export"]["quality"],
+                   report["encoder"]["build"], report["source_revision"], report["bench_sha256"],
+                   report["scorer"]["sha256"], report["scorer"]["model"], report["duration_seconds"],
+                   binary_hash, report["corpus_sha256"], environment.get("image_id"),
+                   report["encoder_export"].get("software_threads"))
+        if identity is not None and current != identity:
+            raise ValueError("mixed source, encoder, candidate, scorer or duration evidence")
+        identity = current
+        rows.append({"identity": fixture["identity"], "class": fixture["class"], "modes": report["modes"]})
+    if identities != expected:
+        raise ValueError("a complete six-fixture n2 screen is required")
+    benefit, failures = BENCH["evaluate_rate_control_benefit"](rows)
+    quality_loss = [r["identity"] for r in rows if r["modes"]["qvbr"]["vmaf"] < r["modes"]["vbr"]["vmaf"]]
+    return {"schema_version": 1, "scope": SCOPE, "acceptance_eligible": False,
+            "decision": "retain_bitrate_pending_production_qualification",
+            "benefit": benefit, "benefit_failures": failures, "quality_regressions": quality_loss,
+            "fixture_rows": rows, "limitations": LIMITATIONS,
+            "matched_identity": dict(zip(("family", "quality", "encoder_build", "source_revision",
+                                           "bench_sha256", "scorer_sha256", "metric_model", "duration_seconds",
+                                           "encoder_sha256", "corpus_sha256", "image_id", "software_threads"), identity)),
+            "input_reports": reports,
+            "candidate_warrants_further_qualification": bool(benefit and benefit["passed"] and not quality_loss)}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    cap = sub.add_parser("capture")
+    for name in ("encoder-args", "fixture", "output", "source-revision"):
+        cap.add_argument("--" + name, required=True)
+    cap.add_argument("--ffmpeg", default="ffmpeg")
+    cap.add_argument("--fixture-ffmpeg", default="ffmpeg")
+    cap.add_argument("--duration", type=float, default=12)
+    cap.add_argument("--provenance")
+    cap.add_argument("--max-temp-mib", type=int, default=512)
+    sc = sub.add_parser("score")
+    for name in ("capture", "json"):
+        sc.add_argument("--" + name, required=True)
+    sc.add_argument("--scorer", default="ffmpeg")
+    sc.add_argument("--ffprobe", default="ffprobe")
+    summary = sub.add_parser("summarize")
+    summary.add_argument("reports", nargs="+")
+    summary.add_argument("--json", required=True)
+    args = parser.parse_args()
+    if args.action == "capture":
+        capture(args)
+    elif args.action == "score":
+        score(args)
+    else:
+        result = summarize([json.loads(Path(p).read_text()) for p in args.reports])
+        result["input_report_sha256"] = {Path(p).name: BENCH["sha256_file"](p) for p in args.reports}
+        write_json(args.json, result)
+
+
+if __name__ == "__main__":
+    main()

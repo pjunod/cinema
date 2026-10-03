@@ -679,6 +679,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 }
 function beginPlayAttempt(fileId,title,resumeMs,knownDurMs,meta,reservedOpenAttempt,retryIntent){
   WATCH_CLOSE_PROMISE=null;
+  cancelNextEpisodePreparation(PLAYER);
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
   // (the route change stopped it); now the dock survives, so two pictures

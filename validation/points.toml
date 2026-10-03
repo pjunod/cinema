@@ -412,6 +412,7 @@ paths = [
   # adds a newly-required column breaks it, so it belongs with the model whose
   # persistence it reproduces.
   "crates/plurx-core/examples/catalogue_fixture.rs",
+  "crates/plurx-core/examples/encoder-calibration-args.rs",
   # K-05's query-plan tool over that fixture: it drives the real stores'
   # hot catalogue reads, captures the statements they trace, and records
   # each plan and its cold and warm timings on both backends' schemas.
@@ -1083,6 +1084,7 @@ paths = [
   "scripts/ci-cargo-cache-refresh",
   "scripts/image-base-drift",
   "scripts/build-static-ffprobe",
+  "scripts/build-static-vmaf-scorer",
   "scripts/ci-cache-prune",
   "scripts/ci-buildkit-prune",
   "scripts/k08-build-measure",
@@ -1091,6 +1093,9 @@ paths = [
   "scripts/release-package-candidate",
   "scripts/package-windows",
   "scripts/{bench,dv-evidence,gop-census,mkpgs,perf-report,perf2-rate-control-n1-corpus.json,perf2-rate-control-n2-corpus.json,perf2-rate-control-smoke-corpus.json,ship,ship-physical}",
+  "scripts/encoder-calibration-screen",
+  "scripts/content-aware-encoding",
+  "scripts/tone-map-calibration",
   "scripts/container-smoke",
   "scripts/container-restore-smoke",
   "scripts/windows-smoke.ps1",

@@ -388,11 +388,28 @@ impl TranscodeManager {
     pub async fn effective_rate_control_for_new_offline_package(
         &self,
         file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        Ok(self.effective_rate_control(
-            self.encoder_for_file(file, crate::process_control::ChildClass::Background)
-                .await?,
-        ))
+        let encoder = self
+            .encoder_for_file(file, crate::process_control::ChildClass::Background)
+            .await?;
+        let baseline = self.effective_rate_control(encoder);
+        if subtitle_burn {
+            return Ok(baseline);
+        }
+        let opts = self.speculative_producer_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            None,
+            None,
+        );
+        Ok(self
+            .measured_content_rate(file, &opts, encoder)
+            .await
+            .unwrap_or(baseline))
     }
 
     #[cfg(test)]
@@ -851,27 +868,32 @@ impl TranscodeManager {
         file: Option<&plurx_core::domain::MediaFile>,
         hdr10_requested: bool,
     ) -> i64 {
-        // The exact Profile-5 → HDR10 → QSV chain was measured above realtime
-        // at both 1080p and 2160p. This branch is intentionally narrower than
-        // generic "hardware HDR": it requires the selected QSV family and the
-        // boot proof of its Main10 upload/encode graph.
-        let hdr10_renderer_proved = match file.and_then(plurx_core::playback::hdr_route) {
-            Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough,
-            Some(plurx_core::playback::HdrRoute::Passthrough) => {
-                self.hdr10_passthrough && self.hdr10_passthrough_qsv
-            }
-            None => false,
-        };
-        if hdr10_requested
-            && hdr10_renderer_proved
-            && self.dovi_passthrough_qsv
-            && self.encoder().await == Encoder::Qsv
-        {
+        let preferred = self.encoder().await;
+        let hdr10_renderer_proved =
+            match (file.and_then(plurx_core::playback::hdr_route), preferred) {
+                (Some(plurx_core::playback::HdrRoute::DolbyVisionRpu), Encoder::Qsv) => {
+                    self.dovi_passthrough && self.dovi_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Qsv) => {
+                    self.hdr10_passthrough && self.hdr10_passthrough_qsv
+                }
+                (Some(plurx_core::playback::HdrRoute::Passthrough), Encoder::Vaapi) => {
+                    self.hdr10_passthrough_vaapi
+                        && self
+                            .vaapi_hdr10_source_fits(
+                                file.expect("the matched route has a file"),
+                                HDR10_HEIGHT,
+                            )
+                            .await
+                }
+                _ => false,
+            };
+        if hdr10_requested && hdr10_renderer_proved {
             if let Some(file) = file {
-                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_4K_HEIGHT, preferred) {
                     return HDR10_4K_HEIGHT;
                 }
-                if hdr10_rung_fits(file, HDR10_HEIGHT, Encoder::Qsv) {
+                if hdr10_rung_fits(file, HDR10_HEIGHT, preferred) {
                     return HDR10_HEIGHT;
                 }
             }

@@ -45,7 +45,8 @@ pub use encoder::{
 pub use pipeline::{Pipeline, CANDIDATES as PIPELINE_CANDIDATES};
 pub use recipe::{PipelineDigest, Recipe, CACHE_RECIPE_VERSION};
 pub use vod::{
-    vod_audio_anchor, vod_pipe_args, VodFrameGrid, VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE,
+    vod_audio_anchor, vod_pipe_args, vod_pipe_args_with_reorder, VodFrameGrid,
+    VOD_AAC_FRAME_SAMPLES, VOD_AUDIO_RATE, VOD_HEVC_SAMPLE_ENTRY,
 };
 
 use crate::domain::MediaFile;
@@ -1497,6 +1498,14 @@ fn hls_args(
     hls_args_with_compatibility(source, encoder, opts, pacing, out_dir, false)
 }
 
+/// Retained HLS keyframe policy, shared by producers and their sample scorer.
+pub fn hls_keyframe_args() -> Vec<String> {
+    vec![
+        "-force_key_frames".into(),
+        format!("expr:gte(t,n_forced*{SEGMENT_SECONDS})"),
+    ]
+}
+
 /// Build a movie HLS command exclusively from one validated semantic plan and
 /// its attempt-local execution context.
 #[cfg(not(test))]
@@ -1846,8 +1855,7 @@ fn hls_args_inner(
     }
 
     // Segment-aligned keyframes so each segment is independently decodable.
-    args.push("-force_key_frames".into());
-    args.push(format!("expr:gte(t,n_forced*{SEGMENT_SECONDS})"));
+    args.extend(hls_keyframe_args());
 
     // Audio: downmix + AAC (browser-universal), with the A/V correction as
     // a filter on the same input rather than a second read of the source.

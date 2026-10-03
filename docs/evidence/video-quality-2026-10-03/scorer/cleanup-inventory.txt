@@ -1,0 +1,4 @@
+NAME/NODE     DRIVER/ENDPOINT   STATUS    BUILDKIT   PLATFORMS
+default*      docker                                 
+ \_ default    \_ default       running   v0.26.2    linux/amd64 (+3), linux/arm64, linux/386
+active_sessions=0

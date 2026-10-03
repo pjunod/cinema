@@ -55,7 +55,9 @@ class KnownRedContractTest(unittest.TestCase):
         # needs the pinned model files its ignore reason names.
         # K-08 M5 adds embed_thread_scaling, the inference thread-count
         # measurement behind EMBED_THREADS, which needs the same model files.
-        self.assertEqual(len(ignored), 20)
+        # Video-quality C2 adds an explicit native FFmpeg/libvmaf qualification.
+        # It is run independently when those tools exist, not hidden as known red.
+        self.assertEqual(len(ignored), 21)
         self.assertTrue(all(item.reason for item in ignored))
         self.assertTrue(all(item.path in item.identity for item in ignored))
         self.assertTrue(all(item.cargo_name in item.identity for item in ignored))

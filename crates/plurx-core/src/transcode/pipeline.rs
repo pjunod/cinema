@@ -204,9 +204,11 @@ impl Pipeline {
             Pipeline::DoviPassthrough => {
                 matches!(encoder, Encoder::Software | Encoder::Qsv)
             }
-            // The same two measured Main10 encode routes. Other families stay
-            // refused until somebody measures them.
-            Pipeline::Hdr10Passthrough => matches!(encoder, Encoder::Software | Encoder::Qsv),
+            // Plain HDR has no RPU dependency; its VAAPI P010/Main10 graph
+            // has an independent boot proof and a 1080p planner ceiling.
+            Pipeline::Hdr10Passthrough => {
+                matches!(encoder, Encoder::Software | Encoder::Qsv | Encoder::Vaapi)
+            }
             Pipeline::Cpu => true,
         }
     }
@@ -848,7 +850,9 @@ mod tests {
 
         assert!(p.pairs_with(Encoder::Software));
         assert!(p.pairs_with(Encoder::Qsv));
-        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
+        assert!(p.pairs_with(Encoder::Vaapi));
+        assert!(!Pipeline::DoviPassthrough.pairs_with(Encoder::Vaapi));
+        for encoder in [Encoder::Nvenc, Encoder::VideoToolbox] {
             assert!(
                 !p.pairs_with(encoder),
                 "{encoder:?} has no measured HEVC Main10 route"

@@ -425,6 +425,7 @@ const MEDIA_METHODS: &[&str] = &[
     "get_file_probe_chapters_json",
     "merge_file_probe_chapters",
     "merge_file_probe_hevc_parameter_sets",
+    "merge_file_probe_content_encoding",
     "files_missing_probe",
     "library_file_paths",
     "ensure_library_root_fingerprint",
@@ -18195,11 +18196,136 @@ fn contract_inventory_matches_every_store_method() {
     // Media info adds the source-aware preparation history projection.
     // +1: coherent playback file/probe/settings/generation snapshot, covered
     // by playback_planning_snapshot_retains_one_source_and_settings_revision.
-    assert_eq!(declared.len(), 452, "review the Store method count");
+    // +1: source-fenced content encoding report publication, covered by
+    // content_encoding_report_publication_is_source_fenced_on_every_backend.
+    assert_eq!(declared.len(), 453, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+#[tokio::test]
+async fn content_encoding_report_publication_is_source_fenced_on_every_backend() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-report").await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file")
+            .expect("fixture exists");
+        let report = r#"{"outcome":"measured","context":{"version":1}}"#;
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("unprobed publication"),
+            "{backend}: never invent probe facts"
+        );
+        assert!(store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("unprobed row")
+            .is_none());
+
+        let original = serde_json::json!({"streams":[{"codec_name":"h264"}],"chapters":[]});
+        let probe = ProbeResult {
+            raw_json: Some(original.to_string()),
+            ..Default::default()
+        };
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("probed fixture");
+        for (id, size, mtime) in [
+            (file_id, file.size + 1, file.mtime),
+            (file_id, file.size, file.mtime + 1),
+            (i64::MAX, file.size, file.mtime),
+        ] {
+            assert!(
+                !store
+                    .merge_file_probe_content_encoding(id, size, mtime, report)
+                    .await
+                    .expect("fenced publication"),
+                "{backend}: reject stale or absent source"
+            );
+        }
+        let unchanged: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("probe row")
+                .expect("probe exists"),
+        )
+        .expect("probe JSON");
+        assert_eq!(
+            unchanged, original,
+            "{backend}: refused writes leave probe untouched"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("current publication"),
+            "{backend}"
+        );
+        let grafted: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("grafted probe row")
+                .expect("grafted probe exists"),
+        )
+        .expect("grafted JSON");
+        let mut expected = original.clone();
+        expected[plurx_core::store::CONTENT_ENCODING_PROBE_KEY] =
+            serde_json::from_str(report).expect("report JSON");
+        assert_eq!(grafted, expected, "{backend}: only the app report changes");
+
+        store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("UTF-8 fixture path"),
+                file.size + 1,
+                file.mtime + 1,
+                &probe,
+            )
+            .await
+            .expect("source reprobe");
+        let refreshed: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file_id)
+                .await
+                .expect("refreshed probe row")
+                .expect("refreshed probe exists"),
+        )
+        .expect("refreshed JSON");
+        assert_eq!(
+            refreshed, original,
+            "{backend}: reprobe discards old evidence"
+        );
+        assert!(
+            !store
+                .merge_file_probe_content_encoding(file_id, file.size, file.mtime, report)
+                .await
+                .expect("late publication"),
+            "{backend}: old source cannot restore evidence"
+        );
+        assert!(
+            store
+                .merge_file_probe_content_encoding(file_id, file.size + 1, file.mtime + 1, report)
+                .await
+                .expect("new source publication"),
+            "{backend}"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]
