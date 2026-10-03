@@ -101,8 +101,8 @@ an encoder, and no shorter source cadence has been inferred from the browser
 buffer. The previous 108 s reserve trial and the 128 s steady +30 estimate
 cannot be made safe by treating their arithmetic as qualification.
 
-A complete source/GOP plan is missing on the incident's rolling fallback
-route. A shorter contract chosen from the initial GOPs cannot prove a later
+The incident rolling fallback did not load a compatible complete source/GOP
+plan. Existing artifacts alone do not prove compatibility with that request. A shorter contract chosen from the initial GOPs cannot prove a later
 long GOP will fit. Rejecting that later GOP would terminate a previously
 playable stream; changing the target after publication would break the frozen
 presentation contract. Even an encoded-only shortcut needs an explicitly
@@ -126,6 +126,49 @@ five spaced and five coalesced presses, exact landing/frame evidence,
 1×/2×, pause/resume, concurrent streams, scratch pressure, and reference-fleet
 p95 below 2 s for unavoidable replacements. Generated fixtures supplement
 those rows; they cannot close them.
+
+## What the exact incident source shows
+
+Read-only inspection of `m6` on 2026-10-03 identified file `5208`,
+“Bad Boys: Ride or Die”, at the catalog path
+`/media/movies/Bad Boys Ride or Die (2024)/Bad Boys Ride or Die (2024) Remux-2160p.mkv`.
+The source metadata is 79,519,453,096 bytes with mtime `1727490599`.
+No playback, settings, analysis build or deployment was initiated.
+
+Bounded `ffprobe -show_packets` reads at `0%+120` and `3300%+120` report
+packet keyframe gaps no greater than 0.876 s. This is not the clean-cut
+contract. Two existing 244,142-byte video-only artifacts match the catalog
+size/mtime and their blob SHA-256 matches the replicated artifact row. Both
+use segment-plan version 3 and describe the same 6,958.952 s video timeline:
+
+| Indexed fact | Value | Meaning |
+|---|---:|---|
+| Fragment rows | 10,149 | Source pipe fragments, not served HLS segments |
+| Maximum fragment duration | 0.960 s | Does not bound gaps between usable clean cuts |
+| `CleanIdr` rows | 3,690 | Classified clean starts in this indexed recipe |
+| `Dirty` rows | 6,459 | Includes conservatively rejected non-IRAP openings |
+| First clean-cut gap | 38.914 s | Frequent packet keyframes do not supply early clean starts |
+| Maximum clean-cut gap | 169.920 s | At 6,743.737–6,913.657 s; incompatible with a three-second clean-only cadence |
+| `parameter_sets_constant` | `true` | Configuration stability, not random-access availability |
+
+The artifact keys are
+`ad46d6a6c17a59b395a26c69b7066b4b8458c2e46d906f79dc7742094590feae`
+and
+`a89f7d8cb73d4cd78d83d0c1459a8f0dded6949f084e6315a1be0c005c99529e`;
+their verified blob digests are respectively
+`f58371adbb3103eac9bedfe17eb42c17ab8a5833114ee7076b390312cb20d240`
+and
+`e762729cd6d1c2b1c6704eff21a6d8f579ff6198383166dbfde6b6b43a457a19`.
+The source content digest recorded in both artifacts is
+`d388cb2abd20e58eb23a33b7ce4f8a7433e78c23140773f3070770c1c577a127`.
+Size/mtime matching is not a fresh content attestation. Current native-request
+recipe compatibility and retained-file/authority reuse remain unverified.
+
+How to read this evidence: neither short pipe fragments nor packet keyframe
+flags qualify a three-second clean-copy policy. A strict ceiling cut and its
+leading-picture treatment need separate frame-fidelity qualification. The
+adversarial reviewer confirmed the class interpretation and these limits;
+no production policy change follows from this inspection.
 
 ## Validation and review
 
@@ -165,7 +208,25 @@ index and validation catalog checks passed locally with the pinned compiler.
 The Mac linker emitted its existing large-unwind-table warning on the test
 binary; no Rust denied lint failed.
 
-Physical Safari evidence, exact-head compile results and the task PR/gate
-receipt will be added here when available. CUA reported that the Mac was
+The candidate is reviewable as [draft task PR #770](http://192.168.4.7:3000/noirr/plurx/pulls/770)
+into `effort/web-seek`. The pinned all-target check and focused regression
+also passed against committed `fac7c75e31`.
+
+[Effort gate run 3962](http://192.168.4.7:3000/noirr/plurx/actions/runs/3962)
+failed the validation-unit preflight because the ignored exporter added five
+process ownership census deltas without their ledger notes. The exporter
+children are reviewed and the ledger is corrected in the follow-up commit;
+all 253 local validation contract tests passed (one platform skip). This failure
+is blocking until the new candidate passes the gate.
+
+The local operations suite ran 585 cases. Its exporter ignore census was
+updated from 20 to 21; all ten reasoned-ignore contract tests then passed.
+This exporter has already passed explicitly and is not a known-red waiver.
+The unrelated hung-Docker janitor fixture took 60 s on this Mac because GNU
+`timeout` is absent; the script requires the Linux timeout branch for that
+case. Validate that unchanged fixture from committed source on Linux rather
+than changing production janitor behavior for this task.
+
+Physical Safari evidence remains open. CUA reported that the Mac was
 locked during the first test attempt; the user was asked to unlock it. Apple
 hardware availability is not an inferred blocker.
