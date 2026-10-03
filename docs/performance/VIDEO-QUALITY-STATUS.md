@@ -12,10 +12,10 @@ unverified, not a pass. Dates use America/New_York unless a receipt states UTC.
 |---|---|
 | Planning base | Forgejo main `4fa50b79e4b3b196797a9b7a1a7a4abd2184ea43` |
 | Planning branch | `codex/video-quality-program` |
-| Documentation PR | Pending creation/review |
+| Documentation PR | [#758](http://192.168.4.7:3000/noirr/plurx/pulls/758), one adversarial review complete; two P2 specification ambiguities addressed; fast lane pending |
 | Effort branch | `effort/video-quality`, created after the plan merges |
 | Compiler | `/Users/pjunod/.cargo/bin/rustc`: `1.97.1 (8bab26f4f 2026-07-14)` |
-| Compiler-loop baseline | `cargo check -p plurx-core --lib --locked --offline` passed on planning base; package-only baseline reported pre-existing unused-item warnings. Workspace Clippy remains required by the tracked hook. |
+| Compiler-loop baseline | `cargo check -p plurx-core --lib --locked --offline` passed on planning base; package-only baseline reported pre-existing unused-item warnings. Pinned workspace Clippy and tracked hook passed. |
 | Original checkout | Left untouched, including pre-existing uncommitted documents |
 | Production changes | None |
 
