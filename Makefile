@@ -1514,6 +1514,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# are served in is a load order. One reads them, one runs them.
 	@node --test tests/web/file-context.test.js
 	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/sharing-management.test.js
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@node tests/web/asset-layout.test.js
