@@ -3565,3 +3565,22 @@ regression as well as the thirteen sharing/key cases. The registered Local
 rebuilt-principal activation regression passed (0.94s), and the existing actual
 three-voter Source reservation and purpose factory contracts passed with zero
 ignored (11.56s and 9.78s). All four documentation-index tests passed.
+
+### S5 receiver decision context — authenticated file alias
+
+Authenticated receiver item details now carry the current positive import
+`lifecycle_generation`, repeat it in each complete file reference, and advertise
+`file_base` only when the receiver's actual sealed locator key is available.
+The receiver signs the complete Source/import/library/item/file/revision and
+lifecycle tuple; Source metadata cannot choose the receiver URL. A missing key
+keeps details browseable without advertising a decision context. Decision and
+PGS projections carry the same lifecycle field so native clients can compare
+responses against their captured authenticated context.
+
+The focused alias regression passed with zero ignored, including Source ID zero,
+lossless `i64::MAX` identity/lifecycle, stale lifecycle refusal, foreign Source
+refusal, and browse-only key unavailability. All five complete engine/PGS wire
+projection tests passed with zero ignored on pinned Rust 1.97.1. The disposable
+CGNAT HTTP/1 and HTTP/2 fixture now reads the actual authenticated item alias
+before requesting a decision; its changed-tree Linux execution is still pending.
+This does not enable playback or grant delivery authority.
