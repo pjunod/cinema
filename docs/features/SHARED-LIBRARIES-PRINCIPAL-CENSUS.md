@@ -1129,3 +1129,82 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store
 cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
 cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
 ```
+
+## Actual Source VOD start allowance
+
+The Source actor and peer start handler share
+`TranscodeManager::source_worker_start_budget(&PreparedSourcePlayback)`. It
+reads the actual VOD settings snapshot and adds the existing five-second
+`admission::QUEUE_WAIT` to the configured producer materialization allowance:
+30 seconds by default, bounded to 10–300 seconds by the existing settings
+parser. The resulting start allowance is 35 seconds by default and at most
+305 seconds. The handler separately budgets transport overhead. VOD maintenance
+disables this start with an explicit refusal. A caller's short segment block
+budget does not shorten producer admission or redefine physical settlement.
+
+This is a budget observation; it allocates no session, producer or physical
+permit. The Source actor must obtain actual admission before blocked activation,
+preserve one absolute start deadline, and retain owned cleanup independently of
+an HTTP waiter or deadline. Physical actor dispatch remains open at this seam.
+
+On the qualified preparation/bridge base `842892246`, the focused real-settings
+regression passed in 0.15 seconds (one test, zero ignored). It covers default,
+operator-selected, excessive and invalid producer allowances, an independently
+short viewer block budget, maintenance refusal and absence of session/permit
+allocation. Pinned Rust 1.97.1 daemon feature all-target check passed in
+45.79 seconds and Clippy with denied warnings in 55.89 seconds. Catalogue lint,
+four documentation index tests and diff checks passed.
+
+```sh
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_start_budget_uses_actual_vod_settings_and_admission_policy
+cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+
+## Registered VOD generation ownership before Source attachment
+
+On the merged `f06984bc5` base, actual VOD generation spawn transfers its
+child, job and physical permit to an owned registration task before the
+caller can await registration. Closing the rendition or cancelling that waiter
+therefore retires the exact registered generation through successful process
+wait and writer settlement. A failed wait retains the physical resources.
+Generation tokens expose a cancellation-independent confirmation waiter;
+advancing the producer slot does not invalidate the old generation's barrier.
+
+The private Source association ledger captures complete immutable assignments
+before asynchronous spawn preparation and retains each captured owner's
+obligation until actual registration or failed-spawn cleanup. Detachment
+serializes with capture. A new owner refuses attachment during dispatch;
+exact existing owners join the same association. Eight Source owners and
+64 unsettled generations per owner bound retained associations. Source
+attachment and worker creation remain closed at this checkpoint. The ledger
+barrier does not certify downstream response bodies or release SQL capacity.
+
+Pinned Rust 1.97.1 passed the actual FFmpeg close/cancel registration regression
+in 2.88 seconds, the actual registered process/permit/writer barrier regression
+in 1.85 seconds, all 12 producer-slot tests, and the existing Local cached-read
+admission regression in 1.86 seconds, each with zero ignored tests. Daemon
+feature all-target check passed in 48.48 seconds and denied-warning Clippy in
+59.31 seconds. All 13 Source Store unit tests passed in 28.49 seconds; the
+actual three-voter Source contract passed in 11.44 seconds after explicitly
+seeding the installed-purpose-key capability in its fixture. No fixture
+here dispatches a Shared viewer or qualifies full Source attachment during
+spawn; those cases belong to the owned actor handoff.
+
+```sh
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_generation_registration_close_and_cancel_retain_actual_resources -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_registered_producer_retains_real_permit_until_wait_and_writers -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd prodrun::tests::
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+An abrupt daemon restart loses in-memory actor and process barriers. Persisted
+unresolved generation-one associations must remain retained and unavailable;
+neither an absent registry nor lease expiry proves that old producers and
+writers have stopped. Crash recovery needs its own qualified shutdown receipt
+or Source process-lifetime guarantee before the feature can be complete.

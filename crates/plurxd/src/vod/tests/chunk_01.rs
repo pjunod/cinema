@@ -818,6 +818,7 @@ use crate::queue_fixture::QueueFixture;
             plan,
             identity: Mutex::new(IdentityState::default()),
             slot: ProducerSlot::new(),
+            source_owners: SourceRenditionOwners::default(),
             readers: Mutex::new(HashMap::new()),
             publication_serial: AtomicU64::new(0),
             publication_versions: StdMutex::new(vec![None; plan_len]),

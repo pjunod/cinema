@@ -3,7 +3,8 @@ use super::*;
 use plurx_core::{
     cluster::membership::{
         observe_source_admission_members_for_contract, SourceAdmissionMembers,
-        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY, SHARING_SESSION_PRINCIPAL_CAPABILITY,
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY, SHARING_PURPOSE_KEYS_CAPABILITY,
+        SHARING_SESSION_PRINCIPAL_CAPABILITY,
     },
     playback_principal::PlaybackPrincipal,
     secrets::CredentialKey,
@@ -211,12 +212,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .expect("Source candidate fixture operation");
         client
             .execute(
-                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3)",
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3),($1,$5,$3)",
                 hiqlite::params!(
                     format!("node-{id}"),
                     SHARING_SESSION_PRINCIPAL_CAPABILITY,
                     now,
-                    SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY
+                    SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+                    SHARING_PURPOSE_KEYS_CAPABILITY
                 ),
             )
             .await
