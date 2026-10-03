@@ -453,6 +453,7 @@ function pbTick(){
   if(!PLAYER) return;
   const v=document.getElementById("video");
   const tot=pbTotalSec();
+  prepareNextEpisodeIfNearEnd(PLAYER,v);
   // Desired first, then the drag preview, then the picture. A destination
   // the viewer committed and no attachment has executed is where they asked
   // to be; letting the thumb snap back to the incumbent's clock would make
