@@ -106,7 +106,7 @@ test_anchor = "transcode_capacity_pending"
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
 source = "crates/plurxd/src/web/player/decode-tiers.js"
-source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
+source_anchor = "if(id!=null||v.readyState<2||(v.seeking&&!renewingSeek)) return;"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
 

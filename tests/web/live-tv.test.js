@@ -88,6 +88,34 @@ function startupHarness(options={}) {
 }
 
 async function main() {
+  await test("station logos use the matching guide channel and reject unsafe artwork URLs", () => {
+    const state={guide:{channels:[
+      {id:"other",image_url:"https://images.example/other.png"},
+      {id:"one",image_url:"https://images.example/cbs6.png?size=large&theme=color",
+        programmes:[{image_url:"https://images.example/movie.jpg"}]},
+    ]}};
+    const esc=value=>String(value).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    const {url,markup}=new Function("LIVE_TV","esc",`${shipped("liveTvStationLogoUrl")}\n${shipped("liveTvStationLogo")}\nreturn {url:liveTvStationLogoUrl,markup:liveTvStationLogo};`)(state,esc);
+    const channel={id:"one",guide_name:'CBS <6> "HD"'};
+    assert.equal(url(channel),"https://images.example/cbs6.png?size=large&theme=color");
+    assert.equal(url({id:"absent"}),null);
+    const html=markup(channel);
+    assert.match(html,/src="https:\/\/images.example\/cbs6.png\?size=large&amp;theme=color"/);
+    assert.match(html,/CBS &lt;6&gt; &quot;HD&quot;/);
+    assert.match(html,/referrerpolicy="no-referrer"/);
+    assert.doesNotMatch(html,/movie.jpg|other.png/);
+    for(const value of [undefined,null,"","not a URL","/local.png","//images.example/logo.png",
+      "http://images.example/logo.png","javascript:alert(1)","data:image/svg+xml,test",
+      "https://user:secret@images.example/logo.png","https://user@images.example/logo.png",
+      "https://images.example/"+"a".repeat(512)]){
+      state.guide.channels[1].image_url=value;
+      assert.equal(url(channel),null,String(value));
+      assert.doesNotMatch(markup(channel),/<img/);
+      assert.match(markup(channel),/lt-chip-fallback/);
+    }
+    state.guide=null;
+    assert.equal(url(channel),null,"cold or unavailable guide leaves the callsign");
+  });
   await test("live transport follows playback state instead of offering Play and Pause together", () => {
     const state={},lease={current:null},actions=[];
     const button={setAttribute(name,value){this[name]=value;}};
@@ -2084,7 +2112,7 @@ async function main() {
     assert.match(shell, /\.lt-mark\{[^}]*position:absolute/s);
     assert.match(shell, /\.lt-mark \.dot\{[^}]*width:8px;height:8px/s);
     assert.match(shell, /\.lt-recbar\{[^}]*position:absolute[^}]*bottom:0/s);
-    assert.match(shell, /\.lt-grow\{[^}]*height:52px/s, "the grid row height is unchanged");
+    assert.match(shell, /\.lt-grow\{[^}]*height:68px/s, "marks fit inside the station-logo row");
     assert.match(shell, /\.lt-row\{[^}]*min-height:78px/s, "the list row height is unchanged");
     assert.match(shipped("liveTvGridMarkup"), /liveTvMarks\(row\.channel\.id,cell\.programme,false\)/);
     assert.match(shipped("liveTvRowMarkup"), /liveTvMarks\(channel\.id,at\.now,true\)/);

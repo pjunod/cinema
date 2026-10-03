@@ -230,6 +230,9 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [PLAYBACK-STARTUP-LATENCY-REVIEW.md](streaming/PLAYBACK-STARTUP-LATENCY-REVIEW.md) | Independent adversarial plan review, three findings and verified dispositions. | open |
 | [Playback startup build status](streaming/PLAYBACK-STARTUP-LATENCY-STATUS.html) | Live Sol build status: current phase, source, PR, evidence, review, fast lane and decisions. | open |
 | [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
+| [WEB-SEEK-LATENCY-RCA-AND-FIX.md](streaming/WEB-SEEK-LATENCY-RCA-AND-FIX.md) | October 2 VOD loader deadlock, false seek-presentation evidence and native rolling reopen latency: controlled causal evidence, proposed repair and adversarial review. | open |
+| [Web seek Opus review](reviews/WEB-SEEK-LATENCY-OPUS-REVIEW.md) | Independent diagnosis approval and requested plan changes: MSE/MMS selection, required iPhone qualification, frame-proof defects and native successor startup. | done |
+| [Web seek incident evidence](evidence/web-seek-rca-2026-10-02.json) · [mechanism replay](evidence/web-seek-mechanism-replay.cjs) | Sanitized live seek traces, same-session loader intervention and executable incident-source mechanisms. | done |
 | [SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md](streaming/SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md) | The build order for that repair: one scratch ledger, a writer barrier, exact release grace, growing reservations, ownership boundaries and the evidence each unit owes. | open |
 | [Seek scratch reservations status](streaming/SEEK-SCRATCH-RESERVATIONS-STATUS.html) | Live ledger for the effort: unit state, base and compiler, evidence, review, fast lane and deployment. | open |
 | [Seek scratch reservations receipt](evidence/seek-scratch-reservations-receipt-2026-09-20.md) | Exact base and compiler, the accounting/release/mechanism proofs, which regression covers which acceptance row, what already failed before the change, and what is still owed. | open |
@@ -478,6 +481,8 @@ is streamed (`streaming/`) and what is replicated (`cluster/`).
 | [AUTH-HARDENING.md](server/AUTH-HARDENING.md) | Implementation plan from the 2026-09-20 architecture review: bounded logout admission that keeps the two-phase revocation fence, a lockout-resistant login throttle, and token expiry as a product decision with its client consequences. | open |
 
 ## performance/ — where the seconds go
+
+[Video quality programme](performance/VIDEO-QUALITY-PROGRAM.md) — approved calibration and performance build order; [execution ledger](performance/VIDEO-QUALITY-STATUS.md) — parallel ownership, actual measurements, merges and remaining evidence. **Open.**
 
 Two rounds of performance work, each with its plan, review, and response.
 

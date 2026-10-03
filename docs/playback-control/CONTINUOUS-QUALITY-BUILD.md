@@ -4503,3 +4503,16 @@ a bounded retry then ended Locked without confirming a CQ Lab process. Its
 server/proxy/runtime were cleaned up. The phone must remain awake through
 launch. Physical playback remains unmeasured; production was untouched.
 No units ran, and final adversarial review has not started.
+
+
+### 10.152 Integrate current main startup and owned-frame seek repairs
+
+Main advanced from `2abd65f47` to `3197d0c58`. The integration retains
+upstream's `preferManagedMediaSource:false` alongside continuous loader
+configuration and manual authority. Local VOD seeks both notify the
+continuous reservation adapter and execute upstream's owned-frame seek
+observation. The two overlapping lines are combined rather than dropping
+either owner. Upstream also updates the vendored HLS seek loader lifecycle
+and bounded storage/startup work. The current `4f70eabc6` diagnostic run
+remains a pre-integration receipt; it will not qualify the combined source.
+No units are run during this integration.

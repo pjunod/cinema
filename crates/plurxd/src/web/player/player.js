@@ -176,6 +176,7 @@
  * @property {number} [controlPresentedFrames]
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {()=>void} [controlFrameRearm] renews observation for the current seek
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]
@@ -951,7 +952,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const continuous=attachedPlayer.continuousQualityBootstrap
     ?continuousQualityAdapter(attachedPlayer,video,startup.attachment,attachedPlayer.continuousQualityBootstrap):null;
   attachedPlayer.continuousQuality=continuous;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     ...(continuous?{autoStartLoad:false,progressive:false,
       // Plurx owns every reserved rung, including when the viewer chose Auto.
       // hls.js must not clear that manual level and fetch an unreserved

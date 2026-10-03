@@ -1013,9 +1013,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertEqual(
             sorted(self._manifest_digest_arguments()),
             sorted(
-                ["None"] * 27
+                ["None"] * 28
                 + ["digest", "digest", "manifest_digest", "manifest_digest"]
                 + ['Some("d1")', 'Some("d2")', "written"]
+                # Exact-generation invalidation seeds an unqualified cache
+                # above, then a replacement carrying this explicit digest.
+                + ['Some("replacement-digest")']
             ),
         )
         # The two production writers are the off-queue completion arms, and
