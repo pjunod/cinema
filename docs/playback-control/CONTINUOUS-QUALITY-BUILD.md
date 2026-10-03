@@ -4769,3 +4769,29 @@ removed the new diagnostics and two existing control-generation diagnostics.
 `scripts/web-types --update --base origin/main` lowered the baseline from
 517 to 515; no increase was accepted. The next normal commit/build and focused
 Auto run will qualify these source changes.
+
+
+### 10.163 · Distinguish policy choice from delayed presentation
+
+The exact `432a8b322` focused Firefox receipt remains failed. Its one manual
+change passed at 83.48 ms, and actual Auto presented 1080p → 720p → 1080p
+with maximum gaps of 84.00/83.86/83.96 ms. The second pressure downgrade did
+not present within 240 seconds. Its final ledger already contained appended
+720p frames beginning at film tick 38400/24 (1600 seconds), while the video
+was still at 1594.464 seconds. Thus the final state had selected and appended
+the target, rather than simply retaining 1080p; the delay before that boundary
+still needs diagnosis. Thresholds and the failed outcome remain unchanged.
+There were zero recorded backsteps, stalls or hitches. End producer counts
+were 2/0/0/0 at 0/1/3/5 seconds, and the supervisor removed its owned runtime.
+
+Qualification now records bounded one-second policy/transfer/frontier samples
+(up to 1200), including the first appended tick, so policy observation delay,
+preparation delay and presentation delay can be distinguished. This changes
+only diagnostic receipts. The sliced production-owner test fixtures also load
+the new timing observer dependency. They remain unrun.
+
+The latest unlocked-phone retry reached a fresh isolated Linux backend at
+`432a8b322`, then reported Locked and ended with Apple remoteService XPC
+unavailable. No CQ Lab process or physical playback was confirmed; the helper
+cleaned its owned backend/proxy/runtime. No production app was touched.
+No units executed, and final adversarial review/Fable handoff remains pending.

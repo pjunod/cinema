@@ -49,7 +49,7 @@ async function producerCensus(server) {
 
 async function measureAuto(driver, shaper, result) {
   const catalog = await driver.eval("PLAYER.qualityCandidates.map(c=>({id:c.id,route:c.route,height:c.target_height||c.height,peak_bps:c.peak_bps}))");
-  const detail = result.actual_auto = {catalog, status: "running", changes: [],
+  const detail = result.actual_auto = {catalog, status: "running", changes: [], policy_trace: [],
     presentation_target: await driver.eval("measuredPresentationTarget()")};
   const measured = autoLinkProfile(catalog);
   detail.link = measured;
@@ -68,6 +68,18 @@ async function measureAuto(driver, shaper, result) {
     let after, event, presented = false;
     while (Date.now() < deadline) {
       after = await driver.eval(lab.playerSnapshotExpression());
+      const trace = detail.policy_trace;
+      if (!trace.length || after.sampled_at_ms - trace.at(-1).at_ms >= 1000) {
+        if (trace.length === 1200) trace.shift();
+        trace.push({stage: i, at_ms: after.sampled_at_ms, film_seconds: after.video.current_time,
+          runway_seconds: after.video.runway, height: after.video.height,
+          policy: after.auto_policy, frontier: after.continuous?.frontier,
+          wanted_candidate: after.continuous?.wanted_candidate,
+          transaction: after.continuous?.transaction && {
+            id: after.continuous.transaction.id, state: after.continuous.transaction.state,
+            first_presented_tick: after.continuous.transaction.first_presented_tick,
+            first_appended_tick: after.continuous.transaction.appended?.[0]?.from_tick}});
+      }
       lab.observeContinuousRemovals(removals, after.continuous);
       if (after.video.error) throw new Error("Auto media error");
       if (after.continuous?.observation === "Continuous target retained current") {

@@ -5,21 +5,20 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> <code>a8110bccf</code> passed the early manual
-transition (66.4 ms) and actual Auto upgrade to 1080p (83.96 ms), but timed out
-waiting for its pressure downgrade. A separate Firefox probe confirmed that
-retained Resource Timing saturates at 250 entries while an observer still
-receives fresh requests. The player now keeps a bounded 128-entry HLS observer
-cache for Auto evidence. The web compiler's generated list and type errors are
-fixed, lowering its baseline by two diagnostics. Normal commit/build and
-focused replay follow. Android's matching budget correction compiles.
-No units ran; full campaigns, native evidence and final review remain.</p>
-<p><strong>Physical iOS:</strong> the newly unlocked 17promax launch was retried
-against exact build <code>f815cf3d6</code>. CoreDevice recovered and verified a usable developer image. The next retry
-on <code>d9c8acba3</code> repeatedly reported Locked and ended with remoteService
-XPC unavailable. No CQ Lab process or physical playback was observed; the
-isolated server and proxy were cleaned up. Reconnection and an awake phone
-were requested. Production app remains untouched.</p>
+<p><strong>Working now:</strong> exact build <code>432a8b322</code> passed one
+manual change (83.48 ms) and actual Auto 1080p → 720p → 1080p (maximum 84 ms),
+but the second pressure downgrade did not present within 240 seconds. The failed
+receipt shows the 720p target already appended at film time 1600 seconds while
+playback was still at 1594.464 seconds. Policy selection and presentation are
+being traced separately, with bounded one-second diagnostics. No thresholds
+were relaxed. End retired both owned producers by the one-second sample.
+Normal hook, exact Linux build and web compiler passed; no units ran.
+Full campaigns, native evidence and final review remain.</p>
+<p><strong>Physical iOS:</strong> 17promax was reachable after the latest unlock.
+The separate CQ Lab launch against exact <code>432a8b322</code> again reported
+Locked and then remoteService XPC unavailable. No application process or
+physical playback was confirmed. The owned backend and proxy were cleaned up.
+Production app remains untouched.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and

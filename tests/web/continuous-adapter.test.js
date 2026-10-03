@@ -304,10 +304,10 @@ test('controlled HLS errors preserve Plurx quality authority',()=>{
   loadSource(){}attachMedia(){}
  }
  const construct=new Function('Hls','continuousQualityAdapter','PlaybackPolicy',
-  'vodClientContract','createHlsStartupLoader','PLAYER','TOKEN',
+  'vodClientContract','createHlsStartupLoader','PLAYER','TOKEN','observeQualityResourceTimings',
   source.slice(begin,end)+';return constructHls;')(HlsFixture,()=>adapter,
    {HLS_STARTUP:{manifest_load_policy:{}},bandwidthSeedBps:()=>0},
-   ()=>({fragLoadPolicy:{}}),base=>base,player,null);
+   ()=>({fragLoadPolicy:{}}),base=>base,player,null,()=>{});
  const built=construct({player,playlistUrl:'/owned/master.m3u8',attachment:{}},
   {fwd:60,back:90}, {},990,()=>true);
  const VendoredHls=require('../../crates/plurxd/src/web/hls.min.js');

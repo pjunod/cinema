@@ -24,6 +24,13 @@ function shippedSource(name) {
   const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
   return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
 }
+// Preserve the production observer dependency in sliced HLS owner fixtures.
+function qualityResourceTimingSources(){
+  const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/player.js"),"utf8");
+  const begin=source.indexOf("const QUALITY_RESOURCE_TIMING_LIMIT="),end=source.indexOf("function completedQualityTransfer(");
+  assert.ok(begin>=0&&end>begin);
+  return source.slice(begin,end);
+}
 function transportTelemetrySources(){
   return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
 }
@@ -180,7 +187,7 @@ function fullOpenHarness() {
     shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
-    shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+    qualityResourceTimingSources(),shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
     shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
     shippedSource("attachNativeHls"),
     // The directed-change owner, shipped. Neither of these harnesses has a
@@ -1313,7 +1320,7 @@ async function main() {
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
-      shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
+      qualityResourceTimingSources(),shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
       shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
       shippedSource("attachNativeHls"),shippedSource("hlsStartupCurrent"),
       shippedSource("nativeHlsCurrent"),shippedSource("armNativeHlsDeadline"),shippedSource("armNativeHlsReadiness"),
@@ -4045,7 +4052,7 @@ async function main() {
         shippedSource("preparedSettlementDone"), shippedSource("markPreparedSettlement"),
         shippedSource("handlePreparedReplacementAction"),
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
-        shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
+        qualityResourceTimingSources(),shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
         shippedSource("resumePreparedIncumbentLoad"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
         shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
