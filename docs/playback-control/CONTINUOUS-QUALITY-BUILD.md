@@ -4453,3 +4453,28 @@ resource URLs or credentials. This identifies a wrongly selected level versus
 a mismatched advertised rendition while retaining the original refusal. The
 independent backward-step failure remains open. Syntax checks pass; no units
 executed.
+
+
+### 10.150 Preserve manual quality authority during HLS error recovery
+
+The exact `2237f12c1` steady control failed before its first frame. Its
+reserved primary was 720p, but hls.js attempted 480p with start level 1 and
+load level 0. The library defaults to clearing its manual level during
+fragment error recovery. The controlled constructor now explicitly preserves
+that manual level: Plurx remains responsible for choosing and reserving every
+rung. The original primary preparation or delivery refusal is still under
+investigation; this authority fix does not claim successful startup.
+
+The adapter retains the last sixteen timestamped refusal observations so
+subsequent errors cannot erase the first refusal. Bounded steady controls use
+debug daemon logging. The failed control preserved thirty-two generated
+init/fragment objects (12,571,032 bytes) for offline diagnosis; those copies
+have not been matched to publication identities and are not qualification
+evidence. End retired its children by one second and its runtime was removed.
+
+Authored, unrun regression:
+`tests/web/continuous-adapter.test.js::controlled HLS errors preserve Plurx quality authority`.
+It exercises the shipped constructor configuration and the vendored error
+controller. No unit tests have run. Physical iOS launch is being retried after
+the human unlocked 17promax. Final adversarial review and the requested Fable
+stop remain ahead.

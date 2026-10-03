@@ -953,6 +953,10 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   attachedPlayer.continuousQuality=continuous;
   const hls=new Hls({
     ...(continuous?{autoStartLoad:false,progressive:false,
+      // Plurx owns every reserved rung, including when the viewer chose Auto.
+      // hls.js must not clear that manual level and fetch an unreserved
+      // companion after a preparation or delivery error.
+      preserveManualLevelOnError:true,
       fLoader:continuous.loader(createHlsStartupLoader(StockLoader,startup))}:{}),
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,

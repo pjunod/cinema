@@ -276,6 +276,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   function note(error){
     player.continuousQualityObservation=String(error?.message||error).slice(0,160);
     player.continuousQualityObservationStack=String(error?.stack||'').slice(0,2048);
+    const history=player.continuousQualityObservations||(player.continuousQualityObservations=[]);
+    history.push({at_ms:Math.round(performance.now()),message:player.continuousQualityObservation});
+    if(history.length>16)history.shift();
   }
   function tx(id=transaction){return protocol.ledger?.transactions.find(row=>row.transaction_id===id);}
   function pins(){return (protocol.ledger?.transactions||[]).flatMap(row=>row.reserved)

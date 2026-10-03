@@ -38,7 +38,7 @@ function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}
  const player={abr:{},qualityCandidates:[{id:primary.candidate_id,target_height:720},{id:target.candidate_id,target_height:1080}]};
  const Hls={Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detached'}};
  const context=vm.createContext({ArrayBuffer,Uint8Array,DataView,crypto:webcrypto,URL,location:{href:'http://localhost/'},
-  Hls,CONTROL_CLIENT_ID:uuid(3),newRequestId:()=>uuid(4),setTimeout,clearTimeout,AbortController,TextDecoder});
+  Hls,performance:{now:()=>0},CONTROL_CLIENT_ID:uuid(3),newRequestId:()=>uuid(4),setTimeout,clearTimeout,AbortController,TextDecoder});
  for(const path of ['continuous-media.js','continuous-quality.js'])vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/'+path,'utf8'),context);
  const intervals=family.video.flatMap((row,index)=>Array.from({length:4},(_,ordinal)=>{
   const data=ordinal===0?(index?secondMedia:firstMedia):media({start:ordinal*2002,
@@ -290,4 +290,34 @@ test('future loader resumes its retained quality rather than a stale startup lev
  assert.equal(f.hls.loadLevel,1);
  assert.equal(f.player.continuousQuality,f.adapter);
  assert.deepEqual(f.surface.removes,[]);
+});
+
+test('controlled HLS errors preserve Plurx quality authority',()=>{
+ const source=fs.readFileSync('crates/plurxd/src/web/player/player.js','utf8');
+ const begin=source.indexOf('function constructHls('),end=source.indexOf('\nfunction wireHlsObservers(',begin);
+ assert.ok(begin>=0&&end>begin);
+ const player={continuousQualityBootstrap:{},abr:{}};
+ const adapter={loader:base=>base,bind(){}};
+ class HlsFixture{
+  static DefaultConfig={loader:class {}};
+  constructor(config){this.config=config;}
+  loadSource(){}attachMedia(){}
+ }
+ const construct=new Function('Hls','continuousQualityAdapter','PlaybackPolicy',
+  'vodClientContract','createHlsStartupLoader','PLAYER','TOKEN',
+  source.slice(begin,end)+';return constructHls;')(HlsFixture,()=>adapter,
+   {HLS_STARTUP:{manifest_load_policy:{}},bandwidthSeedBps:()=>0},
+   ()=>({fragLoadPolicy:{}}),base=>base,player,null);
+ const built=construct({player,playlistUrl:'/owned/master.m3u8',attachment:{}},
+  {fwd:60,back:90}, {},990,()=>true);
+ const VendoredHls=require('../../crates/plurxd/src/web/hls.min.js');
+ let loaded=1,manual=1;
+ const hls={config:built.config,levels:[0,1].map(()=>({loadError:0,fragmentError:0,
+   codecSet:'avc1',audioCodec:'mp4a.40.2',attrs:{}})),minAutoLevel:0,maxAutoLevel:1,
+  logger:{log(){},warn(){},debug(){},trace(){},error(){}},on(){},off(){},
+  get loadLevel(){return loaded;},set loadLevel(value){loaded=value;manual=value;},
+  get manualLevel(){return manual;},get autoLevelEnabled(){return manual===-1;}};
+ const controller=new VendoredHls.DefaultConfig.errorController(hls);
+ controller.getLevelSwitchAction({details:VendoredHls.ErrorDetails.FRAG_LOAD_ERROR,frag:{type:'main'}});
+ assert.equal(hls.manualLevel,1,'a library retry must not replace the owned rung with library Auto');
 });

@@ -177,7 +177,7 @@ async function main(args) {
   Object.assign(options, {suite: "continuous", network_profile: "100mbps-to-10mbps"});
   const outcome = await lab.executeRun(manifest, options, {
     startServer: async (opts, directory) => {
-      const server = await lab.startServer({...opts, enable_auto_abr: true}, directory);
+      const server = await lab.startServer({...opts, enable_auto_abr: true, server_log: steadySeconds ? "debug" : opts.server_log}, directory);
       try {
         const system = await lab.api(server.baseUrl, "/system", {token: server.token});
         if (system.build !== options.source_ref) throw new Error(`daemon build ${system.build} differs from expected ${options.source_ref}`);
