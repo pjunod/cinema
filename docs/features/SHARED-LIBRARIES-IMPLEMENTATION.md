@@ -1,7 +1,8 @@
 # Shared libraries — the Tailscale build contract for Opus and Sol
 
-**Status:** ready to build after Opus S0 corrections; S2 topology
-qualification pending; S1 implemented; task gate pending · **Revised:** 2026-10-02 ·
+**Status:** implementation in progress; S1 implemented; S2 topology
+qualification pending; S3–S7 partially implemented; S8 live validation open;
+task gates pending · **Revised:** 2026-10-03 ·
 **Source rechecked:** `15e36f7f4` ·
 **Executes:** the Cinema-to-Cinema and private-Tailscale decisions in
 [SHARED-LIBRARIES-DESIGN.md](SHARED-LIBRARIES-DESIGN.md) ·
@@ -4162,3 +4163,70 @@ Documentation index passed four tests; catalog lint covered 2708 files. The
 same-playback successor, real terminal acknowledgement, trigger-cleared reply,
 partial pending attachment, foreign pin epoch and ignored cleanup-write cases
 are inside the named Core receiver regressions above.
+### S5 retained receiver cleanup transport
+
+The receiver retains the complete original private Source session request,
+the exact pinned endpoint selected for Start, and the credential and viewer
+hash used at dispatch. It records them before the first Source send. Removing
+an import or losing the original B login therefore does not erase the means
+to clean up an already dispatched Source request. The selected endpoint is
+also included in the bounded sealed upstream capsule.
+
+The cleanup connection exposes only the fixed authenticated file-scoped End
+exchange. It validates the retained private endpoint and SPKI without an
+identity-read preflight, since sharing-off can disable identity reads while
+an existing request still needs retirement. It exposes no catalogue, Start,
+or resource operation. The complete original session recipe and all known
+Source incarnation/session/control identifiers accompany End; a lost Start
+response retains the original request identity instead of inventing a session.
+
+A bounded duplicate-aware closed reply must echo the full Source file
+reference and request identity. A known Source tuple must match exactly;
+unknown lineage may contain the actual assigned tuple or omit both session
+and control epoch. Only a settled reply with a canonical nonnil v4 confirmation
+is accepted. The receiver retains that authenticated receipt before any later
+Store await. The receipt records RPC facts: it cannot alone create retirement
+authority. The independently owned B retirement task must also join its actual
+accepted bodies, readers and writers before using the Core retirement witness.
+The receiver playback ingress and that ownership integration remain closed
+while their end-to-end regressions are outstanding.
+
+The combined cold-index and cleanup candidate passed pinned Rust 1.97.1
+Core/daemon all-target compilation, thirteen actual Source copy/index tests
+(40.14 seconds), the Core guarded index-evidence test (1.07 seconds), and
+seven actual Source HTTP tests (12.19 seconds), with zero ignored tests.
+The four documentation index tests and validation catalog also passed. The
+cleanup wire regressions exercise full recipe preservation, exact known
+lineage, lost-Start settlement, duplicates, oversized replies, unsettled
+states and noncanonical identifiers. These are wire validation regressions;
+actual authenticated End transport and B physical retirement remain open.
+
+### S5 accepted writer completion and owned receiver Start join
+
+The accepted-connection closure observer completes after the actual Hyper
+connection and socket writer are dropped. A Source response retains its
+producer guard through that observer; body EOF and cancellation are not
+settlement. The actual Source HTTP regression blocks the incarnation JSON
+DATA at the accepted HTTP/1 and HTTP/2 writer and requires connection/DATA
+closure before the actor can report settled. Incomplete resource streams and
+independent blocking read jobs still require their own ownership tests.
+
+The receiver registry retains the exact Start task handle. Cleanup seals
+dispatch before joining that task; a private joined token binds the result
+to the same registry entry and is required before its Source End exchange.
+A delayed send cannot follow cleanup's closed gate. An already dispatched
+credential/endpoint obligation survives closure, and an absent or failed
+task cannot synthesize a joined token. Pending renewal stops when cleanup
+requests closure, while an already sent Start remains awaited so its eventual
+Source lineage is retained. The planned activation is stored before its SQL
+await, and the actual B owner/lease is retained immediately after activation
+and successful renewal. Activation commit-unknown still requires exact route
+reconciliation; registry absence or a planned epoch does not settle it.
+
+The exact combined tree passed pinned Rust 1.97.1 feature-enabled all-target
+Core/daemon compilation (53.42 seconds), four receiver ownership/retry tests,
+and eight actual Source HTTP tests (24.04 seconds), all with zero ignored.
+The receiver ownership fixture proves the real spawned task remains joined
+behind its release signal; it does not model a physical Source producer.
+The production B ingress, accepted B body/read/writer joins and private Core
+retirement witness integration remain outstanding.

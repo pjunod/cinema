@@ -20,6 +20,13 @@ use serde::{de::DeserializeOwned, Deserialize};
 use std::{net::SocketAddr, time::Duration};
 use uuid::Uuid;
 
+#[allow(dead_code)] // Used by the receiver cleanup owner as its HTTP routes qualify.
+#[path = "sharing_playback_client.rs"]
+mod playback;
+pub(crate) use playback::{
+    CleanupPeerConnection, SourceEndReceipt, SourcePeerLineage, SourcePeerSession,
+};
+
 const MANAGEMENT_RESPONSE_BYTES: usize = 128 * 1024;
 const CATALOGUE_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 #[derive(Clone, Copy)]
@@ -85,6 +92,7 @@ pub(crate) struct PeerConnection {
     sender: SendRequest<Body>,
     connection: tokio::task::JoinHandle<()>,
     host: String,
+    verified_endpoint: Option<Endpoint>,
 }
 impl Drop for PeerConnection {
     fn drop(&mut self) {
@@ -97,6 +105,21 @@ impl PeerConnection {
         endpoints: &[Endpoint],
         expected: &SharingIdentity,
     ) -> Result<(Self, Identity), PeerError> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut peer = Self::connect_pinned(manager, endpoints).await?;
+            let identity = peer.verify_identity(expected).await?;
+            Ok((peer, identity))
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+    // The cleanup-only wrapper may dial the retained approved pin while
+    // identity reads are disabled. Only its authenticated exact End echo can
+    // produce a cleanup receipt; this helper confers no content authority.
+    async fn connect_pinned(
+        manager: &SharingManager,
+        endpoints: &[Endpoint],
+    ) -> Result<Self, PeerError> {
         use futures_util::{stream::FuturesUnordered, StreamExt};
         plurx_core::sharing::validate_endpoints(endpoints)
             .map_err(|_| PeerError::InvalidResponse)?;
@@ -127,7 +150,11 @@ impl PeerConnection {
                             )
                             .await
                             .map(|stream| {
-                                (stream, format!("{}:{}", endpoint.ts_fqdn, endpoint.port))
+                                (
+                                    stream,
+                                    format!("{}:{}", endpoint.ts_fqdn, endpoint.port),
+                                    endpoint.clone(),
+                                )
                             })
                         }
                         .boxed(),
@@ -159,7 +186,11 @@ impl PeerConnection {
                                 )
                                 .await
                                 .map(|stream| {
-                                    (stream, format!("{}:{}", endpoint.ts_fqdn, endpoint.port))
+                                    (
+                                        stream,
+                                        format!("{}:{}", endpoint.ts_fqdn, endpoint.port),
+                                        endpoint.clone(),
+                                    )
                                 })
                             });
                         }
@@ -176,11 +207,11 @@ impl PeerConnection {
                 );
             }
             while let Some(result) = attempts.next().await {
-                if let Ok((stream, host)) = result {
+                if let Ok((stream, host, endpoint)) = result {
                     drop(attempts);
                     let mut peer = Self::from_stream(stream, host).await?;
-                    let identity = peer.verify_identity(expected).await?;
-                    return Ok((peer, identity));
+                    peer.verified_endpoint = Some(endpoint);
+                    return Ok(peer);
                 }
             }
             Err(PeerError::Unavailable)
@@ -203,7 +234,11 @@ impl PeerConnection {
                 let _ = connection.await;
             }),
             host,
+            verified_endpoint: None,
         })
+    }
+    pub(crate) fn verified_endpoint(&self) -> Option<&Endpoint> {
+        self.verified_endpoint.as_ref()
     }
     async fn verify_identity(&mut self, expected: &SharingIdentity) -> Result<Identity, PeerError> {
         let identity: Identity = self.identity().await?;

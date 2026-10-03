@@ -60,6 +60,7 @@ pub(crate) struct ReceiverSourceStartResult {
     pub summary: plurx_core::sharing::ImportSummary,
     pub credential: plurx_core::secrets::Secret,
     pub viewer_hash: String,
+    pub endpoint: plurx_core::sharing::Endpoint,
     pub source: crate::http::DecodedSourceHlsStart,
 }
 pub(crate) async fn enabled(store: &dyn Store) -> Result<bool, StoreError> {
@@ -82,7 +83,12 @@ impl SharingManager {
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
         request_json: &str,
-        retain_dispatch: impl FnOnce(&plurx_core::secrets::Secret, &str) + Send,
+        retain_dispatch: impl FnOnce(
+                &plurx_core::secrets::Secret,
+                &str,
+                &plurx_core::sharing::Endpoint,
+            ) -> Result<(), crate::sharing_client::PeerError>
+            + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError};
         let expected = receiver_source_request(intent, request_json)?;
@@ -155,7 +161,11 @@ impl SharingManager {
             .ok_or(PeerError::Authentication)?;
         // Retain cleanup authentication before the first send, including when
         // no Start response returns. The callback performs no await.
-        retain_dispatch(&credential.credential, &viewer);
+        let endpoint = peer
+            .verified_endpoint()
+            .ok_or(PeerError::IdentityMismatch)?
+            .clone();
+        retain_dispatch(&credential.credential, &viewer, &endpoint)?;
         let reply = peer
             .file_start(&credential.credential, &expected, &viewer, request_json)
             .await?;
@@ -165,6 +175,7 @@ impl SharingManager {
             summary: summary.clone(),
             credential: credential.credential,
             viewer_hash: viewer,
+            endpoint,
             source: reply,
         })
     }

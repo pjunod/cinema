@@ -215,7 +215,9 @@ fn hold_start_body(
     guard: crate::transcode::source_actor::SourceResponseGuard,
 ) -> axum::response::Response {
     use futures_util::StreamExt;
-    let (parts, body) = response.into_parts();
+    let (mut parts, body) = response.into_parts();
+    let guard = std::sync::Arc::new(guard);
+    parts.extensions.insert(std::sync::Arc::clone(&guard));
     let stream = futures_util::stream::try_unfold(
         (body.into_data_stream(), guard),
         |(mut stream, guard)| async move {
@@ -771,6 +773,325 @@ mod tests {
             .await
             .is_err());
         fixture.shutdown().await;
+    }
+    struct QueuedStartBytes {
+        bytes: Vec<u8>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl AsRef<[u8]> for QueuedStartBytes {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for QueuedStartBytes {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    struct QueuedStartBody {
+        data: Option<bytes::Bytes>,
+        dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl hyper::body::Body for QueuedStartBody {
+        type Data = bytes::Bytes;
+        type Error = std::convert::Infallible;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<hyper::body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(
+                self.data
+                    .take()
+                    .map(|data| Ok(hyper::body::Frame::data(data))),
+            )
+        }
+        fn is_end_stream(&self) -> bool {
+            self.data.is_none()
+        }
+    }
+    impl Drop for QueuedStartBody {
+        fn drop(&mut self) {
+            self.dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    #[derive(Default)]
+    struct AcceptedWriterProbe {
+        gate: std::sync::atomic::AtomicBool,
+        blocked: std::sync::atomic::AtomicBool,
+        queued_start: std::sync::atomic::AtomicBool,
+        dropped: std::sync::atomic::AtomicBool,
+    }
+    struct GatedStartStream {
+        stream: tokio::net::TcpStream,
+        probe: std::sync::Arc<AcceptedWriterProbe>,
+    }
+    impl Drop for GatedStartStream {
+        fn drop(&mut self) {
+            self.probe
+                .dropped
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    impl tokio::io::AsyncRead for GatedStartStream {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buffer: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.stream).poll_read(cx, buffer)
+        }
+    }
+    impl tokio::io::AsyncWrite for GatedStartStream {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let source_data = bytes
+                .windows(b"incarnation_id".len())
+                .any(|part| part == b"incarnation_id");
+            if self.probe.gate.load(std::sync::atomic::Ordering::SeqCst)
+                && (source_data || self.probe.blocked.load(std::sync::atomic::Ordering::SeqCst))
+            {
+                if bytes
+                    .windows(b"incarnation_id".len())
+                    .any(|part| part == b"incarnation_id")
+                {
+                    self.probe
+                        .queued_start
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                // Publish the observed DATA before the waiter sees blocked.
+                self.probe
+                    .blocked
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                return std::task::Poll::Pending;
+            }
+            std::pin::Pin::new(&mut self.stream).poll_write(cx, bytes)
+        }
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.stream).poll_flush(cx)
+        }
+        fn poll_shutdown(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::pin::Pin::new(&mut self.stream).poll_shutdown(cx)
+        }
+    }
+    struct GatedStartListener {
+        listener: tokio::net::TcpListener,
+        probe: std::sync::Arc<AcceptedWriterProbe>,
+    }
+    impl crate::HttpAcceptor for GatedStartListener {
+        type Stream = GatedStartStream;
+        async fn accept(&self) -> std::io::Result<(Self::Stream, std::net::SocketAddr)> {
+            let (stream, address) = self.listener.accept().await?;
+            Ok((
+                GatedStartStream {
+                    stream,
+                    probe: self.probe.clone(),
+                },
+                address,
+            ))
+        }
+    }
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sharing_source_http_queued_h1_h2_writer_closes_before_actual_settlement() {
+        Box::pin(actual_queued_source_start()).await;
+    }
+    async fn actual_queued_source_start() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use std::time::{Duration, Instant};
+        use tokio::io::AsyncWriteExt;
+        for h2 in [false, true] {
+            let fixture = real_source_start_fixture().await;
+            let probe = Arc::new(AcceptedWriterProbe::default());
+            let body_dropped = Arc::new(AtomicBool::new(false));
+            let bytes_dropped = Arc::new(AtomicBool::new(false));
+            let (accepted, captured) = tokio::sync::oneshot::channel();
+            let accepted = Arc::new(std::sync::Mutex::new(Some(accepted)));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("private accepted listener");
+            let address = listener.local_addr().expect("address");
+            let app = super::super::sharing::peer_router((*fixture.state).clone()).layer(
+                axum::middleware::from_fn({
+                    let probe = probe.clone();
+                    let body_dropped = body_dropped.clone();
+                    let bytes_dropped = bytes_dropped.clone();
+                    move |request: axum::extract::Request, next: axum::middleware::Next| {
+                        let probe = probe.clone();
+                        let body_dropped = body_dropped.clone();
+                        let bytes_dropped = bytes_dropped.clone();
+                        let accepted = accepted.clone();
+                        async move {
+                            let connection = request
+                                .extensions()
+                                .get::<crate::SharingConnectionCancellation>()
+                                .expect("actual accepted connection")
+                                .clone();
+                            accepted
+                                .lock()
+                                .expect("capture")
+                                .take()
+                                .expect("one request")
+                                .send(connection)
+                                .ok();
+                            let response = next.run(request).await;
+                            assert_eq!(response.status(), StatusCode::OK);
+                            let (parts, body) = response.into_parts();
+                            assert!(parts
+                                .extensions
+                                .get::<Arc<crate::transcode::source_actor::SourceResponseGuard>>()
+                                .is_some());
+                            let bytes = axum::body::to_bytes(body, 4 * 1024 * 1024)
+                                .await
+                                .expect("actual complete Source envelope");
+                            assert!(serde_json::from_slice::<Value>(&bytes)
+                                .expect("actual envelope")
+                                .get("incarnation_id")
+                                .is_some());
+                            // Test-only controlled backpressure starts after actual
+                            // production Start/guard admission. No DTO is fabricated.
+                            probe.gate.store(true, Ordering::SeqCst);
+                            axum::response::Response::from_parts(
+                                parts,
+                                axum::body::Body::new(QueuedStartBody {
+                                    data: Some(bytes::Bytes::from_owner(QueuedStartBytes {
+                                        bytes: bytes.to_vec(),
+                                        dropped: bytes_dropped,
+                                    })),
+                                    dropped: body_dropped,
+                                }),
+                            )
+                        }
+                    }
+                }),
+            );
+            let (stop, stopped) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(crate::serve_http(
+                GatedStartListener {
+                    listener,
+                    probe: probe.clone(),
+                },
+                app,
+                async move {
+                    let _ = stopped.await;
+                },
+                crate::HTTP_TIMEOUTS,
+            ));
+            let mut socket = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("actual TCP client");
+            let path = format!(
+                "/sharing/v1/items/{}/files/{}/sessions",
+                fixture.reference.item_id.as_str(),
+                fixture.reference.file_id.as_str()
+            );
+            let mut h2_tasks = None;
+            if h2 {
+                let (mut sender, driver) =
+                    hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                        .handshake::<_, axum::body::Body>(hyper_util::rt::TokioIo::new(socket))
+                        .await
+                        .expect("actual H2 handshake");
+                let driver = tokio::spawn(driver);
+                let request = axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("http://fixture{path}"))
+                    .header(
+                        "authorization",
+                        fixture.headers.get("authorization").expect("auth"),
+                    )
+                    .header(
+                        "cinemashare-viewer",
+                        fixture.headers.get("cinemashare-viewer").expect("viewer"),
+                    )
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(fixture.request.clone()))
+                    .expect("actual H2 request");
+                let send = tokio::spawn(async move { sender.send_request(request).await });
+                h2_tasks = Some((driver, send));
+            } else {
+                let head = format!("POST {path} HTTP/1.1\r\nHost: fixture\r\nAuthorization: {}\r\nCinemaShare-Viewer: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",fixture.headers.get("authorization").expect("auth").to_str().expect("text"),fixture.headers.get("cinemashare-viewer").expect("viewer").to_str().expect("text"),fixture.request.len());
+                socket
+                    .write_all(head.as_bytes())
+                    .await
+                    .expect("actual H1 head");
+                socket
+                    .write_all(&fixture.request)
+                    .await
+                    .expect("actual H1 request");
+            }
+            let connection = captured.await.expect("accepted connection");
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !probe.blocked.load(Ordering::SeqCst) || !body_dropped.load(Ordering::SeqCst)
+                {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("actual Hyper drained body and blocked writer");
+            // Small DATA can be copied into Hyper's own write buffer before
+            // delivery. The gate passes headers and blocks only when the real
+            // Source JSON is presented to the actual accepted writer.
+            assert!(
+                probe.queued_start.load(Ordering::SeqCst),
+                "actual Source envelope remains in blocked H1/H2 writer buffer"
+            );
+            assert!(!probe.dropped.load(Ordering::SeqCst));
+            assert!(!connection.closed().is_closed());
+            let entry = fixture
+                .state
+                .transcode
+                .source_http_starts
+                .entries
+                .lock()
+                .expect("actual registry")
+                .first()
+                .cloned()
+                .expect("actual owner");
+            let owned = entry
+                .wait(Instant::now() + Duration::from_secs(1))
+                .await
+                .expect("actual published owner");
+            let actor = owned.actor.clone();
+            assert_eq!(actor.settlement_status(), None);
+            let retire = tokio::spawn(async move { actor.retire().await });
+            tokio::time::timeout(Duration::from_secs(10), connection.closed().wait())
+                .await
+                .expect("actual accepted writer dropped");
+            assert!(
+                probe.dropped.load(Ordering::SeqCst),
+                "accepted IO dropped before closure receipt"
+            );
+            assert!(
+                bytes_dropped.load(Ordering::SeqCst),
+                "queued actual DATA dropped before closure receipt"
+            );
+            tokio::time::timeout(Duration::from_secs(10), retire)
+                .await
+                .expect("physical/body/SQL settlement deadline")
+                .expect("retire task")
+                .expect("actual settled retirement");
+            assert_eq!(owned.actor.settlement_status(), Some(Ok(())));
+            if let Some((driver, send)) = h2_tasks {
+                driver.abort();
+                send.abort();
+            }
+            stop.send(()).expect("stop");
+            server.await.expect("server task").expect("server shutdown");
+            fixture.shutdown().await;
+        }
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sharing_source_http_start_disconnect_joins_actual_actor_and_fresh_exact_replay() {
