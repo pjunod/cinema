@@ -14,6 +14,7 @@ final class Session: @unchecked Sendable {
     private var credentialOrigin = ""
     private var credentialToken: String?
     private var credentialGeneration: UInt64 = 0
+    private var authorizationObservers: [UUID: (UInt64) -> Void] = [:]
     private var mediaFailoverOrigins: [String] = []
     private var mediaFailoverIndex = 0
 
@@ -29,14 +30,27 @@ final class Session: @unchecked Sendable {
         return (credentialOrigin, credentialToken, credentialGeneration)
     }
 
+    /// Registration returns the generation under the same lock as the listener install.
+    /// A caller that captured authorization earlier must compare this and recheck afterward.
+    func observeAuthorizationChanges(_ observer: @escaping (UInt64) -> Void) -> (id: UUID, generation: UInt64) {
+        nodeLock.lock(); defer { nodeLock.unlock() }
+        let id = UUID(); authorizationObservers[id] = observer
+        return (id, credentialGeneration)
+    }
+    func removeAuthorizationObserver(_ id: UUID) {
+        nodeLock.lock(); defer { nodeLock.unlock() }
+        authorizationObservers.removeValue(forKey: id)
+    }
     func setCredentials(origin: String, token: String?) {
         nodeLock.lock()
-        if credentialOrigin != origin || credentialToken != token {
-            credentialGeneration += 1
-        }
-        credentialOrigin = origin
-        credentialToken = token
+        let changed = credentialOrigin != origin || credentialToken != token
+        if changed { credentialGeneration += 1 }
+        credentialOrigin = origin; credentialToken = token
+        let generation = credentialGeneration
+        let observers = changed ? Array(authorizationObservers.values) : []
         nodeLock.unlock()
+        // Observers may inspect current authorization or unregister themselves.
+        observers.forEach { $0(generation) }
     }
 
     private let noticeLock = NSLock()

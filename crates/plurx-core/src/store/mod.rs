@@ -5357,6 +5357,7 @@ pub trait Store:
     + SharingSourceArtworkStore
     + SharingSourceCatalogueStore
     + SharingSourceDetailsStore
+    + SharingSourceSessionStore
     + SettingsStore
     + BackgroundJobStore
     + DvConversionStore
@@ -5400,6 +5401,7 @@ impl<T> Store for T where
         + SharingSourceArtworkStore
         + SharingSourceCatalogueStore
         + SharingSourceDetailsStore
+        + SharingSourceSessionStore
         + SettingsStore
         + BackgroundJobStore
         + DvConversionStore

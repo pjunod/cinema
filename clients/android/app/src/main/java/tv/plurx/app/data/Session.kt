@@ -14,6 +14,14 @@ object Session {
     private var credentialOrigin = ""
     private var credentialToken: String? = null
     private var credentialGeneration = 0L
+    private var authorizationObserverId = 0L
+    private val authorizationObservers = mutableMapOf<Long, (Long) -> Unit>()
+    data class AuthorizationObservation(val id: Long, val generation: Long)
+    fun observeAuthorizationChanges(observer: (Long) -> Unit): AuthorizationObservation = synchronized(authorizationLock) {
+        val id = ++authorizationObserverId; authorizationObservers[id] = observer
+        AuthorizationObservation(id, credentialGeneration)
+    }
+    fun removeAuthorizationObserver(id: Long) { synchronized(authorizationLock) { authorizationObservers.remove(id) } }
     data class PlaybackAuthorization(val origin: String, val token: String?, val generation: Long)
     fun playbackAuthorization(): PlaybackAuthorization = synchronized(authorizationLock) {
         PlaybackAuthorization(credentialOrigin, credentialToken, credentialGeneration)
@@ -21,17 +29,27 @@ object Session {
     /** Server origin, no trailing slash, e.g. `http://192.168.1.10:32400`. */
     var origin: String
         get() = synchronized(authorizationLock) { credentialOrigin }
-        set(value) = synchronized(authorizationLock) {
-            if (credentialOrigin != value) credentialGeneration++
-            credentialOrigin = value
+        set(value) {
+            val notification = synchronized(authorizationLock) {
+                val changed = credentialOrigin != value
+                if (changed) credentialGeneration++
+                credentialOrigin = value
+                credentialGeneration to if (changed) authorizationObservers.values.toList() else emptyList()
+            }
+            notification.second.forEach { observer -> runCatching { observer(notification.first) } }
         }
 
     /** Bearer token, or null when signed out. */
     var token: String?
         get() = synchronized(authorizationLock) { credentialToken }
-        set(value) = synchronized(authorizationLock) {
-            if (credentialToken != value) credentialGeneration++
-            credentialToken = value
+        set(value) {
+            val notification = synchronized(authorizationLock) {
+                val changed = credentialToken != value
+                if (changed) credentialGeneration++
+                credentialToken = value
+                credentialGeneration to if (changed) authorizationObservers.values.toList() else emptyList()
+            }
+            notification.second.forEach { observer -> runCatching { observer(notification.first) } }
         }
 
     /** Replicated Android-TV refresh matching policy from `/api/v1/server`. */

@@ -16,7 +16,7 @@ struct SharedSharingSettingsView: View {
                 ForEach(errors, id: \.self) { Text($0).foregroundStyle(.secondary) }
                 Button("Refresh status") { Task { await load() } }.disabled(busy)
             }
-            Section("Management") { Text("Pairing, invitations and library assignments are managed in the web app.") }
+            Section("Management") { NavigationLink("Manage invitations and Sources") { SharedSharingManagementView() } }
         }
         .navigationTitle("Sharing")
         .task { await load() }

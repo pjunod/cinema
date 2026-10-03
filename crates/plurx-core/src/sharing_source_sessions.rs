@@ -119,6 +119,46 @@ impl SourceBindingHandle {
     pub fn is_released(&self) -> bool {
         self.released
     }
+
+    /// Compare the complete immutable association, independent of retirement.
+    /// Equality does not authorize a write or certify physical settlement.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.incarnation_id == other.incarnation_id
+            && self.principal == other.principal
+            && self.request_id == other.request_id
+            && self.request_fingerprint == other.request_fingerprint
+            && self.playback_id == other.playback_id
+            && self.source_server_id == other.source_server_id
+            && self.catalogue_epoch == other.catalogue_epoch
+            && self.library_id == other.library_id
+            && self.item_id == other.item_id
+            && self.file_id == other.file_id
+            && self.file_revision == other.file_revision
+    }
+    pub fn playback_id(&self) -> &str {
+        &self.playback_id
+    }
+    pub fn request_fingerprint(&self) -> &str {
+        &self.request_fingerprint
+    }
+    pub fn source_server_id(&self) -> Uuid {
+        self.source_server_id
+    }
+    pub fn catalogue_epoch(&self) -> Uuid {
+        self.catalogue_epoch
+    }
+    pub fn library_id(&self) -> &SourceId {
+        &self.library_id
+    }
+    pub fn item_id(&self) -> &SourceId {
+        &self.item_id
+    }
+    pub fn file_id(&self) -> &SourceId {
+        &self.file_id
+    }
+    pub fn file_revision(&self) -> &FileRevision {
+        &self.file_revision
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,6 +211,13 @@ impl SourceDispatchAssignment {
     pub fn dispatch_generation(&self) -> i64 {
         self.dispatch_generation
     }
+
+    /// Membership observations may refresh without changing dispatch lineage.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.binding.same_identity(&other.binding)
+            && self.owner_node_id == other.owner_node_id
+            && self.dispatch_generation == other.dispatch_generation
+    }
     /// Check the original observation's clock before actual queue admission.
     /// Success is not a current grant/floor proof or a physical worker permit.
     pub fn validate_observation_freshness(
@@ -189,6 +236,9 @@ pub struct SourceSessionWriteAuthority {
     pub(crate) intent: Box<SourceSessionIntent>,
 }
 impl SourceSessionWriteAuthority {
+    pub fn assignment(&self) -> &SourceDispatchAssignment {
+        &self.assignment
+    }
     /// Required again after commit and before actual queue admission. This
     /// checks the original snapshot clock, not current grant or physical work.
     pub fn validate_observation_freshness(
@@ -227,4 +277,82 @@ pub enum SourceOwnedRouteAuthorityRead {
     Ready(Box<SourceOwnedRouteAuthority>),
     Unavailable,
     Capacity,
+}
+
+#[cfg(test)]
+mod association_tests {
+    use super::*;
+
+    #[test]
+    fn source_association_identity_never_collapses_grant_viewer_request_or_file() {
+        let binding = SourceBindingHandle {
+            incarnation_id: Uuid::new_v4(),
+            principal: PlaybackPrincipal::sharing(Uuid::new_v4(), &"a".repeat(64))
+                .expect("principal"),
+            request_id: "request".into(),
+            request_fingerprint: "b".repeat(64),
+            playback_id: "playback".into(),
+            source_server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            library_id: SourceId::parse("1").expect("library"),
+            item_id: SourceId::parse("2").expect("item"),
+            file_id: SourceId::parse("3").expect("file"),
+            file_revision: FileRevision::parse(&"c".repeat(64)).expect("revision"),
+            released: false,
+        };
+        let mut changed = binding.clone();
+        changed.released = true;
+        assert!(binding.same_identity(&changed), "retirement keeps identity");
+        for dimension in 0..12 {
+            let mut changed = binding.clone();
+            match dimension {
+                0 => changed.incarnation_id = Uuid::new_v4(),
+                1 => {
+                    changed.principal = PlaybackPrincipal::sharing(Uuid::new_v4(), &"a".repeat(64))
+                        .expect("other grant")
+                }
+                2 => {
+                    changed.principal = PlaybackPrincipal::sharing(
+                        match &binding.principal {
+                            PlaybackPrincipal::Sharing { grant_id, .. } => *grant_id,
+                            _ => panic!("sharing fixture"),
+                        },
+                        &"d".repeat(64),
+                    )
+                    .expect("other viewer")
+                }
+                3 => changed.request_id.push('2'),
+                4 => changed.request_fingerprint = "d".repeat(64),
+                5 => changed.playback_id.push('2'),
+                6 => changed.source_server_id = Uuid::new_v4(),
+                7 => changed.catalogue_epoch = Uuid::new_v4(),
+                8 => changed.library_id = SourceId::parse("4").expect("library"),
+                9 => changed.item_id = SourceId::parse("4").expect("item"),
+                10 => changed.file_id = SourceId::parse("4").expect("file"),
+                11 => {
+                    changed.file_revision = FileRevision::parse(&"d".repeat(64)).expect("revision")
+                }
+                _ => unreachable!(),
+            }
+            assert!(!binding.same_identity(&changed), "dimension {dimension}");
+        }
+        let members = crate::cluster::membership::source_admission_members_for_unit_test(
+            1,
+            &std::collections::BTreeSet::from([1]),
+            1,
+        )
+        .expect("fixture observation");
+        let assignment = SourceDispatchAssignment {
+            binding,
+            owner_node_id: "node".into(),
+            dispatch_generation: 1,
+            members,
+        };
+        let mut other = assignment.clone();
+        other.owner_node_id.push('2');
+        assert!(!assignment.same_identity(&other));
+        other = assignment.clone();
+        other.dispatch_generation = 2;
+        assert!(!assignment.same_identity(&other));
+    }
 }
