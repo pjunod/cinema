@@ -2168,6 +2168,10 @@ fn verify_backup_key(
             census.observe_envelopes(table, &envelopes.iter().collect::<Vec<_>>());
         }
     }
+    let purpose_material = crate::store::sharing_purpose_keys::connection_material(connection)?;
+    if let Some(material) = &purpose_material {
+        material.observe(&mut census);
+    }
     let key = credential_key_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| archive.join(crate::secrets::CREDENTIAL_KEY_FILENAME));
@@ -2190,6 +2194,9 @@ fn verify_backup_key(
             expected_key_id.unwrap_or_default(),
             key.id()
         )));
+    }
+    if let Some(material) = purpose_material {
+        material.verify(&key)?;
     }
     Ok(())
 }
@@ -4831,6 +4838,85 @@ mod tests {
                 .count(),
             0,
             "integrity failure must clean staging and never publish"
+        );
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn sharing_purpose_backup_verification_censuses_retired_keys_and_opens_original_aad() {
+        let archive = tempfile::tempdir().expect("archive");
+        let connection = Connection::open_in_memory().expect("offline image");
+        connection.execute_batch("CREATE TABLE sharing_identity(singleton INTEGER NOT NULL PRIMARY KEY,server_id TEXT NOT NULL,catalogue_epoch TEXT NOT NULL,created_at_ms INTEGER NOT NULL)").expect("empty retired identity");
+        for schema in [
+            crate::store::sharing_purpose_keys::SHARING_PURPOSE_KEYS_SCHEMA,
+            crate::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            crate::store::sharing_file_locators::CANDIDATE_FILE_LOCATOR_KEY_SCHEMA,
+        ] {
+            connection
+                .execute_batch(schema)
+                .expect("candidate installed image");
+        }
+        let key_path = archive.path().join(crate::secrets::CREDENTIAL_KEY_FILENAME);
+        let master = CredentialKey::load_or_create(&key_path).expect("fixture master");
+        let identity = crate::sharing::SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1,
+        };
+        let source = crate::sharing_catalogue_details::CatalogueRevisionKey::generate_sealed(
+            &master,
+            identity.clone(),
+        )
+        .expect("retired Source");
+        let receiver =
+            crate::sharing_file_locators::FileLocatorKey::generate_sealed(&master, &identity)
+                .expect("retired B");
+        for (purpose, envelope) in [("catalogue_revision", &source), ("file_locator", &receiver)] {
+            connection
+                .execute(
+                    "INSERT INTO sharing_purpose_key_archive VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![
+                        purpose,
+                        identity.server_id.to_string(),
+                        identity.catalogue_epoch.to_string(),
+                        envelope.as_stored()
+                    ],
+                )
+                .expect("retired archive");
+        }
+        connection.execute("INSERT INTO sharing_purpose_key_installation VALUES(1,?1,?2,?3,'restore_pending',2,1)",rusqlite::params![identity.server_id.to_string(),identity.catalogue_epoch.to_string(),master.id()]).expect("explicit restore disposition");
+        connection
+            .execute(
+                "INSERT INTO sharing_purpose_transaction_guard VALUES(1,1)",
+                [],
+            )
+            .expect("closed guard");
+        verify_backup_key(&connection, archive.path(), None, None)
+            .expect("all retired purpose material opens");
+        let retained = archive.path().join("retained-key");
+        std::fs::rename(&key_path, &retained).expect("missing-key fixture");
+        assert!(
+            verify_backup_key(&connection, archive.path(), None, None).is_err(),
+            "purpose-only image cannot be mistaken for no sealed rows"
+        );
+        assert!(!key_path.exists(), "verification never mints a replacement");
+        verify_backup_key(&connection, archive.path(), Some(&retained), None)
+            .expect("explicit correct key");
+        let wrong = archive.path().join("wrong-key");
+        CredentialKey::load_or_create(&wrong).expect("wrong fixture master");
+        assert!(verify_backup_key(&connection, archive.path(), Some(&wrong), None).is_err());
+        let foreign = crate::sharing_catalogue_details::CatalogueRevisionKey::generate_sealed(
+            &master,
+            crate::sharing::SharingIdentity {
+                server_id: uuid::Uuid::new_v4(),
+                ..identity.clone()
+            },
+        )
+        .expect("same key foreign AAD");
+        connection.execute("UPDATE sharing_purpose_key_archive SET envelope=?1 WHERE purpose='catalogue_revision'",[foreign.as_stored()]).expect("AAD corruption fixture");
+        assert!(
+            verify_backup_key(&connection, archive.path(), Some(&retained), None).is_err(),
+            "matching key ID is insufficient without authenticated open"
         );
     }
 

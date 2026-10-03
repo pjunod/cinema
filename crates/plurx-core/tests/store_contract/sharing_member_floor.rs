@@ -608,6 +608,7 @@ async fn three_voter_candidate_admission_fences_legacy_rejoin_and_promotion_afte
     allocator.sharing = SharingJoinCapabilities {
         session_principal: false,
         catalogue_item_identity: true,
+        purpose_keys: false,
     };
     submit_sharing_join(&client, &allocator, now, true)
         .await

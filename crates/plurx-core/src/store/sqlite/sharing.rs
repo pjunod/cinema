@@ -15,6 +15,21 @@ fn values(values: Vec<Value>) -> Vec<rusqlite::types::Value> {
 }
 #[async_trait]
 impl Backend for SqliteStore {
+    async fn sharing_purpose_archive_rows(&self) -> Result<Vec<String>, StoreError> {
+        self.with_read(|connection| {
+            let snapshot=connection.unchecked_transaction()?;
+            let present:i64=snapshot.query_row("SELECT CASE WHEN count(*)=0 THEN 0 WHEN count(*)=1 AND max(type)='table' THEN 1 ELSE 2 END FROM sqlite_master WHERE name='sharing_purpose_key_archive'",[],|row| row.get(0))?;
+            if present==0 {return Ok(Vec::new());}
+            if present!=1 {return Err(crate::sharing::invalid());}
+            let read=|sql:&str| -> Result<Vec<String>,StoreError> {
+                Ok(snapshot.prepare(sql)?.query_map([],|row| row.get(0))?.collect::<Result<_,_>>()?)
+            };
+            crate::store::sharing_purpose_keys::archive_columns(read(crate::store::sharing_purpose_keys::ARCHIVE_COLUMNS_SQL)?)?;
+            let rows=read(crate::store::sharing_purpose_keys::ARCHIVE_ROWS_SQL)?;
+            snapshot.commit()?;
+            Ok(rows)
+        }).await
+    }
     async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
         self.with_read(|connection| {
             let snapshot=connection.unchecked_transaction()?;
