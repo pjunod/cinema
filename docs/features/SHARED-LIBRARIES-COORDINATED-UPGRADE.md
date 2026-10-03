@@ -96,13 +96,47 @@ pre-upgrade retained rows, with those same required cleanup outcomes.
 This is a test-only whole-topology restore drill. It does not qualify the
 portable backup API or an operator migration coordinator.
 
-## 4. Receipt and rollout limits
+## 4. Close, rebuild and restore a SQLite Store
 
-The runner and helper are prepared for execution; no successful coordinated
-receipt is claimed by this initial checkpoint. The separately executed unchanged
-historical daemon already refused a synthetic future SQLite source before HTTP
-or Raft activation and preserved its source sentinel. The reproducible runner
-must repeat this against its committed snapshots before receipt publication.
+The separate SQLite Store fixture starts with the real legacy schema and the
+same populated local-principal ledger. It checkpoints WAL, closes the last
+connection, refuses outstanding WAL bytes, and copies the closed database.
+No daemon runs against this standalone fixture: daemon startup automatically
+activates replicated storage.
+
+A deliberately failed partial rebuild transaction must leave the original
+inventory unchanged. A successful transaction then applies the same frozen
+seven-table rebuild. The current SQLite Store must reopen the candidate, and
+all original columns and rows across eleven tables must match. After closing
+and checkpointing, the drill parks the candidate file, restores the closed
+backup byte-for-byte, reopens the legacy SQLite Store and compares its full
+inventory again. No daemon maintenance runs in this Store-only case, so the
+stale rows and leases also remain unchanged.
+
+This qualifies closed-file Store restore and statement-error rollback. It does
+not qualify a production backup API, interruption by process or power loss,
+or SQLite daemon runtime. The membership factory and membership quiescence
+checks belong to the separate replicated topology fixture.
+
+## 5. Receipt and rollout limits
+
+On 2026-10-03 the full daemon/topology runner passed against committed
+candidate `7ce5f6a7095f0b073f932695a00f38a24a9eb167` and unchanged historical
+source `971265536a259dea38b0f7a9a8752a5a74e8c025`, using
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`. Its candidate source archive SHA-256 was
+`5b4a4e1cb3907a441494d917bb221e342fe01f13f27ba24a31d49d57c92f414f`.
+The receipt verified both future-schema refusal cases for both actual daemons,
+three historical voters, successful full-stop shutdown, factory-before-marker
+rebuild, strict immediate eleven-table retention, current daemon restart,
+whole-topology restore with historical owner login and voter membership, and
+the exact retained/cleanup outcomes described above. Shared writes were not
+admitted and no capability was advertised.
+
+The later SQLite extension has separately passed its exact production-schema
+regression, one executed test and zero ignored. The combined archived runner
+must be rerun after committing that extension; the first receipt does not
+cover its newer source tree. Source and binary hashes in each generated receipt
+identify the snapshot actually exercised.
 
 Production activation requires completed principal and allocator writers,
 qualified atomic source-grant and exact member-floor admission, a released

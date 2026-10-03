@@ -366,6 +366,23 @@ def cluster_fixture(old_binary, new_binary, helper, root):
             child.kill()
 
 
+def sqlite_store_drill(helper, root):
+    outcome = subprocess.run([str(helper), "sqlite-drill", str(root)],
+                             capture_output=True, text=True, timeout=45, check=False)
+    (root.parent / "sqlite-store-drill.log").write_text(outcome.stdout + outcome.stderr)
+    if outcome.returncode:
+        raise RuntimeError(f"SQLite Store drill failed: {root.parent / 'sqlite-store-drill.log'}")
+    records = [json.loads(line[len(PREFIX):]) for line in outcome.stdout.splitlines()
+               if line.startswith(PREFIX)]
+    if len(records) != 1 or not records[0]["store_only"]:
+        raise RuntimeError("SQLite Store drill receipt missing")
+    snapshots = {name: json.loads((root / f"retained-{name}.json").read_text())
+                 for name in ("before", "rebuilt", "reopened", "restored")}
+    for stage in ("rebuilt", "reopened", "restored"):
+        compare_retained(snapshots["before"], snapshots[stage])
+    return records[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-dir", type=Path, required=True, help="new source and fixture directory")
@@ -402,6 +419,7 @@ def main():
                  for binary, label in [(old_binary, "historical-replicated-future"), (new_binary, "candidate-replicated-future")]]
     print("FUTURE REPLICATED " + json.dumps(receipt["future_replicated"], sort_keys=True), flush=True)
     receipt["three_voter"] = cluster_fixture(old_binary, new_binary, helper, args.source_dir / "three-voter")
+    receipt["sqlite_store"] = sqlite_store_drill(helper, args.source_dir / "sqlite-store")
     (args.source_dir / "qualification-receipt.json").write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
     print("COORDINATED FIXTURE " + json.dumps(receipt, sort_keys=True), flush=True)
 

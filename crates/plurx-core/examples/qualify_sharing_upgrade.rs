@@ -87,9 +87,166 @@ mod qualification {
         Ok(json!(result))
     }
 
+    fn sqlite_snapshot(connection: &rusqlite::Connection) -> Result<Value> {
+        let mut result = BTreeMap::new();
+        for table in TABLES {
+            let mut statement = connection.prepare(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let fields = columns
+                .iter()
+                .map(|column| format!("'{column}',\"{column}\""))
+                .collect::<Vec<_>>()
+                .join(",");
+            let mut statement = connection.prepare(&format!(
+                "SELECT json_object({fields}) FROM {table} ORDER BY 1"
+            ))?;
+            let texts = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let rows = texts
+                .iter()
+                .map(|text| serde_json::from_str::<Value>(text))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            result.insert(table, json!({"columns":columns,"rows":rows}));
+        }
+        Ok(json!(result))
+    }
+
+    fn close_sqlite(connection: rusqlite::Connection, path: &Path) -> Result<()> {
+        let busy: i64 =
+            connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))?;
+        if busy != 0 {
+            return Err("closed-file backup requires a completed WAL checkpoint".into());
+        }
+        connection.close().map_err(|(_, error)| error)?;
+        let wal = path.with_file_name(format!(
+            "{}-wal",
+            path.file_name().ok_or("database name")?.to_string_lossy()
+        ));
+        if wal.exists() && wal.metadata()?.len() != 0 {
+            return Err("closed-file backup has uncheckpointed WAL bytes".into());
+        }
+        Ok(())
+    }
+
+    fn sqlite_drill(directory: &Path) -> Result<Value> {
+        // A separate Store fixture, not a SQLite daemon runtime or production
+        // backup API. The caller supplies a new runner-owned directory.
+        std::fs::create_dir(directory)?;
+        let path = directory.join("plurx.db");
+        drop(SqliteStore::open(&path)?);
+        let connection = rusqlite::Connection::open(&path)?;
+        connection.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'owner', 'fixture-hash', 1, 1)", [])?;
+        connection.execute_batch(&fixture_sql())?;
+        let before = sqlite_snapshot(&connection)?;
+        let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        close_sqlite(connection, &path)?;
+        let backup = directory.join("closed-pre-upgrade.db");
+        std::fs::copy(&path, &backup)?;
+        let mut connection = rusqlite::Connection::open(&path)?;
+        // Prove statement-error rollback without calling it a power-loss test.
+        {
+            let transaction = connection.transaction()?;
+            let first = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+                .split("-- next statement\n")
+                .next()
+                .ok_or("candidate first statement")?;
+            transaction.execute_batch(first)?;
+            if transaction
+                .execute_batch("INSERT INTO qualification_missing_table VALUES (1)")
+                .is_ok()
+            {
+                return Err("SQLite statement failure was not injected".into());
+            }
+        }
+        if sqlite_snapshot(&connection)? != before {
+            return Err("failed SQLite rebuild changed retained rows".into());
+        }
+        {
+            let transaction = connection.transaction()?;
+            transaction.execute_batch(MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+            transaction.commit()?;
+        }
+        let rebuilt = sqlite_snapshot(&connection)?;
+        close_sqlite(connection, &path)?;
+        drop(SqliteStore::open(&path)?);
+        let connection = rusqlite::Connection::open(&path)?;
+        let reopened = sqlite_snapshot(&connection)?;
+        close_sqlite(connection, &path)?;
+        std::fs::rename(&path, directory.join("closed-candidate.db"))?;
+        std::fs::copy(&backup, &path)?;
+        if std::fs::read(&backup)? != std::fs::read(&path)? {
+            return Err("closed SQLite backup bytes changed during restore".into());
+        }
+        drop(SqliteStore::open(&path)?);
+        let connection = rusqlite::Connection::open(&path)?;
+        let restored = sqlite_snapshot(&connection)?;
+        close_sqlite(connection, &path)?;
+        if restored != before {
+            return Err("restored SQLite Store retained inventory changed".into());
+        }
+        for (name, inventory) in [
+            ("before", &before),
+            ("rebuilt", &rebuilt),
+            ("reopened", &reopened),
+            ("restored", &restored),
+        ] {
+            std::fs::write(
+                directory.join(format!("retained-{name}.json")),
+                serde_json::to_vec_pretty(inventory)?,
+            )?;
+        }
+        Ok(
+            json!({"store_only":true,"sqlite_schema_version":version,"closed_file_backup_restore":true,"statement_error_rollback":true,"candidate_store_reopened":true,"restored_legacy_store_reopened":true,"retained_tables":TABLES.len(),"capabilities_advertised":false}),
+        )
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn closed_sqlite_store_rebuild_and_restore_retains_legacy_rows() {
+            let directory = tempfile::tempdir().expect("fixture root");
+            let path = directory.path().join("sqlite-store");
+            let receipt = sqlite_drill(&path).expect("closed SQLite Store drill");
+            assert_eq!(receipt["store_only"], true);
+            assert_eq!(receipt["statement_error_rollback"], true);
+            let before: Value = serde_json::from_slice(
+                &std::fs::read(path.join("retained-before.json")).expect("baseline inventory"),
+            )
+            .expect("baseline JSON");
+            for phase in ["rebuilt", "reopened", "restored"] {
+                let after: Value = serde_json::from_slice(
+                    &std::fs::read(path.join(format!("retained-{phase}.json")))
+                        .expect("phase inventory"),
+                )
+                .expect("phase JSON");
+                for table in TABLES {
+                    let columns = before[table]["columns"]
+                        .as_array()
+                        .expect("original columns");
+                    let rows = after[table]["rows"]
+                        .as_array()
+                        .expect("candidate rows")
+                        .iter()
+                        .map(|row| {
+                            let mut projected = serde_json::Map::new();
+                            for column in columns {
+                                let name = column.as_str().expect("column name");
+                                projected.insert(name.to_owned(), row[name].clone());
+                            }
+                            Value::Object(projected)
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(Value::Array(rows), before[table]["rows"], "{phase} {table}");
+                }
+            }
+        }
 
         #[test]
         fn terminal_retention_fixture_obeys_production_sqlite_constraints() {
@@ -142,6 +299,11 @@ mod qualification {
     pub async fn run() -> Result<()> {
         let args = std::env::args().skip(1).collect::<Vec<_>>();
         match args.as_slice() {
+            [mode, path] if mode == "sqlite-drill" => {
+                println!("QUALIFICATION {}", sqlite_drill(Path::new(path))?);
+                Ok(())
+            }
+
             [mode, path] if mode == "sqlite-init" => {
                 drop(SqliteStore::open(Path::new(path))?);
                 println!(
