@@ -80,12 +80,12 @@ fn unhex(value: &str) -> Result<[u8; 32], StoreError> {
     }
     Ok(bytes)
 }
-fn positive_id(value: &SourceId) -> Result<i64, StoreError> {
+fn canonical_source_id(value: &SourceId) -> Result<i64, StoreError> {
     value
         .as_str()
         .parse::<i64>()
         .ok()
-        .filter(|id| *id > 0)
+        .filter(|id| *id >= 0)
         .ok_or_else(invalid)
 }
 impl FileLocatorKey {
@@ -169,7 +169,7 @@ impl FileLocatorKey {
         }
         bytes.extend_from_slice(&reference.lifecycle_generation.to_be_bytes());
         for id in [&item.library_id, &item.item_id, &reference.file_id] {
-            bytes.extend_from_slice(&positive_id(id)?.to_be_bytes());
+            bytes.extend_from_slice(&canonical_source_id(id)?.to_be_bytes());
         }
         bytes.extend_from_slice(&unhex(reference.revision.as_str())?);
         let signature = self.signature(&bytes);
@@ -216,7 +216,7 @@ impl FileLocatorKey {
                     .try_into()
                     .map_err(|_| invalid())?,
             );
-            if value <= 0 {
+            if value < 0 {
                 return Err(invalid());
             }
             Ok(value)
@@ -319,8 +319,17 @@ mod tests {
                 .expect("exact roundtrip")
                 == other
         );
-        other.file_id = SourceId::parse("0").expect("untrusted ID grammar");
-        assert!(key.issue(&other).is_err());
+        other.item.library_id = SourceId::parse("0").expect("canonical zero library");
+        other.item.item_id = SourceId::parse("0").expect("canonical zero item");
+        other.file_id = SourceId::parse("0").expect("canonical zero file");
+        let zero = key.issue(&other).expect("zero compound Source IDs");
+        assert!(
+            key.verify(zero.as_str(), other.item.import_id, 1)
+                .expect("exact zero roundtrip")
+                == other
+        );
+        assert!(key.verify(zero.as_str(), Uuid::new_v4(), 1).is_err());
+        assert!(key.verify(zero.as_str(), other.item.import_id, 2).is_err());
     }
     #[test]
     fn sharing_file_locator_refuses_tampering_and_signed_malformed_payloads() {
