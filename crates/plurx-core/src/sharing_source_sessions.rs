@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 /// Untrusted identity inputs. The intent factory validates these and binds a
 /// current server-produced witness; these fields are not themselves authority.
+#[derive(Clone)]
 pub struct SourceSessionRequest {
     pub principal: PlaybackPrincipal,
     pub request_id: String,
@@ -25,6 +26,7 @@ pub struct SourceSessionRequest {
 }
 
 /// No Serialize/Deserialize/Debug: a wire revision cannot mint this witness.
+#[derive(Clone)]
 pub struct SourceSessionIntent {
     pub(crate) request: SourceSessionRequest,
     pub(crate) witness: SourceFileWitness,
@@ -134,6 +136,7 @@ pub enum SourceReleaseOutcome {
 /// An actual local worker's committed assignment. A retained binding or a
 /// caller-supplied node string cannot construct this handle. This is not an
 /// encoder permit, an active route lease, or takeover authority.
+#[derive(Clone)]
 pub struct SourceDispatchAssignment {
     pub(crate) binding: SourceBindingHandle,
     pub(crate) owner_node_id: String,
@@ -162,9 +165,20 @@ impl SourceDispatchAssignment {
 
 /// Fresh assignment-stage authority for a first blocked Source activation.
 /// It is not renewable route, replacement, or takeover authority.
+#[derive(Clone)]
 pub struct SourceSessionWriteAuthority {
     pub(crate) assignment: SourceDispatchAssignment,
     pub(crate) intent: Box<SourceSessionIntent>,
+}
+impl SourceSessionWriteAuthority {
+    /// Required again after commit and before actual queue admission. This
+    /// checks the original snapshot clock, not current grant or physical work.
+    pub fn validate_observation_freshness(
+        &self,
+        now_ms: i64,
+    ) -> Result<(), crate::cluster::membership::MembershipError> {
+        self.assignment.validate_observation_freshness(now_ms)
+    }
 }
 
 pub enum SourceWriteAuthorityRead {

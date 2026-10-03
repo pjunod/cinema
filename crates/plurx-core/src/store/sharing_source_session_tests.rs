@@ -10,7 +10,10 @@ use crate::{
     secrets::CredentialKey,
     sharing::{InvitationRecord, ShareClaim, SourceId},
     sharing_catalogue_details::CatalogueRevisionKey,
-    store::{LibraryStore, SharingStore, SqliteStore, MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA},
+    store::{
+        LibraryStore, MediaSessionStore, SharingStore, SqliteStore,
+        MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA,
+    },
 };
 use std::{collections::BTreeSet, path::PathBuf};
 
@@ -347,6 +350,199 @@ async fn sharing_source_activation_authority_assertion_rolls_back_and_preserves_
             SourceWriteAuthorityRead::Unavailable
         ));
         assert_eq!(count(&store, "media_sessions").await, 0);
+    }
+}
+
+#[tokio::test]
+async fn sharing_source_sqlite_first_activation_current_authority_and_lineage() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("source-activation.db")).expect("pool"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let request = intent(&store, grant, &key, "first-activation").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&request, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("Source reservation")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("actual local worker");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("authority")
+        else {
+            panic!("current private witness")
+        };
+        let now = now_ms().expect("clock");
+        let mut activation = crate::domain::MediaSessionActivation {
+            incarnation_id: binding.incarnation_id.to_string(),
+            session_id: Uuid::new_v4().to_string(),
+            principal: binding.principal.clone(),
+            playback_id: binding.playback_id.clone(),
+            recovery_epoch: String::new(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: true,
+            request_id: Some(binding.request_id.clone()),
+            request_fingerprint: binding.request_fingerprint.clone(),
+            owner_node_id: "voter".into(),
+            recipe_json: "{}".into(),
+            response_json: "{}".into(),
+            publication_ready_at_ms: crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: now,
+            lease_expires_at_ms: now + 60000,
+            expected_desired_revision: None,
+        };
+        assert!(
+            store.activate_media_session(&activation).await.is_err(),
+            "ordinary Shared entry remains closed"
+        );
+        store
+            .sharing_txn(vec![(
+                "UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),
+                vec![],
+            )])
+            .await
+            .expect("switch race");
+        assert!(store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("typed switch refusal")
+            .is_none());
+        for table in ["media_sessions", "media_playback_pointers", "job_leases"] {
+            assert_eq!(count(&store, table).await, 0);
+        }
+        store.sharing_txn(vec![("UPDATE settings SET value='true' WHERE key='sharing_enabled'".into(),vec![]),("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES($1,'foreign',1,1,$2,$3)".into(),vec![format!("session:{}",binding.incarnation_id).into(),(now+90000).into(),now.into()]),("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session',$1,1,1)".into(),vec![binding.incarnation_id.into()])]).await.expect("foreign retained resources");
+        assert!(store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("foreign lineage refusal")
+            .is_none());
+        assert!(matches!(
+            store
+                .prepare_source_activation_authority(&assignment, &key, &proof())
+                .await
+                .expect("foreign mint refusal"),
+            SourceWriteAuthorityRead::Unavailable
+        ));
+        let rows = store
+            .sharing_read(
+                "SELECT json_quote(expires_at_ms) AS payload FROM job_leases WHERE resource=$1",
+                vec![format!("session:{}", binding.incarnation_id).into()],
+            )
+            .await
+            .expect("preserved expiry");
+        assert_eq!(rows[0], (now + 90000).to_string());
+        assert_eq!(count(&store, "cache_consumer_pins").await, 1);
+        store
+            .sharing_txn(vec![
+                (
+                    "DELETE FROM job_leases WHERE resource=$1".into(),
+                    vec![format!("session:{}", binding.incarnation_id).into()],
+                ),
+                (
+                    "DELETE FROM cache_consumer_pins WHERE consumer_id=$1".into(),
+                    vec![binding.incarnation_id.into()],
+                ),
+            ])
+            .await
+            .expect("remove only fixture injections");
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET path='/private/replacement.mkv' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("private file race");
+        assert!(store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("same-write file refusal")
+            .is_none());
+        store
+            .sharing_txn(vec![(
+                "UPDATE files SET path='/private/synthetic.mkv' WHERE id=1".into(),
+                vec![],
+            )])
+            .await
+            .expect("restore fixture file");
+        let SourceWriteAuthorityRead::Ready(authority) = store
+            .prepare_source_activation_authority(&assignment, &key, &proof())
+            .await
+            .expect("fresh authority")
+        else {
+            panic!("restored file authority")
+        };
+        activation.now_ms = now_ms().expect("clock");
+        activation.lease_expires_at_ms = activation.now_ms + 60000;
+        let mut foreign = activation.clone();
+        foreign.principal =
+            PlaybackPrincipal::sharing(grant, &"e".repeat(64)).expect("other viewer");
+        assert!(store
+            .activate_source_media_session(&authority, &foreign)
+            .await
+            .expect("foreign tuple refusal")
+            .is_none());
+        store.sharing_txn(vec![("CREATE TRIGGER source_activation_storage_fault BEFORE INSERT ON media_sessions BEGIN SELECT RAISE(ABORT,'source_activation_fixture_fault'); END".into(),vec![])]).await.expect("actual writer fault fixture");
+        let error = store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect_err("genuine database fault propagates");
+        assert!(!source_write_refused(&error));
+        assert_eq!(count(&store, "job_leases").await, 0);
+        assert_eq!(count(&store, "media_sessions").await, 0);
+        store
+            .sharing_txn(vec![(
+                "DROP TRIGGER source_activation_storage_fault".into(),
+                vec![],
+            )])
+            .await
+            .expect("remove only fixture fault");
+        let created = store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("guarded first activation")
+            .expect("Source route");
+        assert_eq!(created.route.principal, binding.principal);
+        assert_eq!(created.route.session_id, activation.session_id);
+        assert_eq!(
+            created.route.publication_ready_at_ms,
+            crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+        );
+        let old_expiry = created.route.lease_expires_at_ms;
+        activation.lease_expires_at_ms += 60000;
+        let replay = store
+            .activate_source_media_session(&authority, &activation)
+            .await
+            .expect("exact replay")
+            .expect("same route");
+        assert_eq!(
+            replay.route.lease_expires_at_ms, old_expiry,
+            "replay cannot renew"
+        );
+        assert_eq!(count(&store, "media_sessions").await, 1);
+        assert_eq!(count(&store, "media_playback_pointers").await, 1);
+        let retained = binding_row(&store, &binding.principal.owner_key(), &binding.request_id)
+            .await
+            .expect("binding")
+            .expect("held obligation");
+        assert_eq!(retained.reservation, "held");
+        assert!(retained.start_resolved.is_none());
+        assert_eq!(
+            store
+                .release_source_never_dispatched(&binding)
+                .await
+                .expect("release refusal"),
+            SourceReleaseOutcome::Refused
+        );
     }
 }
 #[tokio::test]

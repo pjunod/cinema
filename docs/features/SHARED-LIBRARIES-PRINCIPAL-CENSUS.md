@@ -703,9 +703,10 @@ observation. It returns a closed `SourceSessionWriteAuthority` with no wire
 constructor. A retained binding alone cannot mint it. Source activation on the
 ordinary `activate_media_session` entry remains refused.
 
-The narrowly named `activate_source_media_session` currently has a Hiqlite
-implementation; the default backend method returns unavailable. Both its Local
-and proof-bearing Source entries delegate to the existing activation algorithm.
+The narrowly named `activate_source_media_session` has candidate SQLite and
+Hiqlite implementations; the default method remains unavailable for other
+backends. Each backend's Local and proof-bearing Source entries delegate to its
+existing activation algorithm.
 The Source selector binds the canonical owner key, inserts literal NULL
 `user_id`, and persists the full Sharing principal. It accepts only a first
 start fenced against an absent predecessor. Replacement, preparation, renewal,
@@ -738,3 +739,25 @@ SQLite prove assertion rollback, file replacement refusal and preservation of a
 genuine storage fault. The existing Local activation/preparation/settlement
 contract through `dyn Store` passed with zero ignored tests in 11.64 seconds.
 The exact feature all-target compiler check passed in 28.16 seconds.
+
+
+The SQLite counterpart is based on
+`5982f541bd9ffa22c22909de7f004f0b512cee17`. Its owned writer closure carries a
+clone of the original closed authority, without resetting observation times,
+and calls the guard after acquiring the writer connection and starting the
+transaction. Both backends insert the same complete Sharing metadata with NULL
+local user ID. The authority exposes its original-observation freshness check
+for the required postcommit check before actual producer queue admission; it
+remains separate from current authorization and the actual physical permit.
+
+All nine Source library regressions passed with zero ignored tests in 17.80
+seconds. The new memory and pooled SQLite activation case covers the ordinary
+Shared entry refusal, saved-switch and private-file races, foreign lease/pin
+preservation and mint refusal, foreign viewer tuple refusal, genuine writer
+fault rollback, one blocked Sharing route, and exact replay without lease
+renewal. The held binding and unresolved start remain; the never-dispatched
+callback cannot release an assigned incarnation. The existing Local lifecycle
+contract through `dyn Store` passed with zero ignored tests in 11.72 seconds.
+Exact feature all-target check passed in 29.79 seconds and Clippy in 33.68
+seconds. The prior actual-voter receipt remains scoped to the Hiqlite checkpoint;
+this counterpart changes its SQLite algorithm and closed snapshot cloning only.
