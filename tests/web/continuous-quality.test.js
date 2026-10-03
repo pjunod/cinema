@@ -125,7 +125,8 @@ test('rate refusal waits for admission before retrying the identical reservation
 
 test('attached quality preparation follows a newer cold seek without reviving a fenced ask',async()=>{
  for(const firstReady of [false,true])for(const fenced of [false,true]){
-  let release,began,identity=20;const held=new Promise(resolve=>release=resolve);
+  let release,began,releaseSecond,beganSecond,identity=20;const held=new Promise(resolve=>release=resolve);
+  const secondHeld=new Promise(resolve=>releaseSecond=resolve),secondStarted=new Promise(resolve=>beganSecond=resolve);
   const started=new Promise(resolve=>began=resolve),calls=[],transactions=[];
   const row=(height,id)=>({candidate_id:id.repeat(32),rendition_id:id.repeat(64),
    init_id:'e'.repeat(64),codec:'avc1.640032',width:height===720?1280:1920,height,
@@ -138,6 +139,7 @@ test('attached quality preparation follows a newer cold seek without reviving a 
    if(operation.kind==='prepare'){
     const count=calls.filter(call=>call.operation.kind==='prepare').length;
     if(count===1){began();await held;}
+    if(count===2){beganSecond();await secondHeld;}
     const ready=count>1||firstReady;
     transactions.push({transaction_id:id,state:ready?'ready':'retained_current',
      ready:ready?[{from_tick:frontier.through_tick,through_tick:frontier.through_tick+48}]:[],
@@ -161,6 +163,7 @@ test('attached quality preparation follows a newer cold seek without reviving a 
   adapter.bind(hls,0);
   const choice=adapter.choose(videoRows[1].candidate_id,()=>!fenced);
   await started;assert.equal(adapter.noteSeek(900),true);release();
+  await secondStarted;assert.equal(adapter.noteSeek(900),true);releaseSecond();
   assert.equal(await choice,fenced?(firstReady?'superseded':'retained_current'):'continuous');
   const prepares=calls.filter(call=>call.operation.kind==='prepare');
   assert.deepEqual(prepares.map(call=>call.frontier.through_tick),[0,21600]);

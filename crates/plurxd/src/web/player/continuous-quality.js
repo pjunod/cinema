@@ -253,7 +253,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
   const pendingAppends=new Map(),pendingDisposals=new Set();
-  let disposalTimer=null,seekRevision=0;
+  let disposalTimer=null,seekRevision=0,seekBoundary=null;
   let work=Promise.resolve(),queued=0;
   const current=()=>!closed&&attachment.current()&&player.continuousQuality===adapter;
   let wanted=family.video.find(row=>row.candidate_id===bootstrap.primary_candidate_id);
@@ -545,6 +545,8 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       // old forward range must not drag a backward seek's choice to its tail.
       let through=Math.floor(seconds*wanted.timescale/wanted.segment_ticks)*wanted.segment_ticks;
       if(!continuousQualityInteger(through))return false;
+      if(through===seekBoundary)return true; // Identical frontier cannot renew preparation.
+      seekBoundary=through;
       for(;;){
         const next=Array.from(records.values()).find(row=>row.type==='video'
           &&(row.exposed||row.appended)&&!row.removed&&!row.disposed

@@ -4044,3 +4044,24 @@ the final lane. New runtime phase measurements must establish the effect;
 no startup improvement is claimed yet, and no unit tests executed.
 
 Pinned workspace/all-target compilation with optimized SHA-256 passed in 1m46s.
+
+
+### 10.135 An identical seek frontier cannot renew bounded preparation
+
+Development hashing optimization committed as `dfc8ea4ea` and passed its
+normal hook, including all-target Clippy in 1m56s. No unit tests executed.
+
+A follow-up tightens the seek repair: repeated notification of the same
+segment-aligned destination is a no-op rather than another preparation
+revision. Only a changed destination may supersede the pending frontier. The
+authored adapter regression holds the second preparation exchange open,
+repeats 900 s, and requires exactly the original and rebased prepares. It also
+checks that fenced owners restore the incumbent instead of retrying the new
+rung. Source and test syntax pass; combined committed-source runtime evidence
+is still pending.
+
+The follow-up hook initially failed while writing compiler metadata because
+the Mac had 195 MiB free. Two obsolete owned incremental caches last used at
+05:08–05:09 on October 2 were removed (about 5.5 GiB), retaining current warm
+caches, source and all runtime evidence. This was a compiler-storage failure,
+not a failed unit test; the normal hook is being retried.
