@@ -391,9 +391,9 @@ If the actual source binding is unavailable, report that deficit; do not
 infer it from the workstation's HEAD or invent it in a receipt.
 
 An independently admitted **external read-only observer** must acquire and
-atomically refresh one sanitized JSON manifest. This tooling does not
-implement that observer, read settings credentials, deploy, change a
-switch, or authorize a capture. The exact schema is:
+atomically refresh one sanitized JSON manifest. The source-only observer
+added 2026-10-03 uses `observe-after` in the existing capture tool. It does
+not deploy, change a switch, or authorize a capture. The exact schema is:
 
 - Top-level fields: `schema: "k03-after-acquisition-v1"` and `observations`.
 - Exactly one observation each for `nuc4`, `m6`, `nynuc`, with only `node`,
@@ -416,6 +416,31 @@ cryptographically prove HTTP origin, independently establish the receipt's
 full-source assertion, or prove no switch flip occurred between observations.
 The future acquisition handoff must retain its real origin/build evidence;
 this input contract is not a substitute for that evidence.
+
+`observe-after --output-dir OWNED --deployment-receipt RECEIPT
+--deployment-sha256 DIGEST --credentials-file PRIVATE --max-seconds 46800`
+is a separately admitted foreground POSIX process. `OWNED` must not exist.
+The receipt has schema `k03-deployment-binding-v1` and `observations`, one
+exact `{node, build, source_commit, origin}` object per voter; origins equal
+the fixed metrics origins below. **Independently authenticate this receipt
+and its SHA-256 before admission**, using real deployed artifact/source
+evidence. Supplying a self-authored digest is not deployment authentication:
+the tool verifies bytes and observed build, never invents full-source proof
+from a prefix. All three nodes must bind the same expected source/build.
+
+The private regular credential file maps the three node names to bearer
+tokens; do not put tokens in argv or publish the file. The observer GETs
+each actual `/metrics` and authenticated `/api/v1/settings`, selects only
+the two actual boolean switches, and refuses a changed build, missing or
+malformed pair, or on/on. It never retains the full settings DTO (which can
+contain credentials), HTTP exception details or tokens. Sanitized immutable
+per-tick manifests remain alongside atomically replaced `manifest.json`,
+which the existing sampler consumes. Each complete request is bounded to
+5 seconds, refreshes occur every 60 seconds, and the original monotonic
+allowance is at most 25 hours. Existing 16 KiB manifest, 1 MiB response,
+512 MiB retained-byte and 8192-file bounds remain. Partial sanitized files
+remain on failure; no restart, deployment or twelve-hour result is implied.
+The new offline observer control uses synthetic HTTP responses, not a fleet.
 
 After a separate capture admission, set `K03_BUILD` and `K03_SOURCE_SHA` from
 the verified deployed build receipt, and `K03_OWNER` / `K03_MANIFEST` to
