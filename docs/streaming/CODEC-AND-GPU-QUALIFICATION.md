@@ -714,6 +714,46 @@ not a full-source hash. This longer fixture supersedes no earlier limited
 sample receipt and has not been decoded, independently reshaped/graded or
 physically compared. M1's all-class corpus and fidelity acceptance stay open.
 
+**2026-10-02 M1 reference-association implementation — incomplete corpus:**
+`scripts/codec-qualification-corpus.json` now accounts for all thirteen existing
+generators, including the separate ten-bit gradient, real-PGS input and genuine
+P5 input. It is a versioned metadata plan, not a completed acquisition receipt.
+Known full acquired-fixture hashes retain their historical source identity;
+the separate 70-second H.264, grain, SDR4K and PQ4K inputs are not relabelled as
+the default 45-second generator output. Unknown hashes stay null. Current file
+availability, decoded grade, captured-session output and fidelity are unmeasured.
+
+Run `scripts/bench qualification-corpus` to validate this metadata without
+opening media, generating fixtures, probing tools or connecting to a server.
+`--require-associated` refuses missing reference associations only in this
+measurement command; it never controls ordinary playback. Metadata JSON reads
+are bounded to 1 MiB per regular no-follow file and 4 MiB total, with held-file
+identity and receipt-hash checks. The summary always reports
+`measurement_executed: false` and `qualified: false`, even when associations are
+complete. The existing capture, rate-control and scoring commands are unchanged.
+
+SDR source references remain in the BT.709 VMAF domain. PQ-to-PQ references
+remain in PQ code values; PQ-to-SDR requires a separately hash-bound independent
+BT.709 grade receipt matching the parent, reference and zero-start interval.
+An association validates those receipt fields, **not** its pixels or graph:
+the independent [HDR scorer](../performance/HDR-REFERENCE-SCORING.md) still
+validates decoded metadata, parent geometry, the exact grade graph and scoring
+execution. HLG and unreshaped DV explicitly retain unsupported/unmeasured
+associations; no SDR score is substituted. This does not complete §3.1.3's
+all-class corpus, §3.6's fidelity checks, the session matrix or M1 acceptance.
+The historical acceptance command below still needs a domain-aware measurement
+consumer; this metadata command does not pretend the SDR-only rate-control
+loader can consume PQ/HLG/DV references.
+
+For the unchanged 64-document local-unit receipt bound, this task retires only
+the inactive merged-PR671 discovery copy
+`validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+Its exact 1,262-byte SHA-256 is the filename; Git blob is
+`963c29967b09561bc077844ac5a0f2f5838da190`. Original null-source attribution,
+authenticated comment6937 and landing history remain unchanged. Recover the
+original with `git show b353c4f8c0129b17e6217680f6bdf757a3ede65b:validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+No active-task proof, receipt loader, cap or replay policy is changed.
+
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
 `identity`/`class`/`dynamic_range`/`trim`/`rung` rows matching the existing
