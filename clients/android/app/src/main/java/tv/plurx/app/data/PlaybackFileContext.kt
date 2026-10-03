@@ -80,6 +80,51 @@ class PlaybackFileContext private constructor(
         return path(uri.rawPath.removePrefix("$fileBase/"), query)
     }
 
+    internal fun validateSharedReference(item: SharedPlaybackReference, file: String, revision: String) {
+        requireCurrent()
+        require(reference != null && reference == item && sourceFileId == file && this.revision == revision)
+        require(canonicalId(file) && Regex("[0-9a-f]{64}").matches(revision))
+    }
+    /** Descriptive validation neither binds a session nor admits delivery. */
+    internal fun validateDescriptiveUrl(value: String) {
+        requireCurrent()
+        require(reference != null && '%' !in value)
+        val uri = URI(value)
+        require(uri.scheme == null && uri.rawAuthority == null && uri.rawFragment == null)
+        require(uri.rawPath in listOf("$fileBase/direct", "$fileBase/stream.mp4", "$fileBase/hls/sessions"))
+        val query = closedMetadataQuery(uri)
+        query.forEach { (key, text) ->
+            if (key == "session") require(sessionId != null && text == sessionId)
+            else require(uri.rawPath == "$fileBase/stream.mp4" && key == "audio" && canonicalId(text) && text.toLong() <= 4095)
+        }
+    }
+    internal fun validateSessionPlaylist(value: String, session: String) {
+        requireCurrent()
+        require(reference != null && sessionId == session && Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(session))
+        require('%' !in value && value.length <= 512)
+        val uri = URI(value)
+        require(uri.scheme == null && uri.rawAuthority == null && uri.rawFragment == null)
+        require(uri.rawPath in listOf("master.m3u8", "index.m3u8", "video.m3u8").map { "/api/v1/hls/$session/$it" })
+        require((uri.rawQuery?.length ?: 0) <= 256)
+        closedMetadataQuery(uri).forEach { (key, text) ->
+            require(when (key) {
+                "native" -> text in setOf("0", "1")
+                "subtitle" -> text == "-1" || (Regex("[0-9]+").matches(text) && text.toLongOrNull()?.let { it <= 4095 } == true)
+                "diagnostic" -> text in setOf("video-only", "video-only-codecs", "video-only-range", "video-only-hdr")
+                else -> false
+            })
+        }
+    }
+    private fun closedMetadataQuery(uri: URI): Map<String, String> {
+        val raw = uri.rawQuery ?: return emptyMap()
+        require(raw.isNotEmpty())
+        val entries = raw.split('&').map {
+            val parts = it.split('='); require(parts.size == 2 && parts[0].isNotEmpty() && parts[1].isNotEmpty())
+            parts[0] to parts[1]
+        }
+        require(entries.map { it.first }.toSet().size == entries.size)
+        return entries.toMap()
+    }
     companion object {
         private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.toString()).replace("+", "%20")
         private fun validateQuery(resource: String, query: Map<String, String>) {
