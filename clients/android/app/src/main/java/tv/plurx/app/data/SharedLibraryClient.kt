@@ -68,7 +68,8 @@ internal class SharedLibraryClient private constructor(private val auth: Session
         val query = mutableMapOf("q" to q, "limit" to "60"); if (cursor != null) query["cursor"] = cursor
         val wire = request(path, query)
         wire.getValue("items").jsonArray.forEach { strictItem(it.jsonObject) }
-        return json.decodeFromJsonElement<SharedLibraryPage>(wire).also { it.validate(library) }
+        val page = json.decodeFromJsonElement<SharedLibraryPage>(wire).also { it.validate(library) }
+        requireCurrent(); return page.copy(items = page.items.map { it.copy(artworkSubject = artworkSubject(it)) })
     }
     suspend fun detail(reference: SharedPlaybackReference): SharedLibraryDetail {
         reference.validate()
@@ -80,7 +81,11 @@ internal class SharedLibraryClient private constructor(private val auth: Session
             val binding = file.getValue("reference").jsonObject
             binding.string("file_id"); binding.string("revision"); strictReference(binding.getValue("item").jsonObject)
         }
-        return json.decodeFromJsonElement<SharedLibraryDetail>(wire).also { it.validate(reference) }
+        val detail = json.decodeFromJsonElement<SharedLibraryDetail>(wire).also { it.validate(reference) }
+        requireCurrent(); return detail.copy(item = detail.item.copy(artworkSubject = artworkSubject(detail.item)))
+    }
+    private fun artworkSubject(item: SharedLibraryItem): SharedArtworkSubject {
+        requireCurrent(); return CapturedSharedArtwork(auth, transport, item)
     }
     suspend fun settings(): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings")).enabled
     suspend fun save(enabled: Boolean): Boolean = json.decodeFromJsonElement<SharingSetting>(request("sharing/settings", enabled = enabled)).enabled.also { require(it == enabled) }
@@ -106,4 +111,54 @@ internal class SharedLibraryClient private constructor(private val auth: Session
             item["parent"]?.takeUnless { it == JsonNull }?.let { strictReference(it.jsonObject) }
         }
     }
+}
+
+/** Closed subject implementations live in this authenticated client file. */
+internal sealed interface SharedArtworkSubject {
+    val reference: SharedPlaybackReference
+    val key: String
+    val generation: Long
+    fun requireCurrent()
+    fun descriptor(backdrop: Boolean): SharedArtworkDescriptor?
+    suspend fun read(descriptor: SharedArtworkDescriptor): SharedArtworkPayload
+}
+internal sealed interface SharedArtworkReadPlan {
+    val request: Request
+    val transport: OkHttpClient
+    val generation: Long
+    fun requireCurrent()
+}
+private class CapturedSharedArtwork(private val auth: Session.PlaybackAuthorization, private val transport: OkHttpClient,
+    item: SharedLibraryItem) : SharedArtworkSubject {
+    private val descriptors = item.art.orEmpty().toList()
+    private val poster = item.poster_url
+    private val backdropUrl = item.backdrop_url
+    override val reference = item.reference.copy()
+    override val generation = auth.generation
+    override val key = listOf(auth.origin, auth.generation.toString(), reference.import_id, reference.server_id,
+        reference.catalogue_epoch, reference.library_id, reference.item_id).joinToString("|")
+    override fun requireCurrent() { require(Session.playbackAuthorization() == auth && !auth.token.isNullOrEmpty()) }
+    override fun descriptor(backdrop: Boolean): SharedArtworkDescriptor? {
+        requireCurrent(); val path = if (backdrop) backdropUrl else poster
+        return descriptors.firstOrNull { it.url == path && it.kind == (if (backdrop) "backdrop" else "poster") && it.variant == (if (backdrop) "w780" else "w300") }
+    }
+    override suspend fun read(descriptor: SharedArtworkDescriptor): SharedArtworkPayload {
+        requireCurrent(); descriptor.validate(reference); require(descriptor in descriptors)
+        val url = auth.origin.toHttpUrl().newBuilder().encodedPath(descriptor.url).build()
+        val request = Request.Builder().url(url).header("Authorization", "Bearer ${auth.token}").build()
+        val current = this
+        val closedTransport = transport.newBuilder().followRedirects(false).followSslRedirects(false).cache(null)
+            .cookieJar(okhttp3.CookieJar.NO_COOKIES).authenticator(okhttp3.Authenticator.NONE).build()
+        return SharedArtworkPayload.fetch(CapturedSharedArtworkPlan(request, closedTransport, generation) { current.requireCurrent() })
+    }
+}
+private class CapturedSharedArtworkPlan(override val request: Request, override val transport: OkHttpClient,
+    override val generation: Long, private val current: () -> Unit) : SharedArtworkReadPlan {
+    override fun requireCurrent() = current()
+}
+
+/** Sealed interfaces alone permit package-local implementations. The actual
+ * transport boundary accepts only the private authenticated factory product. */
+internal fun requireAuthenticatedSharedArtworkPlan(plan: SharedArtworkReadPlan) {
+    require(plan is CapturedSharedArtworkPlan); plan.requireCurrent()
 }

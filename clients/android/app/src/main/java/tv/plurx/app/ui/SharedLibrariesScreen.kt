@@ -118,7 +118,10 @@ private fun SharedLibraryItems(route: SharedBrowseRoute.Library, onItem: (Shared
         item { Text(route.title, style = MaterialTheme.typography.headlineMedium); Text("Source · ${route.row.sourceName}") }
         item { OutlinedTextField(value = q, onValueChange = { q = it }, label = { Text("Find a title") }) }
         error?.let { item { Text(it) } }
-        items(browse.items, key = { it.id }) { item -> Button(onClick = { onItem(item.reference) }) { Text("${item.title} · ${item.kind} · ${route.row.sourceName}") } }
+        items(browse.items, key = { it.id }) { item -> Button(onClick = { onItem(item.reference) }) {
+            SharedArtworkImage(item.artworkSubject, modifier = Modifier.size(width = 72.dp, height = 108.dp))
+            Text("${item.title} · ${item.kind} · ${route.row.sourceName}")
+        } }
         if (loading) item { CircularProgressIndicator() }
         if (!loading && error == null && browse.items.isEmpty()) item { Text("No matching titles in this Shared library.") }
         if (browse.nextCursor != null) item { Button(enabled = !loading, onClick = { scope.launch { load(false) } }) { Text("Load more") } }
@@ -144,6 +147,7 @@ private fun SharedLibraryDetails(route: SharedBrowseRoute.Detail, onChildren: (S
         if (loading) item { CircularProgressIndicator() }
         error?.let { item { Text(it) } }
         detail?.let { value ->
+            if (value.item.backdrop_url != null) item { SharedArtworkImage(value.item.artworkSubject, backdrop = true, modifier = Modifier.fillMaxWidth().height(240.dp)) }
             item { Text(value.item.title, style = MaterialTheme.typography.headlineMedium); Text(listOfNotNull(value.item.kind, value.item.year?.toString()).joinToString(" · ")) }
             value.item.overview?.let { item { Text(it) } }
             if (value.item.genres.isNotEmpty()) item { Text(value.item.genres.joinToString(" · ")) }
