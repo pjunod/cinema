@@ -63,6 +63,10 @@ class KnownRedContractTest(unittest.TestCase):
         self.assertEqual(fixture_ids, {
             "crates/plurxd/src/http/mod.rs::http::tests::sharing_pinned_transport_recovers_committed_claim_and_rotation_after_restart",
             "crates/plurxd/tests/sharing_daemon_restart.rs::sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_restart",
+            "crates/plurxd/src/http/sharing_start_decode.rs::http::sharing_start_decode::tests::sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_decision_http1_http2_revalidates_file_assignment_and_login",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_receiver_pinned_source_blocked_http1_http2_revalidate_current_scope",
+            "crates/plurxd/src/http/shared_library.rs::http::shared_library::tests::sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection",
         })
         self.assertEqual(len([item for item in ignored if item.identity not in fixture_ids]), 20)
         self.assertTrue(all(item.reason for item in ignored))

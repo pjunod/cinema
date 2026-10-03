@@ -30,7 +30,7 @@ struct CatalogStatus {
 
 /// Nonserializable decoded facts only; even a valid Source response cannot
 /// mint a Source observation, physical producer proof or B session binding.
-pub(super) struct DecodedSourceHlsStart(Envelope);
+pub(crate) struct DecodedSourceHlsStart(Envelope);
 impl DecodedSourceHlsStart {
     pub(super) fn parse(bytes: &[u8], expected: &SourcePlaybackTarget) -> Result<Self> {
         if bytes.is_empty() || bytes.len() > MAX_BYTES {
@@ -66,6 +66,58 @@ impl DecodedSourceHlsStart {
     pub(super) fn into_parts(self) -> (SourcePlaybackTarget, Uuid, StartResponse) {
         (self.0.reference, self.0.incarnation_id, self.0.response)
     }
+}
+
+/// Validate the transport wrapper without granting Source admission. The
+/// Source handler remains responsible for the complete ordinary session DTO.
+pub(crate) fn validate_source_start_request(
+    bytes: &[u8],
+    expected: &SourcePlaybackTarget,
+) -> Result<()> {
+    if bytes.is_empty() || bytes.len() > 128 * 1024 {
+        return Err(SharingResourceUnsupported);
+    }
+    let mut json = serde_json::Deserializer::from_slice(bytes);
+    let value = super::sharing_decision_decode::bounded_decision_value(&mut json)
+        .map_err(|_| SharingResourceUnsupported)?;
+    json.end().map_err(|_| SharingResourceUnsupported)?;
+    let wrapper = value.as_object().ok_or(SharingResourceUnsupported)?;
+    if wrapper.len() != 2
+        || wrapper.get("reference")
+            != Some(&serde_json::to_value(expected).map_err(|_| SharingResourceUnsupported)?)
+        || expected.server_id.is_nil()
+        || expected.catalogue_epoch.is_nil()
+        || serde_json::to_vec(&value).map_err(|_| SharingResourceUnsupported)? != bytes
+    {
+        return Err(SharingResourceUnsupported);
+    }
+    let session = wrapper
+        .get("session")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(SharingResourceUnsupported)?;
+    if serde_json::to_vec(session)
+        .map_err(|_| SharingResourceUnsupported)?
+        .len()
+        > 24 * 1024
+    {
+        return Err(SharingResourceUnsupported);
+    }
+    let text = session
+        .get("request_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or(SharingResourceUnsupported)?;
+    let id = Uuid::parse_str(text).map_err(|_| SharingResourceUnsupported)?;
+    if !v4(id) || id.to_string() != text {
+        return Err(SharingResourceUnsupported);
+    }
+    Ok(())
+}
+
+pub(crate) fn decode_source_start_response(
+    bytes: &[u8],
+    expected: &SourcePlaybackTarget,
+) -> Result<DecodedSourceHlsStart> {
+    DecodedSourceHlsStart::parse(bytes, expected)
 }
 
 fn v4(id: Uuid) -> bool {
@@ -337,5 +389,327 @@ mod tests {
         let mut v = good;
         v["response"]["plan_notes"] = json!(vec!["x"; 16385]);
         assert!(decode(&v, &expected).is_err());
+    }
+    #[test]
+    fn sharing_start_transport_request_closes_wrapper_reference_and_recipe_budget() {
+        let (expected, _) = fixture();
+        let good =
+            json!({"reference":expected,"session":{"request_id":Uuid::new_v4(),"caps":{"v":2}}});
+        let bytes = serde_json::to_vec(&good).expect("canonical wrapper");
+        assert!(validate_source_start_request(&bytes, &expected).is_ok());
+        for field in [
+            "server_id",
+            "catalogue_epoch",
+            "library_id",
+            "item_id",
+            "file_id",
+            "revision",
+        ] {
+            let mut bad = good.clone();
+            bad["reference"][field] = json!("1");
+            assert!(validate_source_start_request(
+                &serde_json::to_vec(&bad).expect("JSON"),
+                &expected
+            )
+            .is_err());
+        }
+        for bad in [
+            json!(null),
+            json!({}),
+            json!({"request_id":Uuid::nil()}),
+            json!({"request_id":Uuid::new_v4().to_string().to_uppercase()}),
+            json!({"request_id":Uuid::new_v4(),"padding":"x".repeat(24*1024)}),
+        ] {
+            let mut v = good.clone();
+            v["session"] = bad;
+            assert!(validate_source_start_request(
+                &serde_json::to_vec(&v).expect("JSON"),
+                &expected
+            )
+            .is_err());
+        }
+        let mut noncanonical = bytes.clone();
+        noncanonical.push(b' ');
+        assert!(validate_source_start_request(&noncanonical, &expected).is_err());
+        let duplicate = format!(
+            "{{\"reference\":{},\"session\":{},\"session\":{}}}",
+            good["reference"], good["session"], good["session"]
+        );
+        assert!(validate_source_start_request(duplicate.as_bytes(), &expected).is_err());
+        assert!(validate_source_start_request(&vec![b' '; 128 * 1024 + 1], &expected).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable CGNAT network and PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_start_transport_pinned_source_h1_and_receiver_h1_h2_preserve_raw_envelope() {
+        use axum::{
+            body::{Body, Bytes},
+            http::{Request, StatusCode},
+            routing::{get, post},
+            Router,
+        };
+        use http_body_util::BodyExt;
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            secrets::CredentialKey,
+            sharing::{Endpoint, SharingIdentity},
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+        };
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit CGNAT fixture")
+            .parse()
+            .expect("address");
+        assert!(plurx_core::sharing::is_tailnet_address(address));
+        for h2 in [false, true] {
+            let (expected, envelope) = fixture();
+            let credential = Arc::new(plurx_core::sharing::new_secret().expect("credential"));
+            let canonical = serde_json::to_string(&json!({"reference":expected,"session":{"request_id":Uuid::new_v4(),"caps":{"v":2}}})).expect("wrapper");
+            let case = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(AtomicUsize::new(0));
+            let source_dir = tempfile::tempdir().expect("TLS directory");
+            let tls = Arc::new(
+                LiveNodeTls::open(
+                    source_dir.path(),
+                    i64::try_from(
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("current clock")
+                            .as_secs(),
+                    )
+                    .expect("clock seconds"),
+                )
+                .expect("Source TLS"),
+            );
+            let (pin, _) = tls.status().expect("pin");
+            let source = tokio::net::TcpListener::bind((address, 0))
+                .await
+                .expect("Source listener");
+            let endpoint = Endpoint {
+                ipv4: match address {
+                    std::net::IpAddr::V4(ip) => ip,
+                    _ => panic!("IPv4 fixture"),
+                },
+                ipv6: None,
+                ts_fqdn: "source.fixture.ts.net".into(),
+                port: source.local_addr().expect("address").port(),
+                spki_sha256: pin,
+            };
+            let identity = SharingIdentity {
+                server_id: expected.server_id,
+                catalogue_epoch: expected.catalogue_epoch,
+                created_at_ms: 1,
+            };
+            let identity_body = json!({"server_id":identity.server_id,"catalogue_epoch":identity.catalogue_epoch,"name":"explicit transport fixture","protocol_min":1,"protocol_max":1}).to_string();
+            let source_router = Router::new().route("/sharing/v1/identity", get(move || {let body=identity_body.clone();async move {body}})).route("/sharing/v1/items/{item}/files/{file}/sessions", post({
+                let case=case.clone(); let requests=requests.clone();let envelope=envelope.clone();let credential=credential.clone();let canonical=canonical.clone();
+                move |request:Request<Body>| {let case=case.clone();let requests=requests.clone();let mut envelope=envelope.clone();let credential=credential.clone();let canonical=canonical.clone();async move {
+                    requests.fetch_add(1,Ordering::SeqCst);
+                    assert_eq!(request.uri().path(),"/sharing/v1/items/9007199254740993/files/9223372036854775807/sessions");
+                    assert_eq!(request.headers()["authorization"], format!("CinemaShare {}",credential.expose()));
+                    assert_eq!(request.headers()["cinemashare-viewer"], "a".repeat(64));
+                    assert_eq!(axum::body::to_bytes(request.into_body(),128*1024).await.expect("request"),canonical.as_bytes());
+                    let index=case.load(Ordering::SeqCst);
+                    if index==8 {tokio::time::sleep(std::time::Duration::from_millis(100)).await;}
+                    let status=match index {4=>StatusCode::TEMPORARY_REDIRECT,5=>StatusCode::UNAUTHORIZED,_=>StatusCode::OK};
+                    if index==1 {envelope["reference"]["revision"]=json!("b".repeat(64));}
+                    if index==2 {envelope["response"]["unexpected"]=json!(true);}
+                    let body=if index==3 {format!("{{\"reference\":{},\"incarnation_id\":{},\"response\":{},\"response\":{}}}",envelope["reference"],envelope["incarnation_id"],envelope["response"],envelope["response"])} else if index==6 {"x".repeat(4*1024*1024+1)} else if index==7 {"x".repeat(128*1024+1)} else {envelope.to_string()};
+                    let status=if index==7 {StatusCode::FORBIDDEN}else{status};
+                    axum::http::Response::builder().status(status).header("location","https://outside.invalid/credential-sink").body(Body::from(body)).expect("Source response")
+                }}
+            }));
+            let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+            let source_task = tokio::spawn(crate::serve_http(
+                SharingTlsListener::new(source, tls),
+                source_router,
+                async move {
+                    let _ = source_stopped.await;
+                },
+                crate::HTTP_TIMEOUTS,
+            ));
+            let manager_dir = tempfile::tempdir().expect("manager directory");
+            let manager = Arc::new(crate::sharing::SharingManager::new(
+                Arc::new(CredentialKey::generate()),
+                manager_dir.path().join("unused"),
+                SharingNetworkConfig {
+                    bind: "127.0.0.1:32444".parse().expect("bind"),
+                    egress: SharingEgressConfig::LocalAddress { address },
+                },
+            ));
+            let receiver = tokio::net::TcpListener::bind((address, 0))
+                .await
+                .expect("B listener");
+            let receiver_address = receiver.local_addr().expect("B address");
+            let direct_manager = manager.clone();
+            let direct_endpoint = endpoint.clone();
+            let direct_identity = identity.clone();
+            let direct_canonical = canonical.clone();
+            let receiver_router = Router::new().route(
+                "/fixture-start",
+                post({
+                    let expected = expected.clone();
+                    let envelope = envelope.clone();
+                    let credential = credential.clone();
+                    move || {
+                        let expected = expected.clone();
+                        let envelope = envelope.clone();
+                        let credential = credential.clone();
+                        let manager = manager.clone();
+                        let endpoint = endpoint.clone();
+                        let identity = identity.clone();
+                        let canonical = canonical.clone();
+                        async move {
+                            let (mut peer, _) = crate::sharing_client::PeerConnection::verified(
+                                &manager,
+                                &[endpoint],
+                                &identity,
+                            )
+                            .await
+                            .expect("actual pinned identity");
+                            match peer
+                                .file_start(&credential, &expected, &"a".repeat(64), &canonical)
+                                .await
+                            {
+                                Ok(decoded) => {
+                                    assert!(decoded.reference() == &expected);
+                                    assert_eq!(
+                                        serde_json::to_value(decoded.response())
+                                            .expect("complete response"),
+                                        envelope["response"]
+                                    );
+                                    StatusCode::OK
+                                }
+                                Err(_) => StatusCode::BAD_GATEWAY,
+                            }
+                        }
+                    }
+                }),
+            );
+            let (receiver_stop, receiver_stopped) = tokio::sync::oneshot::channel();
+            let receiver_task = tokio::spawn(crate::serve_http(
+                receiver,
+                receiver_router,
+                async move {
+                    let _ = receiver_stopped.await;
+                },
+                crate::HTTP_TIMEOUTS,
+            ));
+            for index in 0..8 {
+                case.store(index, Ordering::SeqCst);
+                let socket = tokio::net::TcpStream::connect(receiver_address)
+                    .await
+                    .expect("B socket");
+                let request = Request::builder()
+                    .method("POST")
+                    .uri("/fixture-start")
+                    .header("host", "receiver.fixture")
+                    .body(Body::empty())
+                    .expect("B request");
+                let (status, body): (StatusCode, Bytes) = if h2 {
+                    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(
+                        hyper_util::rt::TokioExecutor::new(),
+                    )
+                    .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                    .await
+                    .expect("B H2");
+                    let driver = tokio::spawn(driver);
+                    let response = sender.send_request(request).await.expect("response");
+                    let status = response.status();
+                    let bytes = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("body")
+                        .to_bytes();
+                    drop(sender);
+                    driver.abort();
+                    let _ = driver.await;
+                    (status, bytes)
+                } else {
+                    let (mut sender, driver) = hyper::client::conn::http1::handshake::<_, Body>(
+                        hyper_util::rt::TokioIo::new(socket),
+                    )
+                    .await
+                    .expect("B H1");
+                    let driver = tokio::spawn(driver);
+                    let response = sender.send_request(request).await.expect("response");
+                    let status = response.status();
+                    let bytes = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .expect("body")
+                        .to_bytes();
+                    drop(sender);
+                    driver.abort();
+                    let _ = driver.await;
+                    (status, bytes)
+                };
+                assert_eq!(
+                    status,
+                    if index == 0 {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::BAD_GATEWAY
+                    },
+                    "H2={h2} case={index}"
+                );
+                assert!(body.is_empty());
+                assert_eq!(
+                    requests.load(Ordering::SeqCst),
+                    index + 1,
+                    "single Source request; no redirects/retry"
+                );
+            }
+            let (mut peer, _) = crate::sharing_client::PeerConnection::verified(
+                &direct_manager,
+                &[direct_endpoint],
+                &direct_identity,
+            )
+            .await
+            .expect("direct pinned client");
+            for viewer in [String::new(), "A".repeat(64), "g".repeat(64)] {
+                assert!(peer
+                    .file_start(&credential, &expected, &viewer, &direct_canonical)
+                    .await
+                    .is_err());
+            }
+            assert!(peer
+                .file_start(&credential, &expected, &"a".repeat(64), "{}")
+                .await
+                .is_err());
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                8,
+                "invalid local requests send nothing"
+            );
+            case.store(8, Ordering::SeqCst);
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_millis(50),
+                    peer.file_start(&credential, &expected, &"a".repeat(64), &direct_canonical)
+                )
+                .await
+                .is_err(),
+                "caller can cancel a blocked Source reply"
+            );
+            drop(peer);
+            assert_eq!(
+                requests.load(Ordering::SeqCst),
+                9,
+                "cancellation never retries; no Source rollback claim"
+            );
+            source_stop.send(()).expect("Source stop");
+            receiver_stop.send(()).expect("B stop");
+            source_task
+                .await
+                .expect("Source task")
+                .expect("Source server");
+            receiver_task.await.expect("B task").expect("B server");
+        }
     }
 }
