@@ -876,3 +876,50 @@ cargo test --locked -p plurxd --bin plurxd encoded_vod_ntsc_gets_decode_after_fo
 cargo check --locked -p plurxd --all-targets
 cargo clippy --locked -p plurxd --all-targets -- -D warnings
 ```
+
+## Source actor identity and production store boundary
+
+The actual worker association retains the complete immutable binding: grant and
+viewer principal, incarnation, request and fingerprint, playback, Source server
+and catalogue epoch, library, item, file and revision. Read-only comparison
+checks all those values, independently of the mutable release marker. Dispatch
+comparison additionally checks the assigned node and dispatch generation. A
+new current membership observation may refresh permission without changing
+that immutable lineage. Neither equality nor these read-only accessors mint
+write, physical admission, readiness or retirement authority.
+
+`SharingSourceSessionStore` is part of the full Store boundary, allowing the
+server-held storage object to invoke the actual current intent, assignment and
+activation factories. The concrete backend implementations remain the same.
+This does not enable ordinary Shared queue admission.
+
+Ordinary production daemon startup uses `select_daemon_store` and takes its
+actual `membership_manager`. The one-server production topology is one real
+Hiqlite voter with its actual local identity and current committed roster.
+`cluster::open_store` is the legacy/recovery SQLite path; interrupted activation
+recovery returns `SelectedBackend::SqliteRecovery` with
+`MembershipManager::unavailable()`. That path cannot provide Source admission
+and must report the exact readiness prerequisite: an activated replicated
+store with the current principal/catalogue member floor. The saved Sharing
+switch remains the user's choice. The memory and pooled SQLite candidate
+contracts qualify backend atomic behavior using explicit closed test fixtures;
+they do not prove a production SQLite membership authority or justify a fake
+single-member roster.
+
+The additive identity/bound checkpoint is based on merged Root
+`719fde0bd87828322219fc35e55f26126c35ccba`, incorporated as
+`8c514e1838d0059d0d8f725d1c445a259943afe3`. The identity regression passed
+with one test and zero ignored tests; it changes each association dimension
+independently and also distinguishes dispatch node and generation. This is a
+pure identity contract, not a Source actor or database admission receipt.
+Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 3 seconds,
+daemon Clippy with denied warnings in 1 minute 21 seconds, and feature Core
+all-target Clippy in 40.27 seconds. Documentation index tests and catalogue
+lint passed. The exact commands were:
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib source_association_identity_never_collapses_grant_viewer_request_or_file -- --nocapture
+cargo check --locked -p plurxd --all-targets
+cargo clippy --locked -p plurxd --all-targets -- -D warnings
+cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
+```
