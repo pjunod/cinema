@@ -17,7 +17,7 @@ class BufferSurface {
  emit(type){if(type==='updateend')this.updating=false;
   for(const row of this.listeners.filter(row=>row.type===type).sort((a,b)=>Number(b.capture)-Number(a.capture)))row.handler();}
 }
-function fixture({holdScheduled=false,sharedAudio=false}={}){
+function fixture({holdScheduled=false,sharedAudio=false,startLevel=undefined}={}){
  const firstInit=init(),secondInit=init(1,{width:1920,height:1080});
  const firstMedia=media({start:0}),secondMedia=media({start:0,payload:Buffer.from([8,7,6,5,4,3,2,1])});
  const primary={candidate_id:'1'.repeat(32),rendition_id:'a'.repeat(64),init_id:digest(firstInit),width:1280,height:720,
@@ -100,8 +100,8 @@ function fixture({holdScheduled=false,sharedAudio=false}={}){
    receipt,ledger:copy(ledger)};
  };
  const adapter=context.continuousQualityAdapter(player,video,{current:()=>true},bootstrap,exchange);player.continuousQuality=adapter;
- const hls={levels:family.video.map(row=>({url:['http://localhost'+prefix+row.playlist]})),loadLevel:-1,
-  on(event,callback){events[event]=callback;},startLoad(){},emit(event,data){events[event]?.(event,data);}};
+ const hls={levels:family.video.map(row=>({url:['http://localhost'+prefix+row.playlist]})),loadLevel:-1,startLevel,
+  on(event,callback){events[event]=callback;},startLoad(){this.startedLevel=this.startLevel??this.loadLevel;},emit(event,data){events[event]?.(event,data);}};
  adapter.bind(hls,0);hls.emit('manifest');hls.emit('buffers',{tracks:{video:{buffer:surface}}});
  class BaseLoader {
   constructor(){this.stats={};}
@@ -272,4 +272,22 @@ test('completed network awaiting authorization still aborts the hls fragment sta
  assert.equal(await choosing,'continuous');await pause();await pause();
  assert.equal(streamState,'idle');assert.equal(exposed,false);
  assert.equal(f.player.continuousQualityObservation,undefined);
+});
+
+test('continuous startup overrides a seeded start level with its reserved primary',()=>{
+ // hls.js keeps an already seeded startLevel when loadLevel changes.
+ const f=fixture({startLevel:1});
+ assert.equal(f.hls.startLevel,0);
+ assert.equal(f.hls.startedLevel,0);
+ assert.equal(f.hls.loadLevel,0);
+});
+test('future loader resumes its retained quality rather than a stale startup level',async()=>{
+ const f=fixture();
+ assert.equal(await f.adapter.choose(f.target.candidate_id),'continuous');
+ f.hls.startLoad();
+ assert.equal(f.hls.startLevel,1);
+ assert.equal(f.hls.startedLevel,1);
+ assert.equal(f.hls.loadLevel,1);
+ assert.equal(f.player.continuousQuality,f.adapter);
+ assert.deepEqual(f.surface.removes,[]);
 });

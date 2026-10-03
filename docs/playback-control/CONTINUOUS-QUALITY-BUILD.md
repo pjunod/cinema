@@ -4408,3 +4408,30 @@ window. A blocked launch receipt and bounded logs were preserved; its own
 daemon, forward, LAN proxy and runtime were removed. No native playback is
 claimed. The installed separate lab app remains for the requested device
 qualification; production app settings and credentials were untouched.
+
+
+### 10.148 Pin the retained HLS choice across startup and network resume
+
+The `b4a2db82d` manual-720 steady control failed before its first frame:
+`Unreserved superseded video load`, with one created session and no media
+buffers. No steady-playback result is claimed. End retired both owned producers
+by one second, and the receipt and cleanup status are retained.
+
+The vendored hls.js `loadLevel` setter updates its manual level but leaves an
+already seeded `startLevel` intact. `startLoad` can consequently select that
+stale seed at initial startup or network-only resume. The continuous adapter
+now explicitly sets both `startLevel` and `loadLevel` to its reserved primary
+before initial loading, and updates both when a retained quality request
+changes the target. This preserves the existing owner, future-load boundary
+and media attachment; it does not relax an unreserved-load refusal or replace
+the source. The failed control's root cause is not declared resolved until
+the exact-source runtime rerun completes. The independent backward-step
+failure remains open.
+
+Authored, unrun regressions in `tests/web/continuous-adapter.test.js`:
+
+- `continuous startup overrides a seeded start level with its reserved primary`
+- `future loader resumes its retained quality rather than a stale startup level`
+
+JavaScript syntax checks pass; no units executed. Final adversarial review
+and the human-requested Fable stop remain ahead.

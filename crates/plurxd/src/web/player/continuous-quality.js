@@ -526,7 +526,10 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         if(!current())return;
         const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+wanted.playlist));
         if(level<0){note(new Error('Continuous primary level missing'));return;}
-        hls.loadLevel=level;hls.startLoad(startAt>0?startAt:-1);
+        // loadLevel updates the manual level but preserves a previously
+        // seeded startLevel. Every startLoad must begin at the reserved
+        // primary, including a lower rung than the initial bandwidth seed.
+        hls.startLevel=level;hls.loadLevel=level;hls.startLoad(startAt>0?startAt:-1);
       });
       hls.on(Hls.Events.BUFFER_CREATED,(event,data)=>{
         if(!current())return;
@@ -582,7 +585,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         }
         // Readiness succeeds before retiring optional old loaders. Payloads
         // already delivered keep their own append and disposal ownership.
-        wanted=next;hls.loadLevel=level;
+        // Network-only resume and pending-quality seek call startLoad again.
+        // They retain this choice rather than the original startup seed.
+        wanted=next;hls.startLevel=level;hls.loadLevel=level;
         for(const loader of loaders){let found;try{found=resource(loader.context?.url||'');}catch(e){}
           if(found?.type==='video'&&found.row.rendition_id===previous.rendition_id)loader.abort();}
         if(old)try{
