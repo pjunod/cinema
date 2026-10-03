@@ -121,3 +121,56 @@ test('rate refusal waits for admission before retrying the identical reservation
  assert.deepEqual(events,['send',1000,'send']);assert.deepEqual(requests[0],requests[1]);
  assert.equal(client.pending,null);assert.equal(client.ledger.accepted_sequence,1);
 });
+
+
+test('attached quality preparation follows a newer cold seek without reviving a fenced ask',async()=>{
+ for(const firstReady of [false,true])for(const fenced of [false,true]){
+  let release,began,identity=20;const held=new Promise(resolve=>release=resolve);
+  const started=new Promise(resolve=>began=resolve),calls=[],transactions=[];
+  const row=(height,id)=>({candidate_id:id.repeat(32),rendition_id:id.repeat(64),
+   init_id:'e'.repeat(64),codec:'avc1.640032',width:height===720?1280:1920,height,
+   timescale:24,frame_ticks:1,segment_ticks:48,peak_bps:1000000,
+   playlist:`video/${id.repeat(64)}/index.m3u8`});
+  const videoRows=[row(720,'b'),row(1080,'c')];
+  const family={version:1,mode:'controlled',family_id:'a'.repeat(64),master:'master.m3u8',video:videoRows,audio:null};
+  const mock={get ledger(){return {transactions};},async transition(id,operation,frontier){
+   calls.push({id,operation:clone(operation),frontier:clone(frontier||null)});
+   if(operation.kind==='prepare'){
+    const count=calls.filter(call=>call.operation.kind==='prepare').length;
+    if(count===1){began();await held;}
+    const ready=count>1||firstReady;
+    transactions.push({transaction_id:id,state:ready?'ready':'retained_current',
+     ready:ready?[{from_tick:frontier.through_tick,through_tick:frontier.through_tick+48}]:[],
+     reserved:[],cancel_requested:false,intent_superseded:false});
+   }else if(operation.kind==='cancel_unappended'){
+    transactions.find(tx=>tx.transaction_id===id).cancel_requested=true;
+   }
+   return {ledger:{transactions}};
+  }};
+  const scope=vm.createContext({AbortController,TextDecoder,setTimeout,clearTimeout,URL,
+   location:{href:'http://localhost/'},CONTROL_CLIENT_ID:uuid(2),newRequestId:()=>uuid(9),
+   crypto:{randomUUID:()=>uuid(identity++)},mock,
+   Hls:{Events:{MANIFEST_PARSED:'manifest',BUFFER_CREATED:'buffers',MEDIA_DETACHED:'detach'}}});
+  vm.runInContext(fs.readFileSync('crates/plurxd/src/web/player/continuous-quality.js','utf8'),scope);
+  vm.runInContext('continuousQualityProtocol=()=>mock;',scope);
+  const player={},attachment={current:()=>true},media={};
+  const adapter=scope.continuousQualityAdapter(player,media,attachment,
+   {...bootstrap,family,primary_candidate_id:videoRows[0].candidate_id});
+  player.continuousQuality=adapter;
+  const hls={levels:videoRows.map(row=>({url:['http://localhost/api/v1/hls/session/'+row.playlist]})),on(){},loadLevel:0};
+  adapter.bind(hls,0);
+  const choice=adapter.choose(videoRows[1].candidate_id,()=>!fenced);
+  await started;assert.equal(adapter.noteSeek(900),true);release();
+  assert.equal(await choice,fenced?(firstReady?'superseded':'retained_current'):'continuous');
+  const prepares=calls.filter(call=>call.operation.kind==='prepare');
+  assert.deepEqual(prepares.map(call=>call.frontier.through_tick),[0,21600]);
+  assert.equal(adapter.wanted.rendition_id,videoRows[fenced?0:1].rendition_id);
+  assert.equal(hls.loadLevel,fenced?0:1);
+  assert.deepEqual(prepares.map(call=>call.operation.target_rendition_id),
+   [videoRows[1].rendition_id,videoRows[fenced?0:1].rendition_id]);
+  assert.equal(calls.filter(call=>call.operation.kind==='cancel_unappended').length,firstReady?1:0);
+  assert.equal(adapter.noteSeek(30),true);assert.equal(adapter.frontier,720,'backward seek ignores the disjoint old frontier');
+  assert.equal(adapter.noteSeek(NaN),false);assert.equal(adapter.frontier,720);
+  player.continuousQuality={};assert.equal(adapter.noteSeek(100),false,'replaced attachment cannot mutate this owner');
+ }
+});

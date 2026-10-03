@@ -3975,3 +3975,48 @@ changes no startup deadline, activation rule or media qualification threshold.
 No unit tests executed.
 
 Pinned workspace/all-target compilation of these diagnostics passed in 29.00s.
+
+
+### 10.133 Rapid/pause now reaches presentation; cold seek needs a new frontier
+
+Diagnostic source `79e099f1c` built on Linux in 3m55s. Its explicitly warmed
+probe retained a failed startup precondition (516.5 ms callback gap) while
+continuing transport measurements from a healthy attached player. Rapid
+720p/1080p/720p choices across pause/resume reached a fresh 720p Presented
+receipt at film time 13.345 s without changing session or player. Pause
+parked the clock exactly at 2.771 s. No reserved-artifact regeneration refusal
+occurred. This is a passed transport stage inside a failed complete case, not
+current-source continuity qualification.
+
+The subsequent 1080p request and cold seek to 900 s retained 720p. At the
+forty-second deadline the original session was playing at 924.307 s, with
+`Continuous target retained current`. Preparation still used the pre-seek
+future frontier, and the global transport generation fenced the manual ask.
+The owned End census again verified the same live daemon and zero FFmpeg
+children at immediate, one-, three- and five-second observations. Physical
+queue, display and audio retirement remain unqualified.
+
+New phase timings attribute most startup work to decoder planning: catalog
+2,679 ms plus execution 1,583 ms for primary video; shared audio execution
+1,479 ms; companion catalog 1,577 ms plus execution 1,509 ms. Held-source
+probes took 71/132/93 ms, source fences 0/2/0 ms, and encoded engine captures
+0–1 ms. Decoder lookups rehash the held probe, snapshot and current path;
+the diagnostic build is unoptimized. No verification fence was weakened.
+
+An attached local VOD seek now carries only the same pending manual quality
+owner. The adapter records the latest destination and its contiguous exposed
+video frontier, retaining every old byte obligation. If a newer seek arrives
+while preparation is pending, that obsolete destination cannot choose the
+rung: a ready old ask is cancelled before preparing the newest frontier, and
+a refused old ask may retry only because that seek advanced. An unchanged
+destination never grants another retry. Forced reopen, changed attachment
+and automatic trials retain their intent fences.
+
+Authored production-adapter regression
+`attached quality preparation follows a newer cold seek without reviving a fenced ask`
+covers both old Ready and retained-current replies, exact 900 s frontiers,
+backward seeks, invalid input and caller fences. The paired transport test
+`local seek preserves only its attached continuous manual request` exercises
+the actual seek-intent and supersession functions. JavaScript and test-source
+syntax checks passed; no unit tests executed. Runtime qualification remains
+open, alongside the measured initial callback gap.

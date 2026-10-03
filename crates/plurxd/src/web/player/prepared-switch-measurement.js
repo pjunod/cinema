@@ -673,8 +673,8 @@ function supersedePlaybackControlIntent(p,{preserveHlsStartup=false,preserveCont
   if(!p) return 0;
   const previous=p.controlIntentGeneration||0;
   p.controlIntentGeneration=previous+1;
-  // Pause/resume changes transport intent without replacing the attached
-  // quality recipe. Carry only the immediately preceding manual request
+  // Pause/resume or an attached VOD seek changes transport intent while
+  // retaining the quality recipe. Carry only the immediately preceding manual request
   // owned by this exact continuous adapter and media attachment.
   const quality=p.directedChange;
   if(preserveContinuousManualQuality&&quality&&!quality.settled

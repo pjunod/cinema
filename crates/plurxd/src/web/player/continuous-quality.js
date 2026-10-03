@@ -253,7 +253,7 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
   const readers=new Map(),records=new Map(),buffers=new Set(),loaders=new Set();
   let hls=null,closed=false,mediaDetached=false,transaction=null,revision=0,frontier=0,frameToken=null;
   const pendingAppends=new Map(),pendingDisposals=new Set();
-  let disposalTimer=null;
+  let disposalTimer=null,seekRevision=0;
   let work=Promise.resolve(),queued=0;
   const current=()=>!closed&&attachment.current()&&player.continuousQuality===adapter;
   let wanted=family.video.find(row=>row.candidate_id===bootstrap.primary_candidate_id);
@@ -538,6 +538,21 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       });
       frames();
     },
+    noteSeek(seconds){
+      if(!current()||!Number.isFinite(seconds)||seconds<0)return false;
+      // A seek changes the future-load interval, not ownership of old bytes.
+      // Protect the contiguous exposed video at this destination; a disjoint
+      // old forward range must not drag a backward seek's choice to its tail.
+      let through=Math.floor(seconds*wanted.timescale/wanted.segment_ticks)*wanted.segment_ticks;
+      if(!continuousQualityInteger(through))return false;
+      for(;;){
+        const next=Array.from(records.values()).find(row=>row.type==='video'
+          &&(row.exposed||row.appended)&&!row.removed&&!row.disposed
+          &&row.interval.from_tick<=through&&through<row.interval.through_tick);
+        if(!next)break;through=next.interval.through_tick;
+      }
+      frontier=through;seekRevision++;return true;
+    },
     choose(candidateId,live=()=>true){return serial(async()=>{
       if(!current())return 'superseded';
       const next=family.video.find(row=>row.candidate_id===candidateId);if(!next)return 'outside_family';
@@ -547,7 +562,18 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
         await flushAppends();await flushDisposals(true);
         const level=hls.levels.findIndex(level=>level.url.some(url=>new URL(url,location.href).pathname===parentPath+next.playlist));
         if(level<0)throw new Error('Continuous target level missing');
-        await prepare(next,frontier);
+        for(;;){
+          const observedSeek=seekRevision;
+          try{await prepare(next,frontier);}
+          catch(error){
+            if(!current()||!live()||observedSeek===seekRevision)throw error;
+            // The old destination may have lost preparation demand while
+            // this exchange was pending. Only a newer seek permits retry.
+            continue;
+          }
+          if(!current()||!live()||observedSeek===seekRevision)break;
+          await protocol.transition(transaction,{kind:'cancel_unappended',completed:[]});
+        }
         if(!current())return 'superseded';
         if(!live()){
           await protocol.transition(transaction,{kind:'cancel_unappended',completed:[]});

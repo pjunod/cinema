@@ -209,10 +209,11 @@ function watchPlaybackSeekTelemetry(p,pending,v){
   v.addEventListener("seeked",onSeeked);
   v.addEventListener("timeupdate",onTimeupdate);
 }
-function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null){
+function beginPlaybackControlSeek(p,targetSec,supersedeIntent=true,seekTelemetry=null,
+  {preserveContinuousManualQuality=false}={}){
   if(!p) return null;
   const intentGeneration=supersedeIntent
-    ? supersedePlaybackControlIntent(p) : (p.controlIntentGeneration||0);
+    ? supersedePlaybackControlIntent(p,{preserveContinuousManualQuality}) : (p.controlIntentGeneration||0);
   const sequence=(p.controlSeekSequence||0)+1;
   // The destination this replaces is superseded, which is the one thing that
   // retires a fault about a pending destination (contract §3.4).
@@ -1095,7 +1096,9 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   const seekTelemetry=forceReopen&&prior?.targetMs===Math.round(targetSec*1000)
     &&!prior.seekTelemetry?.outcome ? prior.seekTelemetry
     : viewerInitiated&&!forceReopen ? {startedAt:null,outcome:null,context:null,cleanup:null} : null;
-  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry);
+  const seekIntent=beginPlaybackControlSeek(PLAYER,targetSec,viewerInitiated,seekTelemetry,
+    {preserveContinuousManualQuality:!forceReopen&&!!PLAYER.vod
+      &&!!PLAYER.continuousQuality&&!PLAYER.pendingMediaChange});
   endWait(false);
   if(restartPendingPlaybackOpen(PLAYER,forceReopen?"stall-restart":"seek")){
     recordPlaybackSeekRoute(PLAYER,seekIntent,v,{route:"reopen"},null,null,null,"pending_open");
@@ -1183,6 +1186,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       seekIntent.localVodSeekCleanup=cleanup;
     }
     dispatchPlaybackSeekTelemetry(me,seekIntent);
+    me.continuousQuality?.noteSeek?.(targetSec);
     try{ v.currentTime=Math.max(0,atMs/1000-(me.offset||0)); }catch(e){}
     markPlaybackControlSeekExecuted(me,targetSec);
     clientLog({level:'info',event:'seek_local',

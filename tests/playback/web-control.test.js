@@ -7309,7 +7309,7 @@ test("pause and resume preserve only the attached manual continuous quality inte
   assert.equal(p.controlIntentGeneration,6);
   assert.equal(live(),true,"resume retains that same ask");
   harness(p);
-  assert.equal(live(),false,"seek and other superseding commands still fence the ask");
+  assert.equal(live(),false,"commands without an explicit carry still fence the ask");
   for(const mutate of [
     p=>p.mediaAttachment={},p=>p.continuousQuality={},p=>p.sessionId="successor",
     p=>p.directedChange.intentGeneration=3,p=>p.directedChange.settled=true,
@@ -7328,4 +7328,27 @@ test("pause and resume preserve only the attached manual continuous quality inte
   assert.match(shippedSource("togglePlay"),/supersedePlaybackControlIntent\(PLAYER,\{preserveContinuousManualQuality:true\}\)/);
   assert.match(shippedSource("requestQualityChange"),/change\.continuousOwner=p\.continuousQuality/);
   assert.match(shippedSource("requestQualityChange"),/change\.continuousAttachment=p\.mediaAttachment/);
+});
+
+
+test("local seek preserves only its attached continuous manual request",()=>{
+  const begin=new Function([
+    "function clearPlaybackControlWaiters(){}function playbackSurfaceStep(){}function notifyPlaybackControl(){return false;}",
+    "function abandonPreparedReplacement(){}function settleDirectedChange(){}",
+    "const document={getElementById(){return null;}};",
+    shippedSource("supersedePlaybackControlIntent"),shippedSource("beginPlaybackControlSeek"),
+    "return beginPlaybackControlSeek;",
+  ].join("\n"))();
+  const owner={},attachment={};
+  const p={controlIntentGeneration:1,sessionId:"attached",continuousQuality:owner,mediaAttachment:attachment,
+    directedChange:{intentGeneration:1,reason:"manual",settled:false,incumbentSessionId:"attached",
+      continuousOwner:owner,continuousAttachment:attachment}};
+  begin(p,900,true,null,{preserveContinuousManualQuality:true});
+  assert.equal(p.directedChange.intentGeneration,p.controlIntentGeneration);
+  p.mediaAttachment={};
+  begin(p,100,true,null,{preserveContinuousManualQuality:true});
+  assert.notEqual(p.directedChange.intentGeneration,p.controlIntentGeneration,"replacement attachment fences the ask");
+  p.directedChange.intentGeneration=p.controlIntentGeneration;p.mediaAttachment=attachment;
+  begin(p,50);
+  assert.notEqual(p.directedChange.intentGeneration,p.controlIntentGeneration,"ordinary replacement paths retain their fence");
 });

@@ -5,17 +5,22 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> tracing the encoded preparation phases that
-precede rendition setup. Commit <code>4904742cb</code> passed pinned compilation,
-its normal hook and the exact-source Linux build, but its transport repair
-remains unqualified.</p>
-<p><strong>Latest runtime failures:</strong> the first current-source probe
-recorded a 500 ms gap immediately after its first frame; rapid choices were
-not reached. A separate probe failed before presentation: VOD creation took
-8,756 ms, then response publication lost its exact durable activation and
-returned 503. Neither receipt is green. The earlier reserved-artifact refusal
-and 516.6 ms sequential callback gap also remain unresolved qualification
-failures.</p>
+<p><strong>Working now:</strong> carrying the pending manual quality ask
+across an attached local seek and rebasing its bounded preparation to the
+latest destination. Production-adapter and transport regressions are authored
+and syntax checked; no unit tests have run.</p>
+<p><strong>Latest runtime result:</strong> source <code>79e099f1c</code>
+completed rapid 720p/1080p/720p choices across pause/resume in the same session,
+with the clock parked while paused. End left zero owned FFmpeg children
+through five seconds with the same live daemon verified. The complete case
+still failed its initial 516.5 ms callback gap and a pending-quality cold seek,
+which stayed at 720p. These are partial transport and process results, not
+physical continuity qualification.</p>
+<p><strong>Startup diagnosis:</strong> measured decoder planning consumed
+roughly nine seconds; held-source probes took 71–132 ms and encoded engine
+captures 0–1 ms. The diagnostic build is unoptimized. Earlier placement and
+activation-publication failures remain preserved; no verification or deadline
+was relaxed.</p>
 <p><strong>Established partial evidence:</strong> older source
 <code>6ad6c51c9</code> completed twenty manual Chrome switches in one session,
 with zero waits, reopens, stalls, hitches or dropped frames and a 66.8 ms maximum
@@ -41,7 +46,7 @@ before the next native experiment; ADB has no physical device. Android build
 <tr><td>CQ8 · Landing</td><td>Commits backed up on the independent Forgejo branch; main 15e36f7f4 integrated; pinned Rust workspace/all-target compilation passes.</td><td>Final evidence and adversarial review remain. Human requests a stop immediately after that review for external Fable reviews, before fast-lane tests or merge.</td></tr>
 </table>
 <h2>Current sequence</h2>
-<ol><li>Qualify the reserved-artifact traversal repair through rapid choices and pause/resume, then pending-quality cold seek; resolve the measured sequential frame gap.</li><li>Complete Chrome / Firefox continuity and cancellation, seek, pressure and producer-retirement measurements.</li><li>Complete native implementation and obtain actual device / display / audio evidence, recording API limitations explicitly.</li><li>Integrate current main and get the adversarial agent review. Stop afterward and hand over the changes, findings and unresolved issues for external Fable reviews.</li><li>After the human resumes work following external review, address findings, run each fast-lane test once with failed-only reruns, merge the batched PR, and clean up.</li></ol>
+<ol><li>Qualify the pending-quality cold-seek repair; resolve startup planning cost and the measured callback gap before the current-source browser matrix.</li><li>Complete Chrome / Firefox continuity and cancellation, seek, pressure and producer-retirement measurements.</li><li>Complete native implementation and obtain actual device / display / audio evidence, recording API limitations explicitly.</li><li>Integrate current main and get the adversarial agent review. Stop afterward and hand over the changes, findings and unresolved issues for external Fable reviews.</li><li>After the human resumes work following external review, address findings, run each fast-lane test once with failed-only reruns, merge the batched PR, and clean up.</li></ol>
 <h2>How to read the evidence</h2>
 <p>The early CQ0 experiment is mechanics evidence, not production qualification. It recorded twenty Chrome switches and decoded fixture / PCM results; Safari recorded 476 callbacks at 1080p but no presented 720p switch. Those results do not qualify the production adapter or physical audible and display continuity. Failed production receipts remain failed even when recovery playback resumes.</p>
 <p>Commands, source identities, limitations and the chronological evidence are in <a href="CONTINUOUS-QUALITY-BUILD.md">the build ledger</a>. Redacted machine receipts remain in the independent clone's ignored <code>target/playback-lab/reports/</code> until final evidence is selected. No work uses or modifies the user's checkout.</p>
