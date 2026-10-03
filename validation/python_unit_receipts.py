@@ -470,6 +470,89 @@ def recover_lost_pr742(api, scope, prior, jobs):
     return True, journal
 
 
+def inherited_failure_case():
+    """Two reviewed PR742 attempts; never a general incomplete waiver."""
+    path = Path(__file__).resolve().parent / 'python-unit-inherited-failure742.json'
+    require(path.is_file() and not path.is_symlink(), 'Inherited failure witness unavailable')
+    with path.open('rb') as source:
+        raw = source.read(MAX_BYTES + 1)
+    digest = hashlib.sha256(raw).hexdigest()
+    require(len(raw) <= MAX_BYTES and digest ==
+            'c94d6df515346d3ce24a99959b112ad5585f9294dfc966937f6c22b1ce351e55',
+            'Unknown or corrupt inherited failure witness')
+    return bounded_json(raw), digest
+
+
+def recover_inherited_pr742(api, scope, prior, jobs, marker=None, marker_raw=None,
+                           artifact=None, final_raw=None, journal=None):
+    """Preserve an unchanged inherited map, or prove an empty prepare refusal."""
+    if scope != {'repository': 1, 'pr': 742, 'branch': 'opus/client-evidence',
+                 'base': 'effort/architecture-review-2026-09-20'} or prior['id'] not in (3994, 4002):
+        return False
+    proof, digest = inherited_failure_case()
+    require(proof['version'] == 1 and proof['scope'] == scope
+            and (proof['inherited']['run'], proof['inherited']['job'], proof['inherited']['commit']) ==
+            (3994, 41507, 'b18c01904af3f33193be3ee15db88bac69c519c7')
+            and (proof['refusal']['run'], proof['refusal']['job'], proof['refusal']['commit']) ==
+            (4002, 41568, '4a087b75be2ad886f664c72596c36f8cc0311914'),
+            'Inherited failure exact-case identity mismatch')
+    authenticate_lost_journal(api, scope, digest)
+    zero = prior['id'] == 4002
+    case = proof['refusal'] if zero else proof['inherited']
+    lines = recovery_metadata(api, scope, prior, jobs, case, 'failure')
+    log = '\n'.join(lines)
+    require(not any(token in log for token in (
+        'discovered=', 'historical-passes=', 'pending=', 'Ran ', 'Unit discovery failed',
+        'fixture_errors', '... ok', '... FAIL', '... ERROR')),
+        'Inherited failure contradicts zero-unit phase evidence')
+    if zero:
+        require(all(value is None for value in (marker, marker_raw, artifact, final_raw, journal)),
+                'Prepare refusal unexpectedly has journal inputs')
+        refusal = ('Python receipt refusal: ReceiptError: Incomplete receipt attempt 3994; '
+                   'preserve artifact and recover individual evidence')
+        start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
+        final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
+        require(lines.count(refusal) == lines.count(start) == lines.count(final) == 1
+                and lines.index(refusal) < min(lines.index(start), lines.index(final)),
+                'Inherited prepare refusal phase evidence mismatch')
+        recovery_absence(api, scope, case['run'])
+        print('Recovered failed prepare run 4002/job 41568: zero units, no successes imported')
+        return True
+    require(all(value is not None for value in (marker, marker_raw, artifact, final_raw, journal)),
+            'Inherited failure requires both live start and final witnesses')
+    uploads = []
+    for label, item, raw, name in (
+            ('start', marker, marker_raw, key(scope) + '-start-3994'),
+            ('final', artifact, final_raw, key(scope))):
+        expected = case['artifacts'][label]
+        require(item['id'] == expected['id'] and item['run_id'] == case['run']
+                and item['name'] == name and not item['expired']
+                and item['size_in_bytes'] == len(raw) == expected['size'] <= MAX_BYTES
+                and hashlib.sha256(raw).hexdigest() == expected['sha256'],
+                'Inherited failure artifact mismatch')
+        upload = (f"Artifact {name} has been successfully uploaded! Final size is "
+                  f"{expected['size']} bytes. Artifact ID is {expected['id']}")
+        require(lines.count(upload) == 1, 'Inherited failure upload evidence mismatch')
+        uploads.append(lines.index(upload))
+    start = artifact_json(marker_raw)
+    validate_journal(start, scope, case['run'], case['commit'], completed=False)
+    validate_journal(journal, scope, case['run'], case['commit'], completed=False)
+    require(start == journal and start['complete'] is False
+            and len(start['passes']) == case['count']
+            and start.get('applicability_commit') == case['commit']
+            and all(source in case['sources'] and source['run'] != case['run']
+                    and source['commit'] != case['commit'] for source in start['passes'].values()),
+            'Inherited failure changed its initial map or attribution')
+    history = 'historical regression coverage is incomplete:'
+    failure = 'make: *** [Makefile:140: history-check] Error 1'
+    require(lines.count(history) == lines.count(failure) == 1
+            and uploads[0] < lines.index(history) < lines.index(failure) < uploads[1]
+            and lines.count("Job 'Python unit receipts' failed") == 1,
+            'Inherited failure history-before-units ordering mismatch')
+    print('Preserved unchanged inherited map from failed run 3994/job 41507; zero new passes')
+    return True
+
+
 def validate_journal(journal, scope, run, commit, completed=True):
     require(journal.get("version") == VERSION and journal.get("scope") == scope,
             "Receipt repository/PR/branch/base mismatch")
@@ -878,6 +961,8 @@ def restore(api, scope, run, applicability=None):
         if matching[0]["status"] == "skipped":
             continue
         if rid not in indexed:
+            if recover_inherited_pr742(api, scope, prior, jobs):
+                continue
             from validation.python_unit_interrupted_recovery import recover_interrupted_pr767
             handled, recovered_journal = recover_interrupted_pr767(api, scope, prior, jobs, legacy, run)
             if handled:
@@ -904,10 +989,13 @@ def restore(api, scope, run, applicability=None):
         artifact = indexed.pop(rid)
         final_raw = api.bytes(f"/actions/artifacts/{artifact['id']}/zip")
         journal = artifact_json(final_raw)
-        recovered = journal.get("complete") is False and recover_discovery_passes(
+        inherited = journal.get('complete') is False and recover_inherited_pr742(
+            api, scope, prior, jobs, markers[0], marker_raw, artifact, final_raw, journal)
+        recovered = inherited or journal.get("complete") is False and recover_discovery_passes(
             api, scope, prior, matching[0], markers[0], marker_raw, artifact, final_raw, journal, legacy)
         validate_journal(journal, scope, rid, sha(prior["commit_sha"]), completed=not recovered)
-        trusted_sources.add((rid, prior["commit_sha"]))
+        if not inherited:
+            trusted_sources.add((rid, prior["commit_sha"]))
         journals.append(journal)
     require(not indexed, "Receipt artifacts lack corresponding trusted workflow/job metadata")
     for journal in journals:
