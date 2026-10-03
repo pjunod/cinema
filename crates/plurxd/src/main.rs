@@ -1851,6 +1851,7 @@ async fn boot(
     tracing::debug!(expiry_since, "sign-in expiry clock");
     log_startup(&config, &identity);
 
+    let purpose_master = Arc::clone(&credential_key);
     let instance_id = identity.cluster_id;
     let node_id = identity.node_id;
     let state = build_state(
@@ -1868,6 +1869,22 @@ async fn boot(
         system,
         logs,
     );
+    state
+        .membership
+        .prepare_purpose_master(purpose_master)
+        .await
+        .context("qualifying coordinated sharing purpose master")?;
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        state.membership.coordinate_purpose_keys(),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(code = error.code(), "sharing purpose factory is pending"),
+        Err(_) => tracing::warn!(code = "deadline", "sharing purpose factory is pending"),
+    }
+
     // The stored request is not an ffmpeg contract. Exercise the exact
     // production rate-control arguments against this boot's real drivers and
     // publish only the effective result before any session can start.

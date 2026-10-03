@@ -29,12 +29,15 @@ pub(crate) fn archive_columns(rows: Vec<String>) -> Result<(), StoreError> {
     }
     Ok(())
 }
-const TRANSACTION_GUARD_SQL: &str = "SELECT json_quote(sql) AS payload FROM sqlite_master WHERE name='sharing_purpose_transaction_guard' AND type='table'";
+const TRANSACTION_GUARD_SQL: &str = "SELECT json_array(sql,(SELECT count(*) FROM sqlite_master WHERE type='trigger' AND tbl_name='sharing_purpose_transaction_guard')) AS payload FROM sqlite_master WHERE name='sharing_purpose_transaction_guard' AND type='table'";
 fn transaction_guard_shape(rows: Vec<String>) -> Result<(), StoreError> {
     let [raw] = rows.as_slice() else {
         return Err(invalid());
     };
-    let sql: String = serde_json::from_str(raw).map_err(|_| invalid())?;
+    let (sql, triggers): (String, i64) = serde_json::from_str(raw).map_err(|_| invalid())?;
+    if triggers != 0 {
+        return Err(invalid());
+    }
     let normalized = sql
         .chars()
         .filter(|c| !c.is_ascii_whitespace())
@@ -161,6 +164,143 @@ struct Installation {
     generation: i64,
     updated_at_ms: i64,
 }
+const CENSUS_COLUMNS_SQL: &str = "SELECT json_array(name,type,\"notnull\",pk) AS payload FROM pragma_table_info('sharing_purpose_census_intents') ORDER BY cid";
+const CENSUS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS sharing_purpose_census_intents(node_id TEXT NOT NULL PRIMARY KEY CHECK(length(node_id) BETWEEN 1 AND 256),raft_id INTEGER NOT NULL CHECK(raft_id>0),attempt_id TEXT NOT NULL CHECK(length(attempt_id)=36),generation INTEGER NOT NULL CHECK(generation>0),claimed_at_ms INTEGER NOT NULL CHECK(claimed_at_ms>0)) STRICT";
+#[cfg(feature = "hiqlite-store")]
+const CENSUS_REMOVAL_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS sharing_purpose_census_removed_node AFTER UPDATE OF removed_at ON cluster_nodes WHEN NEW.removed_at IS NOT NULL BEGIN DELETE FROM sharing_purpose_census_intents WHERE node_id=NEW.node_id AND raft_id=NEW.raft_id; END";
+fn census_columns(rows: Vec<String>) -> Result<(), StoreError> {
+    if rows.as_slice()
+        != [
+            "[\"node_id\",\"TEXT\",1,1]",
+            "[\"raft_id\",\"INTEGER\",1,0]",
+            "[\"attempt_id\",\"TEXT\",1,0]",
+            "[\"generation\",\"INTEGER\",1,0]",
+            "[\"claimed_at_ms\",\"INTEGER\",1,0]",
+        ]
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+/// A census claim is private boot ownership, never a readiness permission.
+/// No timer or Drop handler can release it after failed/cancelled startup.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PurposeCensus {
+    node_id: String,
+    raft_id: i64,
+    attempt_id: Uuid,
+    generation: i64,
+}
+#[cfg(feature = "hiqlite-store")]
+enum CensusBackend {
+    Local,
+    Replicated,
+}
+#[cfg(feature = "hiqlite-store")]
+async fn begin_census<T: Backend + ?Sized>(
+    store: &T,
+    identity: &crate::cluster::ClusterIdentity,
+    now_ms: i64,
+    mode: CensusBackend,
+) -> Result<PurposeCensus, StoreError> {
+    let raft_id = i64::try_from(identity.raft_id).map_err(|_| invalid())?;
+    if identity.node_id.is_empty() || identity.node_id.len() > 256 || raft_id <= 0 || now_ms <= 0 {
+        return Err(invalid());
+    }
+    let attempt = Uuid::new_v4();
+    // Local startup is under its data-directory advisory lock. Replicated
+    // startup additionally claims only its real current admitted SQL identity.
+    let admitted = if matches!(mode, CensusBackend::Replicated) {
+        "EXISTS(SELECT 1 FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL)"
+    } else {
+        "1"
+    };
+    let capabilities=store.sharing_read("SELECT json_array(type) AS payload FROM sqlite_master WHERE name='cluster_node_capabilities'",vec![]).await?;
+    if !capabilities.is_empty() && capabilities.as_slice() != ["[\"table\"]"] {
+        return Err(invalid());
+    }
+    let mut statements=vec![(CENSUS_SCHEMA.to_owned(),vec![]),(format!("INSERT INTO sharing_purpose_census_intents(node_id,raft_id,attempt_id,generation,claimed_at_ms) SELECT $1,$2,$3,1,$4 WHERE ({admitted}) ON CONFLICT(node_id) DO UPDATE SET attempt_id=excluded.attempt_id,generation=generation+1,claimed_at_ms=excluded.claimed_at_ms WHERE raft_id=excluded.raft_id AND generation<9223372036854775807"),vec![identity.node_id.clone().into(),raft_id.into(),attempt.into(),now_ms.into()])];
+    if matches!(mode, CensusBackend::Replicated) {
+        statements.push((CENSUS_REMOVAL_TRIGGER.to_owned(), vec![]));
+    }
+    if !capabilities.is_empty() {
+        statements.push(("DELETE FROM cluster_node_capabilities WHERE node_id=$1 AND (capability='sharing_purpose_keys_v1' OR capability GLOB 'sharing_purpose_master_v1:*')".to_owned(),vec![identity.node_id.clone().into()]));
+    }
+    let changed = store.sharing_txn(statements).await?;
+    if changed.get(1) != Some(&1) {
+        return Err(invalid());
+    }
+    census_columns(store.sharing_read(CENSUS_COLUMNS_SQL, vec![]).await?)?;
+    if matches!(mode, CensusBackend::Replicated) {
+        let removal = store.sharing_read("SELECT json_array(type,sql) AS payload FROM sqlite_master WHERE name='sharing_purpose_census_removed_node'",vec![]).await?;
+        let expected = serde_json::to_string(&(
+            "trigger",
+            CENSUS_REMOVAL_TRIGGER.replace(" IF NOT EXISTS", ""),
+        ))
+        .map_err(|_| invalid())?;
+        if removal.as_slice() != [expected] {
+            return Err(invalid());
+        }
+    }
+    let rows=store.sharing_read("SELECT json_object('node_id',node_id,'raft_id',raft_id,'attempt_id',attempt_id,'generation',generation) AS payload FROM sharing_purpose_census_intents WHERE node_id=$1 AND raft_id=$2 AND attempt_id=$3",vec![identity.node_id.clone().into(),raft_id.into(),attempt.into()]).await?;
+    let [raw] = rows.as_slice() else {
+        return Err(invalid());
+    };
+    let claim: PurposeCensus = serde_json::from_str(raw).map_err(|_| invalid())?;
+    if claim.node_id != identity.node_id
+        || claim.raft_id != raft_id
+        || claim.attempt_id != attempt
+        || claim.generation <= 0
+    {
+        return Err(invalid());
+    }
+    Ok(claim)
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) async fn begin_local_census(
+    store: &crate::store::SqliteStore,
+    identity: &crate::cluster::ClusterIdentity,
+    now_ms: i64,
+) -> Result<PurposeCensus, StoreError> {
+    begin_census(store, identity, now_ms, CensusBackend::Local).await
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) async fn begin_replicated_census(
+    store: &crate::store::HiqliteAuthStore,
+    identity: &crate::cluster::ClusterIdentity,
+    now_ms: i64,
+) -> Result<PurposeCensus, StoreError> {
+    begin_census(store, identity, now_ms, CensusBackend::Replicated).await
+}
+#[cfg(feature = "hiqlite-store")]
+pub(crate) async fn finish_census<T: Backend + ?Sized>(
+    store: &T,
+    claim: PurposeCensus,
+) -> Result<(), StoreError> {
+    let changed=store.sharing_txn(vec![("DELETE FROM sharing_purpose_census_intents WHERE node_id=$1 AND raft_id=$2 AND attempt_id=$3 AND generation=$4".to_owned(),vec![claim.node_id.into(),claim.raft_id.into(),claim.attempt_id.into(),claim.generation.into()])]).await?;
+    if changed.as_slice() != [1] {
+        return Err(invalid());
+    }
+    Ok(())
+}
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn with_purpose_census_for_contract<F, Fut, R>(
+    store: &crate::store::HiqliteAuthStore,
+    identity: &crate::cluster::ClusterIdentity,
+    now_ms: i64,
+    operation: F,
+) -> Result<R, StoreError>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = R>,
+{
+    let claim = begin_replicated_census(store, identity, now_ms).await?;
+    let result = operation().await;
+    finish_census(store, claim).await?;
+    Ok(result)
+}
 enum InstallationState {
     Fresh,
     Installed(Installation),
@@ -174,6 +314,15 @@ async fn installation_state<T: Backend + ?Sized>(
         .map(|row| serde_json::from_str(&row).map_err(|_| invalid()))
         .collect::<Result<_, _>>()?;
     if tables.is_empty() {
+        return Ok(InstallationState::Fresh);
+    }
+    if tables.as_slice()
+        == [(
+            "sharing_purpose_census_intents".to_owned(),
+            "table".to_owned(),
+        )]
+    {
+        census_columns(store.sharing_read(CENSUS_COLUMNS_SQL, vec![]).await?)?;
         return Ok(InstallationState::Fresh);
     }
     if tables.len() != 6 || tables.iter().any(|(_, kind)| kind != "table") {
@@ -341,6 +490,10 @@ pub(crate) fn connection_material(
     if tables.is_empty() {
         return Ok(None);
     }
+    if tables.as_slice() == ["[\"sharing_purpose_census_intents\",\"table\"]"] {
+        census_columns(read(CENSUS_COLUMNS_SQL)?)?;
+        return Ok(None);
+    }
     if tables.len() != 6
         || tables.iter().any(|raw| {
             serde_json::from_str::<(String, String)>(raw).map_or(true, |(_, kind)| kind != "table")
@@ -482,6 +635,9 @@ pub enum PurposeKeyInstallation {
 /// the factory's actual replicated write.
 #[async_trait]
 pub trait SharingPurposeKeyStore: Send + Sync {
+    /// Shape/count census before selecting or creating a sealing master. The
+    /// startup coordinator holds its durable census intent across this read.
+    async fn inspect_sharing_purpose_material(&self) -> Result<(), StoreError>;
     async fn verify_sharing_purpose_material(
         &self,
         master: &CredentialKey,
@@ -504,6 +660,33 @@ pub trait SharingPurposeKeyStore: Send + Sync {
 }
 #[async_trait]
 impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
+    async fn inspect_sharing_purpose_material(&self) -> Result<(), StoreError> {
+        let InstallationState::Installed(row) = installation_state(self).await? else {
+            return Ok(());
+        };
+        let revision =
+            super::sharing::revision_key_envelopes(self.sharing_revision_key_rows().await?)?;
+        let locator =
+            super::sharing::revision_key_envelopes(self.sharing_file_locator_key_rows().await?)?;
+        if (row.state == "ready" && (revision.len() != 1 || locator.len() != 1))
+            || (row.state == "restore_pending" && (!revision.is_empty() || !locator.is_empty()))
+        {
+            return Err(invalid());
+        }
+        let archive = archive_rows(self.sharing_purpose_archive_rows().await?)?;
+        if row.state == "restore_pending"
+            && archive
+                .iter()
+                .filter(|key| {
+                    key.server_id == row.server_id && key.catalogue_epoch == row.catalogue_epoch
+                })
+                .count()
+                != 2
+        {
+            return Err(invalid());
+        }
+        Ok(())
+    }
     async fn verify_sharing_purpose_material(
         &self,
         master: &CredentialKey,
@@ -528,7 +711,7 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
         members: &crate::cluster::membership::PurposeKeyMembers,
         now_ms: i64,
     ) -> Result<(), StoreError> {
-        if now_ms <= 0 || members.master_key_id() != old.id() {
+        if now_ms <= 0 || !members.matches_master(old) {
             return Err(invalid());
         }
         let InstallationState::Installed(row) = installation_state(self).await? else {
@@ -540,10 +723,12 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
         verify_installed(self, old, &row).await?;
         let archive = archive_rows(self.sharing_purpose_archive_rows().await?)?;
         let mut captured = Vec::new();
+        let mut replacement_captured = Vec::new();
         let mut writes = Vec::new();
         for archived in archive {
             let replacement_envelope = archived.rewrapped(old, replacement)?;
             captured.push(serde_json::json!({"purpose":archived.purpose,"server_id":archived.server_id,"catalogue_epoch":archived.catalogue_epoch,"envelope":archived.envelope}));
+            replacement_captured.push(serde_json::json!({"purpose":archived.purpose,"server_id":archived.server_id,"catalogue_epoch":archived.catalogue_epoch,"envelope":replacement_envelope.as_stored()}));
             writes.push(("UPDATE sharing_purpose_key_archive SET envelope=$1 WHERE purpose=$2 AND server_id=$3 AND catalogue_epoch=$4 AND envelope=$5".to_owned(),vec![replacement_envelope.as_stored().to_owned().into(),archived.purpose.into(),archived.server_id.into(),archived.catalogue_epoch.into(),archived.envelope.into()]));
         }
         let revision =
@@ -577,6 +762,7 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
                 };
                 let replacement_envelope = archived.rewrapped(old, replacement)?;
                 captured.push(serde_json::json!({"purpose":purpose,"server_id":row.server_id,"catalogue_epoch":row.catalogue_epoch,"envelope":envelope.as_stored(),"active":true}));
+                replacement_captured.push(serde_json::json!({"purpose":purpose,"server_id":row.server_id,"catalogue_epoch":row.catalogue_epoch,"envelope":replacement_envelope.as_stored(),"active":true}));
                 writes.push((format!("UPDATE {table} SET {column}=$1 WHERE singleton=1 AND server_id=$2 AND catalogue_epoch=$3 AND {column}=$4"),vec![replacement_envelope.as_stored().to_owned().into(),row.server_id.into(),row.catalogue_epoch.into(),envelope.as_stored().to_owned().into()]));
                 active_expected.push_str(&format!(" AND (SELECT count(*) FROM {table})=1 AND EXISTS(SELECT 1 FROM {table} current JOIN json_each($4) expected WHERE json_extract(expected.value,'$.active')=1 AND json_extract(expected.value,'$.purpose')='{purpose}' AND current.singleton=1 AND current.server_id=json_extract(expected.value,'$.server_id') AND current.catalogue_epoch=json_extract(expected.value,'$.catalogue_epoch') AND current.{column}=json_extract(expected.value,'$.envelope'))"));
             } else {
@@ -594,9 +780,16 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
             "DELETE FROM sharing_purpose_transaction_guard".to_owned(),
             vec![],
         )];
-        statements.push((format!("INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN ({guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation WHERE singleton=1 AND generation={} AND master_key_id='{}' AND state='{}') AND (SELECT count(*) FROM sharing_purpose_key_archive)=(SELECT count(*) FROM json_each($4) WHERE coalesce(json_extract(value,'$.active'),0)=0) AND NOT EXISTS(SELECT 1 FROM json_each($4) expected WHERE coalesce(json_extract(expected.value,'$.active'),0)=0 AND NOT EXISTS(SELECT 1 FROM sharing_purpose_key_archive current WHERE current.purpose=json_extract(expected.value,'$.purpose') AND current.server_id=json_extract(expected.value,'$.server_id') AND current.catalogue_epoch=json_extract(expected.value,'$.catalogue_epoch') AND current.envelope=json_extract(expected.value,'$.envelope'))) {active_expected} THEN 1 ELSE 0 END)",row.generation,old.id(),row.state),vec![roster.into(),cutoff.into(),observed.into(),captured.into()]));
+        statements.push((format!("INSERT INTO sharing_purpose_transaction_guard VALUES(1,CASE WHEN ({guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation WHERE singleton=1 AND generation={} AND master_key_id='{}' AND state='{}') AND (SELECT count(*) FROM sharing_purpose_key_archive)=(SELECT count(*) FROM json_each($4) WHERE coalesce(json_extract(value,'$.active'),0)=0) AND NOT EXISTS(SELECT 1 FROM json_each($4) expected WHERE coalesce(json_extract(expected.value,'$.active'),0)=0 AND NOT EXISTS(SELECT 1 FROM sharing_purpose_key_archive current WHERE current.purpose=json_extract(expected.value,'$.purpose') AND current.server_id=json_extract(expected.value,'$.server_id') AND current.catalogue_epoch=json_extract(expected.value,'$.catalogue_epoch') AND current.envelope=json_extract(expected.value,'$.envelope'))) {active_expected} THEN 1 ELSE 0 END)",row.generation,old.id(),row.state),vec![roster.clone().into(),cutoff.into(),observed.into(),captured.into()]));
         statements.extend(writes);
         statements.push(("UPDATE sharing_purpose_key_installation SET master_key_id=$1,generation=generation+1,updated_at_ms=$2 WHERE singleton=1".to_owned(),vec![replacement.id().to_owned().into(),now_ms.into()]));
+        let replacement_captured =
+            serde_json::to_string(&replacement_captured).map_err(|_| invalid())?;
+        if replacement_captured.len() > 2 * 1024 * 1024 {
+            return Err(invalid());
+        }
+        let active_expected = active_expected.replace("$4", "$1");
+        statements.push((format!("UPDATE sharing_purpose_transaction_guard SET passed=CASE WHEN EXISTS(SELECT 1 FROM sharing_purpose_key_installation WHERE singleton=1 AND generation={} AND master_key_id='{}' AND state='{}') AND (SELECT count(*) FROM sharing_purpose_key_archive)=(SELECT count(*) FROM json_each($1) WHERE coalesce(json_extract(value,'$.active'),0)=0) AND NOT EXISTS(SELECT 1 FROM json_each($1) expected WHERE coalesce(json_extract(expected.value,'$.active'),0)=0 AND NOT EXISTS(SELECT 1 FROM sharing_purpose_key_archive current WHERE current.purpose=json_extract(expected.value,'$.purpose') AND current.server_id=json_extract(expected.value,'$.server_id') AND current.catalogue_epoch=json_extract(expected.value,'$.catalogue_epoch') AND current.envelope=json_extract(expected.value,'$.envelope'))) {active_expected} THEN 1 ELSE 0 END WHERE singleton=1",row.generation+1,replacement.id(),row.state),vec![replacement_captured.into()]));
         self.sharing_txn(statements).await?;
         let InstallationState::Installed(current) = installation_state(self).await? else {
             return Err(invalid());
@@ -610,10 +803,7 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
         members: &crate::cluster::membership::PurposeKeyMembers,
         now_ms: i64,
     ) -> Result<PurposeKeyInstallation, StoreError> {
-        if now_ms <= 0
-            || members.actual_local_raft_id() == 0
-            || members.master_key_id() != master.id()
-        {
+        if now_ms <= 0 || members.actual_local_raft_id() == 0 || !members.matches_master(master) {
             return Err(invalid());
         }
         let state = installation_state(self).await?;
@@ -674,12 +864,21 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                statements.push((
-                    statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "),
-                    vec![],
-                ));
+                if matches!(state, InstallationState::Fresh) {
+                    // The census table is the sole qualified pre-factory
+                    // table. Every key/marker table must still be absent in
+                    // this write; a competing complete winner is reopened.
+                    let ddl =
+                        if statement.starts_with("CREATE TABLE sharing_purpose_census_intents") {
+                            statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+                        } else {
+                            statement.to_owned()
+                        };
+                    statements.push((ddl, vec![]));
+                }
             }
         }
+        statements.push((CENSUS_REMOVAL_TRIGGER.to_owned(), vec![]));
         statements.push((
             "DELETE FROM sharing_purpose_transaction_guard".into(),
             vec![],
@@ -714,6 +913,7 @@ impl<T: Backend + SharingStore + ?Sized> SharingPurposeKeyStore for T {
                 now_ms.into(),
             ],
         ));
+        statements.push(("UPDATE sharing_purpose_transaction_guard SET passed=CASE WHEN (SELECT count(*) FROM sharing_catalogue_keys)=1 AND (SELECT count(*) FROM sharing_file_locator_keys)=1 AND EXISTS(SELECT 1 FROM sharing_catalogue_keys WHERE singleton=1 AND server_id=$1 AND catalogue_epoch=$2 AND revision_envelope=$3) AND EXISTS(SELECT 1 FROM sharing_file_locator_keys WHERE singleton=1 AND server_id=$1 AND catalogue_epoch=$2 AND locator_envelope=$4) AND EXISTS(SELECT 1 FROM sharing_purpose_key_installation WHERE singleton=1 AND state='ready' AND server_id=$1 AND catalogue_epoch=$2 AND master_key_id=$5) THEN 1 ELSE 0 END WHERE singleton=1".to_owned(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),revision.as_stored().to_owned().into(),locator.as_stored().to_owned().into(),master.id().to_owned().into()]));
         if let Err(error) = self.sharing_txn(statements).await {
             return match installation_state(self).await? {
                 InstallationState::Fresh
@@ -750,6 +950,80 @@ mod tests {
     use super::*;
     use crate::store::{sharing::Backend, SqliteStore};
 
+    #[tokio::test]
+    async fn sharing_purpose_census_tombstone_retires_only_exact_node_and_raft_claim() {
+        let store = SqliteStore::open_in_memory().expect("census transaction store");
+        let first_directory = tempfile::tempdir().expect("first identity directory");
+        let second_directory = tempfile::tempdir().expect("second identity directory");
+        let first = crate::cluster::initialize_identity(first_directory.path(), "census-cluster")
+            .expect("actual persisted first identity");
+        let second =
+            crate::cluster::initialize_join_identity(second_directory.path(), "census-cluster", 2)
+                .expect("persisted joined identity for the SQL removal fixture");
+        store.sharing_txn(vec![("CREATE TABLE cluster_nodes(node_id TEXT PRIMARY KEY,raft_id INTEGER NOT NULL,removed_at INTEGER)".into(),vec![]),("INSERT INTO cluster_nodes VALUES($1,$2,NULL),($3,$4,NULL)".into(),vec![first.node_id.clone().into(),(first.raft_id as i64).into(),second.node_id.clone().into(),(second.raft_id as i64).into()])]).await.expect("actual identities in removal fixture");
+        let first_claim = begin_census(&store, &first, 1000, CensusBackend::Replicated)
+            .await
+            .expect("first exact durable claim");
+        let second_claim = begin_census(&store, &second, 1001, CensusBackend::Replicated)
+            .await
+            .expect("second exact durable claim");
+        store
+            .sharing_txn(vec![(
+                "UPDATE cluster_nodes SET removed_at=1002 WHERE node_id=$1 AND raft_id=$2".into(),
+                vec![first.node_id.clone().into(), (first.raft_id as i64).into()],
+            )])
+            .await
+            .expect("atomic removal tombstone");
+        assert!(
+            finish_census(&store, first_claim).await.is_err(),
+            "retired ownership cannot release another claim"
+        );
+        assert_eq!(store.sharing_read("SELECT json_array(node_id,raft_id) AS payload FROM sharing_purpose_census_intents",vec![]).await.expect("other node ownership retained"),[serde_json::to_string(&(second.node_id.clone(),second.raft_id)).expect("fixture tuple")]);
+        finish_census(&store, second_claim)
+            .await
+            .expect("unrelated exact owner can still complete");
+    }
+
+    #[tokio::test]
+    async fn sharing_purpose_census_old_attempt_cannot_release_new_generation() {
+        let directory = tempfile::tempdir().expect("node directory");
+        let store = SqliteStore::open_in_memory().expect("store");
+        let logical = crate::store::SettingsStore::instance_id(&store)
+            .await
+            .expect("actual logical identity");
+        let identity = crate::cluster::initialize_identity(directory.path(), &logical)
+            .expect("actual node identity");
+        let old = begin_local_census(&store, &identity, 1000)
+            .await
+            .expect("first boot ownership");
+        let new = begin_local_census(&store, &identity, 1001)
+            .await
+            .expect("same node next generation");
+        assert!(finish_census(&store, old).await.is_err());
+        assert_eq!(
+            store
+                .sharing_read(
+                    "SELECT json_array(generation) AS payload FROM sharing_purpose_census_intents",
+                    vec![]
+                )
+                .await
+                .expect("new ownership survives"),
+            ["[2]"]
+        );
+        finish_census(&store, new)
+            .await
+            .expect("only current exact attempt releases");
+        assert_eq!(
+            store
+                .sharing_read(
+                    "SELECT json_array(count(*)) AS payload FROM sharing_purpose_census_intents",
+                    vec![]
+                )
+                .await
+                .expect("settled"),
+            ["[0]"]
+        );
+    }
     #[test]
     fn sharing_purpose_rewrap_preserves_active_and_archived_material_with_original_aad() {
         let old = CredentialKey::from_bytes([46; 32]);

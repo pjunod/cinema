@@ -1448,6 +1448,14 @@ pub struct SharingJoinCapabilities {
 }
 
 impl SharingJoinCapabilities {
+    /// Binary protocol support only. Installed key readiness is a separate
+    /// same-write factory result, and old requests with absent fields refuse.
+    pub fn for_current_binary() -> Self {
+        Self {
+            purpose_keys: true,
+            ..Self::default()
+        }
+    }
     fn proves(self, required: Self) -> bool {
         (!required.session_principal || self.session_principal)
             && (!required.catalogue_item_identity || self.catalogue_item_identity)
@@ -1565,6 +1573,153 @@ fn sharing_membership_generation_shape_predicate() -> String {
         .collect::<Vec<_>>();
     guards.push("(SELECT count(*) FROM cluster_sharing_membership_generation)=1".to_owned());
     guards.join(" AND ")
+}
+
+const PURPOSE_BOOTSTRAP_GUARD_SCHEMA: &str = "CREATE TABLE cluster_sharing_purpose_bootstrap_guard(singleton INTEGER NOT NULL PRIMARY KEY CHECK(singleton=1),passed INTEGER NOT NULL CHECK(passed=1)) STRICT";
+fn sharing_admission_schema_shape_predicate() -> String {
+    sharing_member_admission_guard_schema()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE "))
+        .map(|sql| {
+            let canonical = sql.replace(" IF NOT EXISTS", "");
+            let words = canonical.split_whitespace().collect::<Vec<_>>();
+            format!(
+                "EXISTS(SELECT 1 FROM sqlite_master WHERE type='{}' AND name='{}' AND sql='{}')",
+                words[1].to_ascii_lowercase(),
+                words[2].split('(').next().expect("fixed DDL name"),
+                canonical.replace('\'', "''")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+fn sharing_admission_schema_names() -> Vec<String> {
+    sharing_member_admission_guard_schema()
+        .into_iter()
+        .filter(|sql| sql.starts_with("CREATE "))
+        .map(|sql| {
+            sql.replace(" IF NOT EXISTS", "")
+                .split_whitespace()
+                .nth(2)
+                .expect("fixed DDL name")
+                .split('(')
+                .next()
+                .expect("fixed DDL name")
+                .to_owned()
+        })
+        .collect()
+}
+async fn bootstrap_purpose_admission_schema(
+    client: &Client,
+    local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<(), MembershipError> {
+    if !client
+        .metrics_db()
+        .await?
+        .membership_config
+        .voter_ids()
+        .any(|id| id == local_raft_id)
+    {
+        return Ok(());
+    }
+    let shape = format!("({}) AND (NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name='cluster_sharing_purpose_bootstrap_guard') OR EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='cluster_sharing_purpose_bootstrap_guard' AND sql='{}')) AND NOT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name='cluster_sharing_purpose_bootstrap_guard')",sharing_admission_schema_shape_predicate(),PURPOSE_BOOTSTRAP_GUARD_SCHEMA.replace('\'', "''"));
+    let names = sharing_admission_schema_names()
+        .into_iter()
+        .chain(["cluster_sharing_purpose_bootstrap_guard".to_owned()])
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let existing = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT count(*) AS count FROM sqlite_master WHERE name IN ({names})"),
+            params!(),
+        )
+        .await?;
+    if !matches!(existing.as_slice(),[row] if row.count==0) {
+        let generation = client.query_consistent_map::<CountRow, _>(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
+        ).await?;
+        if !matches!(generation.as_slice(), [row] if row.count == 1) {
+            return Err(MembershipError::Incompatible);
+        }
+        let valid = client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
+                    sharing_membership_generation_shape_predicate()
+                ),
+                params!(),
+            )
+            .await?;
+        return if matches!(valid.as_slice(),[row] if row.count==1) {
+            Ok(())
+        } else {
+            Err(MembershipError::Incompatible)
+        };
+    }
+    // Generation is absent, so this distinct bootstrap observation captures
+    // only the real current Raft roster. It never escapes as key authority.
+    let Some(observation) = sharing_member_floor_observation(
+        client,
+        local_raft_id,
+        SharingMemberFloor::PurposeKeys,
+        false,
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+    let now = unix_ms()?;
+    let (guard, roster, cutoff, observed) =
+        observation.write_guard_for(SharingMemberFloor::PurposeKeys, now, 1, 2, 3)?;
+    let fingerprint = master.sharing_purpose_master_fingerprint();
+    let master_guard = purpose_master_proof_predicate(&fingerprint)?;
+    let exact_roster = purpose_roster_predicate(1);
+    let floor = format!("({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={local_raft_id} AND role IS NOT 'learner' AND removed_at IS NULL)",sharing_member_guard_predicate(SharingMemberFloor::PurposeKeys,1,2,3));
+    let mut statements=vec![(PURPOSE_BOOTSTRAP_GUARD_SCHEMA.to_owned(),params!()),(format!("INSERT INTO cluster_sharing_purpose_bootstrap_guard VALUES(1,CASE WHEN NOT EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ({names}) AND name!='cluster_sharing_purpose_bootstrap_guard') AND ({floor}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM cluster_join_tokens WHERE state='redeeming') AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END)"),params!(roster.as_str(),cutoff,observed))];
+    statements.extend(
+        sharing_member_admission_guard_schema()
+            .into_iter()
+            .map(|sql| (sql.replace(" IF NOT EXISTS", ""), params!())),
+    );
+    statements.push((format!("UPDATE cluster_sharing_purpose_bootstrap_guard SET passed=CASE WHEN ({shape}) AND ({guard}) AND ({exact_roster}) AND ({master_guard}) AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents) THEN 1 ELSE 0 END WHERE singleton=1"),params!(roster,cutoff,observed)));
+    let result = client
+        .txn(statements)
+        .await
+        .and_then(|rows| rows.into_iter().collect::<Result<Vec<_>, _>>());
+    if result.is_err() {
+        let generation = client.query_consistent_map::<CountRow, _>(
+            "SELECT count(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_sharing_membership_generation'", params!(),
+        ).await?;
+        if !matches!(generation.as_slice(), [row] if row.count == 1) {
+            return Err(MembershipError::Incompatible);
+        }
+        // A competing complete winner can be adopted; a partial loser cannot
+        // be repaired. The caller still obtains a fresh normal key witness.
+        let valid = client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN ({shape}) AND ({}) THEN 1 ELSE 0 END AS count",
+                    sharing_membership_generation_shape_predicate()
+                ),
+                params!(),
+            )
+            .await?;
+        if !matches!(valid.as_slice(),[row] if row.count==1) {
+            return Err(MembershipError::Incompatible);
+        }
+    }
+    Ok(())
+}
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub async fn bootstrap_purpose_admission_schema_for_contract(
+    client: &Client,
+    actual_local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<(), MembershipError> {
+    bootstrap_purpose_admission_schema(client, actual_local_raft_id, master).await
 }
 
 /// Candidate membership guards. Installation is deliberately unconfigured:
@@ -2614,6 +2769,7 @@ pub struct SourceAdmissionMembers {
     query_at_ms: i64,
     completed_at_ms: i64,
     membership_generation: i64,
+    purpose_master_fingerprint: Option<String>,
 }
 
 impl SourceAdmissionMembers {
@@ -2633,13 +2789,32 @@ impl SourceAdmissionMembers {
         cutoff_parameter: usize,
         observed_at_parameter: usize,
     ) -> Result<(String, String, i64, i64), MembershipError> {
-        self.write_guard_for(
-            SharingMemberFloor::PrincipalAndCatalogue,
+        let required = if self.purpose_master_fingerprint.is_some() {
+            SharingMemberFloor::AllSharing
+        } else {
+            SharingMemberFloor::PrincipalAndCatalogue
+        };
+        let (guard, roster, cutoff, observed) = self.write_guard_for(
+            required,
             now_ms,
             members_parameter,
             cutoff_parameter,
             observed_at_parameter,
-        )
+        )?;
+        let purpose = match &self.purpose_master_fingerprint {
+            Some(fingerprint) => format!(
+                "({}) AND ({})",
+                purpose_master_proof_predicate(fingerprint)?,
+                purpose_roster_predicate(members_parameter)
+            ),
+            None => format!("NOT ({})", source_purpose_material_marker()),
+        };
+        Ok((
+            format!("({guard}) AND ({purpose})"),
+            roster,
+            cutoff,
+            observed,
+        ))
     }
 
     fn write_guard_for(
@@ -2689,13 +2864,15 @@ impl SourceAdmissionMembers {
 pub struct PurposeKeyMembers {
     members: SourceAdmissionMembers,
     master_key_id: String,
+    master_fingerprint: String,
 }
 impl PurposeKeyMembers {
     pub(crate) fn actual_local_raft_id(&self) -> u64 {
         self.members.actual_local_raft_id()
     }
-    pub(crate) fn master_key_id(&self) -> &str {
-        &self.master_key_id
+    pub(crate) fn matches_master(&self, master: &crate::secrets::CredentialKey) -> bool {
+        self.master_key_id == master.id()
+            && self.master_fingerprint == master.sharing_purpose_master_fingerprint()
     }
     pub fn write_guard(
         &self,
@@ -2713,8 +2890,11 @@ impl PurposeKeyMembers {
         )?;
         Ok((
             format!(
-                "({guard}) AND ({})",
-                purpose_master_proof_predicate(&self.master_key_id)?
+                "({guard}) AND ({}) AND ({}) AND ({}) AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id={} AND role IS NOT 'learner' AND removed_at IS NULL)",
+                purpose_master_proof_predicate(&self.master_fingerprint)?,
+                sharing_admission_schema_shape_predicate(),
+                purpose_roster_predicate(members_parameter),
+                self.members.actual_local_raft_id()
             ),
             members,
             cutoff,
@@ -2722,15 +2902,18 @@ impl PurposeKeyMembers {
         ))
     }
 }
+fn purpose_roster_predicate(parameter: usize) -> String {
+    format!("(SELECT count(*) FROM cluster_nodes WHERE removed_at IS NULL)=(SELECT count(*) FROM json_each(${parameter})) AND NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM json_each(${parameter}) member WHERE CAST(member.value AS INTEGER)=node.raft_id))")
+}
 fn purpose_master_proof_predicate(id: &str) -> Result<String, MembershipError> {
-    if id.len() != 8
+    if id.len() != 64
         || !id
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err(MembershipError::Incompatible);
     }
-    Ok(format!("NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_key_id_v1:{id}'))"))
+    Ok(format!("NOT EXISTS(SELECT 1 FROM cluster_nodes node WHERE node.removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM cluster_node_capabilities proof WHERE proof.node_id=node.node_id AND proof.last_seen_at=node.last_seen_at AND proof.capability='sharing_purpose_master_v1:{id}'))"))
 }
 
 async fn sharing_member_floor_observation(
@@ -2818,15 +3001,26 @@ async fn sharing_member_floor_observation(
         query_at_ms: now,
         completed_at_ms,
         membership_generation: row.generation.ok_or(MembershipError::Incompatible)?,
+        purpose_master_fingerprint: None,
     }))
 }
 
 async fn purpose_key_member_observation(
     client: &Client,
     local_raft_id: u64,
-    master_key_id: &str,
+    master: &crate::secrets::CredentialKey,
 ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
-    purpose_master_proof_predicate(master_key_id)?;
+    if !client
+        .metrics_db()
+        .await?
+        .membership_config
+        .voter_ids()
+        .any(|id| id == local_raft_id)
+    {
+        return Ok(None);
+    }
+    let fingerprint = master.sharing_purpose_master_fingerprint();
+    purpose_master_proof_predicate(&fingerprint)?;
     let Some(members) = sharing_member_floor_observation(
         client,
         local_raft_id,
@@ -2839,7 +3033,8 @@ async fn purpose_key_member_observation(
     };
     let result = PurposeKeyMembers {
         members,
-        master_key_id: master_key_id.to_owned(),
+        master_key_id: master.id().to_owned(),
+        master_fingerprint: fingerprint,
     };
     let now = unix_ms()?;
     let (guard, roster, cutoff, observed) = result.write_guard(now, 1, 2, 3)?;
@@ -2861,9 +3056,61 @@ async fn purpose_key_member_observation(
 pub async fn observe_purpose_key_members_for_contract(
     client: &Client,
     actual_local_raft_id: u64,
-    master_key_id: &str,
+    master: &crate::secrets::CredentialKey,
 ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
-    purpose_key_member_observation(client, actual_local_raft_id, master_key_id).await
+    purpose_key_member_observation(client, actual_local_raft_id, master).await
+}
+
+fn source_purpose_material_marker() -> &'static str {
+    "EXISTS(SELECT 1 FROM sqlite_master WHERE name IN ('sharing_catalogue_keys','sharing_file_locator_keys','sharing_purpose_key_installation','sharing_purpose_key_archive','sharing_purpose_transaction_guard'))"
+}
+async fn source_member_observation(
+    client: &Client,
+    local_raft_id: u64,
+    master: Option<&crate::secrets::CredentialKey>,
+) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!(
+                "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                source_purpose_material_marker()
+            ),
+            params!(),
+        )
+        .await?;
+    let installed = matches!(rows.as_slice(),[row] if row.count==1);
+    if installed && master.is_none() {
+        return Ok(None);
+    }
+    let required = if installed {
+        SharingMemberFloor::AllSharing
+    } else {
+        SharingMemberFloor::PrincipalAndCatalogue
+    };
+    let Some(mut observation) =
+        sharing_member_floor_observation(client, local_raft_id, required, true).await?
+    else {
+        return Ok(None);
+    };
+    if installed {
+        observation.purpose_master_fingerprint = Some(
+            master
+                .ok_or(MembershipError::Incompatible)?
+                .sharing_purpose_master_fingerprint(),
+        );
+    }
+    let (guard, roster, cutoff, observed) = observation.write_guard(unix_ms()?, 1, 2, 3)?;
+    let rows = client
+        .query_consistent_map::<CountRow, _>(
+            format!("SELECT CASE WHEN {guard} THEN 1 ELSE 0 END AS count"),
+            params!(roster, cutoff, observed),
+        )
+        .await?;
+    Ok(if matches!(rows.as_slice(),[row] if row.count==1) {
+        Some(observation)
+    } else {
+        None
+    })
 }
 
 /// Contract fixtures use the actual quorum observation path. This test-only
@@ -2874,14 +3121,9 @@ pub async fn observe_purpose_key_members_for_contract(
 pub async fn observe_source_admission_members_for_contract(
     client: &Client,
     actual_local_raft_id: u64,
+    master: &crate::secrets::CredentialKey,
 ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
-    sharing_member_floor_observation(
-        client,
-        actual_local_raft_id,
-        SharingMemberFloor::PrincipalAndCatalogue,
-        true,
-    )
-    .await
+    source_member_observation(client, actual_local_raft_id, Some(master)).await
 }
 
 /// SQLite unit fixtures still execute every SQL authority fence, but have no
@@ -2902,7 +3144,19 @@ pub(crate) fn source_admission_members_for_unit_test(
         query_at_ms: now_ms,
         completed_at_ms: now_ms,
         membership_generation: 0,
+        purpose_master_fingerprint: None,
     })
+}
+#[cfg(test)]
+pub(crate) fn source_admission_members_with_purpose_for_unit_test(
+    local_raft_id: u64,
+    members: &BTreeSet<u64>,
+    now_ms: i64,
+    master: &crate::secrets::CredentialKey,
+) -> Result<SourceAdmissionMembers, MembershipError> {
+    let mut observation = source_admission_members_for_unit_test(local_raft_id, members, now_ms)?;
+    observation.purpose_master_fingerprint = Some(master.sharing_purpose_master_fingerprint());
+    Ok(observation)
 }
 
 fn sharing_principal_floor_observation_ready(
@@ -3667,6 +3921,7 @@ struct ReplicatedMembership {
     bootstrap_http: String,
     artwork_http: String,
     secrets: JoinSecrets,
+    purpose_master: Mutex<Option<Arc<crate::secrets::CredentialKey>>>,
     activity_signing_key: ActivitySigningKey,
     activity_public_keys: Mutex<BTreeMap<String, Vec<u8>>>,
     activity_auth_admission: Mutex<BTreeMap<String, ActivityAuthAdmission>>,
@@ -4070,6 +4325,7 @@ impl MembershipManager {
                 bootstrap_http,
                 artwork_http,
                 secrets,
+                purpose_master: Mutex::new(None),
                 activity_signing_key,
                 activity_public_keys: Mutex::new(BTreeMap::new()),
                 activity_auth_admission: Mutex::new(BTreeMap::new()),
@@ -5346,6 +5602,22 @@ impl MembershipManager {
                 .to_owned(),
             params!(inner.identity.node_id.as_str(), now),
         ));
+        let purpose_master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        if let Some(master) = purpose_master {
+            for proof in [
+                SHARING_PURPOSE_KEYS_CAPABILITY.to_owned(),
+                format!(
+                    "sharing_purpose_master_v1:{}",
+                    master.sharing_purpose_master_fingerprint()
+                ),
+            ] {
+                statements.push(("INSERT INTO cluster_node_capabilities(node_id,capability,last_seen_at) SELECT $1,$2,$3 WHERE NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1) ON CONFLICT(node_id,capability) DO UPDATE SET last_seen_at=excluded.last_seen_at".to_owned(),params!(inner.identity.node_id.as_str(),proof,now)));
+            }
+        }
         statements.push((
             "DELETE FROM cluster_node_maintenance_heartbeat_intents WHERE node_id = $1 \
                      AND last_seen_at = $2"
@@ -7830,6 +8102,19 @@ impl MembershipManager {
                     tracing::warn!(code = error.code(), "cluster node heartbeat failed");
                 }
                 Ok(()) => {
+                    match tokio::time::timeout(
+                        Duration::from_secs(5),
+                        self.coordinate_purpose_keys(),
+                    )
+                    .await
+                    {
+                        Err(_) => tracing::warn!("sharing purpose factory deadline expired"),
+                        Ok(Err(error)) => tracing::warn!(
+                            code = error.code(),
+                            "sharing purpose factory is pending"
+                        ),
+                        Ok(Ok(())) => {}
+                    }
                     if let Err(error) = self.refresh_membership_metrics().await {
                         tracing::warn!(
                             code = error.code(),
@@ -9270,25 +9555,101 @@ impl MembershipManager {
         &self,
     ) -> Result<Option<SourceAdmissionMembers>, MembershipError> {
         let inner = self.replicated_inner()?;
-        sharing_member_floor_observation(
-            &inner.client,
-            inner.identity.raft_id,
-            SharingMemberFloor::PrincipalAndCatalogue,
-            true,
-        )
-        .await
+        let master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        source_member_observation(&inner.client, inner.identity.raft_id, master.as_deref()).await
+    }
+
+    /// Explicit boot qualification. The actual master has passed startup
+    /// census; open all current purpose material again before publishing its
+    /// fingerprint. This never claims installed keys or Source writer support.
+    pub async fn prepare_purpose_master(
+        &self,
+        master: Arc<crate::secrets::CredentialKey>,
+    ) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        if !master.matches_purpose_master_encoding(&inner.secrets.credential_key) {
+            return Err(MembershipError::Incompatible);
+        }
+        inner
+            .store
+            .inspect_sharing_purpose_material()
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        inner
+            .store
+            .verify_sharing_purpose_material(&master)
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        let rows=inner.client.query_consistent_map::<CountRow,_>("SELECT count(*) AS count FROM cluster_nodes WHERE node_id=$1 AND raft_id=$2 AND removed_at IS NULL AND NOT EXISTS(SELECT 1 FROM sharing_purpose_census_intents WHERE node_id=$1)",params!(inner.identity.node_id.as_str(),inner.identity.raft_id as i64)).await?;
+        if !matches!(rows.as_slice(),[row] if row.count==1) {
+            return Err(MembershipError::Incompatible);
+        }
+        *inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(master);
+        // A newly verified boot master changes the heartbeat proof. Serialize
+        // with ordinary commits, but never coalesce it with the prior heartbeat
+        // that did not carry this proof.
+        let mut committed = inner.heartbeat_writes.last_committed.lock().await;
+        self.commit_heartbeat(inner).await?;
+        *committed = Some(tokio::time::Instant::now());
+        Ok(())
+    }
+
+    /// Bounded explicit startup/heartbeat factory. A member completing a later
+    /// upgrade can make the exact current floor ready without a read handler
+    /// repairing key state. The saved sharing choice is never overridden.
+    pub async fn coordinate_purpose_keys(&self) -> Result<(), MembershipError> {
+        let Some(inner) = &self.inner else {
+            return Ok(());
+        };
+        if inner
+            .store
+            .get_setting("sharing_enabled")
+            .await
+            .map_err(|_| MembershipError::Incompatible)?
+            .as_deref()
+            != Some("true")
+        {
+            return Ok(());
+        }
+        let master = inner
+            .purpose_master
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(master) = master else {
+            return Ok(());
+        };
+        bootstrap_purpose_admission_schema(&inner.client, inner.identity.raft_id, &master).await?;
+        let Some(members) = self.observe_purpose_key_members(&master).await? else {
+            return Ok(());
+        };
+        inner
+            .store
+            .install_sharing_purpose_keys(&master, &members, unix_ms()?)
+            .await
+            .map_err(|_| MembershipError::Incompatible)?;
+        Ok(())
     }
 
     /// Current exact roster/master proof for key installation only. Source
     /// admission continues to use its separate PrincipalAndCatalogue witness.
     pub async fn observe_purpose_key_members(
         &self,
-        master_key_id: &str,
+        master: &crate::secrets::CredentialKey,
     ) -> Result<Option<PurposeKeyMembers>, MembershipError> {
         let Some(inner) = &self.inner else {
             return Ok(None);
         };
-        purpose_key_member_observation(&inner.client, inner.identity.raft_id, master_key_id).await
+        purpose_key_member_observation(&inner.client, inner.identity.raft_id, master).await
     }
 
     /// Active nodes that cannot currently prove the always-compiled live-TV
@@ -11645,6 +12006,25 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sharing_purpose_master_proof_requires_canonical_256_bit_fingerprint() {
+        for rejected in [
+            "".to_owned(),
+            "a".repeat(8),
+            "a".repeat(63),
+            "a".repeat(65),
+            "A".repeat(64),
+            "g".repeat(64),
+            format!("{}'", "a".repeat(63)),
+            "é".repeat(32),
+        ] {
+            assert!(super::purpose_master_proof_predicate(&rejected).is_err());
+        }
+        assert!(super::purpose_master_proof_predicate(&"a".repeat(64))
+            .expect("canonical")
+            .contains("sharing_purpose_master_v1:"));
+    }
+
     use super::*;
 
     fn sharing_principal_floor_fixture() -> rusqlite::Connection {
@@ -11842,6 +12222,73 @@ mod tests {
             .observe_source_admission_members()
             .await
             .is_err());
+    }
+
+    #[test]
+    fn sharing_source_purpose_installation_invalidates_legacy_proof_and_requires_current_master() {
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("CREATE TABLE cluster_sharing_membership_intents(id TEXT); CREATE TABLE cluster_sharing_join_declarations(token_hash TEXT); CREATE TABLE cluster_join_tokens(token_hash TEXT,state TEXT); CREATE TABLE sharing_purpose_census_intents(boot_metadata TEXT)").expect("unit transition and census metadata");
+        for sql in sharing_membership_generation_schema() {
+            connection
+                .execute_batch(&sql)
+                .expect("durable generation fixture");
+        }
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY]).expect("catalogue proofs");
+        let legacy = source_admission_members_for_unit_test(1, &BTreeSet::from([1, 2]), 1000000)
+            .expect("legacy observation");
+        let allows = |observation: &SourceAdmissionMembers| {
+            let (guard, roster, cutoff, now) = observation
+                .write_guard(1000001, 1, 2, 3)
+                .expect("current private witness");
+            connection
+                .query_row(
+                    &format!("SELECT {guard}"),
+                    rusqlite::params![roster, cutoff, now],
+                    |row| row.get::<_, bool>(0),
+                )
+                .expect("same-write predicate")
+        };
+        assert!(
+            allows(&legacy),
+            "census-only metadata preserves legacy floor"
+        );
+        connection
+            .execute_batch("CREATE TABLE sharing_catalogue_keys(partial TEXT)")
+            .expect("purpose material appears after observation");
+        assert!(
+            !allows(&legacy),
+            "partial installation cannot inherit a cached Both proof"
+        );
+        let master = crate::secrets::CredentialKey::from_bytes([129; 32]);
+        let current = source_admission_members_with_purpose_for_unit_test(
+            1,
+            &BTreeSet::from([1, 2]),
+            1000000,
+            &master,
+        )
+        .expect("private fixture master witness");
+        assert!(!allows(&current), "missing purpose capability refuses");
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[SHARING_PURPOSE_KEYS_CAPABILITY]).expect("binary proofs");
+        assert!(
+            !allows(&current),
+            "capability alone cannot replace master proof"
+        );
+        let fingerprint = format!(
+            "sharing_purpose_master_v1:{}",
+            master.sharing_purpose_master_fingerprint()
+        );
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes",[fingerprint.as_str()]).expect("actual fixture master proof");
+        assert!(allows(&current));
+        connection
+            .execute(
+                "DELETE FROM cluster_node_capabilities WHERE node_id='learner' AND capability=?1",
+                [SHARING_PURPOSE_KEYS_CAPABILITY],
+            )
+            .expect("purpose proof disappears after observation");
+        assert!(!allows(&current));
+        connection.execute("INSERT INTO cluster_node_capabilities SELECT node_id,?1,last_seen_at FROM cluster_nodes WHERE node_id='learner'",[SHARING_PURPOSE_KEYS_CAPABILITY]).expect("purpose proof returns");
+        connection.execute("UPDATE cluster_node_capabilities SET last_seen_at=last_seen_at-1 WHERE node_id='learner' AND capability=?1",[fingerprint]).expect("master proof no longer coupled to heartbeat");
+        assert!(!allows(&current));
     }
 
     #[test]

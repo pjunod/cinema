@@ -24,8 +24,8 @@ async fn exec(client: &Client, sql: &str) {
         .await
         .expect("replicated fixture mutation");
 }
-async fn observation(client: &Client) -> SourceAdmissionMembers {
-    observe_source_admission_members_for_contract(client, 1)
+async fn observation(client: &Client, credential: &CredentialKey) -> SourceAdmissionMembers {
+    observe_source_admission_members_for_contract(client, 1, credential)
         .await
         .expect("actual quorum factory")
         .expect("both floors ready")
@@ -212,13 +212,14 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .expect("Source candidate fixture operation");
         client
             .execute(
-                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3),($1,$5,$3)",
+                "INSERT INTO cluster_node_capabilities VALUES($1,$2,$3),($1,$4,$3),($1,$5,$3),($1,$6,$3)",
                 hiqlite::params!(
                     format!("node-{id}"),
                     SHARING_SESSION_PRINCIPAL_CAPABILITY,
                     now,
                     SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
-                    SHARING_PURPOSE_KEYS_CAPABILITY
+                    SHARING_PURPOSE_KEYS_CAPABILITY,
+                    format!("sharing_purpose_master_v1:{}", credential.sharing_purpose_master_fingerprint())
                 ),
             )
             .await
@@ -239,7 +240,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     }
     let first = intent(&store, grant, &credential, &key, "first").await;
     let second = intent(&store, grant, &credential, &key, "second").await;
-    let old = observation(&client).await;
+    let old = observation(&client, &credential).await;
     exec(
         &client,
         "UPDATE cluster_nodes SET role='learner' WHERE node_id='node-1'",
@@ -297,7 +298,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         .expect("zero Source rows after stale proof");
     assert_eq!(rows[0].value, "0");
     let duplicate = intent(&store, grant, &credential, &key, "first").await;
-    let proof = observation(&client).await;
+    let proof = observation(&client, &credential).await;
     let (a, b) = tokio::join!(
         store.claim_source_media_session(&first, &proof),
         store.claim_source_media_session(&duplicate, &proof)
@@ -316,7 +317,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     };
     assert!(matches!(
         store
-            .claim_source_media_session(&second, &observation(&client).await)
+            .claim_source_media_session(&second, &observation(&client, &credential).await)
             .await
             .expect("second distinct request"),
         SourceClaimOutcome::Acquired(_)
@@ -324,14 +325,14 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let third = intent(&store, grant, &credential, &key, "third").await;
     assert!(matches!(
         store
-            .claim_source_media_session(&third, &observation(&client).await)
+            .claim_source_media_session(&third, &observation(&client, &credential).await)
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Capacity(SourceCapacity::PendingStarts)
     ));
     let retry = intent(&store, grant, &credential, &key, "first").await;
     match store
-        .claim_source_media_session(&retry, &observation(&client).await)
+        .claim_source_media_session(&retry, &observation(&client, &credential).await)
         .await
         .expect("Source candidate fixture operation")
     {
@@ -360,7 +361,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         "DELETE FROM cache_consumer_pins WHERE storage_id='foreign'",
     )
     .await;
-    let before = observation(&client).await;
+    let before = observation(&client, &credential).await;
     exec(
         &client,
         "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
@@ -394,7 +395,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     .await;
     assert!(matches!(
         store
-            .claim_source_media_session(&retry, &observation(&client).await)
+            .claim_source_media_session(&retry, &observation(&client, &credential).await)
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Retired(_)
@@ -406,7 +407,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     .await;
     assert!(matches!(
         store
-            .claim_source_media_session(&third, &observation(&client).await)
+            .claim_source_media_session(&third, &observation(&client, &credential).await)
             .await
             .expect("Source candidate fixture operation"),
         SourceClaimOutcome::Unavailable
@@ -417,7 +418,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     )
     .await;
     let SourceClaimOutcome::Acquired(third_binding) = store
-        .claim_source_media_session(&third, &observation(&client).await)
+        .claim_source_media_session(&third, &observation(&client, &credential).await)
         .await
         .expect("third actual claim")
     else {
@@ -449,7 +450,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
                 hash,
             )
             .await;
-            let proof = observation(&client).await;
+            let proof = observation(&client, &credential).await;
             let (x, y) = tokio::join!(
                 store.claim_source_media_session(&x, &proof),
                 store.claim_source_media_session(&y, &proof)
@@ -466,7 +467,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             let ninth = intent_hash(&store, other, &credential, &key, "ninth", hash).await;
             assert!(matches!(
                 store
-                    .claim_source_media_session(&ninth, &observation(&client).await)
+                    .claim_source_media_session(&ninth, &observation(&client, &credential).await)
                     .await
                     .expect("Source candidate fixture operation"),
                 SourceClaimOutcome::Capacity(SourceCapacity::SourceSlots)
@@ -476,7 +477,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("Source candidate fixture operation");
     assert_eq!(rows[0].value, "8");
     let second_binding = match store
-        .claim_source_media_session(&second, &observation(&client).await)
+        .claim_source_media_session(&second, &observation(&client, &credential).await)
         .await
         .expect("Source candidate fixture operation")
     {
@@ -492,7 +493,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         )
         .await
         .expect("rotate current fixture credential");
-    let local = observation(&client).await;
+    let local = observation(&client, &credential).await;
     let (first_assignment, retry_assignment) = tokio::join!(
         store.assign_source_dispatch(&second_binding, &credential, &local),
         store.assign_source_dispatch(&second_binding, &credential, &local)
@@ -508,7 +509,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             second_binding.incarnation_id()
         );
     }
-    let other_worker = observe_source_admission_members_for_contract(&client, 2)
+    let other_worker = observe_source_admission_members_for_contract(&client, 2, &credential)
         .await
         .expect("second worker full floor")
         .expect("second actual voter");
@@ -527,12 +528,20 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("capacity retained after assignment");
     assert_eq!(rows[0].value, "8");
     let assignment = store
-        .assign_source_dispatch(&second_binding, &credential, &observation(&client).await)
+        .assign_source_dispatch(
+            &second_binding,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("activation assignment")
         .expect("same owned worker");
     let SourceWriteAuthorityRead::Ready(authority) = store
-        .prepare_source_activation_authority(&assignment, &credential, &observation(&client).await)
+        .prepare_source_activation_authority(
+            &assignment,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("fresh activation witness")
     else {
@@ -574,7 +583,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_activation_authority(
                 &assignment,
                 &credential,
-                &observation(&client).await
+                &observation(&client, &credential).await
             )
             .await
             .expect("foreign actor lineage refuses mint"),
@@ -644,7 +653,11 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     )
     .await;
     let SourceWriteAuthorityRead::Ready(authority) = store
-        .prepare_source_activation_authority(&assignment, &credential, &observation(&client).await)
+        .prepare_source_activation_authority(
+            &assignment,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("fresh retry authority")
     else {
@@ -689,7 +702,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_owned_route_authority(
                 &assignment,
                 &credential,
-                &observation(&client).await
+                &observation(&client, &credential).await
             )
             .await
             .expect("unresolved owned refusal"),
@@ -698,7 +711,11 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     // Actual coupled Store publication; this candidate SQL receipt does not
     // allocate a producer or qualify physical readiness.
     let SourcePublicationAuthorityRead::Ready(publication) = store
-        .prepare_source_publication_authority(&assignment, &credential, &observation(&client).await)
+        .prepare_source_publication_authority(
+            &assignment,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("actual voter publication permission")
     else {
@@ -744,7 +761,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     assert_eq!(published.session_id, activation.session_id);
     assert!(matches!(
         store
-            .claim_source_media_session(&second, &observation(&client).await)
+            .claim_source_media_session(&second, &observation(&client, &credential).await)
             .await
             .expect("old rotated peer credential refuses"),
         SourceClaimOutcome::Unavailable
@@ -752,10 +769,14 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     let current_replay =
         intent_hash(&store, grant, &credential, &key, "second", "f".repeat(64)).await;
     assert!(
-        matches!(store.claim_source_media_session(&current_replay,&observation(&client).await).await.expect("ready-zero replay before full Source cap"),SourceClaimOutcome::Resolved{binding,..} if binding.same_identity(&second_binding))
+        matches!(store.claim_source_media_session(&current_replay,&observation(&client, &credential).await).await.expect("ready-zero replay before full Source cap"),SourceClaimOutcome::Resolved{binding,..} if binding.same_identity(&second_binding))
     );
     let SourcePublicationAuthorityRead::Ready(publication_replay) = store
-        .prepare_source_publication_authority(&assignment, &credential, &observation(&client).await)
+        .prepare_source_publication_authority(
+            &assignment,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("exact publication permission")
     else {
@@ -771,7 +792,11 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         published.session_id
     );
     let SourceOwnedRouteAuthorityRead::Ready(owned) = store
-        .prepare_source_owned_route_authority(&assignment, &credential, &observation(&client).await)
+        .prepare_source_owned_route_authority(
+            &assignment,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("actual voter owned witness")
     else {
@@ -835,7 +860,7 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .prepare_source_owned_route_authority(
                 &assignment,
                 &credential,
-                &observation(&client).await
+                &observation(&client, &credential).await
             )
             .await
             .expect("refreshed owned witness"),
@@ -851,7 +876,11 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         SourceReleaseOutcome::Refused
     );
     let no_spawn = store
-        .assign_source_dispatch(&third_binding, &credential, &observation(&client).await)
+        .assign_source_dispatch(
+            &third_binding,
+            &credential,
+            &observation(&client, &credential).await,
+        )
         .await
         .expect("actual assigned no-spawn worker")
         .expect("assigned");

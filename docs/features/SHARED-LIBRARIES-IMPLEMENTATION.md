@@ -3337,19 +3337,24 @@ fixture passed all 32 H1/H2 scope/artwork cases (one test, zero ignored,
 in the isolated fixture; actual Tailscale, two-NAT and physical-device claims
 remain open.
 
-### S4 purpose factory and restore foundation — coordinator remains open
+### S4 purpose factory and restore foundation
 
 The candidate purpose factory uses a separate `sharing_purpose_keys_v1` floor
 and an opaque observation of the current Raft roster, membership generation,
-and each member's heartbeat-coupled selected sealing-key ID. Its actual write
+and each member's heartbeat-coupled selected sealing-master fingerprint. The
+fingerprint is a fixed-domain 256-bit HMAC derived from the actual selected
+master and has exactly 64 lowercase hex digits; the existing eight-digit key
+ID remains diagnostic. Actual AEAD opening of every active and archived
+envelope remains mandatory. Its actual write
 checks that proof again, both active rows are empty, import mode is absent or
 closed, and no census intent exists. It installs the Source catalogue revision
 key and B file locator key together with a singleton installation marker.
 Reopening verifies existing material and preserves the winning ciphertext;
 partial, empty, malformed, foreign-identity, and mixed-master states refuse.
-This foundation does not advertise the capability or run an installer at
-startup. The distributed startup census claim/release, exact removal cleanup,
-standalone factory, replicated restart, and daemon coordinator remain open.
+Checkpoint `7f03fea23` did not advertise the capability or run an installer at
+startup. Its distributed startup census, removal cleanup, actual one-voter
+factory, replicated restart and daemon coordinator were unqualified; the newer
+coordinator receipt below records those paths separately.
 
 The existing offline restore fencing transaction now moves the complete old
 purpose pair into a sealed archive before deleting active keys and the old
@@ -3397,3 +3402,82 @@ cases (one test, zero ignored). The new
 pinned Source/B H1/H2 decision fixture is opt-in and remains unqualified until
 its committed source archive runs in the disposable CGNAT container. Source
 starts, receiver sessions, media relay and progress remain separate open work.
+### S4 coordinated purpose startup — candidate qualification
+
+The coordinator candidate integrates the complete effort ancestor
+`bf9edf9d6`. Actual legacy and replicated master-opening paths claim a
+node/raft/boot-attempt census intent before inspecting material or selecting a
+key file. Shape and count refusal precede potential key-file creation, then
+actual AEAD opening precedes exact-attempt release. A failed or cancelled boot
+retains its intent. Same-node restart advances the durable generation under
+the existing startup ownership convention; an old attempt cannot release the
+new one. Replicated claims require the actual admitted SQL node/raft and clear
+that node's old purpose/master proofs. Fenced node removal clears only that
+node/raft's census intent in the same removed-at write. Census-only schema is a
+recognized pre-factory state; partial active-key installation still refuses.
+The first activation also repeats this census against the actual replicated
+store after its admitted node row exists, before publishing a purpose proof.
+Initial legacy SQLite row import refuses installed or partial purpose material
+before changing migration artifacts because its fixed inventory cannot retain
+those optional rows. The existing replicated restore path copies the full
+image and keeps its explicitly archived ciphertext.
+
+Actual daemon startup prepares its selected master and publishes the protocol
+capability and full fingerprint in a serialized heartbeat. This proof-changing
+heartbeat cannot coalesce with an earlier heartbeat that lacked the proof.
+The capability means binary protocol support and actual selected-master proof,
+not installed-key readiness. A five-second startup/heartbeat coordinator runs
+only for the saved `sharing_enabled=true` choice; it never changes the choice.
+SQLite recovery has no actual replicated membership observation and cannot
+mint purpose installation authority. Normal standalone startup uses the same
+actual one-voter replicated path as a larger cluster.
+
+First installation uses a separate opaque bootstrap observation of the actual
+current Raft roster and selected master. Complete absence permits plain CREATE
+of the exact closed membership guard schema and generation zero in a guarded
+transaction; partial, incompatible or legacy two-capability shapes refuse
+without ALTER or repair. A competing loser can adopt only a complete validated
+winner. Existing nonzero generation is retained. The key factory then obtains
+a fresh normal purpose observation. Same-write predicates include the exact
+SQL/Raft roster, current generation/master proof, no membership transition,
+closed import mode and no census owner. Final transaction CHECK assertions
+verify the actual key rows and installation marker, so ignored insertion or
+rewrap updates cannot leave a partial commit. The purpose transaction guard
+refuses attached triggers; complete active/archive rewrap checks exact captured
+and replacement ciphertexts in the same write.
+
+Source admission preserves its legacy Principal/Catalogue floor only while
+all purpose-material/installation markers remain absent in the actual write.
+Even malformed marker presence invalidates an older cached legacy observation.
+Presence requires all three capabilities and the privately captured selected
+master fingerprint coupled to every current heartbeat; a missing prepared
+master or lost purpose/master proof prevents a new observation or guarded
+mutation. Census-only boot metadata is excluded from this Source marker, while
+join and promotion retain their broader purpose-protocol fence. Actual Raft
+voter proof governs key installation; nullable legacy SQL voter roles keep the
+existing non-learner interpretation.
+
+Focused qualification records below distinguish actual replicated startup and
+concurrent factory tests from the SQL tombstone cleanup regression. The latter
+proves that a removed-at write retires only the exact node/raft census claim;
+it does not independently qualify the complete Raft removal protocol. The
+existing data-directory startup lock supplies local boot ownership. Global
+runtime master-file replacement, actual Tailscale/two-NAT transport and final
+shared-library promotion remain outside this receipt.
+
+On the `bf9edf9d6` ancestor with this coordinator and the Source fixture updates,
+pinned Rust 1.97.1 core/daemon all-target checking passed (1 minute 15 seconds).
+The purpose unit filter passed 13 tests with zero ignored (15.01 seconds),
+including actual one-voter store selection, install, nullable legacy voter role,
+selected-master refusal and durable readdress/restart ciphertext preservation.
+The actual three-voter purpose contract passed with zero ignored (9.82 seconds):
+competing schema/key factories preserve their winner, complete legacy
+two-capability and partial schemas remain untouched, census and stale master
+proofs refuse, and an ignored locator rewrap update rolls the entire active/
+archive/marker transaction back. Source admission unit checks passed 17 tests
+with zero ignored (28.22 seconds); its actual three-voter claim/replay/capacity/
+release regression passed with zero ignored (11.60 seconds) using the real
+fixture master and heartbeat-coupled fingerprint. These tests do not claim
+physical producer or public network qualification.
+Feature-enabled all-target Clippy with denied warnings also passed (1 minute
+27 seconds), and the documentation index suite passed all four tests.

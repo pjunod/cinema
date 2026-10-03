@@ -2,7 +2,8 @@
 use super::*;
 use crate::{
     cluster::membership::{
-        source_admission_members_for_unit_test, SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY,
+        source_admission_members_with_purpose_for_unit_test,
+        SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY, SHARING_PURPOSE_KEYS_CAPABILITY,
         SHARING_SESSION_PRINCIPAL_CAPABILITY,
     },
     domain::{LibraryKind, NewLibrary},
@@ -81,7 +82,7 @@ async fn setup(store: &SqliteStore) -> (Uuid, CredentialKey) {
         .await
         .expect("all candidate objects");
     let now = now_ms().expect("clock");
-    store.sharing_txn(vec![("INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".into(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),envelope.as_stored().to_owned().into()]),("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,$1,'movie','Movie','movie')".into(),vec![library.into()]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/private/synthetic.mkv',20,1000)".into(),vec![]),("INSERT INTO cluster_nodes VALUES('voter',1,$1,NULL,NULL,'api','raft')".into(),vec![now.into()]),("INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3)".into(),vec![SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned().into(),SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned().into(),now.into()]),("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'".into(),vec![])]).await.expect("current Source fixture");
+    store.sharing_txn(vec![("INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)".into(),vec![identity.server_id.into(),identity.catalogue_epoch.into(),envelope.as_stored().to_owned().into()]),("INSERT INTO items(id,library_id,kind,title,sort_title) VALUES(1,$1,'movie','Movie','movie')".into(),vec![library.into()]),("INSERT INTO files(id,item_id,path,size,mtime) VALUES(1,1,'/private/synthetic.mkv',20,1000)".into(),vec![]),("INSERT INTO cluster_nodes VALUES('voter',1,$1,NULL,NULL,'api','raft')".into(),vec![now.into()]),("INSERT INTO cluster_node_capabilities VALUES('voter',$1,$3),('voter',$2,$3),('voter',$4,$3),('voter',$5,$3)".into(),vec![SHARING_SESSION_PRINCIPAL_CAPABILITY.to_owned().into(),SHARING_CATALOGUE_ITEM_IDENTITY_CAPABILITY.to_owned().into(),now.into(),SHARING_PURPOSE_KEYS_CAPABILITY.to_owned().into(),format!("sharing_purpose_master_v1:{}",credential.sharing_purpose_master_fingerprint()).into()]),("INSERT INTO settings(key,value,updated_at) VALUES('sharing_enabled','true',1) ON CONFLICT(key) DO UPDATE SET value='true'".into(),vec![])]).await.expect("current Source fixture");
     store
         .sharing_txn(
             crate::cluster::membership::sharing_member_admission_guard_schema()
@@ -150,10 +151,11 @@ async fn intent(
     }
 }
 fn proof() -> SourceAdmissionMembers {
-    source_admission_members_for_unit_test(
+    source_admission_members_with_purpose_for_unit_test(
         1,
         &BTreeSet::from([1]),
         now_ms().expect("Source candidate fixture operation"),
+        &CredentialKey::from_bytes([17; 32]),
     )
     .expect("Source candidate fixture operation")
 }
