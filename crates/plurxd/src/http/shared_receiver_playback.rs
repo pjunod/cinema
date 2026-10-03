@@ -42,6 +42,11 @@ struct ReceiverStartState {
     // Never discarded on publication failure or loss of the original login.
     source: Option<ReceiverSourceAttachment>,
     received: Option<Arc<ReceivedSource>>,
+    dispatched: Option<Arc<DispatchedSource>>,
+}
+struct DispatchedSource {
+    credential: plurx_core::secrets::Secret,
+    viewer_hash: String,
 }
 struct ReceivedSource {
     credential: plurx_core::secrets::Secret,
@@ -252,22 +257,44 @@ async fn run_owner(
         lease_expires_at_ms: route.lease_expires_at_ms,
     };
     let dispatch_owner = pending.clone();
-    let start = state
-        .sharing
-        .start_file_source(&state, intent, &dispatch_owner, &source_wrapper);
+    let dispatch_entry = entry.clone();
+    let start = state.sharing.start_file_source(
+        &state,
+        intent,
+        &dispatch_owner,
+        &source_wrapper,
+        move |credential, viewer| {
+            dispatch_entry
+                .state
+                .lock()
+                .expect("receiver owner")
+                .dispatched = Some(Arc::new(DispatchedSource {
+                credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
+                viewer_hash: viewer.to_owned(),
+            }));
+        },
+    );
     tokio::pin!(start);
     let mut timer = tokio::time::interval(Duration::from_secs(10));
     timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut pending_authorized = true;
     let result = loop {
         tokio::select! {
             result = &mut start => break result.map_err(|_| ReceiverStartError::Unresolved)?,
-            _ = timer.tick() => {
-                let authority = state.store.prepare_receiver_session_authority(intent.clone()).await
-                    .map_err(|_| ReceiverStartError::Unresolved)?.ok_or(ReceiverStartError::Unresolved)?;
-                pending.now_ms = clock_ms();
-                pending.lease_expires_at_ms = pending.now_ms + 30_000;
-                if !state.store.renew_pending_receiver_session(&authority, &pending).await
-                    .map_err(|_| ReceiverStartError::Unresolved)? { return Err(ReceiverStartError::Unresolved); }
+            _ = timer.tick(), if pending_authorized => {
+                let renewed = async {
+                    let authority = state.store.prepare_receiver_session_authority(intent.clone()).await
+                        .map_err(|_| ReceiverStartError::Unresolved)?.ok_or(ReceiverStartError::Unresolved)?;
+                    pending.now_ms = clock_ms();
+                    pending.lease_expires_at_ms = pending.now_ms + 30_000;
+                    state.store.renew_pending_receiver_session(&authority, &pending).await
+                        .map_err(|_| ReceiverStartError::Unresolved)
+                }.await;
+                if renewed != Ok(true) {
+                    // Losing B authority cannot cancel an already-sent Source
+                    // Start and discard its eventual physical cleanup handle.
+                    pending_authorized = false;
+                }
             }
         }
     };
@@ -419,6 +446,7 @@ async fn run_owner(
             return Err(ReceiverStartError::Unresolved);
         }
         attachment.owner.lease_expires_at_ms = new_lease;
+        entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
         entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
     }
 }

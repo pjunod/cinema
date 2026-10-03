@@ -3949,3 +3949,146 @@ relay, delivery grants and control. No viewer playback is enabled here.
 ```sh
 cargo test -p plurxd --bin plurxd http::shared_source_playback::
 ```
+
+### Combined retained binding, progress and dispatch qualification
+
+The binding reader, Local-only lease inventory and ordered B progress
+checkpoints are integrated with the actual Source HTTP/actor tree. On pinned
+Rust 1.97.1, the receiver suite passed three tests with zero ignored in 20.33
+seconds; it includes the two-owner progress preimage race across both SQLite
+modes and both principal layouts. The actual three-voter receiver contract
+passed one test in 9.79 seconds, and the affected actual three-voter
+Local/Source/B inventory regression passed one test in 17.93 seconds. The
+SQLite inventory regression passed one test in 0.69 seconds. Both B registry
+tests, the complete dispatch recipe test and all seven Source HTTP tests also
+passed with zero ignored; the HTTP suite took 12.37 seconds.
+
+The candidate B owner now retains the exact sent credential and viewer before
+the first Source send, so a lost response retains cleanup authentication.
+Pending renewal failure stops renewal but continues awaiting the owned Source
+exchange instead of dropping its eventual physical handle. Fresh B authority
+still gates attachment and publication. Attached renewal updates the retained
+owner's exact lease for subsequent guarded reads. These remain unregistered
+candidate seams awaiting real B transport, delivery and cleanup qualification.
+
+```sh
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_receiver
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --test store_contract sharing_principal_runtime::sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_principal_replay -- --exact
+cargo test -p plurx-core --features hiqlite-store,hiqlite-contract-tests --lib sharing_staged_and_worker_inventory_preserve_distinct_owners
+```
+### S5 retained receiver binding reader and Local worker separation
+
+`receiver_source_binding` reads the original retained sealed upstream envelope
+and optional resolved projected response through the current original-login,
+import/library, exact B owner/session/request/pointer and live lease proof. It
+uses one bounded consistent query, limits UUIDs to their canonical 36-byte
+form, envelopes to four KiB and canonical response objects to sixty-four KiB
+before returning private data. An unbound blocked owner returns no binding;
+partial, malformed or oversized binding material refuses without repair. The
+reader neither opens the upstream capability nor establishes Source physical
+authority. The actor must authenticate the retained envelope with its exact
+Upstream AAD and obtain fresh Source evidence before using it.
+
+Both backend `owned_media_sessions` implementations now enumerate only genuine
+Local sessions for the generic Local lease loop. Shared Source principals and
+B `remote_source` recipes belong to their dedicated actors and cannot enter
+Local renewal or stale-recipe settlement. Staged, expired and cleanup ownership
+inventories remain separate; this exclusion is not proof that no actor owns a
+resource. Regression fixtures retain genuine Local visibility, exclude both
+actor classes, and keep Shared expired ownership visible.
+
+Pinned Rust 1.97.1 receiver reader regressions passed three tests with zero
+ignored (19.19 seconds) across both SQLite storage modes and both principal
+layouts. The reader recovers the retained envelope/reply and refuses changed
+assignment, owner and file tuples or malformed/oversized binding material.
+The actual three-voter receiver contract passed (9.56 seconds). The SQLite
+actor inventory regression passed in both memory and pooled storage
+(0.71 seconds), and the actual three-voter Local/Source/B inventory regression
+passed for both principal layouts (17.94 seconds). Affected Core/daemon
+feature-enabled all-target compilation passed in 1 minute 9 seconds; the
+docs index passed four tests and the catalog passed 2702 audited files.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_staged_and_worker_inventory_preserve_distinct_owners -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_principal_replay -- --nocapture
+```
+
+The existing Local activation/publication contract through `dyn Store` also
+passed (11.52 seconds), and affected feature-enabled Clippy with denied
+warnings passed in 1 minute 28 seconds. The final reader test additionally
+revokes the original login while another valid login remains: that alternate
+login cannot authorize recovery of the retained binding.
+
+Final original-login refusal coverage passed in the same three-test reader
+filter (19.19 seconds), followed by exact-tree affected compilation and Clippy.
+
+### S5 session-bound ordered receiver progress
+
+`SharingReceiverProgressStore::save_receiver_progress` accepts server-only
+progress with an exact retained attachment and opaque fresh receiver authority.
+The body supplies position, optional duration, watched state and sequence;
+identity comes from the current B session and the Store captures the timestamp.
+The transaction repeats original-login/idle-policy, effective import/library,
+Source identity/epoch, exact published B owner/session/request/pointer/lease,
+recipe/file/revision and retained Source session/incarnation/envelope checks.
+Blocked, expired, replaced or revoked owners cannot write history. This is B
+metadata authority; the caller still owns fresh Source actor evidence.
+
+The existing history key remains `(source_server_id, catalogue_epoch,
+remote_item_id, user_id)`. It spans B sessions and import recreation for the
+same durable Source identity; simultaneous imports of the same Source/epoch
+are already prohibited. A higher sequence advances the row. An exact duplicate
+returns Replay without rewriting its timestamp; older sequences return Stale,
+and equal-sequence differences or changed-library history return Conflict.
+Neither outcome mutates history. A new session cannot reset the global sequence.
+Library moves still require explicit reconciliation, and no Local item ID,
+`watch_state`, `watched_outbox` or A household history is written.
+
+The leader reads a bounded watch preimage, rechecks captured proof/owner
+freshness after that read, and asserts the exact preimage in the mutation
+transaction. A concurrent history change therefore refuses for fresh retry,
+without overwriting newer data. The transaction then proves the exact accepted
+postimage and current authority before committing. Replay, stale and conflict
+transactions issue no history INSERT or UPDATE. Refusal evaluates before an
+INSERT trigger; ignored history writes and in-write scope revocation roll back.
+Replicated SQL uses no connection-local `changes()` or database clock. Position,
+duration and sequence use the existing nonnegative JavaScript-safe integer
+bound, while private stored library identifiers are capped before projection.
+
+Ownership is confined to the two receiver-progress Core modules, direct
+trait/module/catalog registrations, receiver guard helper visibility and the
+existing SQLite/replicated receiver fixtures. The older assignment-bound
+`save_remote_watch` remains a historical metadata fixture helper: all current
+daemon callers are test-only. The live HTTP progress route remains closed until
+the parent receiver actor integrates this session-bound writer and qualifies
+actual Source evidence and control delivery.
+
+Pinned Rust 1.97.1 final receiver regressions passed three tests with zero
+ignored (20.18 seconds), including both SQLite storage modes and principal
+layouts, invalid numeric bounds, stale/expired owners, complete original-login
+and attachment refusal, read-only duplicate timestamp preservation, sequence
+ordering across two published B sessions, ignored history writes, and scope
+revocation inside the write with rollback of both scope and history. The actual
+three-voter contract passed with zero ignored (9.80 seconds), including the
+replicated ignored-write and in-write revocation cases. A supplemental
+interleaving regression passed in all four SQLite combinations (2.65 seconds):
+a second published B owner advances history after the first owner's snapshot;
+the first write refuses and preserves the newer sequence/position. Affected
+feature-enabled compilation then passed in 1 minute 13 seconds; docs index
+passed four tests and the catalog passed 2704 audited files.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver_source_binding_publication_and_renewal_are_guarded_and_exact -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
+cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+Final affected feature-enabled Clippy with denied warnings passed in
+1 minute 30 seconds. These regressions qualify the B Store ordering and
+metadata boundary; they do not qualify a live HTTP progress/control route,
+Source physical work, two-NAT delivery or hardware playback.

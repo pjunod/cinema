@@ -108,6 +108,16 @@ pub struct ReceiverSourceRenewal {
     pub lease_expires_at_ms: i64,
 }
 
+/// Current-authorized durable B metadata for actor recovery. An attached
+/// blocked owner has no response; a published owner retains its resolved
+/// canonical B response. The actor must still open the envelope and obtain
+/// actual current Source evidence before physical or delivery work.
+#[derive(Clone)]
+pub struct ReceiverSourceSnapshot {
+    pub binding: ReceiverSourceBinding,
+    pub response_json: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiverSourceWrite {
     Applied,

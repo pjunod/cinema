@@ -82,6 +82,7 @@ impl SharingManager {
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
         request_json: &str,
+        retain_dispatch: impl FnOnce(&plurx_core::secrets::Secret, &str) + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError};
         let expected = receiver_source_request(intent, request_json)?;
@@ -152,6 +153,9 @@ impl SharingManager {
             .await
             .map_err(|_| PeerError::Unavailable)?
             .ok_or(PeerError::Authentication)?;
+        // Retain cleanup authentication before the first send, including when
+        // no Start response returns. The callback performs no await.
+        retain_dispatch(&credential.credential, &viewer);
         let reply = peer
             .file_start(&credential.credential, &expected, &viewer, request_json)
             .await?;

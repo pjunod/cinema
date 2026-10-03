@@ -5026,6 +5026,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             return Err(StoreError::Task("invalid media-session owner".to_owned()));
         }
         let layout = LocalSessionSql::load(self).await?;
+        let local_inventory = layout.live_local_user("media_sessions");
         let principal_cols = layout.projection();
         let owner_column = layout.column();
         self.client()
@@ -5034,7 +5035,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                     "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
                         drain_deadline_ms, {principal_cols}
                    FROM media_sessions
-                  WHERE owner_node_id = $1 AND state = 'active'
+                  WHERE owner_node_id = $1 AND state = 'active' {local_inventory}
                     AND lease_expires_at_ms > $2
                     AND (publication_ready_at_ms != $3 OR EXISTS (
                       SELECT 1 FROM media_playback_pointers pointer
