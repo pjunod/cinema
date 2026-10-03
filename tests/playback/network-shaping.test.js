@@ -49,6 +49,24 @@ function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
 
+test("steady frame window excludes preload time but preserves later and switch gaps", () => {
+  assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
+  assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,
+    "a blackout wholly inside the observed window still fails the 250 ms bound");
+  assert.equal(lab.frameGapSince(4921.2, 5421.2), 500,
+    "a quality switch retains the complete outgoing-to-target frame gap");
+  assert.equal(lab.frameGapSince(null, 5421.2, 5300), 0,
+    "missing first-frame evidence is not invented by a window origin");
+  const measured = lab.transitionMetrics({media_event_seq:0}, {
+    media_event_seq:0,media_events:[],sampled_at_ms:5921.2,
+    frame_probe:{supported:true,last_frame_at_ms:4921.2,
+      maximum_gap_ms:0,measurement_start_at_ms:5300},
+    video:{paused:false,ended:false},
+  });
+  assert.ok(Math.abs(measured.maximum_video_gap_ms - 621.2) < 1e-6,
+    "no new callback after the origin remains an open blackout");
+});
+
 test("VOD readiness requires a pass that stored an index", () => {
   const empty = { message: "fragment indexing pass finished attempted=1 built=0" };
   const ready = { message: "fragment indexing pass finished attempted=2 built=1" };

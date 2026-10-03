@@ -2286,6 +2286,12 @@ function diagnosticSwitchCommit(commit, stageAtMs) {
     && commit.at >= stageAtMs ? commit : null;
 }
 
+function frameGapSince(lastFrameAtMs, nowMs, windowStartMs = null) {
+  if (lastFrameAtMs == null) return 0;
+  const from = windowStartMs == null ? lastFrameAtMs : Math.max(lastFrameAtMs, windowStartMs);
+  return Math.max(0, nowMs - from);
+}
+
 async function setCasePreferences(driver, quality, frameDiagnostics = false) {
   await driver.exec(`
     try{closePlayer()}catch(e){}
@@ -2293,6 +2299,7 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
     // Existing callbacks append to bounded rings; no new timer/subscription.
     globalThis.__plurxLabFrameDiagnostics=${frameDiagnostics ? `{windows:[],dropped_windows:0,max_windows:4,max_records:512}` : "null"};
     globalThis.__plurxLabDiagnosticCommit=${diagnosticSwitchCommit.toString()};
+    globalThis.__plurxLabFrameGapSince=${frameGapSince.toString()};
     globalThis.__plurxLabMediaEvents=[];
     globalThis.__plurxLabMediaEventSeq=globalThis.__plurxLabMediaEventSeq||0;
     globalThis.__plurxLabInstallVideoProbe=(v)=>{
@@ -2370,10 +2377,11 @@ async function setCasePreferences(driver, quality, frameDiagnostics = false) {
           const probe=globalThis.__plurxLabFrameProbe;
           if(probe){
             const priorFrame=probe.last_frame;
-            const gap=probe.last_frame_at_ms==null?0:now-probe.last_frame_at_ms;
+            const gap=globalThis.__plurxLabFrameGapSince(probe.last_frame_at_ms,now,probe.measurement_start_at_ms);
             if(gap>probe.maximum_gap_ms){
               probe.maximum_gap_ms=gap;
-              probe.maximum_gap_detail={start_at_ms:probe.last_frame_at_ms,
+              probe.maximum_gap_detail={start_at_ms:probe.measurement_start_at_ms==null?probe.last_frame_at_ms:
+                  Math.max(probe.last_frame_at_ms,probe.measurement_start_at_ms),
                 end_at_ms:now,from_element:priorFrame?.element_id||null,
                 to_element:v.__plurxLabElementId||null,
                 from_session_id:priorFrame?.session_id||null};
@@ -2565,7 +2573,7 @@ async function performOperation(driver, testCase, start) {
       `outgoing frame before quality switch to ${quality}`, 50);
       await driver.exec(`
         { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
         }
         return true;
       `);
@@ -2717,7 +2725,8 @@ function transitionMetrics(before, after) {
   const probe = after?.frame_probe || {};
   const openFrameGap = probe.supported && probe.last_frame_at_ms != null
     && !after?.video?.paused && !after?.video?.ended
-    ? Math.max(0, Number(after?.sampled_at_ms || 0) - Number(probe.last_frame_at_ms))
+    ? frameGapSince(Number(probe.last_frame_at_ms), Number(after?.sampled_at_ms || 0),
+      probe.measurement_start_at_ms ?? null)
     : 0;
   maximumGapMs = Math.max(maximumGapMs, Number(probe.maximum_gap_ms || 0), openFrameGap);
   return {
@@ -2887,7 +2896,7 @@ async function observeShapedCliff(driver, shaper, testCase, start) {
   for (let cliffIndex = 1; cliffIndex < shaper.profile.stages.length; cliffIndex += 1) {
     await driver.exec(`
       { const probe=globalThis.__plurxLabFrameProbe;
-          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;}
+          if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;probe.measurement_start_at_ms=null;}
       }
       return true;
     `);
@@ -3827,7 +3836,17 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       end: shaped.end,
     };
   }
-  const continuityStart = start;
+  // Startup has its own TTFF receipt. A steady observation begins now, not
+  // at the preload frame that could have been rendered before play started.
+  // Switch operations deliberately retain their full outgoing-frame interval.
+  const continuityStart = testCase.operation === "steady"
+    ? await driver.eval(`(()=>{
+        const probe=globalThis.__plurxLabFrameProbe;
+        if(probe){probe.maximum_gap_ms=0;probe.maximum_gap_detail=null;probe.frames=0;
+          probe.measurement_start_at_ms=performance.now();}
+        return ${playerSnapshotExpression()};
+      })()`)
+    : start;
   let operation = null;
   try {
     operation = await performOperation(driver, testCase, start);
@@ -5080,6 +5099,7 @@ module.exports = {
   shaperClaimBoundBytes,
   timeToSustained,
   transitionMetrics,
+  frameGapSince,
   waitForDeviceAcceptance,
   writePreparationReport,
   writeFatalRunReport,

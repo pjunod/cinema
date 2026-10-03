@@ -4152,3 +4152,29 @@ and exact recipe/response equality. No media bytes, credentials or serialized
 recipes are logged, and no predicate, deadline, admission or recovery rule is
 changed. The next committed-source probe must identify the failed predicate
 before another long campaign. No unit tests executed.
+
+
+### 10.139 Steady observation origins and native restorative upgrade
+
+The earlier 500 ms steady callback receipt spans the startup preload frame
+at browser time 4921.2 ms to the next callback at 5421.2 ms. Its steady start
+already had a running media clock at 0.013 s but retained the preload callback.
+The harness now starts the steady frame window atomically after startup,
+clearing its maximum and clipping only the interval crossing that explicit
+origin. A later blackout and an open interval with no subsequent callback
+remain measured. Quality switches retain their full outgoing-frame interval;
+no threshold changes. The old failed receipts remain failed. Authored
+`steady frame window excludes preload time but preserves later and switch gaps`
+covers startup clipping, later blackout, switch preservation and absent/open
+callback evidence. Syntax checks pass; no unit tests executed.
+
+The separate owned Safari recovery window completed the generated four-minute
+fixture with initial 720p, 1080p at 0.792 s, a pressure downgrade to 720p at
+52 s and restorative 1080p at 80 s. The trace ended at 240.004 s with 5,755
+callbacks, 68 ms maximum callback gap, one video and one audio track, and no
+media error. Its measured link returned high after 60 s while requests were
+still active. This is native autonomous mechanics evidence, not production
+adapter, physical display or audible output qualification. The owned window
+and server were closed; the user's two tabs and TV-library navigation remain.
+Receipt: `native-safari-autonomous-pressure-recovery.json` in the ignored
+owned report directory.
