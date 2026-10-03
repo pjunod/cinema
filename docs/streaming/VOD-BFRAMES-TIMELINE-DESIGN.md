@@ -64,16 +64,28 @@ edit-list shifts, clean random access, exact frame durations/count, signed
 version-1 offsets when nonzero, and every unique presentation slot on the
 planned grid. The first random-access sample must present at the entry start:
 a complete permutation with an IDR later than its leading B pictures is still
-refused. Checked widened arithmetic precedes publication. AAC ownership and
-restart init identity remain unchanged.
+refused. Checked widened arithmetic precedes publication. Restart init identity
+remains unchanged. The encoded segmenter owns AAC assignment on the same
+presentation boundaries as the plan; it moves complete packets from the next
+muxed fragment into the preceding entry when their start is before its end.
+Only moved audio payloads are copied; video stays in its existing buffer.
+
+The first real reordered encode exposed why this is necessary: FFmpeg grouped
+AAC at video decode time, four packets before the next presentation boundary.
+A continuous entry began audio at sample 92,160 while regenerating it began at
+96,256. The film-global 1,024-sample phase was correct in both; packet ownership
+was not. `Segmenter::following_encoded` now assigns those packets using rational
+film time, without changing AAC timestamps, encoder preroll, or refusal rules.
+Copy segmenting retains its muxed-fragment contract.
 
 The common design oracle is now also consumed by parser-produced Rust tests.
 Additional cases cover raw wire shape, overflow and a falsely shifted IDR.
 An authored real-encode regression covers forward/backward restarts, identical
-init, independent segment decoding and joined audio/video continuity. Compiler
-checks and the normal hook passed at implementation; execution is deferred to
-the final batch review/fast lane. Physical-client qualification and compression
-measurements are separate evidence, not implied by compilation.
+init, independent segment decoding and joined audio/video continuity. That
+regression passed after the AAC partition fix, alongside exact packet/sample
+conservation. [Receipt](../evidence/video-quality-2026-10-03/reordered-aac-selective-receipt.json).
+Physical-client qualification and compression measurements remain separate
+evidence and are not implied by these server-side checks.
 
 Sections below retain the dated design rationale; this continuation supersedes
 statements that production source has no presentation-grid implementation.
@@ -368,14 +380,13 @@ it, on both the CI ffmpeg 6 and the shipped jellyfin-ffmpeg 8.
    reorder depth is fixed by the recipe; a family that adapts depth to
    content (hardware B-pyramid heuristics) would fail conjunct (2) on the
    first fragment, which is the right failure.
-5. **AAC lattice.** Untouched in samples: reordering is video-only, audio
-   keeps its 1024-sample lattice and `place_encoded_audio` is unchanged.
-   Interleaving changes — with `delay_moov`+`frag_keyframe` the muxer
-   still cuts on the keyframe *in decode order*, which is still the IDR —
-   so the fragment boundaries are the same. The one thing to watch is that
-   `-t` is applied to encoder input frames, not output, so the delayed
-   last frames still flush inside the same `-t`; the final entry's
-   `trim=end_frame` bound is the real limit and is unchanged.
+5. **AAC lattice.** Audio keeps its 1024-sample lattice and
+   `place_encoded_audio` retains generation-start preroll removal. The initial
+   assumption that muxed audio boundaries also remain identical was disproved
+   by the real-encode regression: the keyframe's decode-time cut precedes its
+   presentation boundary. The implementation continuation above assigns packets
+   to the declared presentation intervals. `trim=end_frame` still owns the
+   final video bound; encoder delay must flush inside the same `-t`.
 
 Not touched: `-force_key_frames`, `-g`, `-keyint_min`, `-sc_threshold 0`,
 `-enc_time_base:v`, `-video_track_timescale`, `-use_editlist 0`,

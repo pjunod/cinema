@@ -553,21 +553,21 @@ impl<S: Sink> GenerationRun<'_, S> {
             .served
             .take()
             .expect("the landing buffer fills only after the init");
-        let segmenter = match Segmenter::following(
-            init,
-            self.generation.policy,
-            u64::from(start_entry),
-            starts,
-        ) {
-            Ok(segmenter) => {
-                segmenter.retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets)
-            }
-            Err(error) => {
-                return Err(Outcome::Failed(Failure::Stream(format!(
-                    "placing the generation against its plan: {error}"
-                ))))
-            }
+        let following = if self.generation.encoded_audio_anchor.is_some() {
+            Segmenter::following_encoded
+        } else {
+            Segmenter::following
         };
+        let segmenter =
+            match following(init, self.generation.policy, u64::from(start_entry), starts) {
+                Ok(segmenter) => segmenter
+                    .retaining_hevc_parameter_sets(self.generation.retain_hevc_parameter_sets),
+                Err(error) => {
+                    return Err(Outcome::Failed(Failure::Stream(format!(
+                        "placing the generation against its plan: {error}"
+                    ))))
+                }
+            };
         self.segmenter = Some(segmenter);
 
         // Drop the first `discards` video-carrying fragments — the index

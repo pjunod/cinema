@@ -4549,6 +4549,7 @@ pub struct Segmenter {
     next_index: u64,
     media_time: Option<MediaTime>,
     boundaries: Option<Boundaries>,
+    encoded_audio_boundaries: bool,
     counts: SegmentCounts,
     retain_hevc_parameter_sets: bool,
 }
@@ -4566,6 +4567,7 @@ impl Segmenter {
             next_index: 0,
             media_time: None,
             boundaries: None,
+            encoded_audio_boundaries: false,
             counts: SegmentCounts::default(),
             retain_hevc_parameter_sets: false,
         }
@@ -4617,6 +4619,21 @@ impl Segmenter {
             first_index: start_index,
             starts,
         });
+        Ok(segmenter)
+    }
+
+    /// Encoded AAC belongs to the declared presentation intervals, not the
+    /// muxer's decode-order fragment boundaries. With B frames those boundaries
+    /// precede the next picture by the reorder delay; restarting at that picture
+    /// otherwise drops the AAC packets a continuous generation assigned to it.
+    pub fn following_encoded(
+        init: Init,
+        policy: CutPolicy,
+        start_index: u64,
+        starts: Vec<u64>,
+    ) -> Result<Segmenter, Fmp4Error> {
+        let mut segmenter = Self::following(init, policy, start_index, starts)?;
+        segmenter.encoded_audio_boundaries = true;
         Ok(segmenter)
     }
 
@@ -4732,7 +4749,22 @@ impl Segmenter {
             self.counts.unparseable += 1;
         }
         let published = match self.cut_before(&fragment, class)? {
-            Some(reason) => Some(self.flush(reason)?),
+            Some(reason) => {
+                if self.encoded_audio_boundaries {
+                    let plan = self.boundaries.as_ref().expect("encoded plan");
+                    let boundary = plan.starts[self.entry_after(plan)];
+                    if let Some(prefix) = take_encoded_audio_before(
+                        &mut fragment,
+                        &self.init,
+                        boundary,
+                        self.video_timescale,
+                    )? {
+                        self.pending_bytes += prefix.len();
+                        self.pending.push(prefix);
+                    }
+                }
+                Some(self.flush(reason)?)
+            }
             None => None,
         };
         self.pending_ticks += fragment.video_duration(&self.init);
@@ -5201,6 +5233,97 @@ impl Segmenter {
             seconds,
         })
     }
+}
+
+/// Move complete AAC packets whose start precedes the next presentation
+/// boundary into the preceding segment. Copy only those packet payloads;
+/// video and the rest of the muxed fragment remain in their existing buffer.
+/// The merger writes fresh moof/data offsets from these resolved track runs.
+fn take_encoded_audio_before(
+    fragment: &mut Fragment,
+    init: &Init,
+    boundary: u64,
+    video_timescale: u32,
+) -> Result<Option<Fragment>, Fmp4Error> {
+    let mut bytes = Vec::new();
+    let mut tracks = Vec::new();
+    for track in &mut fragment.tracks {
+        let Some(info) = init
+            .tracks
+            .iter()
+            .find(|info| info.id == track.track_id && info.kind == TrackKind::Audio)
+        else {
+            continue;
+        };
+        let cutoff = u128::from(boundary) * u128::from(info.timescale);
+        let mut time = track.base_decode_time;
+        let base_decode_time = time;
+        let mut runs = Vec::new();
+        for run in &mut track.runs {
+            let mut count = 0;
+            let mut length = 0usize;
+            for sample in &run.samples {
+                if u128::from(time) * u128::from(video_timescale) >= cutoff {
+                    break;
+                }
+                time = time
+                    .checked_add(u64::from(sample.duration))
+                    .ok_or_else(|| Fmp4Error::Malformed("encoded audio time overflow".into()))?;
+                length = length
+                    .checked_add(sample.size as usize)
+                    .ok_or_else(|| Fmp4Error::Malformed("encoded audio size overflow".into()))?;
+                count += 1;
+            }
+            if count == 0 {
+                break;
+            }
+            let end = run
+                .data_offset
+                .checked_add(length)
+                .ok_or_else(|| Fmp4Error::Malformed("encoded audio offset overflow".into()))?;
+            let payload = fragment
+                .bytes
+                .get(run.data_offset..end)
+                .ok_or_else(|| Fmp4Error::Malformed("encoded audio leaves its payload".into()))?;
+            let data_offset = bytes.len();
+            bytes.extend_from_slice(payload);
+            let samples = run
+                .samples
+                .drain(..count)
+                .map(|mut sample| {
+                    sample.size_at = None;
+                    sample
+                })
+                .collect();
+            runs.push(Run {
+                version: run.version,
+                composition_offsets_present: run.composition_offsets_present,
+                data_offset_at: None,
+                data_offset,
+                samples,
+            });
+            run.data_offset = end;
+            run.data_offset_at = None;
+            if !run.samples.is_empty() {
+                break;
+            }
+        }
+        if !runs.is_empty() {
+            track.base_decode_time = time;
+            track.runs.retain(|run| !run.samples.is_empty());
+            tracks.push(TrackFragment {
+                track_id: track.track_id,
+                base_decode_time,
+                runs,
+            });
+        }
+    }
+    fragment.tracks.retain(|track| track.sample_count() > 0);
+    Ok((!tracks.is_empty()).then_some(Fragment {
+        mdat_payload: 0..bytes.len(),
+        bytes,
+        tracks,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -7307,6 +7430,35 @@ mod tests {
                 track(2, TrackKind::Audio, 48_000),
             ],
         }
+    }
+
+    #[test]
+    fn encoded_audio_partition_uses_presentation_time_and_preserves_packets() {
+        let init = muxed_init();
+        let mut incoming = synthetic(2, 92_160, 1_024, 94, 3);
+        for (index, byte) in incoming.bytes.iter_mut().enumerate() {
+            *byte = index as u8;
+        }
+        let original = track_samples(&incoming, 2);
+        let prefix = take_encoded_audio_before(&mut incoming, &init, 48_048, 24_000)
+            .expect("valid partition")
+            .expect("four lagging AAC packets");
+        let before = prefix.track(2).expect("prefix audio");
+        let after = incoming.track(2).expect("following audio");
+        assert_eq!(before.base_decode_time, 92_160);
+        assert_eq!(before.sample_count(), 4);
+        assert_eq!(before.base_decode_time + before.duration(), 96_256);
+        assert_eq!(after.base_decode_time, 96_256);
+        assert_eq!(prefix.bytes.len(), 12, "do not copy the video/mux buffer");
+        assert_eq!(
+            [track_samples(&prefix, 2), track_samples(&incoming, 2)].concat(),
+            original
+        );
+        assert!(
+            take_encoded_audio_before(&mut incoming, &init, 48_048, 24_000)
+                .expect("same boundary")
+                .is_none()
+        );
     }
 
     #[test]
