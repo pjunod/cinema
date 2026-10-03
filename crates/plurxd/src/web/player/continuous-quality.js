@@ -136,10 +136,15 @@ function continuousQualityProtocol(bootstrap,attachment,exchange=continuousQuali
     }
     throw failure;
   }
+  /**
+   * @template T
+   * @param {()=>T|PromiseLike<T>} action
+   * @returns {Promise<T>}
+   */
   function own(action){
     if(queued>=32)return Promise.reject(new Error('Continuous quality exchange queue bound'));
     queued++;const result=tail.then(action);
-    tail=result.catch(()=>{}).finally(()=>queued--);return result;
+    tail=result.then(()=>{},()=>{}).finally(()=>queued--);return result;
   }
   function queue(make){return own(async()=>{
     if(pending)await send(pending);
@@ -278,9 +283,14 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     if(!row||row.rendition_id!==match[2]||(match[3]&&row.init_id!==match[3]))throw new Error('Continuous media outside family');
     return {row,type:match[1],init:!!match[3]};
   }
+  /**
+   * @template T
+   * @param {()=>T|PromiseLike<T>} action
+   * @returns {Promise<T>}
+   */
   function serial(action){
     if(queued>=32)return Promise.reject(new Error('Continuous media work queue bound'));
-    queued++;const result=work.then(action);work=result.catch(()=>{}).finally(()=>queued--);return result;
+    queued++;const result=work.then(action);work=result.then(()=>{},()=>{}).finally(()=>queued--);return result;
   }
   function note(error){
     player.continuousQualityObservation=String(error?.message||error).slice(0,160);

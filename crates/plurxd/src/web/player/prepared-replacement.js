@@ -348,6 +348,7 @@ function preparedSelectionText(selection){
   return `${selection.height||0}p${grade} ${delivery}${selection.quality_auto?" auto":""}`;
 }
 function preparedHlsAttach(p,state,spare){
+  observeQualityResourceTimings();
   const tgt=bufferTargets(p&&p.bufSegSecs);
   const voluntary=!!(p.directedChange&&(p.directedChange.retainIncumbent||p.directedChange.autoMove?.retainIncumbent));
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;

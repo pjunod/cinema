@@ -4727,3 +4727,45 @@ counts remain unchanged. The next exact-source focused run will exercise the
 previously failed early manual transition followed by five actual Auto moves.
 No units ran. A read-only device process query returned no matching separate
 CQ Lab process after the failed phone launch.
+
+
+### 10.162 Preserve fresh Auto evidence after Resource Timing saturation
+
+The exact `a8110bccf` focused run passed its early manual transition at 66.4 ms
+and actual Auto upgrade to 1080p at 83.96 ms, in the continuous attachment.
+It then failed: Auto did not present 720p within 240 seconds. The corrected
+catalog exposed 17.799734/33.799734 Mb/s costs and the shaper actually held
+20.861 Mb/s pressure (19.8618 Mb/s measured peak). Auto hold telemetry still
+reported a 95.470 Mb/s completed sample. The failed receipt remains failed;
+no pressure downgrade or recovery sequence is claimed.
+
+Inspection found completed transfer proof relying solely on retained browser
+Resource Timing entries. A bounded isolated Firefox network diagnostic
+confirmed saturation: 250 retained entries, 341 observer deliveries, and its
+final request absent from retained history but present in the observer.
+[Resource Timing](https://www.w3.org/TR/resource-timing/) queues observer
+entries separately from the bounded retained resource buffer. This proves a
+production evidence-loss vulnerability; whether it explains this failed Auto
+stage remains to be qualified on the corrected code.
+
+The player now starts a resource observer before incumbent or prepared HLS
+requests and retains at most 128 recent HLS timing rows. Completed transfer
+proof drains pending observer records and chooses fresh observed or retained
+metadata. Cache/producer provenance, body sizes and request/time freshness
+checks remain intact. No timing history is cleared or grown without bounds.
+
+Authored, unrun regression:
+`tests/playback/web-policy.test.js::completed video transfer evidence survives a full browser resource timing buffer`.
+It supplies an observer entry absent from a full retained history, verifies
+actual body proof, still rejects cache and producer-paced bodies, and checks
+bounded eviction. No units executed.
+
+The web compiler also found its generated config missing the effort's two
+continuous assets. The config was regenerated. Queue result types now describe
+returned values while serialization tails explicitly discard unused values;
+player adapter/retention fields and control-generation state are declared,
+and retained Resource Timing entries use their actual type. Compiler checking
+removed the new diagnostics and two existing control-generation diagnostics.
+`scripts/web-types --update --base origin/main` lowered the baseline from
+517 to 515; no increase was accepted. The next normal commit/build and focused
+Auto run will qualify these source changes.

@@ -125,6 +125,8 @@
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
+ * @property {any} [continuousQuality] the reservation-bound continuous attachment
+ * @property {any} [qualityRetainedSelection] the retained incumbent selection while a requested change waits
  * @property {string|null} [qualityProtocol] protocol negotiated with the actual session owner
  * @property {number|null} [priorKbps]     the bandwidth estimate carried from the last playback
  * @property {number|null} [autoHeight]    the rung Auto started or settled on
@@ -703,6 +705,37 @@ function noteCompletedAutoTransfer(p,bytes,loading,now,networkDetails=null,url=n
   const evidence=completedQualityTransfer(networkDetails,url,loading,now);
   if(evidence) p.abr.qualityTransfer={...evidence,media_duration_ms:mediaDurationMs,attachment:p.mediaAttachment};
 }
+const QUALITY_RESOURCE_TIMING_LIMIT=128;
+const qualityResourceTimingRows=new Map();
+let qualityResourceTimingObserver=null;
+function rememberQualityResourceTimings(entries){
+  for(const entry of entries){
+    try{if(!new URL(entry.name,location.href).pathname.startsWith('/api/v1/hls/'))continue;}
+    catch(_){continue;}
+    const row={name:entry.name,startTime:entry.startTime,responseStart:entry.responseStart,
+      responseEnd:entry.responseEnd,encodedBodySize:entry.encodedBodySize,transferSize:entry.transferSize};
+    qualityResourceTimingRows.delete(row.name);qualityResourceTimingRows.set(row.name,row);
+    while(qualityResourceTimingRows.size>QUALITY_RESOURCE_TIMING_LIMIT)
+      qualityResourceTimingRows.delete(qualityResourceTimingRows.keys().next().value);
+  }
+}
+function observeQualityResourceTimings(){
+  if(qualityResourceTimingObserver!==null)return;
+  qualityResourceTimingObserver=false;
+  if(typeof PerformanceObserver!=='function')return;
+  let observer;
+  try{
+    observer=new PerformanceObserver(list=>rememberQualityResourceTimings(list.getEntries()));
+    observer.observe({type:'resource',buffered:true});qualityResourceTimingObserver=observer;
+  }catch(_){observer?.disconnect();}
+}
+function qualityResourceTimingFor(name){
+  observeQualityResourceTimings();
+  if(qualityResourceTimingObserver)rememberQualityResourceTimings(qualityResourceTimingObserver.takeRecords());
+  const observed=qualityResourceTimingRows.get(name);
+  const retained=/** @type {PerformanceResourceTiming|undefined} */ (performance.getEntriesByName(name,'resource').at(-1));
+  return observed&&(!retained||observed.responseEnd>=retained.responseEnd)?observed:retained;
+}
 function completedQualityTransfer(networkDetails,url,loading,now){
   // Upgrade evidence needs a completed network body from bytes already sealed
   // by the server. hls.js load averages alone cannot distinguish cache hits,
@@ -711,8 +744,7 @@ function completedQualityTransfer(networkDetails,url,loading,now){
     if(!networkDetails||networkDetails.status!==200
       ||networkDetails.getResponseHeader("X-Plurx-Producer-Paced")!=="0"||!url) return;
     const name=new URL(url,location.href).href;
-    const entries=performance.getEntriesByName(name,"resource");
-    const timing=/** @type {PerformanceResourceTiming|undefined} */ (entries.at(-1));
+    const timing=qualityResourceTimingFor(name);
     if(!timing||!(timing.encodedBodySize>0&&timing.transferSize>=timing.encodedBodySize)
       ||!(timing.responseEnd>timing.responseStart)
       ||Math.abs(timing.responseEnd-now)>1000
@@ -946,6 +978,7 @@ function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,transpo
   return {tgt,startup};
 }
 function constructHls(startup,tgt,video,startAt,observesCurrent){
+  observeQualityResourceTimings();
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;

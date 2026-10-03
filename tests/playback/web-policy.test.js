@@ -6935,3 +6935,35 @@ test("fenced recovery cannot inherit a predecessor attachment or session", () =>
     {sessionId:'new',attachment:{},reason:'serving_fenced'},
   ]) assert.equal(build({sessionId:'new',mediaAttachment:{},sessionTerminal:terminal}),false);
 });
+
+
+test("completed video transfer evidence survives a full browser resource timing buffer",()=>{
+  const source=fs.readFileSync(path.join(__dirname,"../../crates/plurxd/src/web/player/player.js"),"utf8");
+  const block=source.slice(source.indexOf("const QUALITY_RESOURCE_TIMING_LIMIT="),source.indexOf("function createHlsStartupLoader("));
+  const retained=Array.from({length:250},(_,i)=>({name:`http://localhost/old-${i}`}));
+  const queued=[];
+  class Observer {
+    observe(options){assert.equal(options.type,"resource");}
+    takeRecords(){return queued.splice(0);}
+    disconnect(){}
+  }
+  const perf={getEntriesByName:name=>retained.filter(row=>row.name===name)};
+  const build=new Function("PerformanceObserver","performance","URL","location",block+
+    "\nreturn {complete:completedQualityTransfer,size:()=>qualityResourceTimingRows.size};");
+  const timing=build(Observer,perf,URL,{href:"http://localhost/"});
+  const url="http://localhost/api/v1/hls/session/video/rendition/segment/0.m4s";
+  const entry={name:url,startTime:100,responseStart:110,responseEnd:130,encodedBodySize:100000,transferSize:100400};
+  const xhr={status:200,getResponseHeader:()=>"0"};
+  queued.push(entry);
+  const proof=timing.complete(xhr,url,{start:100},140);
+  assert.equal(proof.bytes,100000);assert.equal(proof.elapsed_ms,20);
+  assert.equal(proof.from_cache,false);assert.equal(proof.producer_paced,false);
+  assert.equal(retained.length,250);
+  assert.equal(timing.complete({...xhr,getResponseHeader:()=>"1"},url,{start:100},140),undefined);
+  queued.push({...entry,transferSize:0});
+  assert.equal(timing.complete(xhr,url,{start:100},140),undefined);
+  for(let i=0;i<200;i++)queued.push({...entry,name:url+`?request=${i}`});
+  timing.complete(xhr,url,{start:100},140);
+  assert.equal(timing.size(),128);
+  assert.equal(timing.complete(xhr,url,{start:100},140),undefined);
+});

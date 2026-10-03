@@ -550,8 +550,9 @@ function startPlaybackControl(v,p,bootstrap){
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
     const attachment=p.mediaAttachment;
+    const generationOwner=/** @type {typeof startPlaybackControl & {captureGeneration?:number}} */ (startPlaybackControl);
     const owner=Object.freeze({lifecycleId:CONTROL_CLIENT_ID,
-      attachmentGeneration:startPlaybackControl.captureGeneration=(startPlaybackControl.captureGeneration||0)+1});
+      attachmentGeneration:generationOwner.captureGeneration=(generationOwner.captureGeneration||0)+1});
     // A prepared commit swaps the DOM video while retaining this reporter to
     // deliver the acknowledgement on the predecessor's control session.
     // Sample the visible successor after that swap, never the retired node.
