@@ -53,7 +53,7 @@ mod qualification {
         let (_, body) = fixture.split_once(';').expect("fixture's user insert");
         let now = chrono::Utc::now().timestamp_millis();
         let future = now + 3_600_000;
-        format!("{}\nUPDATE media_session_requests SET state='resolved',response_json='{{}}',claim_expires_at_ms={future},updated_at_ms={now};\nUPDATE media_sessions SET state='ended',terminal_reason='admin_stop',drain_deadline_ms=NULL,lease_expires_at_ms={future},updated_at_ms={now};\nUPDATE media_session_preparations SET deadline_ms={future},created_at_ms={now},updated_at_ms={now};\nUPDATE media_session_terminal_acks SET expires_at_ms={future},updated_at_ms={now};\nUPDATE job_leases SET expires_at_ms={future},updated_at_ms={now} WHERE resource='session:00000000-0000-4000-a000-000000000072';\nUPDATE sharing_delivery_grants SET deadline_ms={future};\nUPDATE media_playback_desired SET updated_at_ms={now};\nUPDATE media_playback_pointers SET updated_at_ms={now};\nUPDATE media_session_producer_recovery SET created_at_ms={now},updated_at_ms={now};\nUPDATE library_channel_session_recipes SET created_at_ms={now};",body.replace("'live'","'00000000-0000-4000-a000-000000000072'").replace("('ended',","('00000000-0000-4000-a000-000000000073',").replace("'staged'","'00000000-0000-4000-a000-000000000074'").replace("session:live","session:00000000-0000-4000-a000-000000000072"))
+        format!("{}\nUPDATE media_session_requests SET state='resolved',response_json='{{}}',claim_expires_at_ms={future},updated_at_ms={now};\nUPDATE media_sessions SET state='ended',terminal_reason='admin_stop',drain_deadline_ms=NULL,lease_expires_at_ms={future},updated_at_ms={now};\nUPDATE media_sessions SET updated_at_ms=10 WHERE incarnation_id='00000000-0000-4000-a000-000000000073';\nUPDATE media_session_preparations SET deadline_ms={future},created_at_ms={now},updated_at_ms={now};\nUPDATE media_session_terminal_acks SET expires_at_ms={future},updated_at_ms={now};\nUPDATE job_leases SET expires_at_ms={future},updated_at_ms={now} WHERE resource='session:00000000-0000-4000-a000-000000000072';\nINSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:00000000-0000-4000-a000-000000000073','node',1,1,{future},10);\nUPDATE sharing_delivery_grants SET deadline_ms={future};\nUPDATE media_playback_desired SET updated_at_ms={now};\nUPDATE media_playback_pointers SET updated_at_ms={now};\nUPDATE media_session_producer_recovery SET created_at_ms={now},updated_at_ms={now};\nUPDATE library_channel_session_recipes SET created_at_ms={now};",body.replace("'live'","'00000000-0000-4000-a000-000000000072'").replace("('ended',","('00000000-0000-4000-a000-000000000073',").replace("'staged'","'00000000-0000-4000-a000-000000000074'").replace("session:live","session:00000000-0000-4000-a000-000000000072"))
     }
 
     async fn snapshot(client: &Client) -> Result<Value> {
@@ -112,9 +112,13 @@ mod qualification {
                 .expect("request inventory");
             assert_eq!(unresolved, 0);
             let observed = chrono::Utc::now().timestamp_millis();
+            let fresh: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000072'", [], |row| row.get(0)).expect("fresh ended fixture");
+            assert!((observed - 10_000..=observed).contains(&fresh));
+            let stale: i64 = connection.query_row("SELECT updated_at_ms FROM media_sessions WHERE incarnation_id='00000000-0000-4000-a000-000000000073'", [], |row| row.get(0)).expect("stale ended fixture");
+            assert_eq!(stale, 10);
+
             for (table, column) in [
                 ("media_session_requests", "updated_at_ms"),
-                ("media_sessions", "updated_at_ms"),
                 ("media_session_preparations", "created_at_ms"),
                 ("media_playback_desired", "updated_at_ms"),
                 ("media_playback_pointers", "updated_at_ms"),

@@ -22,7 +22,10 @@ import urllib.request
 BASELINE = "971265536a259dea38b0f7a9a8752a5a74e8c025"
 ROOT = Path(__file__).resolve().parent.parent
 PREFIX = "QUALIFICATION "
-TERMINAL_FIXTURE_LEASE = "session:00000000-0000-4000-a000-000000000072"
+FRESH_FIXTURE_INCARNATION = "00000000-0000-4000-a000-000000000072"
+STALE_FIXTURE_INCARNATION = "00000000-0000-4000-a000-000000000073"
+FRESH_FIXTURE_LEASE = "session:" + FRESH_FIXTURE_INCARNATION
+TERMINAL_FIXTURE_LEASE = "session:" + STALE_FIXTURE_INCARNATION
 
 
 def archive_source(reference, destination):
@@ -236,25 +239,43 @@ def future_replicated(binary, helper, root, label):
             "source_sentinel_preserved": True, "raft_startup_required": True}
 
 
+def compare_rows(table, columns, original, rebuilt):
+    retained = [{column: row[column] for column in columns} for row in rebuilt]
+    if sorted(json.dumps(row, sort_keys=True) for row in retained) != sorted(
+            json.dumps(row, sort_keys=True) for row in original):
+        raise RuntimeError(f"retained row difference: {table}")
+
+
 def compare_retained(before, after, terminal_cleanup=False):
-    if terminal_cleanup:
-        original = [row for row in before["job_leases"]["rows"]
-                    if row["resource"] == TERMINAL_FIXTURE_LEASE]
-        surviving = [row for row in after["job_leases"]["rows"]
-                     if row["resource"] == TERMINAL_FIXTURE_LEASE]
-        if len(original) != 1 or surviving:
-            raise RuntimeError("ended fixture session lease cleanup was not proven")
+    removal = {
+        "media_sessions": ("incarnation_id", STALE_FIXTURE_INCARNATION),
+        "media_session_terminal_acks": ("incarnation_id", STALE_FIXTURE_INCARNATION),
+        "media_playback_pointers": ("current_incarnation_id", FRESH_FIXTURE_INCARNATION),
+        "media_session_preparations": ("staged_incarnation_id", "00000000-0000-4000-a000-000000000074"),
+    }
     for table, original in before.items():
+        rows, rebuilt = original["rows"], after[table]["rows"]
         if terminal_cleanup and table == "job_leases":
-            # Other resources belong to daemon workers. Their lease clocks,
-            # revisions and expirations are mutable runtime state; both full
-            # inventories remain in the receipt artifacts for inspection.
+            old = [row for row in rows if row["resource"] == TERMINAL_FIXTURE_LEASE]
+            surviving = [row for row in rebuilt if row["resource"] == TERMINAL_FIXTURE_LEASE]
+            if len(old) != 1 or surviving:
+                raise RuntimeError("stale ended fixture session lease cleanup was not proven")
+            fresh = [row for row in rows if row["resource"] == FRESH_FIXTURE_LEASE]
+            if len(fresh) != 1:
+                raise RuntimeError("fresh terminal fixture lease inventory was not proven")
+            compare_rows(table, original["columns"], fresh,
+                         [row for row in rebuilt if row["resource"] == FRESH_FIXTURE_LEASE])
+            # Unrelated daemon worker lease clocks, revisions and expirations
+            # are mutable runtime state. Both full inventories are recorded.
             continue
-        columns = original["columns"]
-        retained = [{column: row[column] for column in columns} for row in after[table]["rows"]]
-        if sorted(map(lambda row: json.dumps(row, sort_keys=True), retained)) != sorted(
-                map(lambda row: json.dumps(row, sort_keys=True), original["rows"])):
-            raise RuntimeError(f"retained row difference: {table}")
+        if terminal_cleanup and table in removal:
+            field, identity = removal[table]
+            if len([row for row in rows if row[field] == identity]) != 1:
+                raise RuntimeError(f"expected cleanup source inventory missing: {table}")
+            if any(row[field] == identity for row in rebuilt):
+                raise RuntimeError(f"expected terminal cleanup missing: {table}")
+            rows = [row for row in rows if row[field] != identity]
+        compare_rows(table, original["columns"], rows, rebuilt)
 
 
 def cluster_fixture(old_binary, new_binary, helper, root):
@@ -335,7 +356,9 @@ def cluster_fixture(old_binary, new_binary, helper, root):
                 "factory_before_principal_marker": True, "retained_tables": len(before),
                 "closed_topology_backup_restore": True,
                 "full_lease_inventory_retained_across_rebuild": True,
-                "ended_session_lease_cleanup_after_restart_and_restore": True,
+                "stale_session_lease_ack_cleanup_after_restart_and_restore": True,
+                "fresh_terminal_session_and_lease_retained": True,
+                "nonactive_pointer_and_missing_successor_preparation_cleaned": True,
                 "background_leases": "mutable runtime state; full snapshots recorded",
                 "active_media_drain": "not qualified", "shared_writes": "not admitted"}
     finally:

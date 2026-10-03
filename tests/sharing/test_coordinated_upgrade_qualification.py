@@ -83,9 +83,11 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
         before = {"job_leases": {"columns": ["resource", "revision"],
                                  "rows": [{"resource": module.TERMINAL_FIXTURE_LEASE,
                                            "revision": 3},
+                                          {"resource": module.FRESH_FIXTURE_LEASE, "revision": 2},
                                           {"resource": "daemon-worker", "revision": 1}]}}
         after = {"job_leases": {"columns": ["resource", "revision"],
-                                "rows": [{"resource": "daemon-worker", "revision": 2}]}}
+                                "rows": [{"resource": module.FRESH_FIXTURE_LEASE, "revision": 2},
+                                         {"resource": "daemon-worker", "revision": 2}]}}
         with self.assertRaisesRegex(RuntimeError, "retained row difference: job_leases"):
             module.compare_retained(before, after)
         module.compare_retained(before, after, terminal_cleanup=True)
@@ -96,6 +98,25 @@ class CoordinatedUpgradeQualificationTests(unittest.TestCase):
             module.compare_retained({"job_leases": {"columns": ["resource"], "rows": []}},
                                     {"job_leases": {"columns": ["resource"], "rows": []}},
                                     terminal_cleanup=True)
+
+    def test_runtime_cleanup_preserves_fresh_session_and_requires_stale_removal(self):
+        module = load_runner()
+        before = {"media_sessions": {"columns": ["incarnation_id", "label"],
+                                     "rows": [{"incarnation_id": module.FRESH_FIXTURE_INCARNATION,
+                                               "label": "retained"},
+                                              {"incarnation_id": module.STALE_FIXTURE_INCARNATION,
+                                               "label": "expired"}]}}
+        after = {"media_sessions": {"columns": ["incarnation_id", "label", "owner_key"],
+                                    "rows": [{"incarnation_id": module.FRESH_FIXTURE_INCARNATION,
+                                              "label": "retained", "owner_key": "user:1"}]}}
+        module.compare_retained(before, after, terminal_cleanup=True)
+        after["media_sessions"]["rows"][0]["label"] = "changed"
+        with self.assertRaisesRegex(RuntimeError, "retained row difference"):
+            module.compare_retained(before, after, terminal_cleanup=True)
+        after["media_sessions"]["rows"][0]["label"] = "retained"
+        after["media_sessions"]["rows"].append(before["media_sessions"]["rows"][1])
+        with self.assertRaisesRegex(RuntimeError, "expected terminal cleanup missing"):
+            module.compare_retained(before, after, terminal_cleanup=True)
 
 
 if __name__ == "__main__":

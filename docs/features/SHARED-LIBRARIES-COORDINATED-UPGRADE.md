@@ -62,7 +62,8 @@ with resolved requests, ended sessions, current fixture creation/update clocks
 and bounded future retention deadlines. The frozen fixture's diagnostic 1970
 clocks would otherwise exercise expiry cleanup rather than retained-data
 compatibility. Only the seeded session lease receives a future lease deadline;
-existing daemon worker leases keep their original clocks. It reads
+existing daemon worker leases keep their original clocks. The second ended
+route deliberately keeps its stale clock to qualify retention cleanup. It reads
 all columns of eleven relevant tables through quorum reads. It then stops all
 three processes and copies each entire stopped data directory into one owned
 whole-topology backup. Individual live SQLite, WAL or Raft files are never
@@ -78,16 +79,19 @@ Store methods are not called through a stale cached shape after rebuilding.
 
 All control processes stop before three current actual daemons restart on the
 candidate. After their successful shutdown, the control processes verify
-retention again. The synthetic lease for the already-ended fixture session
-must have been removed by terminal cleanup. Daemon worker lease clocks,
-revisions and expirations are mutable runtime state; full before/after
-inventories are saved separately, and only the fixture lease has a specific
-post-restart cleanup assertion. The other ten session-ledger tables retain
-exact original columns and rows. The runner parks the entire candidate topology, restores all
+retention again with exact maintenance outcomes. The fresh ended route and its
+lease remain within the resolved-retention window. A second, deliberately stale
+ended route, its lease and acknowledgement must be removed. The pointer whose
+current route is nonactive and the preparation whose staged successor is absent
+must be removed. Every other original fixture row and column must match; the
+full inventories are saved separately. Unrelated daemon worker lease clocks,
+revisions and expirations are mutable runtime state.
+
+The runner parks the entire candidate topology, restores all
 three stopped pre-upgrade data directories together, and starts the historical
 daemons with the same node identities and endpoints. Owner login and the
 three-voter roster must survive. A final quorum inventory must match the
-pre-upgrade retained rows, with the same required terminal-lease cleanup.
+pre-upgrade retained rows, with those same required cleanup outcomes.
 
 This is a test-only whole-topology restore drill. It does not qualify the
 portable backup API or an operator migration coordinator.
