@@ -1,6 +1,6 @@
 # ADR-J0-1 — retain passive VOD routes after reader idle reap
 
-**Status:** proposed; native lifecycle spike tested, physical recovery pending · **Date:** 2026-10-02 EDT · **Deciders:** Jellyfin compatibility implementation and task review.
+**Status:** proposed; native lifecycle spike and Android recovery tested; Infuse repeat pending · **Date:** 2026-10-02 EDT · **Deciders:** Jellyfin compatibility implementation and task review.
 
 Companion to [the build contract](JELLYFIN-COMPATIBILITY-BUILD.md) (required
 behavior) and [execution status](JELLYFIN-COMPATIBILITY-STATUS.md) (measured
@@ -155,3 +155,26 @@ This proves native metadata, renewal and HTTP recovery boundaries. It does
 not yet prove authenticated facade presence, actual remote worker dispatch,
 disable/drain and renewal-ambiguity races, or physical recovery beyond the
 300-second reader lifetime. Those acceptance items remain open.
+
+### Physical Android recovery — cleanup no longer ends the route
+
+An archived source snapshot of `5aae2a6f4` selected the internal policy for
+synthetic authenticated native starts through a recorded two-field test-only
+mutation. The production HTTP constructor remains unchanged. The recorded
+binary and source archive hashes identify this controlled build.
+
+Both readers reached zero after idle cleanup while the isolated daemon's
+local replicated route projection still reported active, unexpired leases at
+owner epoch 1. After a minimum 373.404-second pause, Android resumed and sought
+240 seconds beyond the buffered window. The visible source clock advanced
+from 26.208 to 302.917 seconds. New native fragment requests returned 200;
+the same route incarnation and owner epoch remained active. Native Stop then
+returned 204, a late fragment returned typed `410 media_session_ended`, and
+Android left playback. No presence, progress-to-reader touch or synthetic
+native Control was forwarded.
+
+Infuse rendered the controlled native stream initially and its reader was
+reaped while the route remained active. The device switched away from the
+synthetic test during the pause; no subsequent native media fetch was observed.
+That interrupted run does not qualify physical Infuse recovery. The repeat
+and the remaining worker/facade/race evidence are still required.

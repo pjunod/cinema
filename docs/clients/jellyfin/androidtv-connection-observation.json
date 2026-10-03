@@ -4898,5 +4898,139 @@
         ]
       }
     ]
+  },
+  "controlled_passive_vod_recovery_probe": {
+    "capture_session": "d3f54459-bb0e-4040-80aa-48a008e28b4d",
+    "source_commit": "5aae2a6f4f3bd8701f2fa5c7ec7e326392cf10b4",
+    "binary_sha256": "4f09f34a088015e38a43da708ab97fd3787a3ebcd7a1ace4646c7b093444d773",
+    "source_archive_sha256": "85e1991a2e62e7b264cdb8a3743f1ff13fa40b54b533d8f5668fba648184209b",
+    "compiler": "1.97.1 (8bab26f4f 2026-07-14)",
+    "controlled_mutations": [
+      "Disposable archived native HTTP request constructor sets vod_only and passive_vod true for authenticated synthetic probe starts; production defaults remain false.",
+      "Scratch proxy maps each client to a distinct native session; credentials redacted before trace write.",
+      "Infuse alone receives exact 1275-byte native init prefix and combined content length; Android receives ordinary native fragments."
+    ],
+    "native_presence_forwarded": false,
+    "synthetic_native_controls": false,
+    "reader_touch_forwarded": false,
+    "minimum_pause_seconds_at_resume_command": 373.4042484580423,
+    "observations": [
+      {
+        "phase": "waiting-for-reader-reap",
+        "time_ms": 1790988537087,
+        "pause_elapsed_seconds": 298.6448427080177,
+        "active_reader_count": 1,
+        "routes": [
+          {
+            "client": "android",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "2854a75db23da88871bbb7a306b1eb749e2b311b0008c02400f68e8978e31b4e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 94000
+          },
+          {
+            "client": "infuse",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "cde936d89d21203686c50a1c36d943a9823305ff5a6637b3adcc7936a8229a6e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 116000
+          }
+        ],
+        "boundary": "Read-only local replicated projection on isolated single voter; no presence, media GET or synthetic control."
+      },
+      {
+        "phase": "before-resume",
+        "time_ms": 1790988581831,
+        "pause_elapsed_seconds": 343.38442545803264,
+        "active_reader_count": 0,
+        "routes": [
+          {
+            "client": "android",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "2854a75db23da88871bbb7a306b1eb749e2b311b0008c02400f68e8978e31b4e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 94000
+          },
+          {
+            "client": "infuse",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "cde936d89d21203686c50a1c36d943a9823305ff5a6637b3adcc7936a8229a6e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 116000
+          }
+        ],
+        "boundary": "Read-only local replicated projection on isolated single voter; no presence, media GET or synthetic control."
+      },
+      {
+        "phase": "after-resume",
+        "time_ms": 1790988635947,
+        "pause_elapsed_seconds": 397.5020633750246,
+        "active_reader_count": 1,
+        "routes": [
+          {
+            "client": "android",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "2854a75db23da88871bbb7a306b1eb749e2b311b0008c02400f68e8978e31b4e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 354000
+          },
+          {
+            "client": "infuse",
+            "state": "active",
+            "owner_epoch": 1,
+            "lease_unexpired": true,
+            "incarnation_sha256": "cde936d89d21203686c50a1c36d943a9823305ff5a6637b3adcc7936a8229a6e",
+            "vod_only": true,
+            "passive_vod": true,
+            "fetched_through_ms": 116000
+          }
+        ],
+        "boundary": "Read-only local replicated projection on isolated single voter; no presence, media GET or synthetic control."
+      }
+    ],
+    "android": {
+      "rendered_before_pause_seconds": 26.208,
+      "rendered_after_resume_seconds": 302.917,
+      "resume_action": "Play then eight Media Fast Forward events (240 seconds total), beyond the pre-pause delivered frontier of 94 seconds.",
+      "new_native_media_response_counts": {
+        "200": 84,
+        "410": 15
+      },
+      "native_stop": {
+        "client": "android",
+        "time_ms": 1790988727198,
+        "stop": {
+          "status": 204,
+          "code": null
+        },
+        "late_fragment": {
+          "status": 410,
+          "code": "media_session_ended"
+        }
+      },
+      "result": "Reader count reached zero; exact durable route/owner stayed active; new media GETs resurrected and rendered beyond the buffer; Stop returned 204 and late media GET returned typed 410."
+    },
+    "infuse": {
+      "rendered_initial_seconds": 12.417,
+      "native_reader_reaped": true,
+      "route_active_after_reap": true,
+      "result": "Device switched away from synthetic test while paused; no post-resume native fetch observed. This run does not qualify physical Infuse recovery."
+    },
+    "remaining_boundary": "No facade presence ingress, remote worker dispatch, client-specific production wrapper, feature-disable/drain race or renewal-ambiguity claim."
   }
 }

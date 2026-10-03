@@ -307,7 +307,12 @@ regressions, including real reader detach/resurrection, current-play identity,
 quotas, terminal/replacement fencing, reader-free owner renewal and expiry,
 and a public fragment GET against real indexed media retaining the same
 durable incarnation and owner epoch. Native HTTP defaults and the existing
-idle-reap/resurrection race also pass. Physical long-pause recovery and the
+idle-reap/resurrection race also pass. Physical Android recovery now passes after a 373.404-second pause: zero
+readers before resume, active same-incarnation route/owner, new fragment 200s,
+visible source time 302.917 seconds, and typed late 410 after native Stop.
+The controlled build selects the service policy only in an archived probe
+snapshot; production HTTP defaults remain unchanged. Infuse switched away
+from the synthetic test during the wait, so its recovery repeat and the
 remaining facade/worker/race boundaries are still pending; see the
 [passive lifetime ADR](JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md#native-spike-evidence--actual-owner-renewal-and-fragment-recovery).
 
