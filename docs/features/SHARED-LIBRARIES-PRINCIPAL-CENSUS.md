@@ -652,3 +652,173 @@ original in-flight incarnation. All six Source library tests passed with zero
 ignored tests in 8.43 seconds, including oversized saved-switch refusal without
 changing the saved value. The exact combined feature all-target check passed
 in 29.39 seconds. Earlier receipts remain scoped to their earlier factory.
+
+## Candidate local worker assignment
+
+`assign_source_dispatch(binding, CredentialKey, SourceAdmissionMembers)` commits
+this actual local worker's assignment before producer queueing. It resolves the
+opaque observation's local Raft ID to a current active SQL node, rereads the
+canonical starting request and immutable held binding, obtains the current
+stored grant credential and file witness, and verifies the existing Source
+purpose key against the bound FileRevision. The old peer token is not retained
+as binding identity: benign credential rotation does not invalidate this worker
+assignment while the grant, effective scope and bound file remain authorized.
+
+One transaction advances dispatch generation from zero to one and assigns the
+canonical request owner. Its final assertion requires the complete pair plus
+current saved switch, exact candidate shapes, original member observation and
+generation, active local node identity, removal fence, current grant/scope,
+private file projection and sealed key. A lost predicate rolls back both rows;
+an incomplete retained pair refuses without repair. Exact retry returns the
+same opaque assignment only for the same actual local worker. A different
+actual member cannot use the retained binding to acquire ownership.
+
+The assignment carries the original opaque observation. Its freshness check
+must succeed again before actual producer queue admission; a successful SQL
+assignment does not prove that a delayed Raft apply happened within five seconds.
+The assignment is neither an encoder permit nor an active route lease. It does
+not authorize activation, renewal, takeover, remote scheduling or physical
+capacity release. The existing never-dispatched callback refuses once the
+assignment generation advances. Shared lifecycle entry points remain closed.
+
+The assignment checkpoint is based on
+`4a82e9cbc14e72b4fb393f63a4d897433668bb76`. All seven Source library tests
+passed with zero ignored tests in 13.77 seconds, including memory and pooled
+assignment/rotation, exact replay, saved-switch refusal, no repair of an
+incomplete pair and expiry of the original observation before queue admission.
+The actual three-voter regression passed with zero ignored tests in 10.29
+seconds: concurrent assignment/replay at a full Source eight-slot bound returns
+the same actual node and original incarnation; a second actual voter refuses
+ownership, current credential rotation remains valid, and held capacity stays
+eight. No producer, route or lease is allocated by assignment. The exact
+feature all-target compiler check passed in 29.75 seconds. These tests qualify
+candidate assignment, not the still-closed activation or physical worker path.
+
+## Candidate proof-bearing first activation
+
+`prepare_source_activation_authority` refreshes the actual worker assignment's
+full held binding, canonical starting request, effective grant/current stored
+credential, Source file witness, sealed purpose key and opaque original member
+observation. It returns a closed `SourceSessionWriteAuthority` with no wire
+constructor. A retained binding alone cannot mint it. Source activation on the
+ordinary `activate_media_session` entry remains refused.
+
+The narrowly named `activate_source_media_session` has candidate SQLite and
+Hiqlite implementations; the default method remains unavailable for other
+backends. Each backend's Local and proof-bearing Source entries delegate to its
+existing activation algorithm.
+The Source selector binds the canonical owner key, inserts literal NULL
+`user_id`, and persists the full Sharing principal. It accepts only a first
+start fenced against an absent predecessor. Replacement, preparation, renewal,
+takeover and recovery require their own qualified authorities and remain closed.
+
+`source_activation_guard` supplies the first assertion in the same lifecycle
+transaction. It checks the immutable binding and current assignment generation,
+canonical request owner, original membership freshness/generation, saved switch,
+grant/scope/file/key snapshot, actual local node and removal fence. Existing
+target route, lease and pin rows must have the exact Sharing principal, node,
+epoch and session lineage; foreign rows refuse before any lease extension. A
+known assertion refusal returns unavailable and rolls back every effect, while
+unrelated database faults propagate. Exact replay checks current authority and
+returns the retained route without extending its lease.
+
+The actual three-voter case interleaves saved switch-off after the preliminary
+pointer read and before the committing transaction: no session, pointer or lease
+is created. It also injects a foreign target lease and pin, verifies both
+activation and proof mint refusal, and checks the exact expiry/pin rows remain.
+A fresh valid authority then creates one fully typed blocked Sharing route and
+read-only exact replay. All eight Source obligations remain held, and the start
+stays unresolved. Publication and physical producer queueing remain separate
+unqualified seams; this checkpoint advertises no capability and installs no
+schema.
+
+On the assignment base `7b8d25fd70c44e39bc362388955ba44157e5935e`, the actual
+voter case passed with zero ignored tests in 10.63 seconds. All eight Source
+library cases passed with zero ignored tests in 12.87 seconds; memory and pooled
+SQLite prove assertion rollback, file replacement refusal and preservation of a
+genuine storage fault. The existing Local activation/preparation/settlement
+contract through `dyn Store` passed with zero ignored tests in 11.64 seconds.
+The exact feature all-target compiler check passed in 28.16 seconds.
+
+
+The SQLite counterpart is based on
+`5982f541bd9ffa22c22909de7f004f0b512cee17`. Its owned writer closure carries a
+clone of the original closed authority, without resetting observation times,
+and calls the guard after acquiring the writer connection and starting the
+transaction. Both backends insert the same complete Sharing metadata with NULL
+local user ID. The authority exposes its original-observation freshness check
+for the required postcommit check before actual producer queue admission; it
+remains separate from current authorization and the actual physical permit.
+
+All nine Source library regressions passed with zero ignored tests in 17.80
+seconds. The new memory and pooled SQLite activation case covers the ordinary
+Shared entry refusal, saved-switch and private-file races, foreign lease/pin
+preservation and mint refusal, foreign viewer tuple refusal, genuine writer
+fault rollback, one blocked Sharing route, and exact replay without lease
+renewal. The held binding and unresolved start remain; the never-dispatched
+callback cannot release an assigned incarnation. The existing Local lifecycle
+contract through `dyn Store` passed with zero ignored tests in 11.72 seconds.
+Exact feature all-target check passed in 29.79 seconds and Clippy in 33.68
+seconds. The prior actual-voter receipt remains scoped to the Hiqlite checkpoint;
+this counterpart changes its SQLite algorithm and closed snapshot cloning only.
+
+## Candidate current-owner renewal
+
+`prepare_source_owned_route_authority` is a separate read-only factory for a
+resolved, ready Source route. It refreshes the current effective grant, stored
+credential hash, private file witness and existing Source key; the immutable
+binding and assignment supply lineage, not current permission. The canonical
+resolved request, binding resolution marker, session capability, actual local
+node, epoch one and unexpired job lease must agree. The closed authority captures
+both lease expiry and revision and the original start of the newly obtained
+membership observation. The dispatch assignment's earlier admission timestamp
+does not permanently prevent later renewal.
+
+The proof-bearing `renew_source_media_session` uses the existing backend renewal
+algorithm with an assertion first in the same transaction. It rechecks saved
+Sharing choice, current grant/scope/file/key, exact candidate schemas, membership
+floor/generation, local node/removal fence and the captured route/lease tuple.
+Only an already resolved, published, active route can extend its live lease and
+frontiers. A reused lease snapshot or delayed member observation refuses. The
+ordinary Shared renewal entry remains closed, and the held Source capacity
+obligation is retained. No expiration, terminal state or renewal releases it.
+
+This stage does not implement publication or projection completion. Possessing
+an owned SQL lease is not proof that a physical producer and its admission permit
+exist. The future daemon actor must retain the actual permit, child job and
+registered session before invoking a separately qualified readiness transition.
+Renewal fixtures explicitly seed a resolved ready route; they do not claim that
+production publication or physical dispatch is available.
+
+One existing publication seam remains open: the Source claim's resolved replay
+query requires `publication_ready_at_ms > 0`, while activation publication
+resolves a request only at readiness zero. The renewal fixture does not qualify
+that replay path. Physical completion/publication must align the ready-state
+predicate and add an actual exact resolved replay regression before enabling
+that seam.
+
+The renewal checkpoint is based on
+`2925a231b6fde645ccb5194c25233236bfb174bb` and was checked with pinned Rust
+1.97.1. All ten Source library regressions passed with zero ignored tests in
+22.03 seconds. The memory and pooled case proves switch/file refusal, exact
+foreign lease and unrelated pin preservation, rollback of lease extension when
+the route writer faults, successful frontier/lease renewal, refusal of a reused
+lease revision, expiry of the newly obtained five-second observation, and fresh
+renewal from an older dispatch assignment. Held capacity remains retained.
+
+The actual three-voter Source regression passed with zero ignored tests in
+10.89 seconds, including current-owner renewal at eight held obligations,
+ordinary Shared refusal, same-write switch-off refusal without lease extension,
+stale lease proof refusal and fresh proof minting. It uses fixture-only resolved
+readiness and does not dispatch a producer. The unchanged Local committed
+successor renewal contract passed with zero ignored tests in 9.64 seconds.
+Feature all-target check passed in 25.24 seconds and Clippy with denied warnings
+in 30.01 seconds. The exact focused commands were:
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract media_session_a_committed_successor_can_renew_and_outlives_its_preparation -- --nocapture
+cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tests
+cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
+```

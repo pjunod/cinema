@@ -338,6 +338,7 @@ private struct LibrariesDashboard: View {
     var body: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 12) {
+                SharedLibrariesEntry().padding(.horizontal, screenHPad).padding(.top, 12)
                 if model.homeLoading {
                     ProgressView()
                         .tint(Palette.accent)

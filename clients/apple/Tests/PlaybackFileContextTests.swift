@@ -25,14 +25,15 @@ final class PlaybackFileContextTests: XCTestCase {
     private let file = "9007199254740993"
     private var base: String { "/api/v1/shared/imports/\(ref.importId)/files/signed_locator-ABC123" }
     override func tearDown() { FileContextHTTP.beforeResponse = nil; Session.shared.setCredentials(origin: "", token: nil) }
-    private func fetch(_ base: String?, mutate: (inout [String: Any]) -> Void = { _ in }) async throws -> PlaybackFileContext {
+    private func fetch(_ base: String?, mutate: (inout [String: Any]) -> Void = { _ in },
+                       detailBody: (Data) throws -> Data = { $0 }) async throws -> PlaybackFileContext {
         let encoder = JSONEncoder(); encoder.keyEncodingStrategy = .convertToSnakeCase
         let reference = try JSONSerialization.jsonObject(with: encoder.encode(ref))
         var row: [String: Any] = ["file_id": file, "revision": revision,
                                   "reference": ["item": reference, "file_id": file, "revision": revision]]
         row["file_base"] = base
         mutate(&row)
-        FileContextHTTP.body = try JSONSerialization.data(withJSONObject: ["files": [row]])
+        FileContextHTTP.body = try detailBody(JSONSerialization.data(withJSONObject: ["files": [row]]))
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [FileContextHTTP.self]
         return try await PlaybackFileContext.authenticatedDetail(reference: ref, fileId: file,
                                                                  testTransport: URLSession(configuration: config))
@@ -108,6 +109,36 @@ final class PlaybackFileContextTests: XCTestCase {
         FileContextHTTP.lastRequest = nil
         do { _ = try await api.pgsOverlayManifest(fileId: id, trackIndex: 2, fileContext: shared); XCTFail("Shared became Local") } catch {}
         XCTAssertNil(FileContextHTTP.lastRequest)
+    }
+    func testAuthenticatedDetailHonorsFourMiBBoundWithoutGrantingMissingLocator() async throws {
+        Session.shared.setCredentials(origin: "https://b.test", token: "fixture-bearer")
+        // Three valid file inventories with the Source's bounded chapter vocabulary exceed 1 MiB.
+        let largeDetail: (Data) throws -> Data = { data in
+            let original = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+            let template = (original["files"] as! [[String: Any]])[0]
+            let chapters: [[String: Any]] = (0..<1024).map {
+                ["index": $0, "title": String(repeating: "c", count: 512), "start_ms": $0 * 1000, "end_ms": ($0 + 1) * 1000]
+            }
+            let rows = (0..<3).map { index -> [String: Any] in
+                var row = template
+                let id = index == 0 ? self.file : String(index)
+                row["file_id"] = id; row["size"] = "1048576"; row["chapters"] = chapters
+                row["audio_streams"] = []; row["subtitle_streams"] = []; row["skip_regions"] = []
+                row["dolby_vision"] = [:]; row["audio_offset_ms"] = 0; row["probed"] = true
+                var binding = row["reference"] as! [String: Any]; binding["file_id"] = id; row["reference"] = binding
+                return row
+            }
+            var result = try JSONSerialization.data(withJSONObject: ["files": rows])
+            XCTAssertGreaterThan(result.count, 1_048_576); XCTAssertLessThan(result.count, 4_194_304)
+            // JSON whitespace makes the transport byte boundary exact without inventing wire fields.
+            result.append(Data(repeating: 32, count: 4_194_304 - result.count))
+            return result
+        }
+        let context = try await fetch(base, detailBody: largeDetail)
+        XCTAssertEqual(context.reference, ref); XCTAssertEqual(context.sourceFileId, file)
+        XCTAssertNil(context.sessionId); XCTAssertThrowsError(try context.path("direct"))
+        do { _ = try await fetch(base, detailBody: { data in var result = try largeDetail(data); result.append(32); return result }); XCTFail("accepted detail over 4 MiB") } catch {}
+        do { _ = try await fetch(nil, detailBody: largeDetail); XCTFail("large detail supplied missing delivery authority") } catch {}
     }
     func testLocalExactIDsAndClosedResources() throws {
         XCTAssertEqual(try PlaybackFileContext.local(Int64.max.description).path("direct"), "/api/v1/files/9223372036854775807/direct")

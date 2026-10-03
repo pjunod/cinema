@@ -89,7 +89,7 @@ fn mutation(result: MutationOutcome) -> Result<Json<Value>, ApiError> {
         MutationOutcome::Expired => Err(failure(StatusCode::GONE, "sharing_expired")),
     }
 }
-pub(crate) fn admin_router() -> Router<AppState> {
+pub(crate) fn admin_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/sharing/settings", get(settings).put(save_settings))
         .route("/sharing/status", get(status))
@@ -103,9 +103,13 @@ pub(crate) fn admin_router() -> Router<AppState> {
         .route("/sharing/imports", get(imports).post(create_import))
         .route("/sharing/imports/{id}/re-pair", post(re_pair))
         .route("/sharing/imports/{id}/rotate", post(rotate_import))
-        .route("/sharing/imports/{id}/assignments", put(assignments))
+        .route(
+            "/sharing/imports/{id}/assignments",
+            get(assignment_snapshot).put(assignments),
+        )
         .route("/sharing/imports/{id}/endpoints", put(import_endpoints))
         .route("/sharing/imports/{id}", delete(disconnect))
+        .merge(super::shared_library::admin_library_router(state))
         .layer(axum::middleware::from_fn(private_response))
 }
 pub(crate) fn peer_router(state: AppState) -> Router {
@@ -654,6 +658,19 @@ async fn imports(
         imports.push(import_status(&state, summary.id).await?);
     }
     Ok(Json(json!({"imports":imports})))
+}
+async fn assignment_snapshot(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(value): Path<String>,
+) -> Result<Json<ImportAssignmentSnapshot>, ApiError> {
+    state
+        .store
+        .sharing_import_assignments(id(&value)?)
+        .await
+        .map_err(authority)?
+        .map(Json)
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "sharing_not_found"))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

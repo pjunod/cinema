@@ -482,3 +482,122 @@ async fn sharing_continue_groups_isolate_sources_filter_assignments_and_refuse_h
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_admin_library_authority_bootstraps_without_viewer_assignment_and_fences_role() {
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    for_each_backend(move |s, b| async move {
+        let admin = s
+            .create_user("sharing-library-admin", "synthetic-hash", true)
+            .await
+            .expect("admin");
+        let viewer = s
+            .create_user("sharing-library-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let import = assigned_import(s.as_ref(), viewer.id).await;
+        s.assign_share_viewers(import, 2, vec![], 1003)
+            .await
+            .expect("empty assignments");
+        let summary = s
+            .sharing_import(import)
+            .await
+            .expect("read")
+            .expect("import")
+            .summary;
+        let scope = ReceiverCatalogueScope {
+            import_id: import,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.expect("grant"),
+            libraries: vec![],
+        };
+        let hash = "d".repeat(64);
+        let viewer_hash = "e".repeat(64);
+        s.create_token(&hash, admin.id, None)
+            .await
+            .expect("admin login");
+        s.create_token(&viewer_hash, viewer.id, None)
+            .await
+            .expect("viewer login");
+        assert!(
+            s.receiver_admin_catalogue_authorized(&hash, admin.id, &scope, now_s)
+                .await
+                .expect("admin bootstrap"),
+            "{b}"
+        );
+        assert!(!s
+            .receiver_admin_catalogue_authorized(&viewer_hash, viewer.id, &scope, now_s)
+            .await
+            .expect("viewer cannot administer"));
+        assert!(!s
+            .receiver_admin_catalogue_authorized(&hash, viewer.id, &scope, now_s)
+            .await
+            .expect("token identity"));
+        let before = s.list_tokens_for_user(admin.id).await.expect("before")[0].last_seen_at;
+        for _ in 0..3 {
+            assert!(s
+                .receiver_admin_catalogue_authorized(&hash, admin.id, &scope, now_s)
+                .await
+                .expect("read only"));
+        }
+        assert_eq!(
+            s.list_tokens_for_user(admin.id).await.expect("after")[0].last_seen_at,
+            before
+        );
+        let mut with_libraries = scope.clone();
+        with_libraries.libraries = vec![source_id("9007199254740993")];
+        assert!(s
+            .receiver_admin_catalogue_authorized(&hash, admin.id, &with_libraries, now_s)
+            .await
+            .expect("Source scope is separately checked"));
+        assert!(!s
+            .receiver_catalogue_authorized(&hash, admin.id, &[with_libraries], now_s)
+            .await
+            .expect("admin gets no viewer bypass"));
+        for changed in 0..7 {
+            let mut stale = scope.clone();
+            match changed {
+                0 => stale.lifecycle_generation += 1,
+                1 => stale.assignment_generation += 1,
+                2 => stale.endpoint_generation += 1,
+                3 => stale.source_server_id = Uuid::new_v4(),
+                4 => stale.catalogue_epoch = Uuid::new_v4(),
+                5 => stale.remote_grant_id = Uuid::new_v4(),
+                _ => stale.claim_id = Uuid::new_v4(),
+            }
+            assert!(
+                !s.receiver_admin_catalogue_authorized(&hash, admin.id, &stale, now_s)
+                    .await
+                    .expect("scope fence"),
+                "{b}/{changed}"
+            );
+        }
+        s.set_admin(admin.id, false).await.expect("demote");
+        assert!(!s
+            .receiver_admin_catalogue_authorized(&hash, admin.id, &scope, now_s)
+            .await
+            .expect("current role"));
+        s.set_admin(admin.id, true).await.expect("restore role");
+        s.disable_share_import(import, 1004)
+            .await
+            .expect("disable import");
+        assert!(!s
+            .receiver_admin_catalogue_authorized(&hash, admin.id, &scope, now_s)
+            .await
+            .expect("current import"));
+        s.delete_token(&hash).await.expect("logout");
+        assert!(!s
+            .receiver_admin_catalogue_authorized(&hash, admin.id, &scope, now_s)
+            .await
+            .expect("current login"));
+    })
+    .await;
+}

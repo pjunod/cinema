@@ -4665,6 +4665,16 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
 
+    /// Server-only, proof-bearing first Source activation. Backends without
+    /// the candidate conditional writer remain unavailable.
+    async fn activate_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
+
     /// Stage a successor that exists without being current.
     ///
     /// `Ok(None)` means the CAS lost, and there are exactly three ways to lose
@@ -5058,6 +5068,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         session_id: &str,
         now_ms: i64,
     ) -> Result<Option<crate::domain::MediaSessionTerminalAck>, StoreError>;
+
+    /// Exact current Source owner only. Does not publish or authorize takeover.
+    async fn renew_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceOwnedRouteAuthority,
+        _renewal: &MediaSessionRenewal,
+        _now_ms: i64,
+        _lease_expires_at_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        Ok(None)
+    }
 
     async fn renew_media_sessions(
         &self,

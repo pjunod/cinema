@@ -684,8 +684,14 @@ pub(super) struct ReceiverSourceScope {
     items: Vec<plurx_core::sharing_catalogue_details::SourceScopeItem>,
     files: Vec<plurx_core::sharing_catalogue_details::SourceScopeFile>,
 }
+#[derive(Clone, Copy)]
+enum ReceiverAccess {
+    Viewer,
+    Administrator,
+}
 #[derive(Clone)]
 struct ReceiverContentAuthority {
+    access: ReceiverAccess,
     hash: String,
     user: i64,
     scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
@@ -703,17 +709,7 @@ pub(super) fn receiver_scope(
         return Err(invalid());
     }
     Ok(ReceiverSourceScope {
-        scope: plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
-            import_id: summary.id,
-            source_server_id: summary.source_server_id,
-            catalogue_epoch: summary.catalogue_epoch,
-            lifecycle_generation: summary.lifecycle_generation,
-            assignment_generation: summary.assignment_generation,
-            endpoint_generation: summary.endpoint_generation,
-            claim_id: summary.claim_id,
-            remote_grant_id: summary.remote_grant_id.ok_or_else(missing)?,
-            libraries,
-        },
+        scope: receiver_import_scope(summary, libraries)?,
         items: items
             .into_iter()
             .map(
@@ -735,24 +731,66 @@ pub(super) fn receiver_scope(
             .collect(),
     })
 }
+fn receiver_import_scope(
+    summary: &plurx_core::sharing::ImportSummary,
+    libraries: Vec<SourceId>,
+) -> Result<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope, ApiError> {
+    if libraries.len() > 64 {
+        return Err(invalid());
+    }
+    Ok(
+        plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
+            import_id: summary.id,
+            source_server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            lifecycle_generation: summary.lifecycle_generation,
+            assignment_generation: summary.assignment_generation,
+            endpoint_generation: summary.endpoint_generation,
+            claim_id: summary.claim_id,
+            remote_grant_id: summary.remote_grant_id.ok_or_else(missing)?,
+            libraries,
+        },
+    )
+}
+async fn receiver_login_current(
+    state: &AppState,
+    authority: &ReceiverContentAuthority,
+) -> Option<bool> {
+    match authority.access {
+        ReceiverAccess::Viewer => state
+            .store
+            .receiver_catalogue_authorized(
+                &authority.hash,
+                authority.user,
+                &authority.scopes,
+                clock_ms() / 1000,
+            )
+            .await
+            .ok(),
+        ReceiverAccess::Administrator => {
+            let [scope] = authority.scopes.as_slice() else {
+                return Some(false);
+            };
+            state
+                .store
+                .receiver_admin_catalogue_authorized(
+                    &authority.hash,
+                    authority.user,
+                    scope,
+                    clock_ms() / 1000,
+                )
+                .await
+                .ok()
+        }
+    }
+}
 async fn receiver_content_current(state: &AppState, authority: &ReceiverContentAuthority) -> bool {
     use futures_util::{stream, StreamExt};
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
             return Some(false);
         }
-        let scopes = &authority.scopes;
-        if !state
-            .store
-            .receiver_catalogue_authorized(
-                &authority.hash,
-                authority.user,
-                scopes,
-                clock_ms() / 1000,
-            )
-            .await
-            .ok()?
-        {
+        if !receiver_login_current(state, authority).await? {
             return Some(false);
         }
         let mut checks = stream::iter(authority.sources.clone().into_iter().map(|source| {
@@ -771,16 +809,7 @@ async fn receiver_content_current(state: &AppState, authority: &ReceiverContentA
             }
         }
         // Local login/assignment may change during the remote checks.
-        state
-            .store
-            .receiver_catalogue_authorized(
-                &authority.hash,
-                authority.user,
-                scopes,
-                clock_ms() / 1000,
-            )
-            .await
-            .ok()
+        receiver_login_current(state, authority).await
     })
     .await
         == Ok(Some(true))
@@ -803,10 +832,31 @@ async fn receiver_json_scoped(
     sources: Vec<ReceiverSourceScope>,
     value: Value,
 ) -> Result<Response, ApiError> {
+    receiver_json_authorized(
+        state,
+        token,
+        user,
+        scopes,
+        sources,
+        value,
+        ReceiverAccess::Viewer,
+    )
+    .await
+}
+async fn receiver_json_authorized(
+    state: &AppState,
+    token: &str,
+    user: i64,
+    scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
+    sources: Vec<ReceiverSourceScope>,
+    value: Value,
+    access: ReceiverAccess,
+) -> Result<Response, ApiError> {
     if scopes.len() > 32 || sources.len() > 32 {
         return Err(invalid());
     }
     let authority = ReceiverContentAuthority {
+        access,
         hash: plurx_core::auth::hash_token(token),
         user,
         scopes,
@@ -841,6 +891,7 @@ pub(super) async fn attach_receiver_art_authority(
         vec![],
     )?;
     let authority = ReceiverContentAuthority {
+        access: ReceiverAccess::Viewer,
         hash: plurx_core::auth::hash_token(token),
         user,
         scopes: vec![source.scope.clone()],
@@ -916,6 +967,42 @@ async fn receiver_content_guard(
     response
 }
 
+pub(crate) fn admin_library_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/sharing/imports/{import}/libraries", get(admin_libraries))
+        .route_layer(middleware::from_fn_with_state(
+            state,
+            receiver_content_guard,
+        ))
+}
+async fn admin_libraries(
+    State(state): State<AppState>,
+    super::extract::AdminUser(user): super::extract::AdminUser,
+    super::extract::RawToken(token): super::extract::RawToken,
+    Path(import): Path<String>,
+) -> Result<Response, ApiError> {
+    let hash = plurx_core::auth::hash_token(&token);
+    let (summary, libraries) = state
+        .sharing
+        .read_admin_libraries(&state, import_id(&import)?, user.id, &hash)
+        .await
+        .map_err(peer_failure)?;
+    let scope = receiver_import_scope(
+        &summary,
+        libraries
+            .iter()
+            .map(|library| library.library_id.clone())
+            .collect(),
+    )?;
+    let source = ReceiverSourceScope {
+        scope: scope.clone(),
+        items: vec![],
+        files: vec![],
+    };
+    receiver_json_authorized(&state, &token, user.id, vec![scope], vec![source],
+        json!({"import_id":summary.id,"server_id":summary.source_server_id,"catalogue_epoch":summary.catalogue_epoch,"lifecycle_generation":summary.lifecycle_generation,"expected_assignment_generation":summary.assignment_generation,"state":summary.state,"libraries":libraries}),
+        ReceiverAccess::Administrator).await
+}
 pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route(
@@ -1697,6 +1784,35 @@ mod tests {
         );
         body_server_app(app, body_dropped, data_dropped).await
     }
+    fn fixture_tracks_shared_body(path: &str) -> bool {
+        if path.starts_with("/sharing/v1/art/")
+            || (path.contains("/shared/imports/") && path.contains("/art/"))
+        {
+            return true;
+        }
+        path.ends_with("/items")
+            || path.starts_with("/sharing/v1/items/")
+            || (path.contains("/shared/imports/")
+                && (path.contains("/items/") || path.ends_with("/continue-watching")))
+            || (path.contains("/sharing/imports/") && path.ends_with("/libraries"))
+    }
+
+    #[test]
+    fn sharing_body_fixture_tracks_continue_watching_and_item_responses() {
+        for path in [
+            "/api/v1/shared/imports/fixture/continue-watching",
+            "/api/v1/sharing/imports/fixture/libraries",
+            "/api/v1/shared/imports/fixture/items/7",
+            "/api/v1/shared/imports/fixture/libraries/7/items",
+            "/sharing/v1/items/7",
+        ] {
+            assert!(fixture_tracks_shared_body(path), "{path}");
+        }
+        for path in ["/ordinary/pending", "/api/v1/shared/continue-watching"] {
+            assert!(!fixture_tracks_shared_body(path), "{path}");
+        }
+    }
+
     async fn body_server_app(
         app: Router,
         body_dropped: Arc<AtomicBool>,
@@ -1735,13 +1851,7 @@ mod tests {
                             )
                             .ok();
                     }
-                    let tracked = request.uri().path().starts_with("/sharing/v1/art/")
-                        || (request.uri().path().contains("/shared/imports/")
-                            && request.uri().path().contains("/art/"))
-                        || request.uri().path().ends_with("/items")
-                        || request.uri().path().starts_with("/sharing/v1/items/")
-                        || (request.uri().path().contains("/shared/imports/")
-                            && request.uri().path().contains("/items/"));
+                    let tracked = fixture_tracks_shared_body(request.uri().path());
                     let response = next.run(request).await;
                     if tracked {
                         let (parts, body) = response.into_parts();
@@ -3195,7 +3305,7 @@ mod tests {
                         .expect("fixture purpose key");
                     let probe=json!({"chapters":(0..1024).map(|n|json!({"start_time":n.to_string(),"end_time":(n+1).to_string(),"tags":{"title":"x".repeat(512)}})).collect::<Vec<_>>()}).to_string();
                     for file in 1..=if details { 3 } else { 0 } {
-                        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(?1,?2,'/private/fixture.mkv',20,1000,?3)",rusqlite::params![file,source.item,probe]).expect("bounded details file");
+                        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(?1,?2,?4,20,1000,?3)",rusqlite::params![file,source.item,probe,format!("/private/fixture-{file}.mkv")]).expect("bounded details file");
                     }
                 }
                 let art_path = if artwork {
@@ -3597,6 +3707,242 @@ mod tests {
                     .await
                     .expect("Source task")
                     .expect("Source result");
+            }
+        }
+    }
+
+    /// Actual pinned Source read and accepted connection authority for an administrator
+    /// whose import has no viewer assignments. This is an isolated CGNAT fixture.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "requires disposable CGNAT network and PLURX_SHARING_FIXTURE_IP"]
+    async fn sharing_admin_pinned_library_read_bootstraps_empty_matrix_and_fences_connection() {
+        use plurx_core::{
+            config::{SharingEgressConfig, SharingNetworkConfig},
+            secrets::SharingSecretPurpose,
+            sharing_tls::{LiveNodeTls, SharingTlsListener},
+            store::SqliteStore,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
+            .expect("explicit CGNAT")
+            .parse()
+            .expect("address");
+        assert!(is_tailnet_address(address));
+        for h2 in [false, true] {
+            for loss in 0..5 {
+                let source = body_fixture().await;
+                let tls_dir = tempfile::tempdir().expect("Source TLS fixture");
+                let tls = Arc::new(
+                    LiveNodeTls::open(tls_dir.path(), clock_ms() / 1000).expect("Source TLS"),
+                );
+                let (pin, _) = tls.status().expect("Source SPKI");
+                let listener = tokio::net::TcpListener::bind((address, 0))
+                    .await
+                    .expect("Source CGNAT listener");
+                let endpoint = Endpoint {
+                    ipv4: match address {
+                        std::net::IpAddr::V4(ip) => ip,
+                        _ => panic!("IPv4 fixture"),
+                    },
+                    ipv6: None,
+                    ts_fqdn: "source.fixture.ts.net".into(),
+                    port: listener.local_addr().expect("Source address").port(),
+                    spki_sha256: pin,
+                };
+                let (source_stop, source_stopped) = tokio::sync::oneshot::channel();
+                let source_task = tokio::spawn(crate::serve_http(
+                    SharingTlsListener::new(listener, tls),
+                    sharing::peer_router(source.state.clone()),
+                    async move {
+                        let _ = source_stopped.await;
+                    },
+                    crate::HTTP_TIMEOUTS,
+                ));
+                let receiver_dir = tempfile::tempdir().expect("B fixture");
+                let receiver_path = receiver_dir.path().join("receiver.sqlite");
+                let (_, mut receiver) = super::super::tests::test_app_with_state();
+                receiver.store = Arc::new(SqliteStore::open(&receiver_path).expect("B Store"));
+                receiver.sharing = Arc::new(crate::sharing::SharingManager::new(
+                    receiver.sharing.key.clone(),
+                    receiver_dir.path().join("unused-tls"),
+                    SharingNetworkConfig {
+                        bind: "127.0.0.1:32444".parse().expect("unused bind"),
+                        egress: SharingEgressConfig::LocalAddress { address },
+                    },
+                ));
+                receiver
+                    .store
+                    .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+                    .await
+                    .expect("enable B");
+                let user = receiver
+                    .store
+                    .create_user("receiver-library-admin", "synthetic-hash", true)
+                    .await
+                    .expect("viewer");
+                let token = "synthetic-receiver-current-login";
+                let hash = plurx_core::auth::hash_token(token);
+                receiver
+                    .store
+                    .create_token(&hash, user.id, None)
+                    .await
+                    .expect("login");
+                let local = receiver
+                    .store
+                    .sharing_identity(1000)
+                    .await
+                    .expect("B identity");
+                let remote = source
+                    .state
+                    .store
+                    .sharing_identity(1000)
+                    .await
+                    .expect("Source identity");
+                rusqlite::Connection::open(&source.path)
+                    .expect("Source fixture writer")
+                    .execute(
+                        "UPDATE sharing_exports SET recipient_server_id=?1 WHERE id=?2",
+                        rusqlite::params![local.server_id.to_string(), source.grant.to_string()],
+                    )
+                    .expect("bind grant to actual B identity");
+                let import = uuid::Uuid::new_v4();
+                let credential = crate::sharing::ImportCredential::encode(
+                    &source.secret,
+                    uuid::Uuid::new_v4(),
+                    1000,
+                    "Fixture B",
+                    2000,
+                    None,
+                )
+                .expect("closed credential");
+                assert_eq!(
+                    receiver
+                        .store
+                        .create_share_import(NewImport {
+                            id: import,
+                            source: remote.clone(),
+                            source_name: "Fixture Source".into(),
+                            claim_id: uuid::Uuid::new_v4(),
+                            credential: receiver
+                                .sharing
+                                .key
+                                .seal_sharing(
+                                    SharingSecretPurpose::Credential,
+                                    local.server_id,
+                                    import,
+                                    credential.expose()
+                                )
+                                .expect("seal credential"),
+                            claim_secret: receiver
+                                .sharing
+                                .key
+                                .seal_sharing(
+                                    SharingSecretPurpose::Claim,
+                                    local.server_id,
+                                    import,
+                                    "synthetic-claim"
+                                )
+                                .expect("seal claim"),
+                            endpoints: vec![endpoint.clone()],
+                            now_ms: 1000
+                        })
+                        .await
+                        .expect("B import"),
+                    ImportOutcome::Created
+                );
+                receiver
+                    .store
+                    .settle_share_claim(import, source.grant, true, 1001)
+                    .await
+                    .expect("active B import");
+
+                let snapshot = receiver
+                    .store
+                    .sharing_import_assignments(import)
+                    .await
+                    .expect("snapshot")
+                    .expect("import");
+                assert!(snapshot.assignments.is_empty());
+                let (summary, libraries) = receiver
+                    .sharing
+                    .read_admin_libraries(&receiver, import, user.id, &hash)
+                    .await
+                    .expect("actual fresh pinned admin read");
+                assert_eq!(summary.id, import);
+                assert_eq!(libraries.len(), 1);
+                assert_eq!(libraries[0].library_id.as_str(), source.library.to_string());
+                assert!(
+                    receiver
+                        .sharing
+                        .read_catalogue(
+                            &receiver,
+                            import,
+                            user.id,
+                            crate::sharing::CatalogueRead::Libraries
+                        )
+                        .await
+                        .is_err(),
+                    "admin does not gain viewer authority"
+                );
+                let app = super::super::router(receiver.clone());
+                let body_dropped = Arc::new(AtomicBool::new(false));
+                let data_dropped = Arc::new(AtomicBool::new(false));
+                let baseline = RECEIVER_MONITORS.available_permits();
+                let (b_address, captured, stop, served) =
+                    body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
+                let path = format!("/api/v1/sharing/imports/{import}/libraries");
+                let client = blocked_receiver_client(b_address, &path, token, h2).await;
+                let connection = captured.await.expect("accepted B connection");
+                assert_eq!(RECEIVER_MONITORS.available_permits(), baseline - 1);
+                await_flag(&body_dropped, true).await;
+                match loss {
+                    0 => {
+                        receiver
+                            .store
+                            .set_admin(user.id, false)
+                            .await
+                            .expect("demote current admin");
+                    }
+                    1 => {
+                        assert!(receiver.store.delete_token(&hash).await.expect("logout"));
+                    }
+                    2 => receiver
+                        .store
+                        .disable_share_import(import, 1003)
+                        .await
+                        .expect("disconnect"),
+                    3 => source
+                        .state
+                        .store
+                        .revoke_share(source.grant, 1003)
+                        .await
+                        .expect("Source revoke"),
+                    4 => receiver
+                        .store
+                        .put_setting(plurx_core::store::keys::SHARING_ENABLED, "false")
+                        .await
+                        .expect("sharing off"),
+                    _ => unreachable!(),
+                }
+                tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                    .await
+                    .expect("current admin/source connection authority closes");
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while RECEIVER_MONITORS.available_permits() != baseline {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("monitor permit returned");
+                release_receiver_client(client).await;
+                stop.send(()).expect("stop B");
+                served.await.expect("B task").expect("B server");
+                source_stop.send(()).expect("stop Source");
+                source_task
+                    .await
+                    .expect("Source task")
+                    .expect("Source server");
             }
         }
     }

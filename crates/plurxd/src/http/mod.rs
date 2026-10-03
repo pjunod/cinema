@@ -49,7 +49,11 @@ mod scan;
 pub(crate) mod scan_identity;
 pub(crate) mod shared_artwork;
 pub(crate) mod shared_library;
+// Candidate projection helpers remain unregistered until Source/B lifecycle
+// authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
+#[allow(dead_code)]
+mod sharing_playback_wire;
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
@@ -1320,7 +1324,7 @@ pub fn router(state: AppState) -> Router {
     // before the shared serving gate so media bodies and blocked GETs remain
     // unlimited while JSON work cannot occupy a request slot forever.
     let json_short = Router::new()
-        .merge(sharing::admin_router())
+        .merge(sharing::admin_router(state.clone()))
         .merge(shared_library::viewer_router(state.clone()))
         .route("/server", get(system::server_info))
         .route("/me", get(auth::me))
@@ -12407,6 +12411,144 @@ mod tests {
         assert_eq!(
             call(&peer, get("/sharing/v1/identity", None)).await.1["code"],
             "sharing_disabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn sharing_http_assignment_snapshot_is_complete_private_and_admin_only() {
+        use plurx_core::{secrets::SharingSecretPurpose, sharing::*};
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let identity = state.store.sharing_identity(1000).await.expect("identity");
+        let id = uuid::Uuid::new_v4();
+        let source = SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let envelope = state
+            .sharing
+            .key
+            .seal_sharing(
+                SharingSecretPurpose::Credential,
+                identity.server_id,
+                id,
+                "assignment fixture secret",
+            )
+            .expect("sealed");
+        state
+            .store
+            .create_share_import(NewImport {
+                id,
+                source: source.clone(),
+                source_name: "Assignment Source".into(),
+                claim_id: uuid::Uuid::new_v4(),
+                credential: envelope.clone(),
+                claim_secret: state
+                    .sharing
+                    .key
+                    .seal_sharing(
+                        SharingSecretPurpose::Claim,
+                        identity.server_id,
+                        id,
+                        "assignment fixture invitation",
+                    )
+                    .expect("sealed claim"),
+                endpoints: vec![Endpoint {
+                    ipv4: "100.101.102.103".parse().expect("address"),
+                    ipv6: None,
+                    ts_fqdn: "source.fixture.ts.net".into(),
+                    port: 32443,
+                    spki_sha256: "a".repeat(64),
+                }],
+                now_ms: 1000,
+            })
+            .await
+            .expect("import");
+        let path = format!("/api/v1/sharing/imports/{id}/assignments");
+        let libraries_path = format!("/api/v1/sharing/imports/{id}/libraries");
+        assert_eq!(
+            call(&app, get(&libraries_path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get(&path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let user = state
+            .store
+            .create_user("assignment-reader", "synthetic hash", false)
+            .await
+            .expect("user");
+        let reader = "assignment-reader-token";
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(reader), user.id, None)
+            .await
+            .expect("reader token");
+        assert_eq!(
+            call(&app, get(&path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(reader))).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(&app, get(&libraries_path, Some(&admin))).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        let (status, empty) = call(&app, get(&path, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(empty["state"], "claiming");
+        assert_eq!(empty["assignments"], json!([]));
+        state
+            .store
+            .settle_share_claim(id, uuid::Uuid::new_v4(), true, 1001)
+            .await
+            .expect("active");
+        state
+            .store
+            .assign_share_viewers(
+                id,
+                1,
+                vec![Assignment {
+                    library_id: SourceId::parse("9007199254740993").expect("lossless"),
+                    user_id: user.id,
+                }],
+                1002,
+            )
+            .await
+            .expect("assign");
+        let response = app
+            .clone()
+            .oneshot(get(&path, Some(&admin)))
+            .await
+            .expect("response");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+            .await
+            .expect("body");
+        let value: Value = serde_json::from_slice(&bytes).expect("snapshot");
+        assert_eq!(
+            value,
+            json!({"import_id":id,"server_id":source.server_id,"catalogue_epoch":source.catalogue_epoch,"lifecycle_generation":1,"expected_assignment_generation":2,"state":"active","assignments":[{"library_id":"9007199254740993","user_ids":[user.id]}]})
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("assignment fixture"));
+        assert_eq!(
+            call(
+                &app,
+                get(
+                    &format!(
+                        "/api/v1/sharing/imports/{}/assignments",
+                        uuid::Uuid::new_v4()
+                    ),
+                    Some(&admin)
+                )
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
         );
     }
 

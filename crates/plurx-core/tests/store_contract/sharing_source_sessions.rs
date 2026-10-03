@@ -473,12 +473,308 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     }
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("Source candidate fixture operation");
     assert_eq!(rows[0].value, "8");
-    match store
+    let second_binding = match store
         .claim_source_media_session(&second, &observation(&client).await)
         .await
         .expect("Source candidate fixture operation")
     {
-        SourceClaimOutcome::InFlight(_) => {}
+        SourceClaimOutcome::InFlight(binding) => binding,
         _ => panic!("exact replay precedes full Source cap"),
     };
+    // Assignment consumes no additional Source slot and uses the current
+    // stored credential after a benign rotation, rather than the old token.
+    client
+        .execute(
+            "UPDATE sharing_exports SET token_hash=$1 WHERE id=$2",
+            hiqlite::params!("f".repeat(64), grant.to_string()),
+        )
+        .await
+        .expect("rotate current fixture credential");
+    let local = observation(&client).await;
+    let (first_assignment, retry_assignment) = tokio::join!(
+        store.assign_source_dispatch(&second_binding, &credential, &local),
+        store.assign_source_dispatch(&second_binding, &credential, &local)
+    );
+    for assignment in [first_assignment, retry_assignment] {
+        let assignment = assignment
+            .expect("atomic assignment")
+            .expect("same actual local worker");
+        assert_eq!(assignment.owner_node_id(), "node-1");
+        assert_eq!(assignment.dispatch_generation(), 1);
+        assert_eq!(
+            assignment.binding().incarnation_id(),
+            second_binding.incarnation_id()
+        );
+    }
+    let other_worker = observe_source_admission_members_for_contract(&client, 2)
+        .await
+        .expect("second worker full floor")
+        .expect("second actual voter");
+    assert!(store
+        .assign_source_dispatch(&second_binding, &credential, &other_worker)
+        .await
+        .expect("foreign worker refusal")
+        .is_none());
+    assert_eq!(
+        store
+            .release_source_never_dispatched(&second_binding)
+            .await
+            .expect("assigned release refusal"),
+        SourceReleaseOutcome::Refused
+    );
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("capacity retained after assignment");
+    assert_eq!(rows[0].value, "8");
+    let assignment = store
+        .assign_source_dispatch(&second_binding, &credential, &observation(&client).await)
+        .await
+        .expect("activation assignment")
+        .expect("same owned worker");
+    let SourceWriteAuthorityRead::Ready(authority) = store
+        .prepare_source_activation_authority(&assignment, &credential, &observation(&client).await)
+        .await
+        .expect("fresh activation witness")
+    else {
+        panic!("current activation authority")
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64;
+    let mut activation = MediaSessionActivation {
+        incarnation_id: second_binding.incarnation_id().to_string(),
+        session_id: Uuid::new_v4().to_string(),
+        principal: second_binding.principal().clone(),
+        playback_id: "p-second".into(),
+        recovery_epoch: String::new(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: true,
+        request_id: Some("second".into()),
+        request_fingerprint: "d".repeat(64),
+        owner_node_id: "node-1".into(),
+        recipe_json: "{}".into(),
+        response_json: "{}".into(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: now,
+        lease_expires_at_ms: now + 60000,
+        expected_desired_revision: None,
+    };
+    let foreign_lease = format!("session:{}", second_binding.incarnation_id());
+    client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES($1,'foreign-worker',1,1,$2,$3)",hiqlite::params!(foreign_lease.clone(),now+90000,now)).await.expect("foreign retained lease");
+    client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign','foreign','foreign','media_session',$1,1,1)",hiqlite::params!(second_binding.incarnation_id().to_string())).await.expect("foreign retained pin");
+    assert!(store
+        .activate_source_media_session(&authority, &activation)
+        .await
+        .expect("foreign resources refuse activation")
+        .is_none());
+    assert!(matches!(
+        store
+            .prepare_source_activation_authority(
+                &assignment,
+                &credential,
+                &observation(&client).await
+            )
+            .await
+            .expect("foreign actor lineage refuses mint"),
+        SourceWriteAuthorityRead::Unavailable
+    ));
+    let rows = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource=$1",
+            hiqlite::params!(foreign_lease.clone()),
+        )
+        .await
+        .expect("foreign lease preserved");
+    assert_eq!(rows[0].value, (now + 90000).to_string());
+    let rows = client
+        .query_consistent_map::<SchemaText, _>(
+            "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_id=$1",
+            hiqlite::params!(second_binding.incarnation_id().to_string()),
+        )
+        .await
+        .expect("foreign pin preserved");
+    assert_eq!(rows[0].value, "1");
+    client
+        .execute(
+            "DELETE FROM job_leases WHERE resource=$1",
+            hiqlite::params!(foreign_lease),
+        )
+        .await
+        .expect("remove only injected fixture lease");
+    client
+        .execute(
+            "DELETE FROM cache_consumer_pins WHERE consumer_id=$1",
+            hiqlite::params!(second_binding.incarnation_id().to_string()),
+        )
+        .await
+        .expect("remove only injected fixture pin");
+    let (reached, release) =
+        HiqliteAuthStore::validation_pause_next_activation_after_pointer_read();
+    let refused = {
+        let pending = store.activate_source_media_session(&authority, &activation);
+        tokio::pin!(pending);
+        tokio::select! {
+            result = &mut pending => panic!("activation completed before race: {}",result.is_ok()),
+            result = reached => result.expect("actual pointer read pause"),
+        }
+        exec(
+            &client,
+            "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+        )
+        .await;
+        release.send(()).expect("release activation race");
+        pending.await.expect("typed authority refusal")
+    };
+    assert!(refused.is_none());
+    for table in ["media_sessions", "media_playback_pointers", "job_leases"] {
+        let rows = client
+            .query_consistent_map::<SchemaText, _>(
+                format!("SELECT CAST(count(*) AS TEXT) AS value FROM {table}"),
+                hiqlite::params!(),
+            )
+            .await
+            .expect("rollback resource census");
+        assert_eq!(rows[0].value, "0", "no authority extension in {table}");
+    }
+    exec(
+        &client,
+        "UPDATE settings SET value='true' WHERE key='sharing_enabled'",
+    )
+    .await;
+    let SourceWriteAuthorityRead::Ready(authority) = store
+        .prepare_source_activation_authority(&assignment, &credential, &observation(&client).await)
+        .await
+        .expect("fresh retry authority")
+    else {
+        panic!("retry authority")
+    };
+    activation.now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64;
+    activation.lease_expires_at_ms = activation.now_ms + 60000;
+    let mut foreign = activation.clone();
+    foreign.principal =
+        PlaybackPrincipal::sharing(grant, &"e".repeat(64)).expect("different viewer");
+    assert!(store
+        .activate_source_media_session(&authority, &foreign)
+        .await
+        .expect("foreign proof refusal")
+        .is_none());
+    let route = store
+        .activate_source_media_session(&authority, &activation)
+        .await
+        .expect("guarded first Source activation")
+        .expect("first Source start")
+        .route;
+    assert_eq!(route.principal, activation.principal);
+    assert_eq!(route.session_id, activation.session_id);
+    assert_eq!(route.owner_node_id, "node-1");
+    assert_eq!(
+        route.publication_ready_at_ms,
+        MEDIA_SESSION_PUBLICATION_BLOCKED
+    );
+    let replay = store
+        .activate_source_media_session(&authority, &activation)
+        .await
+        .expect("exact activation replay")
+        .expect("same retained route");
+    assert_eq!(replay.route.session_id, route.session_id);
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("physical obligations retained");
+    assert_eq!(rows[0].value, "8");
+    assert!(matches!(
+        store
+            .prepare_source_owned_route_authority(
+                &assignment,
+                &credential,
+                &observation(&client).await
+            )
+            .await
+            .expect("unresolved owned refusal"),
+        SourceOwnedRouteAuthorityRead::Unavailable
+    ));
+    // Explicit fixture-only publication; no producer is allocated and this
+    // receipt does not qualify a production readiness transition.
+    client
+        .execute(
+            "UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1",
+            hiqlite::params!(activation.incarnation_id.clone()),
+        )
+        .await
+        .expect("fixture readiness");
+    client.execute("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1",hiqlite::params!(activation.incarnation_id.clone())).await.expect("fixture resolved start");
+    client.execute("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$1 WHERE incarnation_id=$2",hiqlite::params!(activation.now_ms,activation.incarnation_id.clone())).await.expect("fixture resolved binding");
+    let SourceOwnedRouteAuthorityRead::Ready(owned) = store
+        .prepare_source_owned_route_authority(&assignment, &credential, &observation(&client).await)
+        .await
+        .expect("actual voter owned witness")
+    else {
+        panic!("resolved owned witness")
+    };
+    let renewal = MediaSessionRenewal {
+        incarnation_id: activation.incarnation_id.clone(),
+        owner_epoch: 1,
+        produced_playable_through_ms: 1000,
+        fetched_through_ms: 500,
+        media_sequence: 1,
+    };
+    let at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_millis() as i64;
+    let expiry = route.lease_expires_at_ms + 60000;
+    assert!(store
+        .renew_media_sessions("node-1", std::slice::from_ref(&renewal), at, expiry)
+        .await
+        .expect("ordinary Shared refuses")
+        .is_empty());
+    exec(
+        &client,
+        "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+    )
+    .await;
+    assert!(store
+        .renew_source_media_session(&owned, &renewal, at, expiry)
+        .await
+        .expect("same-write off race")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(&activation.incarnation_id)
+            .await
+            .expect("route")
+            .expect("retained")
+            .lease_expires_at_ms,
+        route.lease_expires_at_ms
+    );
+    exec(
+        &client,
+        "UPDATE settings SET value='true' WHERE key='sharing_enabled'",
+    )
+    .await;
+    let renewed = store
+        .renew_source_media_session(&owned, &renewal, at, expiry)
+        .await
+        .expect("actual voter guarded renewal")
+        .expect("same route");
+    assert_eq!(renewed.lease_expires_at_ms, expiry);
+    assert_eq!(renewed.produced_playable_through_ms, 1000);
+    assert!(store
+        .renew_source_media_session(&owned, &renewal, at, expiry + 60000)
+        .await
+        .expect("stale revision refused")
+        .is_none());
+    assert!(matches!(
+        store
+            .prepare_source_owned_route_authority(
+                &assignment,
+                &credential,
+                &observation(&client).await
+            )
+            .await
+            .expect("refreshed owned witness"),
+        SourceOwnedRouteAuthorityRead::Ready(_)
+    ));
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("renewal retains physical obligations");
+    assert_eq!(rows[0].value, "8");
 }

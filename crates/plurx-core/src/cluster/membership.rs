@@ -2586,6 +2586,7 @@ const SOURCE_MEMBER_OBSERVATION_MAX_AGE_MS: i64 = 5_000;
 /// Server-derived membership inputs for a Source admission write. There is no
 /// wire decoder or caller-supplied roster constructor. This observation alone
 /// never authorizes allocation: its closed guard must run in the mutation.
+#[derive(Clone)]
 pub struct SourceAdmissionMembers {
     members_json: String,
     local_raft_id: u64,
@@ -2596,6 +2597,12 @@ pub struct SourceAdmissionMembers {
 }
 
 impl SourceAdmissionMembers {
+    /// Actual identity captured by the production membership observation.
+    /// Source assignment still correlates this identity in its committing SQL.
+    pub(crate) fn actual_local_raft_id(&self) -> u64 {
+        self.local_raft_id
+    }
+
     /// Return the closed SQL predicate and its three numbered bindings. The
     /// caller composes these with installed-schema and current file authority
     /// in the same write. A delayed observation must be reacquired.

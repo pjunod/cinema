@@ -153,6 +153,11 @@ pub trait SharingStore: Send + Sync {
     async fn sharing_grant_status(&self, hash: &str) -> Result<Option<ExportSummary>, StoreError>;
     async fn sharing_imports(&self) -> Result<Vec<ImportSummary>, StoreError>;
     async fn sharing_import(&self, id: Uuid) -> Result<Option<StoredImport>, StoreError>;
+    /// One complete bounded database snapshot; overflow/corruption refuses.
+    async fn sharing_import_assignments(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ImportAssignmentSnapshot>, StoreError>;
     async fn sharing_endpoint_manifest(&self) -> Result<Option<EndpointManifest>, StoreError>;
     async fn set_sharing_endpoint_manifest(
         &self,
@@ -292,6 +297,16 @@ impl<T: Backend> SharingStore for T {
     async fn sharing_imports(&self) -> Result<Vec<ImportSummary>, StoreError> {
         let rows = self.sharing_read(&format!("SELECT {IMPORT_SUMMARY_JSON} AS payload FROM sharing_imports i ORDER BY i.id LIMIT 32"), vec![]).await?;
         rows.iter().map(|row| decode(row)).collect()
+    }
+    async fn sharing_import_assignments(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ImportAssignmentSnapshot>, StoreError> {
+        let rows = self.sharing_read(
+            "SELECT json_object('import_id',substr(i.id,1,37),'server_id',substr(i.source_server_id,1,37),'catalogue_epoch',substr(i.catalogue_epoch,1,37),'lifecycle_generation',i.lifecycle_generation,'expected_assignment_generation',i.assignment_generation,'state',substr(i.state,1,17),'library_id',substr(a.remote_library_id,1,20),'user_id',a.user_id,'enabled',a.enabled,'user_exists',CASE WHEN u.id IS NULL THEN 0 ELSE 1 END) AS payload FROM sharing_imports i LEFT JOIN sharing_assignments a ON a.import_id=i.id LEFT JOIN users u ON u.id=a.user_id WHERE i.id=$1 ORDER BY a.remote_library_id COLLATE BINARY,a.user_id LIMIT 16385",
+            vec![id.into()],
+        ).await?;
+        assignment_snapshot(id, rows)
     }
     async fn sharing_import(&self, id: Uuid) -> Result<Option<StoredImport>, StoreError> {
         #[derive(serde::Deserialize)]
@@ -672,8 +687,8 @@ impl<T: Backend> SharingStore for T {
             .map_err(|_| invalid())?
             .to_owned();
         let counts = self.sharing_txn(vec![
-            stmt("DELETE FROM sharing_import_rotations WHERE import_id=$1 AND EXISTS(SELECT 1 FROM sharing_imports WHERE id=$1 AND lifecycle_generation=$2 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND source_server_id=$3 AND catalogue_epoch=$4)", vec![i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
-            stmt("UPDATE sharing_imports SET source_name=$1,claim_id=$2,credential_envelope=$3,claim_envelope=$4,endpoints_json=$5,remote_grant_id=NULL,state='claiming',lifecycle_generation=lifecycle_generation+1,endpoint_generation=endpoint_generation+1,observed_scope_generation=NULL,observed_credential_generation=NULL,observed_catalogue_generation=NULL,observed_endpoint_revision=NULL,updated_at_ms=$6 WHERE id=$7 AND lifecycle_generation=$8 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND source_server_id=$9 AND catalogue_epoch=$10", vec![i.source_name.into(), i.claim_id.into(), credential.into(), claim.into(), json(&i.endpoints)?.into(), i.now_ms.into(), i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
+            stmt("DELETE FROM sharing_import_rotations WHERE import_id=$1 AND EXISTS(SELECT 1 FROM sharing_imports WHERE id=$1 AND lifecycle_generation=$2 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$3 AND catalogue_epoch=$4)", vec![i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
+            stmt("UPDATE sharing_imports SET source_name=$1,claim_id=$2,credential_envelope=$3,claim_envelope=$4,endpoints_json=$5,remote_grant_id=NULL,state='claiming',lifecycle_generation=lifecycle_generation+1,endpoint_generation=endpoint_generation+1,assignment_generation=assignment_generation+1,observed_scope_generation=NULL,observed_credential_generation=NULL,observed_catalogue_generation=NULL,observed_endpoint_revision=NULL,updated_at_ms=$6 WHERE id=$7 AND lifecycle_generation=$8 AND lifecycle_generation<9223372036854775807 AND endpoint_generation<9223372036854775807 AND assignment_generation<9223372036854775807 AND source_server_id=$9 AND catalogue_epoch=$10", vec![i.source_name.into(), i.claim_id.into(), credential.into(), claim.into(), json(&i.endpoints)?.into(), i.now_ms.into(), i.id.into(), generation.into(), i.source.server_id.into(), i.source.catalogue_epoch.into()]),
         ]).await?;
         Ok(if counts[1] == 1 {
             MutationOutcome::Applied
@@ -754,6 +769,14 @@ impl<T: Backend> SharingStore for T {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 != assignments.len()
+            || assignments
+                .iter()
+                .fold(std::collections::BTreeMap::new(), |mut counts, a| {
+                    *counts.entry(&a.library_id).or_insert(0_usize) += 1;
+                    counts
+                })
+                .values()
+                .any(|count| *count > 256)
             || assignments
                 .iter()
                 .map(|a| &a.library_id)
@@ -972,4 +995,143 @@ pub(crate) fn fence_restored_sharing(connection: &rusqlite::Connection) -> Resul
     tx.execute("DELETE FROM sharing_identity", [])?;
     tx.commit()?;
     Ok(())
+}
+
+fn assignment_snapshot(
+    id: Uuid,
+    rows: Vec<String>,
+) -> Result<Option<ImportAssignmentSnapshot>, StoreError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        import_id: String,
+        server_id: String,
+        catalogue_epoch: String,
+        lifecycle_generation: i64,
+        expected_assignment_generation: i64,
+        state: String,
+        library_id: Option<SourceId>,
+        user_id: Option<i64>,
+        enabled: Option<i64>,
+        user_exists: i64,
+    }
+    fn canonical(value: &str) -> Result<Uuid, StoreError> {
+        let uuid = Uuid::parse_str(value).map_err(|_| invalid())?;
+        if uuid.is_nil() || uuid.to_string() != value {
+            return Err(invalid());
+        }
+        Ok(uuid)
+    }
+    if rows.len() > MAX_LIBRARIES * 256 {
+        return Err(invalid());
+    }
+    let mut snapshot = None;
+    let mut groups = std::collections::BTreeMap::<SourceId, std::collections::BTreeSet<i64>>::new();
+    let mut empty = false;
+    let row_count = rows.len();
+    for raw in rows {
+        let row: Row = decode(&raw)?;
+        let metadata = ImportAssignmentSnapshot {
+            import_id: canonical(&row.import_id)?,
+            server_id: canonical(&row.server_id)?,
+            catalogue_epoch: canonical(&row.catalogue_epoch)?,
+            lifecycle_generation: row.lifecycle_generation,
+            expected_assignment_generation: row.expected_assignment_generation,
+            state: row.state,
+            assignments: vec![],
+        };
+        if metadata.import_id != id
+            || metadata.lifecycle_generation < 1
+            || metadata.expected_assignment_generation < 1
+            || !matches!(
+                metadata.state.as_str(),
+                "claiming" | "pending" | "active" | "disabled" | "revoked"
+            )
+            || snapshot.as_ref().is_some_and(|old| old != &metadata)
+        {
+            return Err(invalid());
+        }
+        snapshot.get_or_insert(metadata);
+        match (row.library_id, row.user_id, row.enabled, row.user_exists) {
+            (None, None, None, 0) if row_count == 1 => empty = true,
+            (Some(library), Some(user), Some(1), 1) if user >= 0 && !empty => {
+                let users = groups.entry(library).or_default();
+                if !users.insert(user) || users.len() > 256 || groups.len() > MAX_LIBRARIES {
+                    return Err(invalid());
+                }
+            }
+            _ => return Err(invalid()),
+        }
+    }
+    if let Some(snapshot) = snapshot.as_mut() {
+        snapshot.assignments = groups
+            .into_iter()
+            .map(|(library_id, users)| ImportAssignmentGroup {
+                library_id,
+                user_ids: users.into_iter().collect(),
+            })
+            .collect();
+    }
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+mod assignment_snapshot_tests {
+    use super::*;
+    #[test]
+    fn sharing_assignment_snapshot_refuses_corruption_and_incomplete_matrices() {
+        let id = Uuid::new_v4();
+        let row = serde_json::json!({"import_id":id,"server_id":Uuid::new_v4(),"catalogue_epoch":Uuid::new_v4(),"lifecycle_generation":1,"expected_assignment_generation":9007199254740993_i64,"state":"active","library_id":"9007199254740993","user_id":9007199254740993_i64,"enabled":1,"user_exists":1});
+        let snapshot = assignment_snapshot(id, vec![row.to_string()])
+            .expect("lossless snapshot")
+            .expect("import");
+        assert_eq!(snapshot.expected_assignment_generation, 9007199254740993);
+        assert_eq!(snapshot.assignments[0].user_ids, vec![9007199254740993]);
+        for (key, value) in [
+            ("library_id", serde_json::json!("01")),
+            ("enabled", serde_json::json!(0)),
+            ("user_exists", serde_json::json!(0)),
+            ("state", serde_json::json!("unknown")),
+            ("lifecycle_generation", serde_json::json!(0)),
+            ("server_id", serde_json::json!(Uuid::nil())),
+            ("user_id", serde_json::json!(-1)),
+        ] {
+            let mut bad = row.clone();
+            bad[key] = value;
+            assert!(
+                assignment_snapshot(id, vec![bad.to_string()]).is_err(),
+                "{key}"
+            );
+        }
+        assert!(assignment_snapshot(id, vec![row.to_string(); 2]).is_err());
+        let mut next = row.clone();
+        next["expected_assignment_generation"] = serde_json::json!(2);
+        assert!(assignment_snapshot(id, vec![row.to_string(), next.to_string()]).is_err());
+        let mut too_many_users = vec![];
+        for user in 0..257 {
+            let mut value = row.clone();
+            value["user_id"] = serde_json::json!(user);
+            too_many_users.push(value.to_string());
+        }
+        assert!(assignment_snapshot(id, too_many_users).is_err());
+        let mut too_many_libraries = vec![];
+        for library in 0..65 {
+            let mut value = row.clone();
+            value["library_id"] = serde_json::json!(library.to_string());
+            too_many_libraries.push(value.to_string());
+        }
+        assert!(assignment_snapshot(id, too_many_libraries).is_err());
+        assert!(assignment_snapshot(id, vec![row.to_string(); 16385]).is_err());
+        let mut empty = row;
+        empty["library_id"] = serde_json::Value::Null;
+        empty["user_id"] = serde_json::Value::Null;
+        empty["enabled"] = serde_json::Value::Null;
+        empty["user_exists"] = serde_json::json!(0);
+        assert!(assignment_snapshot(id, vec![empty.to_string()])
+            .expect("empty")
+            .expect("import")
+            .assignments
+            .is_empty());
+        assert!(assignment_snapshot(id, vec![empty.to_string(); 2]).is_err());
+    }
 }
