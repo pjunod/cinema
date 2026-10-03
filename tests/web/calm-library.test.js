@@ -105,14 +105,15 @@ function libraryHarness(pages, state) {
         assert.equal(selector, ".grid");
         return this.grid;
       },
-      // The browse tools are mounted before #libbody and are not this test's
+      // The browse tools are mounted after the toolbar and are not this test's
       // subject; only their landing place has to exist.
-      insertAdjacentHTML(where) { assert.equal(where, "beforebegin"); },
+      insertAdjacentHTML(where) { assert.equal(where, "afterend"); },
+      scrollIntoView() {},
     };
     nodes[id] = node;
     return node;
   };
-  ["main", "libbody", "libpager", "librail", "libcount"].forEach(makeNode);
+  ["main", "libbar", "libbody", "libpager", "librail", "libcount"].forEach(makeNode);
   const api = new Function(
     "assert", "document", "state", "pages", "nodes",
     [
@@ -148,7 +149,8 @@ function libraryHarness(pages, state) {
       "return {libraryView, libGoPage, redraw(){LIB_VIEW.draw(LIB_VIEW.done);},"
         + "narrow(n){if('find' in n)LIB_FIND=n.find;if('filter' in n)LIB_FILTER=n.filter;if('scope' in n)LIB_SCOPE=n.scope;}};",
     ].join("\n"),
-  )(assert, { getElementById: (id) => nodes[id] || null, querySelector: () => null }, state, pages, nodes);
+  )(assert, { getElementById: (id) => nodes[id] || null,
+    querySelector: (selector) => { assert.equal(selector, "#main .libbar"); return nodes.libbar; } }, state, pages, nodes);
   return { run: api.libraryView, api, nodes };
 }
 // Titles, libraries and watched state exist so the find, scope and filter
