@@ -4848,3 +4848,107 @@ It reproduces 60/61/60-second runway across sustained fresh low margin, rejects
 a move during refill, permits the next draining observation, and retains
 cooldown/budget and invalid/recovered-proof reset behavior. No units executed.
 The integrated corrected candidate still needs exact-source qualification.
+
+### 10.166 · Exact-source Chrome full campaign and encoded boundary
+
+Exact `feae4cc28` completed fifteen manual and five actual Auto transitions
+(1080 → 720 → 1080 → 720 → 1080). The mixed maximum/p95 callback gap was
+66.7 ms; each Auto transition measured 50.1 ms. There were no recorded stalls,
+hitches, backsteps, dropped frames, reopens or waits, and one retained session.
+The pressure-request delays were approximately 60 seconds on both cycles,
+instead of the older focused trace's 162-second second-cycle delay. End
+observed one exiting zombie immediately, then zero owned producers at 1/3/5
+seconds. Its supervisor removed the owned runtime. Receipt:
+`continuous-chrome-mixed-feae4cc28-full20-quota2.json` in the independent
+clone's ignored playback-lab reports.
+
+Two earlier attempts remain failed: an overlong socket path at startup, then
+an owned-storage quota error during manual qualification. Neither supplies
+a full passing receipt. Obsolete owned artifacts were pruned, and the unused
+synthetic H264 fixture was copied locally and hash-verified before its remote
+copy was removed. No system caches or unrelated files were removed.
+
+Copied media from the actual 720p → 1080p presentation boundary at film
+688 seconds decoded 48 frames on each side: PTS 686–687.958333 followed by
+688–689.958333, with the expected 1/24-second join and no decode errors.
+Adjacent shared AAC fragments decoded 188 frames / 192512 samples at 48 kHz
+with increasing timestamps and no errors. Independent publisher binding and
+physical display/audible continuity remain unmeasured; this is encoded-media
+and browser-callback evidence, not physical-output qualification.
+
+### 10.167 · Firefox failure and independent raster diagnostic
+
+The full exact `feae4cc28` Firefox run presented all fifteen manual targets
+but failed on three backward-frame callbacks. Maximum/p95 callback gap was
+99.9 ms, with no stalls, reopens or waits. Auto stages did not run after the
+manual-phase failure. Thirteen dropped frames were reported in the first two
+changes. The failed receipt is preserved and the supervisor removed its
+runtime: `continuous-firefox-mixed-feae4cc28-full20.json`.
+
+A focused steady-720p 120-second run passed, but its initial raster probe was
+wiped by the lab's page reload. It is not pixel evidence. A corrected probe
+installed after browser preparation reproduced a backward callback in a
+three-change diagnostic. The two suspicious callbacks reported media times
+0.666666 then 0.375 seconds, while their media clocks advanced from 0.288799
+to 0.328937 seconds. Both returned identical RGBA raster bytes. Independent
+software decoding, compared across four downscalers, matched both readbacks
+most closely to the source frame at PTS 0.333333. The diagnostic still failed
+its unchanged hitch criterion; it does not relabel the full failure.
+
+Firefox 157.0, build 20260924084938, ran headless. Mozilla's current
+[callback implementation](https://raw.githubusercontent.com/mozilla/gecko-dev/master/dom/html/HTMLVideoElement.cpp)
+selects queued future images when no next compositor tick is supplied. That
+is a possible explanation for these observations, inferred from source that
+is not the exact tested release revision. Canvas readback is not physical
+display proof. The next bounded experiment uses headed Firefox on an owned
+software display, without changing the player, thresholds or raw observations.
+No units executed.
+
+### 10.168 · Native attempts remain bounded and incomplete
+
+Pinned Rust 1.97.1 built the exact `feae4cc28` Mac backend without unit
+execution. Descriptor-bound decoder probing is unsupported on macOS, so two
+local-backend Safari attempts stopped before browser startup. The Linux-backed
+Safari attempt passed backend identity checks but timed out creating the
+isolated WebDriver session. Failed receipts and cleanup are preserved.
+
+Physical 17promax reports connected and prepared for development. An earlier
+isolated CQ Lab launch failed with CoreDevice remoteService XPC unavailable;
+no process or physical playback was confirmed, and its owned backend/proxy
+were removed. After the latest unlock confirmation the process service was
+reachable. The fresh exact-source baseline exhausted its bounded retry on Locked
+responses (CoreDevice 10002 / FBSOpenApplicationErrorDomain 7). A lock-state
+query reported passcodeRequired=true and unlockedSinceBoot=true. The helper
+cleaned its owned backend/proxy after the failed launch. The production app and its data remain untouched. No physical
+presentation, quality transition or audible-continuity claim follows yet.
+
+The full Chrome process census contains 760 samples: 718 with one video and
+one audio producer, fourteen with two video and one audio producers, and nine
+unclassified startup-probe observations. No sample shows more than two video
+or one audio producers. Each two-video observation is isolated to one sample;
+the next sample approximately two seconds later has retired it. This bounds
+sampled process overlap, not the exact onset between samples or physical
+output queues. The final End receipt remains the separate 0/1/3/5-second proof.
+
+
+### 10.169 · Headed Firefox focused proof and full campaign
+
+The owned software display starts and retires cleanly. Its vendor Xvfb binary
+is unchanged; a separately hashed copy relocates only the compiler-directory
+string to the extracted owned xkbcomp, avoiding a system package installation.
+No rendering code is modified. Package and relocation provenance are retained
+in the owned cache, and final cleanup will remove it.
+
+The exact-source three-change headed diagnostic passed. Transition callback
+gaps were 85.46/85.58/85.54 ms, with zero measured transition hitches/stalls.
+The raw raster diagnostic still contains one startup metadata backstep before
+transition measurement; this is preserved, not treated as corrected or erased.
+There were 3143 observed callbacks and two suspicious raster samples. End
+producer counts were 2/0/0/0 while the daemon remained alive. Its supervisor
+retired the display and removed the runtime. The focused result does not
+replace the full campaign or qualify physical display/audio output.
+
+A full fifteen-manual/five-actual-Auto headed campaign now runs against exact
+`feae4cc28`, using the committed mixedCase and unchanged acceptance criteria.
+The wrapper changes only headed launch and bounded diagnostic raster capture;
+End proof remains the committed alive-daemon census. No units executed.

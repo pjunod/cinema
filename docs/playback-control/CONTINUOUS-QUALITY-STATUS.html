@@ -1,69 +1,31 @@
 <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Continuous quality — build status</title>
 <style>body{max-width:960px;margin:48px auto;padding:0 24px;background:#15191e;color:#e8edf2;font:17px/1.6 system-ui}a{color:#8ecbff}h1{line-height:1.15}table{border-collapse:collapse;width:100%}td,th{padding:12px;text-align:left;border-bottom:1px solid #3c4650}.muted{color:#bbc5cf}.state{padding:10px 16px;background:#293544;border-radius:8px}code{font-size:.9em}</style>
 <h1>Continuous quality</h1>
-<p class="muted">Updated October 3, 2026 · Independent clone · <code>codex/continuous-quality-cq0</code></p>
-<p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
-The human requests a stop immediately after that review for external Fable
-reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> exact <code>2ebb4b5f3</code> passed one manual
-and five actual Auto changes in Firefox at 84.02 ms maximum/mixed p95 gap, with
-zero stalls, hitches or backsteps. End showed zero owned producers at all four
-samples; its runtime was removed. The trace identifies phase-sensitive mild
-pressure counting: a routine HLS buffer refill resets the counter despite
-continued low link margin. The counter now retains fresh low-margin evidence across ordinary refills;
-a downgrade still requires draining and obeys cooldown/budget. Main
-<code>342521018</code> integration committed as <code>1de833ab2</code> with
-shared AAC and upstream encoding improvements retained; the normal compiler
-hook passed. The corrected integrated candidate is being prepared for full
-Chrome/Firefox campaigns.
-No units ran; native evidence, full campaigns and final review remain.</p>
-<p><strong>Physical iOS:</strong> 17promax was reachable after the latest unlock.
-The separate CQ Lab launch against exact <code>432a8b322</code> again reported
-Locked and then remoteService XPC unavailable. No application process or
-physical playback was confirmed. The owned backend and proxy were cleaned up.
-Production app remains untouched.</p>
-<p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
-Chrome campaign passed three manual and five actual Auto changes, with at most
-66.8 ms callback gap on all eight transitions, zero stalls or hitches, and
-1.001x final media clock. Actual Auto observed two pressure downgrades and two
-recovery upgrades. End retired both owned FFmpeg children at every alive-daemon
-0/1/3/5-second sample. This is partial browser video evidence; physical output,
-the full current-source matrix and intermittent startup refusal remain open.
-The older fifteen-manual failed receipt remains failed.</p>
-<p><strong>Measured startup improvement:</strong> optimized development
-SHA-256 reduced decoder planning to 48–151 ms per lookup, complete VOD creation
-to 798 ms, and the ordinary Activity attestation to 497 ms. All executable
-rehashes remain enabled. This was explicitly warmed playback and does not
-qualify cold attestation or physical continuity.</p>
-<p><strong>Established partial evidence:</strong> older source
-<code>6ad6c51c9</code> completed twenty manual Chrome switches in one session,
-with zero waits, reopens, stalls, hitches or dropped frames and a 66.8 ms maximum
-and p95 callback gap. A later series observed fifteen manual and three real
-Auto presentations, but failed its removal-evidence window. Native Safari's
-separate-window recovery fixture observed 720p-to-1080p, pressure downgrade
-at 52 s and restorative 1080p at 80 s, with 5,755 callbacks and a 68 ms
-maximum gap. Native production enrollment remains open. These results do not qualify
-the current complete implementation or physical display/audio continuity.</p>
-<p><strong>Still open:</strong> current-source browser continuity, real Auto,
-cancellation, cold seek, pressure and bounded producer evidence; Apple native
-Auto implementation and device/display/audio qualification. The Mac is unlocked; ADB has no physical device. Android build
-144 and Apple build 206 compile. Native Auto policy ownership has been flagged
-for the human: retain Plurx policy/prepared handoffs, or delegate the bounded
-two-rung attachment to the native engine. Existing production policy remains. No unit tests have run.</p>
-<h2>Implemented source and its evidence</h2>
-<table><tr><th>Area</th><th>Implemented</th><th>Evidence and limits</th></tr>
-<tr><td>CQ2a / CQ1 · Cancellation and retention</td><td>Owner-fenced independent cancellation, durable receipts, late admission fences, retained manual preference and explicit Retry / Apply with restart.</td><td>Source compiles. Authored regressions await final fast lane; runtime cancellation and mixed-owner qualification remain.</td></tr>
-<tr><td>CQ2 · Transactions and pins</td><td>Strict bounded ledger on SQLite and replicated storage; physical video/AAC reservations, cross-parent consumer dependencies, publication and terminal reconciliation.</td><td>Source compiles. Production requests reach durable reservation and actual append/presentation. Pressure, takeover and cleanup evidence remain.</td></tr>
-<tr><td>CQ3 · Compatible media</td><td>Immutable two-rung AVC SDR family, BT.709 initialization proof and one shared AAC soundtrack.</td><td>Actual isolated Linux initialization proof passes. Full alternating joins, seek, tail and source-shape matrix remain.</td></tr>
-<tr><td>CQ4 · Bounded producers</td><td>Controlled cold video admission, exact frontier materialization and retirement of future incumbent work while its buffered bytes remain owned.</td><td>Source compiles. Measured one-video steady state, overlap, five-second cleanup and foreground pressure remain.</td></tr>
-<tr><td>CQ5 · Web switching</td><td>Production hls.js enrollment, reserved loaders, actual append/remove/frame observers and durable attachment census.</td><td>Exact-source Chrome completed twenty manual switches: one VOD session, no dropped frames, waits, reopens, stalls or hitches, and 66.8 ms maximum / p95 frame gap. Linux Firefox failed on the return to 1080p; macOS Firefox failed at profile startup. The current focused Chrome receipt now passes three manual and five real Auto changes at 66.8 ms maximum gap; the full current-source Firefox and behavior matrix remain unqualified.</td></tr>
-<tr><td>CQ6 · Prepared presentation</td><td>Apple decoded post-seek alignment; Android owned warm outputs and release fences; first-render metadata retained across queued callbacks, with tunneled item-local PTS integration; one physical overlap clock from construction through exposure; final acceptance derived from successor frame cadence; Apple parks at a bounded future rendezvous; Android waits for its decoded parked frame and keeps a missed final check live within the original bound, converting observed seek latency at the playback rate.</td><td>iOS production and test sources, tvOS production, Android production and test sources compile. Frame-cadence changes also compile; their authored regressions await the final fast lane. Physical presentation, audio and overlap qualification remain.</td></tr>
-<tr><td>CQ7 · Native adapters</td><td>API constraints investigated; exact manual prepared behavior retained; Android bounded transactions, retained selection, reserved loading, accepted-sample inventory, period binding, captured-profile bootstrap, hardware output observers, bounded future loading, actual AudioTrack state tracking, loader retirement fences, controller adoption, compatible manual/Auto changes and bounded terminal reconciliation implemented.</td><td>Apple public controls expose preferences rather than exact manual adaptive selection. Android production/test sources compile with versionCode 144; iOS production/test sources and tvOS production compile with Apple build 206. The retained source is wired into initial playback and compatible manual/Auto changes. Pending-quality seeks retain the source and executed recipe; discarded queues use reset generations and actual codec/audio retirement. Committed observation deadlines now preserve late-frame receipts and report uncertainty once per intent. Operation-specific receipts must prove each acknowledged reservation, append, presentation, cancellation or disposal. Artifact retirement now waits for successful compressed-allocation release and blocks both same-resource and same-digest URL reentry until acknowledgment and provenance removal; AAC reentry renews missing shared pins. Optional cold target failures now restore a durably presented incumbent only before exposure or physical aliasing, retain manual retry intent, and fence late request settlement. Server End retains physical release observers until actual pipeline retirement; unappended control work now has a thirty-second active-time budget. Expected target boundary delay is now recorded from actual film position and rate, with pause reported as unknown. Exact committed-source transfer to the isolated Linux node has explicit human approval; the earlier Linux build passed and is being refreshed after current-main catalog integration. Active-time sampling survives coalesced pause/resume wakeups and restorative retries reuse acknowledged owners. Caller cancellation restores through attachment-owned ordered work; optional control uncertainty cannot take the generic destructive reopen path. Restart/race runtime coverage and physical seek/terminal cleanup remain unqualified. Retained future-load selection and stale zero-byte chunk fallback compile. ADB lists no physical devices; connection details requested. Unlocked Safari has a separate-window four-minute autonomous recovery trace: 5,755 callbacks, 68 ms maximum gap, downgrade at 52 s and restorative upgrade at 80 s, one video and one audio track. This does not qualify a production switch or physical output.</td></tr>
-<tr><td>CQ8 · Landing</td><td>Commits backed up on the independent Forgejo branch; main 3197d0c58 integration retains both continuous reservation and upstream seek ownership; pinned Rust workspace/all-target compilation and normal hook passed.</td><td>Final evidence and adversarial review remain. Human requests a stop immediately after that review for external Fable reviews, before fast-lane tests or merge.</td></tr>
+<p class="muted">Updated October 3, 2026 · Independent clone · <code>codex/continuous-quality-cq0</code> · Current executable source <code>feae4cc28</code> · Integrated main <code>342521018</code></p>
+<p>Batch: <a href="http://192.168.4.7:3000/noirr/plurx/pulls/774">draft PR #774</a>. No unit tests have run. The PR lists 211 authored, statically resolved regressions.</p>
+<p class="state"><strong>Incomplete — final adversarial review has not started.</strong> Stop immediately after that review for the human's external Fable reviews, before fast-lane units or merge.</p>
+<h2>Working now</h2>
+<p>The full fifteen-manual/five-actual-Auto Firefox campaign is running on an owned software display against <code>feae4cc28</code>. Its focused three-change headed diagnostic passed at up to 85.58 ms callback gap, with zero measured transition hitches or stalls. Its raw probe preserves one startup timestamp backstep before transition measurement. Physical output remains unmeasured.</p>
+<p>The fresh 17promax CQ Lab launch exhausted its bounded retry on Apple's Locked response. CoreDevice reported <code>passcodeRequired=true</code>; no app process or playback was confirmed. The owned backend/proxy were cleaned up. The human was asked to keep the phone unlocked and awake for launch. Production app and data remain untouched.</p>
+<h2>Current evidence</h2>
+<table><tr><th>Surface</th><th>Result</th><th>Limit</th></tr>
+<tr><td>Chrome · full current-source campaign</td><td><strong>PASS:</strong> fifteen manual and five actual Auto changes; 66.7 ms mixed p95/max callback gap; zero stalls, hitches, backsteps, dropped frames, waits or reopens; one session.</td><td>Browser video callbacks. Physical display and audible output unmeasured. Earlier socket-path and storage-quota attempts remain failed.</td></tr>
+<tr><td>Chrome · actual encoded boundary</td><td>720p→1080p at film 688 seconds: 48 decoded frames per side, increasing PTS and a 1/24-second join. Adjacent shared AAC decoded without errors.</td><td>Independent publisher binding and physical output unmeasured.</td></tr>
+<tr><td>Chrome · producer ownership</td><td>760 census samples; maximum two video and one audio producers. Each sampled two-video overlap retired by the next sample about two seconds later. End: one exiting zombie immediately, zero children at 1/3/5 seconds; runtime removed.</td><td>Sampled process evidence; exact between-sample overlap and physical queues unmeasured.</td></tr>
+<tr><td>Firefox · full headless campaign</td><td><strong>FAILED:</strong> fifteen targets presented, three backward-frame callbacks, maximum/p95 gap 99.9 ms. No Auto stages ran. Runtime removed.</td><td>Corrected diagnostic reproduced identical raster bytes for two callbacks with conflicting media timestamps; both best matched decoded PTS 0.333333. This suggests metadata inaccuracy and does not erase the failure.</td></tr>
+<tr><td>Firefox · headed campaign</td><td>Focused three-change <strong>PASS</strong>; full twenty-change campaign running.</td><td>Owned Xvfb software display. Vendor original unchanged; isolated compiler-path relocation recorded. Physical output unmeasured.</td></tr>
+<tr><td>Safari · production prepared path</td><td>Linux-backed attempt passed backend identity checks but timed out creating the isolated WebDriver session. Failed receipt and cleanup preserved.</td><td>Mac backend compiles, but descriptor-bound decoder probing is unsupported there. No current production Safari playback qualification.</td></tr>
+<tr><td>Apple / Android native</td><td>Apple build 206 production/test sources and tvOS production compile; Android build 144 production/test sources compile. Phone launch blocked by lock state; ADB has no physical device.</td><td>Physical quality transitions, display/audio continuity and output retirement remain unmeasured.</td></tr>
 </table>
-<h2>Current sequence</h2>
-<ol><li>Resolve the measured initial callback gap and complete the current-source browser matrix; targeted pending-quality cold-seek stages now pass.</li><li>Complete Chrome / Firefox continuity and cancellation, seek, pressure and producer-retirement measurements.</li><li>Complete native implementation and obtain actual device / display / audio evidence, recording API limitations explicitly.</li><li>Integrate current main and get the adversarial agent review. Stop afterward and hand over the changes, findings and unresolved issues for external Fable reviews.</li><li>After the human resumes work following external review, address findings, run each fast-lane test once with failed-only reruns, merge the batched PR, and clean up.</li></ol>
-<h2>How to read the evidence</h2>
-<p>The early CQ0 experiment is mechanics evidence, not production qualification. It recorded twenty Chrome switches and decoded fixture / PCM results; Safari recorded 476 callbacks at 1080p but no presented 720p switch. Those results do not qualify the production adapter or physical audible and display continuity. Failed production receipts remain failed even when recovery playback resumes.</p>
-<p>Commands, source identities, limitations and the chronological evidence are in <a href="CONTINUOUS-QUALITY-BUILD.md">the build ledger</a>. Redacted machine receipts remain in the independent clone's ignored <code>target/playback-lab/reports/</code> until final evidence is selected. No work uses or modifies the user's checkout.</p>
+<h2>Implementation and remaining work</h2>
+<table><tr><th>Milestone</th><th>Implemented</th><th>Remaining</th></tr>
+<tr><td>CQ1 / CQ2a · Selection and cancellation</td><td>Retained manual choice, exact owner-fenced cancellation, durable receipts, late admission fences, explicit Retry / Apply with restart.</td><td>Current-source rapid intents, pause/resume, cancellation and pending-quality cold-seek runtime matrix.</td></tr>
+<tr><td>CQ2 · Transactions and pins</td><td>Strict bounded SQLite/replicated ledger, physical video/AAC reservations, dependency pins, publication and terminal reconciliation.</td><td>Foreground pressure, restart/takeover and mixed-owner runtime evidence; authored units await the final fast lane.</td></tr>
+<tr><td>CQ3 / CQ4 · Media and producers</td><td>Immutable two-rung AVC SDR family, BT.709 initialization proof, shared AAC, controlled cold admission and exact frontier materialization.</td><td>Tail/source-shape matrix, pressure and physical retirement evidence. Encoded boundary and sampled producer results are above.</td></tr>
+<tr><td>CQ5 · Web switching</td><td>Production hls.js enrollment, reserved loaders, append/remove/frame provenance, retained quality authority and bounded Auto transfer proof.</td><td>Finish full headed Firefox and the current-source behavior matrix.</td></tr>
+<tr><td>CQ6 / CQ7 · Native presentation</td><td>Apple decoded alignment and bounded future rendezvous; Android owned outputs, sample/period binding, reserved loading, release fences, continuous manual/Auto adaptation and bounded terminal reconciliation.</td><td>Native device qualification. Apple public preferences do not enforce exact manual adaptive selection; existing Plurx policy/prepared handoffs remain while native policy ownership is unresolved.</td></tr>
+<tr><td>CQ8 · Landing</td><td>One backed-up batched draft; current main integrated; pinned Rust 1.97.1 compiler/normal hook, static web/type checks and native compilation pass.</td><td>Final evidence, main-ready adversarial review, then the required external Fable pause. After human resumption: address findings, each fast-lane unit passes once with failed-only reruns, main gate, merge and cleanup.</td></tr>
+</table>
+<h2>Evidence record</h2>
+<p>Commands, source identities, older results and limitations are in <a href="CONTINUOUS-QUALITY-BUILD.md">the build ledger</a>. Redacted machine receipts remain in the independent clone's ignored <code>target/playback-lab/reports/</code>. Failed attempts stay failed. No work uses or modifies the user's checkout.</p>
 </html>
