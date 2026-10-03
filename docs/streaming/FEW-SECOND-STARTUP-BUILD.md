@@ -516,7 +516,8 @@ the concrete implementation moved to `claim_analysis_request_for_capacity`.
 The inventory entry now follows the actual method; transaction mechanism and
 shape remain unchanged. The focused `hiqlite-store`-enabled
 `every_sqlite_transaction_site_is_classified` regression passed. Independent
-review confirmed that no other transaction census entry needs changing.
+review confirmed that no other transaction census entry needed changing at
+that revision.
 
 That run also failed 14 broader daemon tests, chiefly the ten-second create
 allowance under the full runner load, plus provider and telemetry deadlines.
@@ -525,3 +526,57 @@ including three neighboring cases). This does not reproduce the runner's full-su
 required gate remains necessary. No source merge or deployment is claimed by
 this packet. The LL contract branch and effort base are backed up on Forgejo;
 no LL pull request was opened.
+
+
+### 11.9 Full-suite failure diagnosis — code cost and local prerequisites
+
+The fourteen daemon deadline failures were not established as environmental
+failures. Ten also occurred on the earlier `main` coverage run, which proves
+that they predated this PR, not why they failed. A full local run on repair
+base `bb1bc4c91` passed 1,391 core tests and 191 Store contracts. Thirteen of
+the fourteen daemon cases passed; overlapping creates failed again. Preserving
+both errors in that assertion showed two `startup_timeout` responses. The
+three-second replacement-gate refusal was considered and ruled out for this
+reproduction.
+
+SQLite admission synchronously calls session maintenance. Its first three
+updates compile the session trigger graph even when no rows qualify. In a
+16-thread HLS group, two overlapping creates spent 7,353.793 ms combined on
+those six no-op updates while sharing one writer connection; individual
+updates took 1,089–1,500 ms. The same updates took roughly 33–36 ms each in
+isolation. The instrumented timing run passed all 234 cases; the preceding
+concurrent diagnostic run failed the overlap case. The measurement identifies
+avoidable cost under contention, not a deterministic ten-second threshold.
+
+The repair checks each update's candidate predicate inside the existing
+SQLite transaction before preparing that update. Update order, deadlines,
+batch bounds and the other cleanup statements stay intact. A trace regression
+checks an empty store and a current session, then proves that an expired
+session is still retired. The transaction census now records this method as
+`ReadBranchWrite`. The replicated backend already checks for idle maintenance;
+this SQLite measurement does not establish a speedup on the activated cluster.
+
+The first full local daemon run also found thirteen font prerequisites and
+two socket-test failures. The default Mac FFmpeg lacks subtitle rendering;
+installed full builds render but do not provide the Fontconfig trace this
+suite requires. The socket helper had a separate defect: `read_to_string`
+discards received response bytes when a later read returns a reset. Reading
+bytes before UTF-8 conversion preserves the response, and both unchanged
+socket assertions pass. No timeout or success assertion was relaxed.
+
+Independent review found no actionable issue with these changes. The new
+SQLite regression, transaction census, four expiration/drain/session
+contracts and four documentation-index checks pass. The complete concurrent
+daemon rerun finished with 3,115 passed, 13 failed and 16 ignored in 447.74
+seconds. All fourteen original daemon failures and both socket regressions
+passed. The thirteen remaining failures are the local font prerequisites
+described above. The normal commit hook passed catalog lint, formatting,
+workspace Clippy with warnings denied and served-JavaScript syntax. The
+required Linux fast lane remains pending. The user authorized merge after
+that lane passes, with remaining configured checks monitored afterward;
+no source merge or deployment is claimed here.
+
+Evidence under the aliased local root above: `unit-failure-classification.json`,
+`full-unit-bb1bc4c91-no-incremental.log`, `hls-concurrent-diagnostic.log`,
+`maintenance-diagnostic-concurrent-timings.log`, `maintenance-measurement.json`,
+`unit-repair-store-contracts.log` and `unit-repair-full-daemon.log`.
