@@ -5599,5 +5599,42 @@ completion and shortens no response safety boundary. The existing
 predecessor-only fast path is unchanged. An unrun regression holds a permit
 while a successor is active, durably ends it, and checks prompt release
 with terminal publication still blocked. Pinned Rust 1.97.1 daemon test-source compilation PASSED in 13.49s.
-Normal hook, exact Linux build and focused Retry requalification are pending.
+Normal hook PASSED (Clippy 43.30s, served JavaScript syntax clean).
+Exact committed Linux build `3c5e6d93b` PASSED in 1m36s.
+Focused Retry requalification is running.
 No units or final review ran.
+
+
+### 10.192 · Explicit Retry after abrupt media-owner loss
+
+Exact executable `3c5e6d93b` PASSED
+`continuous-chrome-3c5e6d93b-targeted-owner-retry2`. This is the repeat
+of the failed explicit Retry case, not a rerun of unit suites. Three logical
+voters share one physical nuc3 host. Initial creation runs through B and
+quality ingress through A; the healthy initial 1080p→720p switch retains
+its exact route and presentation pipeline.
+
+Owned B daemon PID 2347373 received SIGKILL. Both recorded child identities
+retired within ten seconds. The failed replacement returned its own pending
+release capability and its DELETE settled in 338 ms; unpublished producers
+retired. The old attachment and saved manual 720p remained intact. One
+fault-window stall is retained, so no seamless or automatic recovery is
+claimed.
+
+The shipped Retry action then restored controlled 720p on surviving A,
+with an active durable route and publication_ready_at_ms=0, in 14.358s.
+It advanced beyond the old recorded buffer frontier. The advertised 480p
+companion subsequently presented in that same recovered session/player;
+maximum callback gap was 66.7 ms with no added stalls, hitches or drops.
+Exactly three parents started: initial, disposed refused family, successful
+Retry. End raw/playback child counts were 0/0/0/0. Initial TTFF was 8.391s,
+observed initial clock 0.957x and initial maximum gap 94.0ms. Selected HTTP,
+ledger diagnostics and bounded node logs carry the same source/stem.
+The helper exited 0 and removed owned browser/proxy/daemons/runtime trees.
+Multi-host partitions and physical display/audio remain unmeasured.
+
+Current main remains `342521018`, already integrated. Pinned test-source
+compilation, normal hook and exact Linux build passed; Linux all-target
+daemon Clippy PASSED in 1m23s. A read-only cleanup check found no
+owned live daemon or current-source runtime directory. No units or final
+adversarial review ran.
