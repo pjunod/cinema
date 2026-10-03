@@ -2731,8 +2731,7 @@ impl MediaSessionStore for SqliteStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        if user_id <= 0
+        if !principal.valid_admission_shape()
             || playback_id.is_empty()
             || playback_id.len() > 128
             || playback_id
@@ -2744,20 +2743,37 @@ impl MediaSessionStore for SqliteStore {
             ));
         }
         let playback_id = playback_id.to_owned();
+        let principal = principal.clone();
         self.with_read(move |conn| {
-            Ok(conn
+            let projection = route_projection(conn)?;
+            let (owner_column, owner) = if projection == PRINCIPAL_ROUTE_COLS {
+                (
+                    "owner_key",
+                    rusqlite::types::Value::Text(principal.owner_key()),
+                )
+            } else {
+                (
+                    "user_id",
+                    rusqlite::types::Value::Integer(crate::store::local_media_principal_id(
+                        &principal,
+                    )?),
+                )
+            };
+            let route = conn
                 .query_row(
                     &format!(
                         "SELECT {route_cols} FROM media_sessions
                           WHERE incarnation_id = (SELECT current_incarnation_id
                             FROM media_playback_pointers
-                            WHERE user_id = ?1 AND playback_id = ?2)",
-                        route_cols = route_projection(conn)?
+                            WHERE {owner_column} = ?1 AND playback_id = ?2)
+                            AND {owner_column} = ?1",
+                        route_cols = projection
                     ),
-                    params![user_id, playback_id],
+                    params![owner, playback_id],
                     route_from_row,
                 )
-                .optional()?)
+                .optional()?;
+            Ok(route.filter(|route| route.principal == principal))
         })
         .await
     }
@@ -4019,6 +4035,20 @@ mod sharing_route_decoder_tests {
     use super::*;
 
     #[tokio::test]
+    async fn sharing_route_legacy_schema_refuses_a_shared_playback_pointer() {
+        let store = SqliteStore::open_in_memory().expect("legacy store");
+        let principal = crate::playback_principal::PlaybackPrincipal::sharing(
+            uuid::Uuid::new_v4(),
+            &"a".repeat(64),
+        )
+        .expect("principal");
+        assert!(store
+            .media_session_route_for_playback(&principal, "playback")
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn sharing_route_reads_rebuilt_sqlite_rows_without_a_local_user() {
         let directory = tempfile::tempdir().expect("pooled store directory");
         for store in [
@@ -4058,7 +4088,48 @@ mod sharing_route_decoder_tests {
                     .expect("principal")
                 );
                 assert_eq!(route.principal.local_user_id(), None);
+                let current = store
+                    .media_session_route_for_playback(&route.principal, "playback")
+                    .await
+                    .expect("principal pointer read")
+                    .expect("current route");
+                assert_eq!(current.incarnation_id, id);
+                let other_viewer = crate::playback_principal::PlaybackPrincipal::sharing(
+                    uuid::Uuid::parse_str(id).expect("grant"),
+                    &"b".repeat(64),
+                )
+                .expect("viewer");
+                assert!(store
+                    .media_session_route_for_playback(&other_viewer, "playback")
+                    .await
+                    .expect("other viewer read")
+                    .is_none());
             }
+            let local = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 };
+            assert_eq!(
+                store
+                    .media_session_route_for_playback(&local, "playback")
+                    .await
+                    .expect("local route")
+                    .expect("local pointer")
+                    .incarnation_id,
+                "live"
+            );
+            store.with_conn(|conn| {
+                conn.execute("DELETE FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000002'", [])?;
+                conn.execute("UPDATE media_playback_pointers SET current_incarnation_id='00000000-0000-4000-a000-000000000002' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", [])?;
+                Ok(())
+            }).await.expect("corrupt cross-grant pointer fixture");
+            let first = crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant"),
+                &"a".repeat(64),
+            )
+            .expect("principal");
+            assert!(store
+                .media_session_route_for_playback(&first, "playback")
+                .await
+                .expect("cross-grant read")
+                .is_none());
         }
     }
 

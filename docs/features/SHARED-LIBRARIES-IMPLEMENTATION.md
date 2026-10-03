@@ -1577,13 +1577,14 @@ rejected the isolated Hiqlite spike lockfile before compilation. Commit
 scope, policy, Rust, web, Apple and Android. Windows attempt 1 reached its
 30-minute runner deadline without a compiler error. The individual retry on
 the same commit passed in 20 minutes 17 seconds; the final Effort development
-gate passed. The exact candidate is gated but has not been integrated.
+gate passed. PR #746 integrated that candidate into the effort as
+`971265536a259dea38b0f7a9a8752a5a74e8c025`, preserving all seven regression fields.
 
-**Still owed:** S1 integration into the effort. S2 requires disposable two-NAT/Tailscale
+**Still owed:** S2 requires disposable two-NAT/Tailscale
 and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
-the S1 task is integrated; no deployment is authorized.
+the completed S1 integration; no deployment is authorized.
 
 ### 16.3 Implementation progress — S2, 2026-10-02
 
@@ -1898,3 +1899,18 @@ floor remain open.
 cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_route_ -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
 ```
+
+**Principal pointer checkpoint:** the production current-playback lookup uses
+the canonical owner key on rebuilt tables and retains real local-user lookup
+on legacy tables. It verifies that the returned session belongs to the
+requested principal. Two grants can therefore use the same playback ID
+without sharing pointers, and a corrupt cross-grant pointer returns no route.
+Other viewers receive no route; legacy tables refuse shared lookups.
+Six route tests passed with zero ignored (0.93 seconds), covering memory and
+pooled SQLite. Both actual three-voter candidate contracts passed with zero
+ignored (18.50 seconds), including the same cross-grant refusal. These reads
+do not admit shared workers or qualify grant authority, schema installation
+or the mixed-version floor; those remain open.
+The existing `media_session_contract_runs_through_dyn_store` regression also
+passed on SQLite and the three-voter backend (zero ignored, 13.25 seconds);
+denied-warning Clippy passed with `hiqlite-contract-tests`.

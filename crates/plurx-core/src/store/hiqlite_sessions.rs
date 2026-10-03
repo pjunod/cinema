@@ -3427,8 +3427,7 @@ impl MediaSessionStore for HiqliteAuthStore {
         principal: &crate::playback_principal::PlaybackPrincipal,
         playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        if user_id <= 0
+        if !principal.valid_admission_shape()
             || playback_id.is_empty()
             || playback_id.len() > 128
             || playback_id
@@ -3439,19 +3438,31 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session playback route".to_owned(),
             ));
         }
+        let (owner_column, owner): (&str, Param) =
+            if route_projection(self).await? == PRINCIPAL_ROUTE_COLS {
+                ("owner_key", principal.owner_key().into())
+            } else {
+                (
+                    "user_id",
+                    crate::store::local_media_principal_id(principal)?.into(),
+                )
+            };
+        let sql = format!(
+            "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_column} = $1 AND playback_id = $2"
+        );
+        validate_sql(&sql)?;
         let incarnation = self
             .client()
-            .query_consistent_map::<PointerRow, _>(
-                "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE user_id = $1 AND playback_id = $2",
-                params!(user_id, playback_id),
-            )
+            .query_consistent_map::<PointerRow, _>(sql, params!(owner, playback_id))
             .await?
             .into_iter()
             .next()
             .map(|row| row.0);
         match incarnation {
-            Some(incarnation) => route_by(self, "incarnation_id", &incarnation).await,
+            Some(incarnation) => Ok(route_by(self, "incarnation_id", &incarnation)
+                .await?
+                .filter(|route| route.principal == *principal)),
             None => Ok(None),
         }
     }

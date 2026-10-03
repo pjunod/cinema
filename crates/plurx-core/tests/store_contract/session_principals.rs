@@ -238,7 +238,36 @@ async fn sharing_principal_owner_deletion_and_revocation_fence_three_voter_autho
             .expect("principal")
         );
         assert_eq!(route.principal.local_user_id(), None);
+        let current = store
+            .media_session_route_for_playback(&route.principal, "playback")
+            .await
+            .expect("principal pointer read")
+            .expect("current route");
+        assert_eq!(current.incarnation_id, id);
+        let other_viewer = plurx_core::playback_principal::PlaybackPrincipal::sharing(
+            uuid::Uuid::parse_str(id).expect("grant"),
+            &"b".repeat(64),
+        )
+        .expect("viewer");
+        assert!(store
+            .media_session_route_for_playback(&other_viewer, "playback")
+            .await
+            .expect("other viewer read")
+            .is_none());
     }
+    client.execute("DELETE FROM media_playback_pointers WHERE share_grant_id='00000000-0000-4000-a000-000000000002'", hiqlite::params!()).await.expect("release unique target for corrupt pointer fixture");
+    client.execute("UPDATE media_playback_pointers SET current_incarnation_id='00000000-0000-4000-a000-000000000002' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", hiqlite::params!()).await.expect("cross-grant pointer fixture");
+    let first = plurx_core::playback_principal::PlaybackPrincipal::sharing(
+        uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("grant"),
+        &"a".repeat(64),
+    )
+    .expect("principal");
+    assert!(store
+        .media_session_route_for_playback(&first, "playback")
+        .await
+        .expect("cross-grant read")
+        .is_none());
+    client.execute("UPDATE media_playback_pointers SET current_incarnation_id='00000000-0000-4000-a000-000000000001' WHERE share_grant_id='00000000-0000-4000-a000-000000000001'", hiqlite::params!()).await.expect("restore pointer fixture");
     client
         .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
         .await
