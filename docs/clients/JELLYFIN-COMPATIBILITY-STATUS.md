@@ -411,3 +411,22 @@ repository-pinned compiler, pinned Windows SDK/CRT and embedded manifest.
 The existing workflow contract checks these resource bounds alongside target
 coverage. No shared runner cache was cleared and no toolchain pin was changed.
 Rerun the effort gate on the updated candidate before merging J0.
+
+## 8. Integration gate — wait for received browser evidence
+
+Effort run 3958 on `3a0310a33` passes policy/contracts and every compile lane,
+including Windows. Its browser fixture failed the local-seek assertion even
+though the video reached the requested position and `session_creates` stayed
+zero. The fixture sampled asynchronous `clientLog` POSTs after a fixed 250 ms
+sleep, which cannot establish that the server has received a fire-and-forget
+message.
+
+A controlled localhost reproduction adds one second before recording only the
+`seek_local` POST. The unchanged fixture fails with the same missing-log
+assertion while the seek succeeds. The corrected fixture waits on a condition
+for that exact event within its existing 38-second deadline before snapshotting
+the evidence. It retains both the log assertion and zero-new-session assertion.
+The delayed HTTP regression passes, and the full browser fixture passes with
+the same injected delay in worker and inline-fallback modes on Headless Chrome
+154 with vendored hls.js 1.6.16. No application seek behavior or playback
+assertion changed. The new candidate still requires its complete effort gate.
