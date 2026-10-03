@@ -658,20 +658,40 @@ pub(super) async fn source_content_guard(
         .extensions()
         .get::<std::sync::Arc<super::shared_artwork::ArtBodyLease>>()
         .cloned();
+    let source_guard = response
+        .extensions()
+        .get::<std::sync::Arc<crate::transcode::source_actor::SourceResponseGuard>>()
+        .cloned();
+    let closed = connection.closed();
     let monitored=connection.monitor(async move {
         let _permit=permit;
         let _art_body_owner=art_lease;
+        // EOF only releases the stream's copy. Queued Hyper DATA remains owned
+        // until the accepted connection future and its writer have dropped.
+        let source_body_owner=source_guard;
         let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                ()=cancel.cancelled()=>return,
+                ()=closed.wait()=>return,
+                ()=cancel.cancelled()=>break,
+                ()=async {
+                    match source_body_owner.as_ref() {
+                        Some(guard)=>guard.cancelled().await,
+                        None=>std::future::pending::<()>().await,
+                    }
+                }=>{cancel.cancel();break;},
                 _=interval.tick()=>{},
             }
             tokio::select! {
-                ()=cancel.cancelled()=>return,
-                current=source_content_current(&state,&authority)=> {if !current {cancel.cancel();return;}},
+                ()=closed.wait()=>return,
+                ()=cancel.cancelled()=>break,
+                current=source_content_current(&state,&authority)=> {if !current {cancel.cancel();break;}},
             }
+        }
+        if source_body_owner.is_some() {
+            // A cancellation request is not an accepted-writer join receipt.
+            closed.wait().await;
         }
     });
     if monitored.is_err() {

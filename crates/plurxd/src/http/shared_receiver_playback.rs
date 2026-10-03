@@ -35,6 +35,8 @@ struct ReceiverStartInner {
     request_id: String,
     fingerprint: String,
     state: Mutex<ReceiverStartState>,
+    start_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    stop: tokio_util::sync::CancellationToken,
     changed: tokio::sync::Notify,
 }
 #[derive(Default)]
@@ -45,6 +47,25 @@ struct ReceiverStartState {
     received: Option<Arc<ReceivedSource>>,
     dispatched: Option<Arc<DispatchedSource>>,
     confirmed_source_end: Option<Arc<crate::sharing_client::SourceEndReceipt>>,
+    dispatch_closed: bool,
+    owner: Option<ReceiverSourceOwner>,
+    planned_activation: Option<MediaSessionActivation>,
+}
+// The only constructor joins the exact registry-owned Start task. This is
+// neither Source settlement nor accepted B body/writer completion.
+struct JoinedReceiverStart(Arc<ReceiverStartInner>);
+impl ReceiverStartInner {
+    fn retain_dispatch(
+        &self,
+        dispatched: DispatchedSource,
+    ) -> Result<(), crate::sharing_client::PeerError> {
+        let mut owner = self.state.lock().expect("receiver owner");
+        if owner.dispatch_closed || owner.dispatched.is_some() {
+            return Err(crate::sharing_client::PeerError::Unavailable);
+        }
+        owner.dispatched = Some(Arc::new(dispatched));
+        Ok(())
+    }
 }
 struct DispatchedSource {
     credential: plurx_core::secrets::Secret,
@@ -76,13 +97,14 @@ impl ReceiverStartRegistry {
         // The owner is inserted before the first claim, activation or Source send.
         // Dropping an HTTP waiter never drops the owned producer obligation.
         let owner = entry.clone();
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let result = run_owner(state, owner.clone(), playback_id, source_wrapper).await;
             if let Err(error) = result {
                 owner.state.lock().expect("receiver owner").start = Some(Err(error));
                 owner.changed.notify_waiters();
             }
         });
+        *entry.start_task.lock().expect("receiver start task") = Some(task);
         Ok(ReceiverStartActor(entry))
     }
     fn register(
@@ -142,6 +164,8 @@ impl ReceiverStartRegistry {
             request_id,
             fingerprint,
             state: Mutex::new(ReceiverStartState::default()),
+            start_task: Mutex::new(None),
+            stop: tokio_util::sync::CancellationToken::new(),
             changed: tokio::sync::Notify::new(),
         });
         entries.push(entry.clone());
@@ -149,12 +173,34 @@ impl ReceiverStartRegistry {
     }
 }
 impl ReceiverStartActor {
+    fn close_dispatch(&self) {
+        self.0.state.lock().expect("receiver owner").dispatch_closed = true;
+        self.0.stop.cancel();
+    }
+    // Only an independently owned retirement task may await this operation.
+    // A missing handle, panic or cancelled task remains unresolved.
+    async fn join_start_for_cleanup(&self) -> Result<JoinedReceiverStart, ReceiverStartError> {
+        self.close_dispatch();
+        let task = self
+            .0
+            .start_task
+            .lock()
+            .expect("receiver start task")
+            .take()
+            .ok_or(ReceiverStartError::Unresolved)?;
+        task.await.map_err(|_| ReceiverStartError::Unresolved)?;
+        Ok(JoinedReceiverStart(self.0.clone()))
+    }
     // Called only by the independently owned retirement task. This exchange
     // retains Source facts; it cannot release B metadata or body ownership.
     async fn request_source_end(
         &self,
         state: &AppState,
+        joined: &JoinedReceiverStart,
     ) -> Result<Arc<crate::sharing_client::SourceEndReceipt>, ReceiverStartError> {
+        if !Arc::ptr_eq(&self.0, &joined.0) {
+            return Err(ReceiverStartError::Unresolved);
+        }
         let (dispatched, received) = {
             let owner = self.0.state.lock().expect("receiver owner");
             if let Some(receipt) = &owner.confirmed_source_end {
@@ -299,6 +345,13 @@ async fn run_owner(
         .await
         .map_err(|_| ReceiverStartError::Unavailable)?
         .ok_or(ReceiverStartError::Unavailable)?;
+    // Retain the planned immutable tuple before the activation await so an
+    // unknown commit cannot erase the metadata cleanup obligation.
+    entry
+        .state
+        .lock()
+        .expect("receiver owner")
+        .planned_activation = Some(activation.clone());
     let route = state
         .store
         .activate_receiver_media_session(&authority, &activation)
@@ -306,6 +359,16 @@ async fn run_owner(
         .map_err(|_| ReceiverStartError::Unresolved)?
         .ok_or(ReceiverStartError::Conflict)?
         .route;
+    entry.state.lock().expect("receiver owner").owner = Some(ReceiverSourceOwner {
+        incarnation_id: incarnation,
+        session_id: Uuid::parse_str(&route.session_id)
+            .map_err(|_| ReceiverStartError::Unresolved)?,
+        owner_node_id: state.node_id.clone(),
+        owner_epoch: route.owner_epoch,
+        request_id: entry.request_id.clone(),
+        now_ms: clock_ms(),
+        lease_expires_at_ms: route.lease_expires_at_ms,
+    });
     let mut pending = ReceiverPendingRenewal {
         incarnation_id: route.incarnation_id.clone(),
         owner_node_id: state.node_id.clone(),
@@ -322,15 +385,11 @@ async fn run_owner(
         &dispatch_owner,
         &source_wrapper,
         move |credential, viewer, endpoint| {
-            dispatch_entry
-                .state
-                .lock()
-                .expect("receiver owner")
-                .dispatched = Some(Arc::new(DispatchedSource {
+            dispatch_entry.retain_dispatch(DispatchedSource {
                 credential: plurx_core::secrets::Secret::from_cleartext(credential.expose()),
                 viewer_hash: viewer.to_owned(),
                 endpoint: endpoint.clone(),
-            }));
+            })
         },
     );
     tokio::pin!(start);
@@ -340,6 +399,7 @@ async fn run_owner(
     let result = loop {
         tokio::select! {
             result = &mut start => break result.map_err(|_| ReceiverStartError::Unresolved)?,
+            _ = entry.stop.cancelled(), if pending_authorized => pending_authorized = false,
             _ = timer.tick(), if pending_authorized => {
                 let renewed = async {
                     let authority = state.store.prepare_receiver_session_authority(intent.clone()).await
@@ -353,6 +413,9 @@ async fn run_owner(
                     // Losing B authority cannot cancel an already-sent Source
                     // Start and discard its eventual physical cleanup handle.
                     pending_authorized = false;
+                } else if let Some(owner) = &mut entry.state.lock().expect("receiver owner").owner {
+                    owner.now_ms = pending.now_ms;
+                    owner.lease_expires_at_ms = pending.lease_expires_at_ms;
                 }
             }
         }
@@ -366,6 +429,9 @@ async fn run_owner(
         response,
     });
     entry.state.lock().expect("receiver owner").received = Some(received.clone());
+    if entry.stop.is_cancelled() {
+        return Err(ReceiverStartError::Unresolved);
+    }
     if received.response.media_origin_ms != Some(0) || !received.response.vod {
         return Err(ReceiverStartError::Unresolved);
     }
@@ -484,7 +550,10 @@ async fn run_owner(
     entry.state.lock().expect("receiver owner").start = Some(Ok(projected));
     entry.changed.notify_waiters();
     loop {
-        timer.tick().await;
+        tokio::select! {
+            _ = entry.stop.cancelled() => return Err(ReceiverStartError::Unresolved),
+            _ = timer.tick() => {}
+        }
         let authority = state
             .store
             .prepare_receiver_session_authority(intent.clone())
@@ -507,7 +576,9 @@ async fn run_owner(
             return Err(ReceiverStartError::Unresolved);
         }
         attachment.owner.lease_expires_at_ms = new_lease;
-        entry.state.lock().expect("receiver owner").source = Some(attachment.clone());
+        let mut owned = entry.state.lock().expect("receiver owner");
+        owned.owner = Some(attachment.owner.clone());
+        owned.source = Some(attachment.clone());
     }
 }
 
@@ -663,5 +734,95 @@ mod tests {
             Err(ReceiverStartError::Capacity)
         ));
         assert_eq!(registry.entries.lock().expect("entries").len(), 8);
+    }
+
+    fn dispatch() -> DispatchedSource {
+        DispatchedSource {
+            credential: plurx_core::secrets::Secret::from_cleartext("owned-metadata-fixture"),
+            viewer_hash: "a".repeat(64),
+            endpoint: plurx_core::sharing::Endpoint {
+                ipv4: std::net::Ipv4Addr::new(100, 64, 0, 2),
+                ipv6: None,
+                ts_fqdn: "source.example.ts.net".into(),
+                port: 9443,
+                spki_sha256: "b".repeat(64),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn sharing_receiver_cleanup_closes_dispatch_and_joins_exact_owned_start() {
+        let registry = ReceiverStartRegistry::default();
+        let intent = intent("attempt");
+        let (entry, _) = registry
+            .register(
+                intent.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&intent),
+            )
+            .expect("registered receiver");
+        let actor = ReceiverStartActor(entry.clone());
+        let (release, waiting) = tokio::sync::oneshot::channel();
+        let owned = entry.clone();
+        *entry.start_task.lock().expect("task") = Some(tokio::spawn(async move {
+            waiting.await.expect("actual owner release");
+            assert!(owned.state.lock().expect("owner").dispatch_closed);
+            assert!(owned.retain_dispatch(dispatch()).is_err());
+        }));
+        actor.close_dispatch();
+        assert!(entry.retain_dispatch(dispatch()).is_err());
+        let cleanup = tokio::spawn(async move { actor.join_start_for_cleanup().await });
+        tokio::task::yield_now().await;
+        assert!(
+            !cleanup.is_finished(),
+            "cleanup cannot bypass the actual Start join"
+        );
+        release.send(()).expect("release actual Start task");
+        let joined = cleanup
+            .await
+            .expect("cleanup task")
+            .expect("joined actual Start");
+        assert!(Arc::ptr_eq(&entry, &joined.0));
+        assert!(entry.state.lock().expect("owner").dispatched.is_none());
+        assert_eq!(registry.entries.lock().expect("registry").len(), 1);
+    }
+
+    #[test]
+    fn sharing_receiver_cleanup_preserves_sent_obligation_and_refuses_missing_join() {
+        let registry = ReceiverStartRegistry::default();
+        let intent = intent("attempt");
+        let (entry, _) = registry
+            .register(
+                intent.clone(),
+                "attempt".into(),
+                "player",
+                &wrapper(&intent),
+            )
+            .expect("registered receiver");
+        entry
+            .retain_dispatch(dispatch())
+            .expect("first dispatch metadata");
+        let retained = entry
+            .state
+            .lock()
+            .expect("owner")
+            .dispatched
+            .clone()
+            .expect("sent obligation");
+        ReceiverStartActor(entry.clone()).close_dispatch();
+        assert!(entry.retain_dispatch(dispatch()).is_err());
+        assert!(Arc::ptr_eq(
+            &retained,
+            entry
+                .state
+                .lock()
+                .expect("owner")
+                .dispatched
+                .as_ref()
+                .expect("retained")
+        ));
+        assert!(entry.start_task.lock().expect("task").is_none());
+        // Absence of a task is unresolved, never a constructed join receipt.
     }
 }

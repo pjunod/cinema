@@ -83,7 +83,11 @@ impl SharingManager {
         intent: &plurx_core::sharing_receiver_sessions::ReceiverSessionIntent,
         owner: &plurx_core::sharing_receiver_sessions::ReceiverPendingRenewal,
         request_json: &str,
-        retain_dispatch: impl FnOnce(&plurx_core::secrets::Secret, &str, &plurx_core::sharing::Endpoint)
+        retain_dispatch: impl FnOnce(
+                &plurx_core::secrets::Secret,
+                &str,
+                &plurx_core::sharing::Endpoint,
+            ) -> Result<(), crate::sharing_client::PeerError>
             + Send,
     ) -> Result<ReceiverSourceStartResult, crate::sharing_client::PeerError> {
         use crate::sharing_client::{PeerConnection, PeerError};
@@ -161,7 +165,7 @@ impl SharingManager {
             .verified_endpoint()
             .ok_or(PeerError::IdentityMismatch)?
             .clone();
-        retain_dispatch(&credential.credential, &viewer, &endpoint);
+        retain_dispatch(&credential.credential, &viewer, &endpoint)?;
         let reply = peer
             .file_start(&credential.credential, &expected, &viewer, request_json)
             .await?;

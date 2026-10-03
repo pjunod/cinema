@@ -4131,3 +4131,33 @@ cleanup wire regressions exercise full recipe preservation, exact known
 lineage, lost-Start settlement, duplicates, oversized replies, unsettled
 states and noncanonical identifiers. These are wire validation regressions;
 actual authenticated End transport and B physical retirement remain open.
+
+### S5 accepted writer completion and owned receiver Start join
+
+The accepted-connection closure observer completes after the actual Hyper
+connection and socket writer are dropped. A Source response retains its
+producer guard through that observer; body EOF and cancellation are not
+settlement. The actual Source HTTP regression blocks the incarnation JSON
+DATA at the accepted HTTP/1 and HTTP/2 writer and requires connection/DATA
+closure before the actor can report settled. Incomplete resource streams and
+independent blocking read jobs still require their own ownership tests.
+
+The receiver registry retains the exact Start task handle. Cleanup seals
+dispatch before joining that task; a private joined token binds the result
+to the same registry entry and is required before its Source End exchange.
+A delayed send cannot follow cleanup's closed gate. An already dispatched
+credential/endpoint obligation survives closure, and an absent or failed
+task cannot synthesize a joined token. Pending renewal stops when cleanup
+requests closure, while an already sent Start remains awaited so its eventual
+Source lineage is retained. The planned activation is stored before its SQL
+await, and the actual B owner/lease is retained immediately after activation
+and successful renewal. Activation commit-unknown still requires exact route
+reconciliation; registry absence or a planned epoch does not settle it.
+
+The exact combined tree passed pinned Rust 1.97.1 feature-enabled all-target
+Core/daemon compilation (53.42 seconds), four receiver ownership/retry tests,
+and eight actual Source HTTP tests (24.04 seconds), all with zero ignored.
+The receiver ownership fixture proves the real spawned task remains joined
+behind its release signal; it does not model a physical Source producer.
+The production B ingress, accepted B body/read/writer joins and private Core
+retirement witness integration remain outstanding.

@@ -3143,7 +3143,20 @@ fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
 pub(crate) struct SharingConnectionCancellation(
     pub(crate) tokio_util::sync::CancellationToken,
     std::sync::Arc<SharingConnectionMonitors>,
+    tokio_util::sync::CancellationToken,
 );
+/// Read-only observer of actual accepted writer closure; it cannot request it.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionClosure(tokio_util::sync::CancellationToken);
+impl SharingConnectionClosure {
+    pub(crate) async fn wait(&self) {
+        self.0.cancelled().await;
+    }
+    #[cfg(test)]
+    pub(crate) fn is_closed(&self) -> bool {
+        self.0.is_cancelled()
+    }
+}
 struct SharingConnectionMonitors(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
 impl Drop for SharingConnectionMonitors {
     fn drop(&mut self) {
@@ -3157,7 +3170,12 @@ impl SharingConnectionCancellation {
         Self(
             tokio_util::sync::CancellationToken::new(),
             std::sync::Arc::new(SharingConnectionMonitors(std::sync::Mutex::new(Vec::new()))),
+            tokio_util::sync::CancellationToken::new(),
         )
+    }
+    /// Completes only after the accepted Hyper connection future is dropped.
+    pub(crate) fn closed(&self) -> SharingConnectionClosure {
+        SharingConnectionClosure(self.2.clone())
     }
     pub(crate) fn monitor(
         &self,
@@ -3236,10 +3254,16 @@ async fn serve_http<A: HttpAcceptor>(
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
             let _cancel_on_close = connection_cancel.0.clone().drop_guard();
+            // Declared before the owned connection so unwinding also drops the
+            // actual writer before signalling closure to capacity monitors.
+            let _closed_after_writer = connection_cancel.2.clone().drop_guard();
+            let mut connection = Box::pin(connection);
             tokio::select! {
                 ()=connection_cancel.0.cancelled()=>{},
-                result=connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
+                result=&mut connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
             }
+            drop(connection);
+            connection_cancel.2.cancel();
         });
     }
 
