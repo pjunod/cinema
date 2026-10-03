@@ -5471,3 +5471,38 @@ This is three logical voters on one physical host, not a multi-host network
 partition drill. Owner loss/takeover, older-peer runtime negotiation, broad
 source/load coverage, Firefox continuity and native physical evidence remain
 open. The Fable pause after the final adversarial review still applies.
+
+
+### 10.188 · Abrupt owner loss exposes surviving paused producers
+
+The exact-source `3983c6cef` owner-loss probe FAILED before recovery.
+After the passing mixed-ingress 1080p→720p switch, it SIGKILLed only its
+owned voter B daemon (PID 2259620). Ten seconds later, two pre-recorded
+FFmpeg identities remained: PID 2264832, birth tick 116240730, stopped;
+and PID 2265374, birth tick 116241841, sleeping. The helper requested
+SIGTERM and failed the retirement bound. The stopped child remained live
+and was subsequently SIGKILLed only after verifying its exact birth tick
+and ffmpeg identity; disappearance was confirmed. The other identity had
+already disappeared. Owned runtime trees were removed. Surviving A/C
+census zeros do not prove retirement of B's orphaned children.
+
+Receipt: `continuous-chrome-3983c6cef-targeted-owner-loss1`; bounded logs
+and durable diagnostics remain beside it. No takeover/recovery success
+is claimed and the failed receipt is preserved.
+
+The Linux launcher had no parent-death lifetime contract. Broken media
+pipes cannot retire a SIGSTOPped producer. Linux's parent-death signal
+follows the creating thread, so installing it on temporary blocking-pool
+launches would also kill healthy children when those workers retire.
+The fix routes Linux spawns through one persistent process-lifetime thread,
+entering the originating Tokio reactor for each spawn. Pre-exec ownership
+sets SIGKILL and checks the parent identity to close the fork/setup race;
+failure refuses spawning. Priority failures remain best effort. Ownership
+is installed before custom probe exec hooks as part of their existing early
+priority setup. Other platforms retain their existing launch path.
+See the [Linux parent-death contract](https://man7.org/linux/man-pages/man2/PR_SET_PDEATHSIG.2const.html).
+
+A new unrun regression deliberately retires the launching caller thread,
+proves its stopped child stays alive while the owner is healthy, then kills
+the owner and requires the exact child's exit. Build/hook and repeat runtime
+qualification are pending. No unit tests or final adversarial review ran.
