@@ -22,12 +22,15 @@ internal data class SharedLibraryRow(val identity: SharedLibraryIdentity, val na
 @Serializable
 internal data class SharedLibraryItem(val source: String, val reference: SharedPlaybackReference, val parent: SharedPlaybackReference? = null,
     val title: String, val kind: String, val year: Int? = null, val overview: String? = null, val genres: List<String> = emptyList(),
-    val season_number: Int? = null, val episode_number: Int? = null) {
+    val season_number: Int? = null, val episode_number: Int? = null,
+    val art: List<SharedArtworkDescriptor>? = null, val poster_url: String? = null, val backdrop_url: String? = null,
+    @kotlinx.serialization.Transient val artworkSubject: SharedArtworkSubject? = null) {
     val id get() = listOf(reference.import_id, reference.server_id, reference.catalogue_epoch, reference.library_id, reference.item_id).joinToString("|")
     val hasChildren get() = kind in setOf("series", "season", "album", "artist", "collection")
     fun validate(library: SharedLibraryIdentity) {
         reference.validate(); require(source == "shared" && library.contains(reference) && title.toByteArray().size <= 512 && genres.size <= 64)
         parent?.let { it.validate(); require(library.contains(it)) }
+        SharedArtworkDescriptor.validate(art, poster_url, backdrop_url, reference)
     }
 }
 @Serializable
@@ -41,13 +44,13 @@ internal data class SharedLibraryPage(val items: List<SharedLibraryItem>, val ne
 @Serializable
 internal data class SharedLibraryFile(val file_id: String, val revision: String, val reference: SharedPlaybackFileReference,
     val size: String, val duration_ms: Long? = null, val container: String? = null, val video_codec: String? = null,
-    val width: Int? = null, val height: Int? = null)
+    val width: Int? = null, val height: Int? = null, val file_base: String? = null)
 @Serializable
 internal data class SharedLibraryWatch(val position_ms: Long, val duration_ms: Long? = null, val watched: Boolean,
     val sequence: Long, val updated_at_ms: Long)
 @Serializable
 internal data class SharedLibraryDetail(val item: SharedLibraryItem, val files: List<SharedLibraryFile>,
-    val watch: SharedLibraryWatch? = null, val delivery_status: String) {
+    val watch: SharedLibraryWatch? = null, val delivery_status: String, val lifecycle_generation: Long? = null) {
     fun validate(expected: SharedPlaybackReference) {
         val library = SharedLibraryIdentity(expected.import_id, expected.server_id, expected.catalogue_epoch, expected.library_id)
         item.validate(library)

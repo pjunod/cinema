@@ -56,6 +56,8 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
 }
 async function render(){
   const generation=++PAGE_RENDER_GENERATION;
+  if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+  if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
   if(typeof sharingRouteChanged==="function")sharingRouteChanged();
   if(WATCH)closePlayer({routeLeave:true});
   if(!TOKEN||!ME) return boot();

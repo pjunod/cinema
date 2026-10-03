@@ -259,6 +259,65 @@ pub(crate) struct EncodePermit {
     _software: Option<SwPermit>,
 }
 
+/// Conservative Source copy pipeline estimate: bounded input codec, audio
+/// encoder, filter and mux/fragment work. This is the existing governor's
+/// reservation, not a process CPU quota or a one-thread profiling claim.
+pub(crate) const SOURCE_COPY_CPU_THREADS: usize = 4;
+
+#[allow(dead_code)] // The owned Source actor retains and consumes the actual permit.
+pub(crate) enum SourceCopyPermitRead {
+    Admitted(EncodePermit),
+    Capacity,
+    Unavailable,
+}
+impl EncodePermit {
+    #[allow(dead_code)] // The owned Source actor acquires before first activation.
+    pub(crate) async fn try_source_copy(
+        admissions: &Admissions,
+        store: &dyn plurx_core::store::Store,
+    ) -> SourceCopyPermitRead {
+        let _waiting = admissions.wait_for_slot();
+        let Ok(Ok((hardware, software))) = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            store.get_setting_pair(
+                plurx_core::store::keys::MAX_HW_SESSIONS,
+                plurx_core::store::keys::SW_POOL_THREADS,
+            ),
+        )
+        .await
+        else {
+            return SourceCopyPermitRead::Unavailable;
+        };
+        let hardware_limit = hardware
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or(crate::admission::DEFAULT_MAX_HW_SESSIONS);
+        let software_budget = software
+            .and_then(|value| value.trim().parse().ok())
+            .unwrap_or_else(crate::admission::software_budget);
+        let resources = TranscodeResourceEstimate {
+            hardware_slot: false,
+            cpu_threads: SOURCE_COPY_CPU_THREADS,
+            decoder_threads: Some(1),
+        };
+        if software_budget < SOURCE_COPY_CPU_THREADS {
+            return SourceCopyPermitRead::Capacity;
+        }
+        let Some(bundle) = admissions.try_admit_bundle(
+            hardware_limit,
+            software_budget,
+            &resources,
+            Priority::Live,
+        ) else {
+            return SourceCopyPermitRead::Capacity;
+        };
+        let (hardware, software) = bundle.into_parts();
+        SourceCopyPermitRead::Admitted(Self {
+            _hardware: hardware,
+            _software: software,
+        })
+    }
+}
+
 impl Encoding {
     #[cfg(test)]
     pub(crate) async fn clone_with_admissions_for_test(

@@ -9,7 +9,7 @@ struct SharedPlaybackReference: Codable, Hashable {
     let itemId: String
 
     func validate() throws {
-        guard [importId, serverId, catalogueEpoch].allSatisfy(PlaybackFileContext.canonicalUUID),
+        guard [importId, serverId, catalogueEpoch].allSatisfy({ PlaybackFileContext.canonicalUUID($0) && $0 != "00000000-0000-0000-0000-000000000000" }),
               [libraryId, itemId].allSatisfy(PlaybackFileContext.canonicalID) else {
             throw APIError.badURL
         }
@@ -31,13 +31,14 @@ struct PlaybackFileContext: Hashable {
     let revision: String?
     let fileBase: String
     let sessionId: String?
+    let lifecycleGeneration: Int64?
     private let accountGeneration: UInt64?
     private let accountOrigin: String?
 
     private init(reference: SharedPlaybackReference?, file: String, revision: String?,
-                 base: String, session: String? = nil, generation: UInt64? = nil, origin: String? = nil) {
+                 base: String, session: String? = nil, generation: UInt64? = nil, origin: String? = nil, lifecycle: Int64? = nil) {
         self.reference = reference; sourceFileId = file; self.revision = revision
-        fileBase = base; sessionId = session; accountGeneration = generation; accountOrigin = origin
+        fileBase = base; sessionId = session; accountGeneration = generation; accountOrigin = origin; lifecycleGeneration = lifecycle
     }
 
     static func local(_ id: Int) throws -> Self { try local(String(id)) }
@@ -48,6 +49,10 @@ struct PlaybackFileContext: Hashable {
     static func canonicalID(_ value: String) -> Bool {
         guard let id = Int64(value), id >= 0 else { return false }
         return String(id) == value
+    }
+    static func canonicalLifecycle(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, ["s", "i", "l", "q"].contains(String(cString: number.objCType)), number.int64Value > 0 else { return nil }
+        return number.int64Value
     }
     static func canonicalUUID(_ value: String) -> Bool {
         UUID(uuidString: value)?.uuidString.lowercased() == value
@@ -73,15 +78,12 @@ struct PlaybackFileContext: Hashable {
         try reference.validate()
         let auth = Session.shared.playbackAuthorization
         guard canonicalID(fileId), let token = auth.token, !token.isEmpty,
-              Session.canonicalOrigin(auth.origin) != nil,
-              let url = URL(string: auth.origin + "/api/v1/shared/imports/\(reference.importId)/items/\(reference.itemId)")
+              Session.canonicalOrigin(auth.origin) != nil
         else { throw APIError.badURL }
-        var request = URLRequest(url: url); request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        let (data, response) = try await transport.data(for: request)
+        let data = try await SharedDecisionClient.detail(reference: reference, transport: transport, expected: auth)
         let current = Session.shared.playbackAuthorization
         guard current.generation == auth.generation, current.origin == auth.origin,
-              current.token == auth.token, let http = response as? HTTPURLResponse,
-              http.statusCode == 200, response.url == url, data.count <= 4_194_304,
+              current.token == auth.token, data.count <= 4_194_304,
               let detail = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let files = detail["files"] as? [[String: Any]]
         else { throw APIError.badURL }
@@ -97,14 +99,18 @@ struct PlaybackFileContext: Hashable {
               let base = file["file_base"] as? String
         else { throw APIError.badURL }
         let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        struct DetailLifecycle: Decodable { let lifecycleGeneration: Int64 }
+        let lifecycle = try decoder.decode(DetailLifecycle.self, from: data).lifecycleGeneration
+        let fileReference = try decoder.decode(SharedPlaybackFileReference.self, from: JSONSerialization.data(withJSONObject: binding))
+        guard Self.canonicalLifecycle(detail["lifecycle_generation"]) == lifecycle, Self.canonicalLifecycle(binding["lifecycle_generation"]) == lifecycle, fileReference.lifecycleGeneration == lifecycle else { throw APIError.badURL }
         let actual = try decoder.decode(SharedPlaybackReference.self,
                                         from: JSONSerialization.data(withJSONObject: item))
         guard actual == reference else { throw APIError.badURL }
         let prefix = "/api/v1/shared/imports/\(reference.importId)/files/"
-        guard base.hasPrefix(prefix), matches(String(base.dropFirst(prefix.count)), "^[A-Za-z0-9_-]{1,2048}$")
+        guard base.hasPrefix(prefix), matches(String(base.dropFirst(prefix.count)), "^[A-Za-z0-9_-]{236}$")
         else { throw APIError.badURL }
         return Self(reference: reference, file: fileId, revision: revision, base: base,
-                    generation: auth.generation, origin: auth.origin)
+                    generation: auth.generation, origin: auth.origin, lifecycle: lifecycle)
     }
 
     func localID(expected: Int? = nil) throws -> Int {
@@ -119,8 +125,8 @@ struct PlaybackFileContext: Hashable {
     }
     var sourceKey: String {
         guard let reference else { return sourceFileId }
-        return [String(accountGeneration!), reference.importId, reference.serverId, reference.catalogueEpoch,
-                reference.libraryId, reference.itemId, sourceFileId, revision!, fileBase].joined(separator: "|")
+        return [accountOrigin!, String(accountGeneration!), reference.importId, reference.serverId, reference.catalogueEpoch,
+                reference.libraryId, reference.itemId, sourceFileId, revision!, String(lifecycleGeneration!), fileBase].joined(separator: "|")
     }
     private func requireCurrent() throws {
         if reference != nil {
@@ -134,7 +140,7 @@ struct PlaybackFileContext: Hashable {
         guard Self.matches(id, "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
         else { throw APIError.badURL }
         return Self(reference: reference, file: sourceFileId, revision: revision, base: fileBase,
-                    session: id, generation: accountGeneration, origin: accountOrigin)
+                    session: id, generation: accountGeneration, origin: accountOrigin, lifecycle: lifecycleGeneration)
     }
     /// Closed resource grammar. Ordinary HLS/control UUID paths never pass here.
     func path(_ resource: String, query: [URLQueryItem] = []) throws -> String {

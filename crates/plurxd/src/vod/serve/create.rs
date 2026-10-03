@@ -1,6 +1,100 @@
 use super::*;
 
+/// Prepared media and its build gate; no viewer, driver demand or child is
+/// created until the final attachment transaction consumes it.
+pub(super) struct PreparedVodRendition {
+    pub(super) attachment: RenditionAttachment,
+    start_entry: u32,
+    marker_destinations: Vec<MarkerDestination>,
+}
+
+/// Private build result. Physical admission and fresh first activation still
+/// precede any viewer attachment or driver demand. No wire constructor.
+#[allow(dead_code)] // The owned Source actor is the only planned consumer.
+pub(crate) struct PreparedSourceVodRendition {
+    prepared: PreparedVodRendition,
+    request: SessionRequest,
+    file: MediaFile,
+    settings: VodSettings,
+    assignment: plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+}
+
+/// A pending copy rendition and its real, indivisible physical reservation.
+/// Dropping this before attachment returns only that reservation; it never
+/// retires the immutable database assignment or certifies a spawned child.
+#[allow(dead_code)] // The private Source actor consumes this first-start handoff.
+pub(crate) struct AdmittedSourceCopyRendition {
+    pending: PreparedSourceVodRendition,
+    permit: crate::vodencode::EncodePermit,
+}
+
+#[cfg(test)]
+impl AdmittedSourceCopyRendition {
+    pub(crate) async fn assert_no_demand_or_child(&self) {
+        let rendition = &self.pending.prepared.attachment.rendition;
+        assert!(rendition.readers.lock().await.is_empty());
+        assert_eq!(rendition.last_child_pid.load(Relaxed), 0);
+        assert!(matches!(
+            rendition.slot.belief().await,
+            Producer::Absent { .. }
+        ));
+    }
+}
+
 impl VodServe {
+    /// No codec/FFprobe/burn work is hidden in this copy-only preparation.
+    /// The real reservation is held before first durable blocked activation.
+    #[allow(dead_code)] // Source actor integration is deliberately incremental.
+    pub(crate) async fn prepare_admitted_source_copy(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        admissions: &crate::admission::Admissions,
+        store: &dyn plurx_core::store::Store,
+        deadline: Instant,
+    ) -> Result<AdmittedSourceCopyRendition, String> {
+        if !source.matches_assignment(assignment)
+            || !matches!(source.request().kind, SessionKind::Copy { .. })
+            || source.request().subtitle_burn.is_some()
+        {
+            return Err(
+                "Source copy preparation requires its exact unburned copy assignment".into(),
+            );
+        }
+        let admission_deadline = deadline.min(Instant::now() + crate::admission::QUEUE_WAIT);
+        let permit = loop {
+            let attempt = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(admission_deadline),
+                crate::vodencode::EncodePermit::try_source_copy(admissions, store),
+            )
+            .await;
+            match attempt {
+                Ok(crate::vodencode::SourceCopyPermitRead::Admitted(permit)) => break permit,
+                Ok(crate::vodencode::SourceCopyPermitRead::Unavailable) => {
+                    return Err("Source physical admission policy is unavailable".into());
+                }
+                Ok(crate::vodencode::SourceCopyPermitRead::Capacity) => {
+                    if Instant::now() >= admission_deadline {
+                        return Err("Source physical copy capacity is unavailable".into());
+                    }
+                    tokio::time::sleep_until(tokio::time::Instant::from_std(
+                        admission_deadline.min(Instant::now() + Duration::from_millis(100)),
+                    ))
+                    .await;
+                }
+                Err(_) => return Err("Source physical copy admission timed out".into()),
+            }
+        };
+        let pending = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Box::pin(self.prepare_source_vod_rendition(source, assignment, settings, None)),
+        )
+        .await
+        .map_err(|_| "Source copy preparation timed out".to_owned())??;
+        Ok(AdmittedSourceCopyRendition { pending, permit })
+    }
+
     /// The VOD arm of session create, called by the manager AFTER it has
     /// decided the request opts in (`presentation=="vod" && settings.enabled`).
     ///
@@ -190,6 +284,50 @@ impl VodServe {
         ids
     }
 
+    /// Prepare only current opaque Source planning input; no Source viewer is
+    /// attached here. Ordinary Shared creation continues to refuse.
+    #[allow(dead_code)] // Consumed by the finite owned Source actor stage.
+    pub(crate) async fn prepare_source_vod_rendition(
+        &self,
+        source: &crate::http::hls::PreparedSourcePlayback,
+        assignment: &plurx_core::sharing_source_sessions::SourceDispatchAssignment,
+        settings: &VodSettings,
+        encoding: Option<Arc<crate::vodencode::Encoding>>,
+    ) -> Result<PreparedSourceVodRendition, String> {
+        if !source.matches_assignment(assignment) {
+            return Err("Source prepared request differs from its immutable assignment".to_owned());
+        }
+        let mut file = source.file().clone();
+        file.audio_offset_ms = if file.audio_streams.is_empty() {
+            0
+        } else {
+            source.request().audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        let fences = VodCreateFences {
+            release_fence: None,
+            serving_admission: None,
+            viewer: None,
+        };
+        let prepared = Box::pin(self.prepare_vod_rendition(
+            VodRecipeRequest {
+                request: source.request(),
+                encoding,
+            },
+            &file,
+            settings,
+            &fences,
+            Some(assignment.binding()),
+        ))
+        .await?;
+        Ok(PreparedSourceVodRendition {
+            prepared,
+            request: source.request().clone(),
+            file,
+            settings: settings.clone(),
+            assignment: assignment.clone(),
+        })
+    }
+
     async fn try_create_with_release_fence(
         &self,
         prepared: VodRecipeRequest<'_>,
@@ -202,285 +340,39 @@ impl VodServe {
         if let Some(viewer) = &fences.viewer {
             viewer.require_local_authority().map_err(str::to_owned)?;
         }
-        // The one funnel every create passes through: the plain entry point,
-        // the cluster one that every shipped caller actually uses, and the
-        // resurrection of a session from its durable route. Applying the
-        // ceiling here rather than at construction is what lets an operator
-        // change it without a restart — a cap set only in `WaitPool::new`
-        // would be frozen at whatever the node booted with — and applying it
-        // at `try_create` alone reached no production path at all.
-        self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let req = prepared.request;
-        let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
-            SessionKind::Copy {
-                aac,
-                preserve_dolby_vision,
-                convert_dolby_vision,
-            } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
-            _ if prepared.encoding.is_some() => (true, false, false),
-            _ => {
-                return Err(crate::transcode::vod_refusal_error(
-                    "vod_recipe_unresolved",
-                    "the encoded VOD request has no resolved encoder recipe",
-                ))
-            }
-        };
-        if req.subtitle_burn.is_some() && prepared.encoding.is_none() {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_recipe_unresolved",
-                "a subtitle burn requires a resolved encoded VOD recipe",
-            ));
-        }
-        // A NULL/unprobed duration cannot be described by a closed film-time
-        // playlist. Refuse it honestly; the removed live presentation is not
-        // a substitute.
-        let Some(duration_ms) = file.duration_ms.filter(|ms| *ms > 0) else {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_source_unsupported",
-                "the file has no probed duration, so no immutable plan can be built",
-            ));
-        };
-        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
-        // An encoded rendition never carries the source's parameter sets, so
-        // only a copy waits on the census.
-        let probe_json = if prepared.encoding.is_none() {
-            crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
-        } else {
-            self.shared.store.get_file_probe_json(file.id).await
-        }
-        .map_err(|error| format!("reading the file probe: {error}"))?;
-        let video = copy_video_pipeline(
+        let prepared = self
+            .prepare_vod_rendition(prepared, file, settings, &fences, None)
+            .await?;
+        self.commit_vod_rendition(
+            req,
             file,
-            probe_json.as_deref(),
-            have_dovi,
-            preserve_dolby_vision,
-            convert_dolby_vision,
-        );
-        let identity = match prepared.encoding.as_ref() {
-            Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
-            None => crate::fragindex::identity_for(file, video),
-        };
-        let cluster_cache_enabled = prepared.encoding.is_none()
-            && self
-                .shared
-                .store
-                .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
-                .await
-                .map_err(|error| format!("reading the cluster index gate: {error}"))?
-                .is_some_and(|value| {
-                    matches!(
-                        value.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                });
-        let cluster_index = if prepared.encoding.is_some() {
-            Ok(None)
-        } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
-                .await
-        } else {
-            Ok(None)
-        };
-        let needs_attestation = cluster_cache_enabled && matches!(&cluster_index, Ok(None));
-        let unavailable_reason = cluster_index.as_ref().err().cloned();
-        let (index, source_object_version, cluster_cache_key) = match cluster_index {
-            Ok(Some((index, object_version, cache_key))) => {
-                (Some(index), Some(object_version), Some(cache_key))
-            }
-            Ok(None) if prepared.encoding.is_some() => (
-                None,
-                prepared
-                    .encoding
-                    .as_ref()
-                    .map(|encoding| encoding.source_object_version.clone()),
-                None,
-            ),
-            Ok(None) => (
-                self.shared
-                    .store
-                    .fragment_index(file.id, &identity)
-                    .await
-                    .map_err(|error| format!("reading the fragment index: {error}"))?,
-                None,
-                None,
-            ),
-            Err(reason) => {
-                // The first rollout phase is write/shadow plus prefer-v2.
-                // Per-key fallback preserves an already healthy v1 title
-                // until this exact source/pipeline key is fully available.
-                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v2 fragment index unavailable; using v1");
-                (
-                    self.shared
-                        .store
-                        .fragment_index(file.id, &identity)
-                        .await
-                        .map_err(|error| format!("reading the fragment index: {error}"))?,
-                    None,
-                    None,
-                )
-            }
-        };
-        // HEVC safety is established on original headers, before filters can
-        // hide updates. Bind the proof to this node's current source object;
-        // a peer's filesystem identity is not a local attestation.
-        // A copy that keeps its in-band parameter sets cannot decode against
-        // stale definitions, so it needs no proof that deleting them is safe.
-        let source_object_version = if prepared.encoding.is_none()
-            && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
-            && !video.retains_hevc_parameter_sets()
-            && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
-        {
-            let current = crate::fragment_index_cluster::inspect_source(file)
-                .await
-                .map_err(|reason| {
-                    crate::transcode::vod_refusal_error("hevc_configuration_unverified", reason)
-                })?;
-            let proof = index
-                .as_ref()
-                .and_then(|index| index.promotion.hevc_configuration.as_ref());
-            if !proof.is_some_and(|proof| {
-                proof.permits_on_node(
-                    &current,
-                    self.shared.cluster_node_id.as_deref().unwrap_or_default(),
-                )
-            }) {
-                let reason = proof
-                    .filter(|proof| {
-                        proof.source_object_version == current
-                            && Some(proof.source_node_id.as_str())
-                                == self.shared.cluster_node_id.as_deref()
-                    })
-                    .and_then(|proof| proof.refusal.as_deref());
-                let mut preparation = if cluster_cache_enabled {
-                    "HEVC copy needs preparation".to_owned()
-                } else {
-                    "HEVC copy needs preparation; shared preparation is disabled".to_owned()
-                };
-                if reason.is_none() && cluster_cache_enabled {
-                    if let Some(node) = self.shared.cluster_node_id.as_deref() {
-                        preparation =
-                            match crate::state::enqueue_copy_preparation_for_object_with_viewer(
-                                self.shared.store.as_ref(),
-                                node,
-                                file,
-                                video,
-                                Some(&current),
-                                fences.viewer.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(request) => {
-                                    format!("HEVC exact copy preparation is {}", request.state)
-                                }
-                                Err(error) => {
-                                    format!("HEVC copy preparation could not be queued: {error}")
-                                }
-                            };
-                    }
-                }
-                let detail = reason.map(str::to_owned).unwrap_or_else(|| {
-                    format!(
-                    "{preparation}; Settings → Developer can enable unverified copy without waiting"
-                )
-                });
-                return Err(crate::transcode::vod_refusal_error(
-                    if reason.is_some() {
-                        "hevc_configuration_unsupported"
-                    } else {
-                        "hevc_configuration_unverified"
-                    },
-                    detail,
-                ));
-            }
-            Some(current)
-        } else {
-            source_object_version
-        };
-        if index.is_none() && prepared.encoding.is_none() {
-            let reason = if needs_attestation {
-                match self.shared.cluster_node_id.as_deref() {
-                    Some(node_id) => {
-                        match crate::state::enqueue_copy_preparation_for_object_with_viewer(
-                            self.shared.store.as_ref(),
-                            node_id,
-                            file,
-                            video,
-                            None,
-                            fences.viewer.as_ref(),
-                        )
-                        .await
-                        {
-                            Ok(request) => format!(
-                                "exact copy preparation is {}{}",
-                                request.state,
-                                if request.last_error_code.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!(": {}", request.last_error_code)
-                                }
-                            ),
-                            Err(error) => {
-                                format!("exact copy preparation could not be queued: {error}")
-                            }
-                        }
-                    }
-                    None => "this process has no cluster index identity".to_owned(),
-                }
-            } else {
-                unavailable_reason.unwrap_or_else(|| {
-                    "shared preparation is disabled; no matching local index exists".to_owned()
-                })
-            };
-            // This is a prerequisite refusal, not a claim that a worker is
-            // active. The durable analysis row and reason carry its actual
-            // queued/running/failed state; the caller keeps rolling first play.
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_index_pending",
-                reason,
-            ));
-        }
-        // The §2 ruling: a single immutable init cannot describe a film whose
-        // clean fragments carry varying parameter sets, so the verdict is a
-        // scan-time fallback here, never a producer_failed mid-playback.
-        if index
-            .as_ref()
-            .is_some_and(|index| !index.parameter_sets_constant)
-        {
-            return Err(crate::transcode::vod_refusal_error(
-                "vod_source_unsupported",
-                "its parameter sets vary mid-film (the §2 ruling)",
-            ));
-        }
-        let recipe = Recipe {
-            file: file.clone(),
-            audio_index: req.audio_index,
-            aac,
-            video,
-            source_object_version,
-            cluster_cache_key,
-            encoding: prepared.encoding,
-        };
-        let key = rendition_key(&recipe, &identity);
-        let attachment = self
-            .shared
-            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
-            .await?
-            .ok_or_else(|| {
-                crate::transcode::vod_refusal_error(
-                    "vod_source_unsupported",
-                    "the fragment index produced an empty VOD plan",
-                )
-            })?;
-        let rendition = Arc::clone(&attachment.rendition);
-
-        let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let marker_destinations = stored_marker_destinations(
-            self.shared.store.as_ref(),
-            file,
-            &rendition.plan,
-            rendition.seconds_per_segment,
+            settings,
+            attribution,
+            session_id,
+            fences,
+            prepared,
         )
-        .await;
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn commit_vod_rendition(
+        &self,
+        req: &SessionRequest,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        fences: VodCreateFences<'_>,
+        prepared: PreparedVodRendition,
+    ) -> Result<VodStart, String> {
+        let PreparedVodRendition {
+            attachment,
+            start_entry,
+            marker_destinations,
+        } = prepared;
+        let rendition = Arc::clone(&attachment.rendition);
         let _release_transition = if let Some(release_fence) = fences.release_fence {
             let guard = release_fence.transition.lock_owned().await;
             if release_fence.released.load(Acquire) {
@@ -676,6 +568,303 @@ impl VodServe {
         Ok(VodStart {
             session_id,
             duration_ms,
+        })
+    }
+
+    pub(super) async fn prepare_vod_rendition(
+        &self,
+        prepared: VodRecipeRequest<'_>,
+        file: &MediaFile,
+        settings: &VodSettings,
+        fences: &VodCreateFences<'_>,
+        source_binding: Option<&plurx_core::sharing_source_sessions::SourceBindingHandle>,
+    ) -> Result<PreparedVodRendition, String> {
+        // The one funnel every create passes through: the plain entry point,
+        // the cluster one that every shipped caller actually uses, and the
+        // resurrection of a session from its durable route. Applying the
+        // ceiling here rather than at construction is what lets an operator
+        // change it without a restart — a cap set only in `WaitPool::new`
+        // would be frozen at whatever the node booted with — and applying it
+        // at `try_create` alone reached no production path at all.
+        self.shared.pool.set_global_cap(settings.blocked_get_cap);
+        let req = prepared.request;
+        let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+                convert_dolby_vision,
+            } if prepared.encoding.is_none() => (aac, preserve_dolby_vision, convert_dolby_vision),
+            _ if prepared.encoding.is_some() => (true, false, false),
+            _ => {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_recipe_unresolved",
+                    "the encoded VOD request has no resolved encoder recipe",
+                ))
+            }
+        };
+        if req.subtitle_burn.is_some() && prepared.encoding.is_none() {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_recipe_unresolved",
+                "a subtitle burn requires a resolved encoded VOD recipe",
+            ));
+        }
+        // A NULL/unprobed duration cannot be described by a closed film-time
+        // playlist. Refuse it honestly; the removed live presentation is not
+        // a substitute.
+        let Some(duration_ms) = file.duration_ms.filter(|ms| *ms > 0) else {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "the file has no probed duration, so no immutable plan can be built",
+            ));
+        };
+        let have_dovi = crate::ffmpeg::has_dovi_rpu().await;
+        // An encoded rendition never carries the source's parameter sets, so
+        // only a copy waits on the census.
+        let probe_json = if prepared.encoding.is_none() && source_binding.is_none() {
+            crate::hevc_census::probe_json_for_copy(self.shared.store.as_ref(), file).await
+        } else {
+            self.shared.store.get_file_probe_json(file.id).await
+        }
+        .map_err(|error| format!("reading the file probe: {error}"))?;
+        let video = copy_video_pipeline(
+            file,
+            probe_json.as_deref(),
+            have_dovi,
+            preserve_dolby_vision,
+            convert_dolby_vision,
+        );
+        let identity = match prepared.encoding.as_ref() {
+            Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
+            None => crate::fragindex::identity_for(file, video),
+        };
+        let cluster_cache_enabled = prepared.encoding.is_none()
+            && self
+                .shared
+                .store
+                .get_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
+                .await
+                .map_err(|error| format!("reading the cluster index gate: {error}"))?
+                .is_some_and(|value| {
+                    matches!(
+                        value.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                });
+        let cluster_index = if prepared.encoding.is_some() || source_binding.is_some() {
+            Ok(None)
+        } else if cluster_cache_enabled {
+            self.try_cluster_fragment_index(file, video, fences.viewer.as_ref())
+                .await
+        } else {
+            Ok(None)
+        };
+        let needs_attestation = cluster_cache_enabled && matches!(&cluster_index, Ok(None));
+        let unavailable_reason = cluster_index.as_ref().err().cloned();
+        let (index, source_object_version, cluster_cache_key) = match cluster_index {
+            Ok(Some((index, object_version, cache_key))) => {
+                (Some(index), Some(object_version), Some(cache_key))
+            }
+            Ok(None) if prepared.encoding.is_some() => (
+                None,
+                prepared
+                    .encoding
+                    .as_ref()
+                    .map(|encoding| encoding.source_object_version.clone()),
+                None,
+            ),
+            Ok(None) => (
+                self.shared
+                    .store
+                    .fragment_index(file.id, &identity)
+                    .await
+                    .map_err(|error| format!("reading the fragment index: {error}"))?,
+                None,
+                None,
+            ),
+            Err(reason) => {
+                // The first rollout phase is write/shadow plus prefer-v2.
+                // Per-key fallback preserves an already healthy v1 title
+                // until this exact source/pipeline key is fully available.
+                tracing::debug!(target: "plurxd::vodserve", file_id = file.id, %reason, "v2 fragment index unavailable; using v1");
+                (
+                    self.shared
+                        .store
+                        .fragment_index(file.id, &identity)
+                        .await
+                        .map_err(|error| format!("reading the fragment index: {error}"))?,
+                    None,
+                    None,
+                )
+            }
+        };
+        // HEVC safety is established on original headers, before filters can
+        // hide updates. Bind the proof to this node's current source object;
+        // a peer's filesystem identity is not a local attestation.
+        // A copy that keeps its in-band parameter sets cannot decode against
+        // stale definitions, so it needs no proof that deleting them is safe.
+        let source_object_version = if prepared.encoding.is_none()
+            && matches!(file.video_codec.as_deref(), Some("hevc" | "h265"))
+            && !video.retains_hevc_parameter_sets()
+            && !crate::transcode::unverified_hevc_copy_enabled(self.shared.store.as_ref()).await?
+        {
+            let current = crate::fragment_index_cluster::inspect_source(file)
+                .await
+                .map_err(|reason| {
+                    crate::transcode::vod_refusal_error("hevc_configuration_unverified", reason)
+                })?;
+            let proof = index
+                .as_ref()
+                .and_then(|index| index.promotion.hevc_configuration.as_ref());
+            if !proof.is_some_and(|proof| {
+                proof.permits_on_node(
+                    &current,
+                    self.shared.cluster_node_id.as_deref().unwrap_or_default(),
+                )
+            }) {
+                let reason = proof
+                    .filter(|proof| {
+                        proof.source_object_version == current
+                            && Some(proof.source_node_id.as_str())
+                                == self.shared.cluster_node_id.as_deref()
+                    })
+                    .and_then(|proof| proof.refusal.as_deref());
+                let mut preparation = if cluster_cache_enabled {
+                    "HEVC copy needs preparation".to_owned()
+                } else {
+                    "HEVC copy needs preparation; shared preparation is disabled".to_owned()
+                };
+                if reason.is_none() && cluster_cache_enabled && source_binding.is_none() {
+                    if let Some(node) = self.shared.cluster_node_id.as_deref() {
+                        preparation =
+                            match crate::state::enqueue_copy_preparation_for_object_with_viewer(
+                                self.shared.store.as_ref(),
+                                node,
+                                file,
+                                video,
+                                Some(&current),
+                                fences.viewer.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(request) => {
+                                    format!("HEVC exact copy preparation is {}", request.state)
+                                }
+                                Err(error) => {
+                                    format!("HEVC copy preparation could not be queued: {error}")
+                                }
+                            };
+                    }
+                }
+                let detail = reason.map(str::to_owned).unwrap_or_else(|| {
+                    format!(
+                    "{preparation}; Settings → Developer can enable unverified copy without waiting"
+                )
+                });
+                return Err(crate::transcode::vod_refusal_error(
+                    if reason.is_some() {
+                        "hevc_configuration_unsupported"
+                    } else {
+                        "hevc_configuration_unverified"
+                    },
+                    detail,
+                ));
+            }
+            Some(current)
+        } else {
+            source_object_version
+        };
+        if index.is_none() && prepared.encoding.is_none() {
+            let reason = if needs_attestation && source_binding.is_none() {
+                match self.shared.cluster_node_id.as_deref() {
+                    Some(node_id) => {
+                        match crate::state::enqueue_copy_preparation_for_object_with_viewer(
+                            self.shared.store.as_ref(),
+                            node_id,
+                            file,
+                            video,
+                            None,
+                            fences.viewer.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(request) => format!(
+                                "exact copy preparation is {}{}",
+                                request.state,
+                                if request.last_error_code.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(": {}", request.last_error_code)
+                                }
+                            ),
+                            Err(error) => {
+                                format!("exact copy preparation could not be queued: {error}")
+                            }
+                        }
+                    }
+                    None => "this process has no cluster index identity".to_owned(),
+                }
+            } else {
+                unavailable_reason.unwrap_or_else(|| {
+                    "shared preparation is disabled; no matching local index exists".to_owned()
+                })
+            };
+            // This is a prerequisite refusal, not a claim that a worker is
+            // active. The durable analysis row and reason carry its actual
+            // queued/running/failed state; the caller keeps rolling first play.
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_index_pending",
+                reason,
+            ));
+        }
+        // The §2 ruling: a single immutable init cannot describe a film whose
+        // clean fragments carry varying parameter sets, so the verdict is a
+        // scan-time fallback here, never a producer_failed mid-playback.
+        if index
+            .as_ref()
+            .is_some_and(|index| !index.parameter_sets_constant)
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_source_unsupported",
+                "its parameter sets vary mid-film (the §2 ruling)",
+            ));
+        }
+        let recipe = Recipe {
+            file: file.clone(),
+            audio_index: req.audio_index,
+            aac,
+            video,
+            source_object_version,
+            cluster_cache_key,
+            encoding: prepared.encoding,
+        };
+        let key = source_binding.map_or_else(
+            || rendition_key(&recipe, &identity),
+            |binding| source_rendition_key(binding, &recipe, &identity),
+        );
+        let attachment = self
+            .shared
+            .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
+            .await?
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "the fragment index produced an empty VOD plan",
+                )
+            })?;
+        let rendition = Arc::clone(&attachment.rendition);
+
+        let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let marker_destinations = stored_marker_destinations(
+            self.shared.store.as_ref(),
+            file,
+            &rendition.plan,
+            rendition.seconds_per_segment,
+        )
+        .await;
+        Ok(PreparedVodRendition {
+            attachment,
+            start_entry,
+            marker_destinations,
         })
     }
 }

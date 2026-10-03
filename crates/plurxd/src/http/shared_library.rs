@@ -1491,6 +1491,46 @@ async fn current_viewer_item(
     }
     Ok((summary, metadata))
 }
+/// Receiver-generated file alias. Source metadata never chooses a B URL or
+/// lifecycle; the signed locator identifies a tuple and grants no authority.
+fn receiver_file_metadata(
+    summary: &plurx_core::sharing::ImportSummary,
+    reference: SharedReference,
+    file: plurx_core::sharing_catalogue_details::SourcePlayableFile,
+    key: Option<&plurx_core::sharing_file_locators::FileLocatorKey>,
+) -> Result<Value, ApiError> {
+    if reference.import_id != summary.id
+        || reference.server_id != summary.source_server_id
+        || reference.catalogue_epoch != summary.catalogue_epoch
+        || summary.lifecycle_generation <= 0
+    {
+        return Err(invalid());
+    }
+    let locator_reference = plurx_core::sharing_file_locators::FileLocatorReference {
+        item: reference,
+        lifecycle_generation: summary.lifecycle_generation,
+        file_id: file.file_id.clone(),
+        revision: file.revision.clone(),
+    };
+    let mut value = serde_json::to_value(&file).map_err(|_| invalid())?;
+    value["reference"] = json!({
+        "item":locator_reference.item,
+        "file_id":locator_reference.file_id,
+        "revision":locator_reference.revision,
+        "lifecycle_generation":summary.lifecycle_generation,
+    });
+    if let Some(key) = key {
+        let locator = key.issue(&locator_reference).map_err(|_| {
+            fail(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "sharing_authority_unavailable",
+            )
+        })?;
+        value["file_base"] = json!(locator.file_base());
+    }
+    Ok(value)
+}
+
 async fn viewer_item(
     State(state): State<AppState>,
     super::extract::AuthUser(user): super::extract::AuthUser,
@@ -1537,7 +1577,6 @@ async fn viewer_item(
         .files
         .into_iter()
         .map(|file| {
-            let mut value = serde_json::to_value(&file).expect("closed serializable file");
             let reference = SharedReference {
                 import_id: summary.id,
                 server_id: summary.source_server_id,
@@ -1545,18 +1584,16 @@ async fn viewer_item(
                 library_id: metadata.library_id.clone(),
                 item_id: metadata.item_id.clone(),
             };
-            value["reference"] =
-                json!({"item":reference,"file_id":file.file_id,"revision":file.revision});
-            value
+            receiver_file_metadata(&summary, reference, file, art_key.as_ref())
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, _>>()?;
     let progress = state
         .store
         .remote_watch(import, metadata.library_id.clone(), item, user.id)
         .await
         .map_err(unavailable)?;
     receiver_json(&state,&token,user.id,vec![scope],
-        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"watch":progress,"delivery_status":"unavailable"})).await
+        json!({"item":shared_item(&summary,metadata,user.id,art_key.as_ref()),"files":files,"lifecycle_generation":summary.lifecycle_generation,"watch":progress,"delivery_status":"unavailable"})).await
 }
 async fn viewer_progress(
     State(state): State<AppState>,
@@ -1947,6 +1984,78 @@ mod tests {
             self.0.fetch_sub(1, Ordering::SeqCst);
         }
     }
+    #[test]
+    fn sharing_receiver_file_alias_binds_current_lifecycle_and_complete_lossless_reference() {
+        use plurx_core::{
+            secrets::CredentialKey,
+            sharing::{ImportSummary, SharingIdentity},
+            sharing_file_locators::FileLocatorKey,
+        };
+        let summary = ImportSummary {
+            id: uuid::Uuid::new_v4(),
+            source_server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            source_name: "Source".into(),
+            claim_id: uuid::Uuid::new_v4(),
+            remote_grant_id: Some(uuid::Uuid::new_v4()),
+            state: "active".into(),
+            assignment_generation: 1,
+            lifecycle_generation: i64::MAX,
+            endpoint_generation: 1,
+            observed_endpoint_revision: None,
+            endpoints: vec![],
+        };
+        let reference = SharedReference {
+            import_id: summary.id,
+            server_id: summary.source_server_id,
+            catalogue_epoch: summary.catalogue_epoch,
+            library_id: source_id("0").expect("zero library"),
+            item_id: source_id("9223372036854775807").expect("lossless item"),
+        };
+        // A closed metadata DTO fixture; this test allocates no media/producer.
+        let file: plurx_core::sharing_catalogue_details::SourcePlayableFile = serde_json::from_value(json!({"file_id":"0","revision":"a".repeat(64),"size":"23","dolby_vision":{},"audio_offset_ms":0,"probed":true,"audio_streams":[],"subtitle_streams":[],"chapters":[],"skip_regions":[]})).expect("closed Source metadata");
+        let master = CredentialKey::from_bytes([59; 32]);
+        let receiver = SharingIdentity {
+            server_id: uuid::Uuid::new_v4(),
+            catalogue_epoch: uuid::Uuid::new_v4(),
+            created_at_ms: 1000,
+        };
+        let envelope =
+            FileLocatorKey::generate_sealed(&master, &receiver).expect("sealed B purpose key");
+        let key = FileLocatorKey::open(&master, &receiver, &envelope).expect("B key");
+        let payload = receiver_file_metadata(&summary, reference.clone(), file.clone(), Some(&key))
+            .expect("B alias");
+        assert_eq!(payload["file_id"], "0");
+        assert_eq!(
+            payload["reference"]["item"]["item_id"],
+            "9223372036854775807"
+        );
+        assert_eq!(
+            payload["reference"]["lifecycle_generation"].as_i64(),
+            Some(i64::MAX)
+        );
+        let base = payload["file_base"].as_str().expect("advertised alias");
+        let locator = base
+            .strip_prefix(&format!("/api/v1/shared/imports/{}/files/", summary.id))
+            .expect("B-only file namespace");
+        assert_eq!(locator.len(), 236);
+        let recovered = key
+            .verify(locator, summary.id, summary.lifecycle_generation)
+            .expect("full signed identity");
+        assert_eq!(recovered.item, reference);
+        assert_eq!(recovered.file_id.as_str(), "0");
+        assert_eq!(recovered.revision.as_str(), "a".repeat(64));
+        assert!(key
+            .verify(locator, summary.id, summary.lifecycle_generation - 1)
+            .is_err());
+        let browse = receiver_file_metadata(&summary, reference.clone(), file.clone(), None)
+            .expect("browse without purpose readiness");
+        assert!(browse.get("file_base").is_none());
+        let mut foreign = reference;
+        foreign.server_id = uuid::Uuid::new_v4();
+        assert!(receiver_file_metadata(&summary, foreign, file, Some(&key)).is_err());
+    }
+
     #[tokio::test]
     async fn sharing_catalogue_connection_monitor_registry_is_bounded_and_owned() {
         let connection = crate::SharingConnectionCancellation::new();
@@ -3102,6 +3211,54 @@ mod tests {
             sharing_tls::{LiveNodeTls, SharingTlsListener},
             store::SqliteStore,
         };
+        async fn exchange(
+            address: std::net::SocketAddr,
+            h2: bool,
+            request: Request<Body>,
+        ) -> (StatusCode, Bytes) {
+            let socket = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("B socket");
+            if h2 {
+                let (mut sender, driver) =
+                    hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                        .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
+                        .await
+                        .expect("H2 handshake");
+                let driver = tokio::spawn(driver);
+                let response = sender.send_request(request).await.expect("B response");
+                let status = response.status();
+                let payload = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("B body")
+                    .to_bytes();
+                drop(sender);
+                driver.abort();
+                let _ = driver.await;
+                (status, payload)
+            } else {
+                let (mut sender, driver) = hyper::client::conn::http1::handshake::<_, Body>(
+                    hyper_util::rt::TokioIo::new(socket),
+                )
+                .await
+                .expect("H1 handshake");
+                let driver = tokio::spawn(driver);
+                let response = sender.send_request(request).await.expect("B response");
+                let status = response.status();
+                let payload = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("B body")
+                    .to_bytes();
+                drop(sender);
+                driver.abort();
+                let _ = driver.await;
+                (status, payload)
+            }
+        }
         let _serial = BODY_FIXTURES.lock().await;
         let address: std::net::IpAddr = std::env::var("PLURX_SHARING_FIXTURE_IP")
             .expect("explicit CGNAT fixture")
@@ -3331,7 +3488,6 @@ mod tests {
             let key =
                 FileLocatorKey::open(&receiver.sharing.key, &local, &envelope).expect("B signer");
             let locator = key.issue(&reference).expect("signed locator");
-            let path = format!("{}/decision", locator.file_base());
             let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("caps");
             let input = super::super::shared_playback::SourceDecisionRequest {
                 reference: super::super::hls::SourcePlaybackTarget {
@@ -3369,6 +3525,44 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
             )
             .await;
+            // A real authenticated item read must advertise the same signed
+            // tuple used by decision clients; no client invents its lifecycle.
+            let request = Request::builder()
+                .uri(format!(
+                    "http://fixture/api/v1/shared/imports/{import}/items/{}",
+                    source.item
+                ))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .expect("B item request");
+            let (status, payload) = exchange(b_address, h2, request).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "{}",
+                String::from_utf8_lossy(&payload)
+            );
+            let details: Value = serde_json::from_slice(&payload).expect("actual B item details");
+            assert_eq!(details["lifecycle_generation"].as_i64(), Some(1));
+            let advertised = details["files"]
+                .as_array()
+                .expect("files")
+                .iter()
+                .find(|file| file["file_id"] == "0")
+                .expect("Source file zero");
+            assert_eq!(advertised["file_base"], locator.file_base());
+            assert_eq!(
+                advertised["reference"]["lifecycle_generation"].as_i64(),
+                Some(1)
+            );
+            assert_eq!(
+                advertised["reference"]["item"],
+                serde_json::to_value(&reference.item).expect("full reference")
+            );
+            let path = format!(
+                "{}/decision",
+                advertised["file_base"].as_str().expect("B alias")
+            );
             for case in 0..5 {
                 if case == 2 {
                     rusqlite::Connection::open(&source.path)
@@ -3424,49 +3618,7 @@ mod tests {
                         serde_json::to_vec(&json!({"caps":caps})).expect("body"),
                     ))
                     .expect("request");
-                let socket = tokio::net::TcpStream::connect(b_address)
-                    .await
-                    .expect("B socket");
-                let (status, payload) = if h2 {
-                    let (mut sender, driver) = hyper::client::conn::http2::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    )
-                    .handshake::<_, Body>(hyper_util::rt::TokioIo::new(socket))
-                    .await
-                    .expect("H2 handshake");
-                    let driver = tokio::spawn(driver);
-                    let response = sender.send_request(request).await.expect("B response");
-                    let status = response.status();
-                    let payload = response
-                        .into_body()
-                        .collect()
-                        .await
-                        .expect("B body")
-                        .to_bytes();
-                    drop(sender);
-                    driver.abort();
-                    let _ = driver.await;
-                    (status, payload)
-                } else {
-                    let (mut sender, driver) = hyper::client::conn::http1::handshake::<_, Body>(
-                        hyper_util::rt::TokioIo::new(socket),
-                    )
-                    .await
-                    .expect("H1 handshake");
-                    let driver = tokio::spawn(driver);
-                    let response = sender.send_request(request).await.expect("B response");
-                    let status = response.status();
-                    let payload = response
-                        .into_body()
-                        .collect()
-                        .await
-                        .expect("B body")
-                        .to_bytes();
-                    drop(sender);
-                    driver.abort();
-                    let _ = driver.await;
-                    (status, payload)
-                };
+                let (status, payload) = exchange(b_address, h2, request).await;
                 if case == 0 {
                     assert_eq!(
                         status,

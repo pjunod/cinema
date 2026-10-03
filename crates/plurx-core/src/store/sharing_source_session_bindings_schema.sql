@@ -41,9 +41,9 @@ CREATE TABLE sharing_source_session_bindings (
       AND substr(catalogue_epoch,14,1)='-' AND substr(catalogue_epoch,19,1)='-'
       AND substr(catalogue_epoch,24,1)='-' AND length(replace(catalogue_epoch,'-',''))=32
       AND replace(catalogue_epoch,'-','') NOT GLOB '*[^0-9a-f]*'),
-    CHECK (CAST(library_id AS INTEGER)>0 AND CAST(CAST(library_id AS INTEGER) AS TEXT)=library_id),
-    CHECK (CAST(item_id AS INTEGER)>0 AND CAST(CAST(item_id AS INTEGER) AS TEXT)=item_id),
-    CHECK (CAST(file_id AS INTEGER)>0 AND CAST(CAST(file_id AS INTEGER) AS TEXT)=file_id),
+    CHECK (CAST(library_id AS INTEGER)>=0 AND CAST(CAST(library_id AS INTEGER) AS TEXT)=library_id),
+    CHECK (CAST(item_id AS INTEGER)>=0 AND CAST(CAST(item_id AS INTEGER) AS TEXT)=item_id),
+    CHECK (CAST(file_id AS INTEGER)>=0 AND CAST(CAST(file_id AS INTEGER) AS TEXT)=file_id),
     CHECK (start_resolved_at_ms IS NULL OR start_resolved_at_ms>=created_at_ms),
     CHECK ((reservation_state='held' AND released_at_ms IS NULL AND release_fingerprint IS NULL)
       OR (reservation_state='released' AND released_at_ms IS NOT NULL

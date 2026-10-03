@@ -49,16 +49,26 @@ struct SharedLibraryItem: Decodable, Identifiable {
     let genres: [String]
     let seasonNumber: Int?
     let episodeNumber: Int?
+    let art: [SharedArtworkDescriptor]?
+    let posterUrl: String?
+    let backdropUrl: String?
+    private(set) var artworkSubject: SharedArtworkSubject?
+    private enum CodingKeys: String, CodingKey { case source, reference, parent, title, kind, year, overview, genres, seasonNumber, episodeNumber, art, posterUrl, backdropUrl }
+    mutating func bindArtwork(_ subject: SharedArtworkSubject) throws {
+        guard subject.reference == reference, subject.descriptors == (art ?? []) else { throw APIError.badURL }
+        artworkSubject = subject
+    }
     var id: String { [reference.importId, reference.serverId, reference.catalogueEpoch, reference.libraryId, reference.itemId].joined(separator: "|") }
     var hasChildren: Bool { ["series", "season", "album", "artist", "collection"].contains(kind) }
     func validate(in library: SharedLibraryIdentity) throws {
         try reference.validate()
         guard source == "shared", library.contains(reference), title.utf8.count <= 512, genres.count <= 64 else { throw APIError.badURL }
         if let parent { try parent.validate(); guard library.contains(parent) else { throw APIError.badURL } }
+        try SharedArtworkDescriptor.validate(art, poster: posterUrl, backdrop: backdropUrl, reference: reference)
     }
 }
 struct SharedLibraryPage: Decodable {
-    let items: [SharedLibraryItem]
+    var items: [SharedLibraryItem]
     let nextCursor: String?
     let catalogueRevision: Int64
     let scopeGeneration: Int64
@@ -70,6 +80,7 @@ struct SharedLibraryPage: Decodable {
     }
 }
 struct SharedLibraryFile: Decodable, Identifiable {
+    let fileBase: String?
     let fileId: String
     let revision: String
     let reference: SharedPlaybackFileReference
@@ -89,10 +100,11 @@ struct SharedLibraryWatch: Decodable {
     let updatedAtMs: Int64
 }
 struct SharedLibraryDetail: Decodable {
-    let item: SharedLibraryItem
+    var item: SharedLibraryItem
     let files: [SharedLibraryFile]
     let watch: SharedLibraryWatch?
     let deliveryStatus: String
+    let lifecycleGeneration: Int64?
     func validate(expected: SharedPlaybackReference) throws {
         let library = SharedLibraryIdentity(importId: expected.importId, serverId: expected.serverId,
                                            catalogueEpoch: expected.catalogueEpoch, libraryId: expected.libraryId)

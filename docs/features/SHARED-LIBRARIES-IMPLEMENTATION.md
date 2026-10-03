@@ -3398,10 +3398,47 @@ Pinned Rust 1.97.1 all-target checking and denied-warning Clippy passed on the
 adapter. Five complete decision/start/PGS projection tests and the dedicated
 JSON allocation-budget regression passed with zero ignored tests. The peer
 client regression also passed ten envelope/reference/redirect/body-bound
-cases (one test, zero ignored). The new
-pinned Source/B H1/H2 decision fixture is opt-in and remains unqualified until
-its committed source archive runs in the disposable CGNAT container. Source
+cases (one test, zero ignored). The opt-in pinned Source/B H1/H2 decision
+fixture passed on committed adapter `5fd1b3af16f228829c8d6da8683149517fa813be`,
+from source-only archive SHA-256
+`1585de991b511d1bf954743011211d73642b9a5de739b675c14e51f81f10735e`.
+Pinned Linux compilation passed in 3m47s and the exact regression passed
+(one test, zero ignored, 2.06 seconds): complete engine projection, forged
+locator, changed Source revision, removed viewer assignment and revoked B
+login, over both H1 and H2. Both session tables remained empty. The daemon's
+normal features already include `hiqlite-store`; a daemon-only test profile
+with 256 code-generation units and one build job kept this qualification
+within the isolated compiler's memory allowance. Earlier attempts with
+unneeded contract-helper exports were killed before tests and supply no pass.
+Actual Tailscale, two-NAT and physical media evidence remains open. Source
 starts, receiver sessions, media relay and progress remain separate open work.
+
+### S7 native artwork integration — physical device evidence remains open
+
+Apple and Android Shared browse/details now display only advertised poster and
+backdrop descriptors. Immutable authenticated subjects retain the full shared
+reference and accept only the matching B-relative artwork namespace. Requests
+use the current B account, refuse redirects and unsupported content, and bound
+the actual stream even without a trustworthy Content-Length. Account change,
+view retirement and task cancellation cannot publish an old completion.
+
+Each process admits four artwork operations without queuing and accounts for
+64 MiB of compressed ownership, with a 15 MiB limit per object. A separate
+64 MiB allowance covers owned decoded pixels. Swift's actual image provider
+release callback retires backing ownership. Android's private bitmap owner
+requires confirmed recycle before returning pixel credits; a collected or
+retired view alone does not return them. These allowances do not claim to
+measure opaque decoder internals or physical GPU/render caches.
+
+Checkpoint `1c7cff4065370c74843d3cafabdb566ee9307723` was qualified from source
+archive SHA-256
+`a1cfd55ac48427caab3fe4188627b493ae219ca5125f10b3f67af2653bfb4e0f`.
+All 395 native files in the integrated tree byte-match that input. The affected
+iOS, tvOS and Android suites each passed 35 tests, including seven artwork
+regressions. Exact-archive Android lint and instrumentation APK compilation
+passed, as did the normal pinned Rust 1.97.1 tracked hook. Android's actual
+native bitmap decode/recycle instrumentation is compiled only: no emulator
+or physical-device execution is claimed. Shared playback remains open.
 ### S4 coordinated purpose startup — candidate qualification
 
 The coordinator candidate integrates the complete effort ancestor
@@ -3565,3 +3602,153 @@ Clippy with denied warnings passed in 1 minute 24 seconds. The schema migration
 chain regression and existing compatibility regressions also passed. This is
 a development checkpoint; qualification must run again after integrating the
 current effort and canonical-zero Source adjunct correction.
+
+The full intended-base integration with `b4e04e417` retains the canonical-zero
+Source binding checks and incoming receiver/client changes. On that exact tree,
+`--lib source_schema` passed nine tests (104.41 seconds),
+`--lib sharing_source` passed twenty-two tests (39.03 seconds), and
+`--lib purpose` passed fourteen tests (15.48 seconds), all with zero ignored.
+The actual three-voter Source reservation contract passed in 11.78 seconds;
+the three-voter purpose factory/master-proof contract passed in 9.81 seconds.
+Affected feature-enabled core/daemon all-target compilation passed in
+1 minute 8 seconds and Clippy with denied warnings passed in 1 minute 38 seconds.
+The actual fourth-learner raw admission/promotion capability-race regression
+passed in 11.44 seconds. These remain startup and Store receipts with the limits
+above; they do not qualify a live relay or promote the complete effort.
+
+### S5 B remote activation checkpoint — delivery remains closed
+
+The receiver now has a distinct `remote_source` recipe with complete import,
+Source server/epoch/library/item/file/revision, lifecycle, canonical bounded
+playback request, and a persisted Source request UUID equal to its B incarnation.
+Its request fingerprint includes the complete remote intent and excludes only
+that planned UUID, so an exact request can recover its already-persisted UUID.
+No B media file, decoder or encoder is created by this storage path.
+
+A Store-produced receiver authority captures the current B login, expiry policy,
+user and effective import/library assignment. Its nonserializable handle lasts
+at most five seconds; the committing transaction repeats the login, switch,
+policy and complete scope checks. The existing ordinary Local activation refuses
+`remote_source` recipes. The dedicated receiver activation commits the blocked
+ordinary B session, pointer, lease and exact pending upstream binding atomically.
+Lost authority aborts every activation write. Exact replay checks the stored
+binding; a missing or mismatched binding refuses without repair.
+
+Ordinary retention sweeps keep unresolved upstream bindings, their session and
+request records, and associated lease metadata. Request expiry cannot reacquire
+that incarnation while the binding remains. This records uncertainty; it does
+not prove Source shutdown, renew an expired serving lease, or authorize a new
+Source allocation. Explicit proof-bearing retirement is still required before
+those bindings can be removed by the delivery owner.
+
+The focused SQLite regression passed across in-memory and pooled storage, both
+original and rebuilt principal layouts, and forty current-authority/identity
+cases (one Rust test, zero ignored, 14.17s). The actual three-voter regression
+passed with zero ignored (9.32s), covering atomic admission, replay, revoked
+login/assignment, changed policy/Source epoch, expired unresolved retention,
+refused replacement, and missing-binding refusal. The low-level fixture's
+synthetic request is never dispatched to a Source worker. Pinned Rust 1.97.1
+feature-enabled affected all-target Clippy passed with denied warnings (1m23s).
+The Source unit filter passed seventeen tests, zero ignored (28.32s).
+
+This is the receiver storage/admission checkpoint. The Source-owned live start,
+B ownership/renewal/retirement actor, authenticated stream relay, delivery grants,
+ordered session-bound progress, and client playback remain open. No public
+Shared start is enabled by this checkpoint.
+
+On the same receiver checkpoint, the corrected `purpose` test census passed
+fourteen tests, zero ignored (15.46s); it includes the process-priority purpose
+regression as well as the thirteen sharing/key cases. The registered Local
+rebuilt-principal activation regression passed (0.94s), and the existing actual
+three-voter Source reservation and purpose factory contracts passed with zero
+ignored (11.56s and 9.78s). All four documentation-index tests passed.
+
+### S5 receiver decision context — authenticated file alias
+
+Authenticated receiver item details now carry the current positive import
+`lifecycle_generation`, repeat it in each complete file reference, and advertise
+`file_base` only when the receiver's actual sealed locator key is available.
+The receiver signs the complete Source/import/library/item/file/revision and
+lifecycle tuple; Source metadata cannot choose the receiver URL. A missing key
+keeps details browseable without advertising a decision context. Decision and
+PGS projections carry the same lifecycle field so native clients can compare
+responses against their captured authenticated context.
+
+The focused alias regression passed with zero ignored, including Source ID zero,
+lossless `i64::MAX` identity/lifecycle, stale lifecycle refusal, foreign Source
+refusal, and browse-only key unavailability. All five complete engine/PGS wire
+projection tests passed with zero ignored on pinned Rust 1.97.1. The disposable
+CGNAT HTTP/1 and HTTP/2 fixture now reads the actual authenticated item alias
+before requesting a decision; its changed-tree Linux execution is still pending.
+This does not enable playback or grant delivery authority.
+
+### S5 original-login binding and pending receiver renewal
+
+The persisted remote recipe now records its original B login hash. A current
+login for the same user cannot adopt another login's film; the Store authority
+factory compares the actual login hash against that durable recipe binding.
+A dedicated pending-renewal writer extends the exact blocked session, its
+original starting request and matching job lease in one guarded transaction.
+It requires fresh original-login/policy/import/library authority, the existing
+owner epoch and pointer, the complete pending Source tuple, an unresolved
+Source binding, and live existing request/lease deadlines. It neither replaces
+the Source request nor publishes the session. Refused authority rolls every
+write back; expired or differently owned obligations are never resurrected.
+Ordinary incarnation-only Local handoff, renewal and takeover paths refuse a
+remote recipe and require the dedicated receiver proof instead.
+
+The expanded SQLite regression passed across both storage modes and principal
+layouts (14.51s, one test, zero ignored), including a second valid login for the
+same user, exact owner/request refusal and six current-authority/upstream/lease
+races with unchanged durable renewal metadata. The actual three-voter contract
+passed (10.02s, one test, zero ignored), including guarded pending renewal and
+atomic revoked-assignment refusal. The focused existing Local worker and
+rebuilt activation regressions passed (0.85s and 0.98s). Pinned Rust 1.97.1
+feature-enabled affected all-target Clippy passed with denied warnings (1m39s).
+This supplies a pending ownership writer; the B actor, Source attachment,
+publication, delivery and ordered progress remain open.
+
+### S3 Source decision marker evidence before physical admission
+
+Shared decisions now use the common engine with an explicit stored-evidence
+marker policy. Existing persisted annotations win; otherwise only bounded
+scan-time chapters supply chapter evidence. Missing stored chapters never
+launch a live FFprobe, backfill a probe document, or create annotations during
+Source decision/preparation. The ordinary Local derivation path is retained.
+This closes the unadmitted chapter-probe path that the actual Source preparation
+fixture exposed when a live fallback changed its captured file revision.
+
+The focused actual-engine regression passed (0.22s, one test, zero ignored).
+It proves that a Source decision does not enter the paused live-probe seam,
+that stored probe/annotation data stays unchanged, that existing chapters and
+persisted annotation evidence are preserved, and that Local fallback still
+enters its original seam. The existing complete Source preparation/principal
+engine regression passed on the same source. This marker policy grants no
+producer or playback authority.
+
+### S6/S7 decision clients — playback remains unavailable
+
+The native clients and web shell now consume the authenticated receiver file
+alias and captured lifecycle/full reference when requesting the actual shared
+decision. They retain runtime v2 capabilities and complete existing engine
+fields, refuse foreign or stale identity, and cancel work when their captured
+account/context is retired. Responses are bounded to four MiB, redirects and
+implicit retries are refused, and Source media identities stay lossless strings.
+These adapters do not invoke Local start APIs or enable Shared playback.
+
+The native checkpoint passed forty affected tests each on iOS, tvOS and Android,
+plus Android lint. The integrated receiver tree's 399 client files are byte-equal
+to the tested native archive. The web checkpoint passed twenty focused tests,
+the complete web gate and four documentation-index tests; the current combined
+receiver/client tree passed that web gate and index suite again. The known
+TypeScript diagnostic baseline is unchanged. Both agent checkpoints used the
+normal hook and exact source-only archives for their compiler evidence.
+
+The exact committed receiver alias checkpoint `f5d4fecef` separately passed the
+actual disposable CGNAT HTTP/1 and HTTP/2 alias-consuming decision fixture
+(one test, zero ignored, 2.10s) on pinned Rust 1.97.1. A daemon-only compiler
+wrapper reduced debug bookkeeping and serialized the backend after measured
+memory-limit failures; the successful fresh compilation recorded zero OOM
+kills. This proves the pinned Source/B HTTP path and advertised alias, not an
+actual Tailscale, DERP, hardware-decoder or live playback scenario. Later
+combined candidates still require their own affected qualification before push.

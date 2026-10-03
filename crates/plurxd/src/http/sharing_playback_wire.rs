@@ -88,8 +88,7 @@ pub(crate) fn project_shared_overlay(
     }
     let mut payload = serde_json::to_value(manifest).map_err(|_| SharingResourceUnsupported)?;
     payload["file_id"] = json!(reference.file_id);
-    payload["reference"] =
-        json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+    payload["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision,"lifecycle_generation":reference.lifecycle_generation});
     if serde_json::to_vec(&payload)
         .map_err(|_| SharingResourceUnsupported)?
         .len()
@@ -170,8 +169,7 @@ pub(crate) fn project_shared_decision(
     }
     let mut payload = serde_json::to_value(decision).map_err(|_| SharingResourceUnsupported)?;
     payload["file_id"] = json!(reference.file_id);
-    payload["reference"] =
-        json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+    payload["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision,"lifecycle_generation":reference.lifecycle_generation});
     if serde_json::to_vec(&payload)
         .map_err(|_| SharingResourceUnsupported)?
         .len()
@@ -257,8 +255,7 @@ pub(super) fn project_decoded_decision(
         _ => return Err(SharingResourceUnsupported),
     }
     payload["file_id"] = json!(reference.file_id);
-    payload["reference"] =
-        json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+    payload["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision,"lifecycle_generation":reference.lifecycle_generation});
     if serde_json::to_vec(&payload)
         .map_err(|_| SharingResourceUnsupported)?
         .len()
@@ -498,7 +495,7 @@ mod tests {
                 project_shared_decision(decision(method), &reference, &key).expect("projection");
             let actual = serde_json::to_value(projected).expect("wire");
             expected["file_id"] = json!(reference.file_id);
-            expected["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+            expected["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision,"lifecycle_generation":reference.lifecycle_generation});
             let prefix = format!("/api/v1/files/{}/", i64::MAX);
             for pointer in ["/play_url", "/delivery/url", "/delivery/sessions_url"] {
                 if let Some(url) = expected.pointer_mut(pointer) {
@@ -735,7 +732,7 @@ mod tests {
         };
         let mut expected = serde_json::to_value(&manifest).expect("actual engine manifest");
         expected["file_id"] = json!(reference.file_id);
-        expected["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision});
+        expected["reference"] = json!({"item":reference.item,"file_id":reference.file_id,"revision":reference.revision,"lifecycle_generation":reference.lifecycle_generation});
         assert_eq!(
             serde_json::to_value(
                 project_shared_overlay(manifest.clone(), &reference, &key).expect("projection")
