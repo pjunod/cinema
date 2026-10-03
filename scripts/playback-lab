@@ -1843,8 +1843,8 @@ class CdpDriver {
     await waitFor(() => this.eval("document.readyState === 'complete' && typeof render === 'function'"), 20_000, "web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
-    await this.exec(`play(${Number(fileId)}, ${JSON.stringify(title)}, 0, ${Number(durationMs || 0)}, null); return true;`);
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
+    await this.exec(`play(${Number(fileId)}, ${JSON.stringify(title)}, ${Number(resumeMs)}, ${Number(durationMs || 0)}, null); return true;`);
   }
 
   async close() {
@@ -1920,15 +1920,15 @@ class SafariDriver {
     await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "Safari web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
     await this.exec(`
       var old=document.getElementById('plurx-lab-start'); if(old) old.remove();
       var button=document.createElement('button'); button.id='plurx-lab-start';
       button.textContent='Start playback test';
       button.style='position:fixed;z-index:99999;left:20px;top:20px;width:220px;height:80px';
-      button.onclick=function(){ play(arguments[0], arguments[1], 0, arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2]);
+      button.onclick=function(){ play(arguments[0], arguments[1], arguments[3], arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2], arguments[3]);
       document.body.appendChild(button); return true;
-    `, [Number(fileId), String(title), Number(durationMs || 0)]);
+    `, [Number(fileId), String(title), Number(durationMs || 0), Number(resumeMs)]);
     const element = await this.wd("POST", `/session/${this.sessionId}/element`, { using: "css selector", value: "#plurx-lab-start" });
     const elementId = element[ELEMENT_KEY] || element.ELEMENT;
     await this.wd("POST", `/session/${this.sessionId}/element/${elementId}/click`, {});
@@ -2014,15 +2014,15 @@ class FirefoxDriver {
     await waitFor(() => this.eval("document.readyState === 'complete'"), 20_000, "Firefox web app reload");
   }
 
-  async startPlayback(fileId, title, durationMs) {
+  async startPlayback(fileId, title, durationMs, resumeMs = 0) {
     await this.exec(`
       var old=document.getElementById('plurx-lab-start'); if(old) old.remove();
       var button=document.createElement('button'); button.id='plurx-lab-start';
       button.textContent='Start playback test';
       button.style='position:fixed;z-index:99999;left:20px;top:20px;width:220px;height:80px';
-      button.onclick=function(){ play(arguments[0], arguments[1], 0, arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2]);
+      button.onclick=function(){ play(arguments[0], arguments[1], arguments[3], arguments[2], null); button.remove(); }.bind(null, arguments[0], arguments[1], arguments[2], arguments[3]);
       document.body.appendChild(button); return true;
-    `, [Number(fileId), String(title), Number(durationMs || 0)]);
+    `, [Number(fileId), String(title), Number(durationMs || 0), Number(resumeMs)]);
     const element = await this.wd("POST", `/session/${this.sessionId}/element`, { using: "css selector", value: "#plurx-lab-start" });
     const elementId = element[ELEMENT_KEY] || element.ELEMENT;
     await this.wd("POST", `/session/${this.sessionId}/element/${elementId}/click`, {});
@@ -2696,8 +2696,9 @@ async function performOperation(driver, testCase, start) {
       if (testCase.require_continuous) change.continuous_after = evidenceEnd.continuous;
       change.video_gap_ms = measuredTransition.maximum_video_gap_ms;
       change.frame_probe_gap_detail = measuredTransition.frame_probe_gap_detail;
-      change.dropped_frames = Math.max(0, Number(evidenceEnd.video.dropped || 0)
-        - Number(before.video.dropped || 0));
+      change.dropped_frames = Number.isFinite(evidenceEnd.video.dropped)
+        && Number.isFinite(before.video.dropped)
+        ? Math.max(0, evidenceEnd.video.dropped - before.video.dropped) : null;
       change.frame_probe_operative = frameProbeOperative;
       changes.push(change);
       before = evidenceEnd;
@@ -3800,12 +3801,17 @@ function normalizeTrace(report) {
 async function runOneCase(driver, server, manifest, fixture, testCase, browserInfo, observeOverride, shaper, frameDiagnostics = false) {
   const file = server.files.get(fixture.filename);
   if (!file) throw new Error(`scanner did not return ${fixture.filename}`);
+  const resumeMs = Number(testCase.start_seconds ?? 0) * 1000;
+  if (!Number.isFinite(resumeMs) || resumeMs < 0
+      || (file.duration_ms > 0 && resumeMs >= file.duration_ms)) {
+    throw new Error("diagnostic start position must be within the fixture");
+  }
   await setCasePreferences(driver, testCase.quality, frameDiagnostics);
   const decision = await api(server.baseUrl,
     `/files/${file.id}/decision?${browserInfo.caps_q}&force=${qualityForce(testCase.quality)}`,
     { token: server.token });
   const startedAt = Date.now();
-  await driver.startPlayback(file.id, file.title || fixture.id, file.duration_ms || 0);
+  await driver.startPlayback(file.id, file.title || fixture.id, file.duration_ms || 0, resumeMs);
   let start;
   try {
     start = await waitFor(async () => {
@@ -3820,6 +3826,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [error.message], warnings: [], decision, start: null, end,
     };
   }
@@ -3828,6 +3835,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [`media error ${start.video.error.code}: ${start.video.error.message || "unknown"}`], warnings: [], decision, start, end: start,
     };
   }
@@ -3840,6 +3848,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       outcome: shaped.score.outcome,
       duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: shaped.score.errors,
       warnings: shaped.score.metrics.shaping.transport_errors.length
         ? [`shaper reported ${shaped.score.metrics.shaping.transport_errors.length} transport errors`] : [],
@@ -3891,6 +3900,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
       playback_request_unix_ms: startedAt,
+      requested_start_seconds: resumeMs / 1000,
       errors: [`${testCase.operation}: ${error.message}`], warnings: [], decision, start, end,
     };
   }
@@ -3910,6 +3920,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     status: score.status,
     duration_ms: Date.now() - startedAt,
     playback_request_unix_ms: startedAt,
+    requested_start_seconds: resumeMs / 1000,
     errors: score.errors,
     warnings: score.warnings,
     metrics: score.metrics,

@@ -4332,3 +4332,16 @@ reported the phone locked, including a fresh retry after the human said it was
 unlocked. No native first frame or physical output is claimed. Keep the phone
 unlocked through isolated server preparation before retrying. Final review,
 the requested Fable stop and fast-lane tests remain ahead.
+
+
+### 10.145 Focus late-window diagnostics without replaying earlier switches
+
+The committed mixed qualification command accepts `--start-seconds` only with
+`--manual-count 3`. It uses the ordinary playback resume position in milliseconds
+across browser drivers, refuses nonfinite, negative or beyond-fixture positions,
+and records the requested start in the receipt. For example, start at film 990
+seconds to investigate the late Firefox window with three manual and five actual
+Auto changes. This is a focused diagnostic, not a replacement for the full
+twenty-change campaign. Default campaigns still start at zero. Unknown dropped
+frame counters remain unknown rather than being reported as zero. Syntax checks
+pass; no units executed.

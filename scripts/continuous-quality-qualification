@@ -139,11 +139,11 @@ async function mixedCase(driver, server, manifest, fixture, testCase, info, obse
 
 async function main(args) {
   if (args.includes("--help")) {
-    process.stdout.write("Usage: scripts/continuous-quality-qualification --server PATH --source-ref BUILD_REF --browser chrome|firefox [--fixtures DIR] [--manual-count 3|15] [--chrome PATH] [--firefox PATH] [--geckodriver PATH] [--json PATH] [--junit PATH]\n");
+    process.stdout.write("Usage: scripts/continuous-quality-qualification --server PATH --source-ref BUILD_REF --browser chrome|firefox [--fixtures DIR] [--manual-count 3|15] [--start-seconds POSITION] [--chrome PATH] [--firefox PATH] [--geckodriver PATH] [--json PATH] [--junit PATH]\n");
     return 0;
   }
   const options = {};
-  const allowed = new Set(["server", "source-ref", "browser", "fixtures", "manual-count", "chrome", "firefox", "geckodriver", "json", "junit"]);
+  const allowed = new Set(["server", "source-ref", "browser", "fixtures", "manual-count", "start-seconds", "chrome", "firefox", "geckodriver", "json", "junit"]);
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i].replace(/^--/, "");
     if (!args[i].startsWith("--") || !allowed.has(key) || !args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`invalid option ${args[i]}`);
@@ -154,9 +154,12 @@ async function main(args) {
   if (!["chrome", "firefox"].includes(options.browser)) throw new Error("choose --browser chrome or firefox");
   const count = Number(options.manual_count || 15);
   if (![3, 15].includes(count)) throw new Error("--manual-count must be 3 (focused) or 15 (twenty total changes)");
+  const startSeconds = Number(options.start_seconds ?? 0);
+  if (!Number.isFinite(startSeconds) || startSeconds < 0) throw new Error("--start-seconds must be a finite nonnegative position");
+  if (startSeconds && count !== 3) throw new Error("late-window diagnostics require --manual-count 3; they do not replace a full campaign");
   const manifest = lab.loadManifest();
   const testCase = manifest.suites.continuous.cases[0];
-  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-1080", repetitions: 1,
+  Object.assign(testCase, {fixture: "continuous-mpeg4-aac-1080", repetitions: 1, start_seconds: startSeconds,
     switches: Array.from({length: count}, (_, i) => ({quality: i % 2 ? "1080" : "720",
       expected_method: "transcode", expected_height: i % 2 ? 1080 : 720}))});
   Object.assign(options, {suite: "continuous", network_profile: "100mbps-to-10mbps"});
