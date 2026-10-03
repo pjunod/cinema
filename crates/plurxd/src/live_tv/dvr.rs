@@ -3375,7 +3375,13 @@ async fn run_transport(
             if warm {
                 return pump_tuner_fanout(input, serving, transport, Some(system)).await;
             }
-            let source = probe_live_source(&system, &transport.scratch, &input.prefix).await;
+            let source = probe_live_source(
+                &system,
+                &transport.scratch,
+                &input.prefix,
+                super::SourceProbeWork::VIEWER,
+            )
+            .await;
             (Some(system), source)
         }
         None => (
@@ -3546,7 +3552,13 @@ async fn pump_tuner_fanout(
                     probing = Some(Box::pin(async move {
                         let result = match system {
                             Some(system) => {
-                                probe_live_source(&system, &directory, &collected).await
+                                probe_live_source(
+                                    &system,
+                                    &directory,
+                                    &collected,
+                                    super::SourceProbeWork::VIEWER,
+                                )
+                                .await
                             }
                             None => {
                                 Err(LiveTvError::StreamFailed("live-TV manager stopped".into()))
