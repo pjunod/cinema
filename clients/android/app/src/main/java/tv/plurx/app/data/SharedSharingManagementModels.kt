@@ -18,6 +18,15 @@ import kotlinx.serialization.Serializable
         }
     }
 }
+internal data class SharedSharingEndpointFields(val id: String = java.util.UUID.randomUUID().toString(),
+    val ipv4: String = "", val ipv6: String = "", val fqdn: String = "", val port: String = "8443", val pin: String = "") {
+    constructor(endpoint: SharedSharingEndpoint) : this(ipv4 = endpoint.ipv4, ipv6 = endpoint.ipv6.orEmpty(), fqdn = endpoint.ts_fqdn, port = endpoint.port.toString(), pin = endpoint.spki_sha256)
+    fun validated(): SharedSharingEndpoint {
+        val number = requireNotNull(port.toIntOrNull()) { "Enter a canonical port from 1 to 65535." }
+        require(number.toString() == port)
+        return SharedSharingEndpoint(ipv4, ipv6.takeIf { it.isNotEmpty() }, fqdn, number, pin).also { it.validate() }
+    }
+}
 @Serializable internal data class SharedSharingEndpointManifest(val revision: Long, val endpoints: List<SharedSharingEndpoint>)
 @Serializable internal data class SharedSharingExportGrant(val id: String, val recipient_server_id: String, val state: String,
     val scope_generation: Long, val credential_generation: Long, val catalogue_generation: Long, val mutation_generation: Long, val pending_expires_at_ms: Long)
@@ -120,6 +129,7 @@ internal class SharedSharingSecretDraft private constructor(beforeObserver: (() 
     private val invalidation = kotlinx.coroutines.flow.MutableStateFlow(0L)
     val invalidations: kotlinx.coroutines.flow.StateFlow<Long> = invalidation
     private val authorization = Session.playbackAuthorization()
+    private val draftId = nextDraftId.incrementAndGet()
     private var active = true
     private var revision = 0L
     private var invitationValue = ""
@@ -130,6 +140,7 @@ internal class SharedSharingSecretDraft private constructor(beforeObserver: (() 
         val weak = java.lang.ref.WeakReference(this)
         val registration = Session.observeAuthorizationChanges { weak.get()?.retire() }
         observation = registration.id
+        synchronized(registryLock) { registry.entries.removeAll { it.value.get() == null }; registry[draftId] = java.lang.ref.WeakReference(this) }
         if (registration.generation != authorization.generation || !current()) retire()
     }
     private fun current(): Boolean = Session.playbackAuthorization() == authorization && authorization.token != null
@@ -153,10 +164,17 @@ internal class SharedSharingSecretDraft private constructor(beforeObserver: (() 
         synchronized(lock) { clearLocked(); invalidation.value = revision }
     }
     fun leave() {
-        retire()
+        retire(); synchronized(registryLock) { registry.remove(draftId) }
         observation?.let(Session::removeAuthorizationObserver); observation = null
     }
     companion object {
+        private val registryLock = Any()
+        private val nextDraftId = java.util.concurrent.atomic.AtomicLong()
+        private val registry = mutableMapOf<Long, java.lang.ref.WeakReference<SharedSharingSecretDraft>>()
+        fun retireAuthorization(generation: Long) {
+            val drafts = synchronized(registryLock) { registry.values.mapNotNull { it.get() } }
+            drafts.filter { it.authorization.generation == generation }.forEach { it.retire() }
+        }
         fun forTest(beforeObserver: () -> Unit): SharedSharingSecretDraft {
             check(tv.plurx.app.BuildConfig.DEBUG); return SharedSharingSecretDraft(beforeObserver)
         }

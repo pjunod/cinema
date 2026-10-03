@@ -23,12 +23,15 @@ internal class SharedSharingManagementClient private constructor(private val aut
         request.method(method, payload)
         transport.newCall(request.build()).execute().use { response ->
             requireCurrent(); require(response.request.url == url && response.priorResponse == null)
+            if (response.code == 401 || response.code == 403) SharedSharingSecretDraft.retireAuthorization(auth.generation)
             val source = requireNotNull(response.body).source()
             val limit = if (path == "libraries" || path == "users" || path.endsWith("/assignments")) 4_194_304L else 131_072L
             source.request(limit + 1); val bytes = source.buffer.readByteArray(source.buffer.size.coerceAtMost(limit + 1))
             require(bytes.size <= limit)
             val text = bytes.toString(Charsets.UTF_8)
-            if (!response.isSuccessful) throw (parseRefusal(response.code, text) ?: IllegalStateException("Server returned ${response.code}"))
+            if (!response.isSuccessful) {
+                throw (parseRefusal(response.code, text) ?: IllegalStateException("Server returned ${response.code}"))
+            }
             Json.parseToJsonElement(text)
         }
     }
@@ -99,6 +102,25 @@ internal class SharedSharingManagementClient private constructor(private val aut
         return json.decodeFromJsonElement<SharedSharingEndpointManifest>(wire).also {
             require(it.revision >= 0 && it.endpoints.size in 1..4); it.endpoints.forEach { endpoint -> endpoint.validate() }
         }
+    }
+    private fun endpointBody(endpoints: List<SharedSharingEndpoint>): JsonArray {
+        require(endpoints.size in 1..4); endpoints.forEach { it.validate() }
+        return JsonArray(endpoints.map { endpoint -> buildJsonObject {
+            put("ipv4", endpoint.ipv4); put("ipv6", endpoint.ipv6?.let(::JsonPrimitive) ?: JsonNull)
+            put("ts_fqdn", endpoint.ts_fqdn); put("port", endpoint.port); put("spki_sha256", endpoint.spki_sha256)
+        } })
+    }
+    suspend fun saveManifest(expectedRevision: Long, endpoints: List<SharedSharingEndpoint>) {
+        require(expectedRevision in 0 until Long.MAX_VALUE)
+        mutation("sharing/endpoints", "PUT", buildJsonObject { put("expected_revision", expectedRevision); put("endpoints", endpointBody(endpoints)) })
+    }
+    suspend fun saveSourceEndpoints(row: SharedSharingImportSummary, endpoints: List<SharedSharingEndpoint>, confirmNewPins: Boolean) {
+        require(row.endpoint_generation in 1 until Long.MAX_VALUE && row.state in listOf("claiming", "pending", "active"))
+        val oldPins = row.endpoints.map { it.spki_sha256 }.toSet()
+        require(confirmNewPins || endpoints.all { it.spki_sha256 in oldPins }) { "Review and explicitly confirm every new TLS pin before saving." }
+        mutation("sharing/imports/${id(row.id)}/endpoints", "PUT", buildJsonObject {
+            put("expected_endpoint_generation", row.endpoint_generation); put("endpoints", endpointBody(endpoints)); put("confirm_new_pins", confirmNewPins)
+        })
     }
     suspend fun assignments(row: SharedSharingImportSummary): SharedSharingAssignmentSnapshot {
         val wire = request("sharing/imports/${id(row.id)}/assignments")

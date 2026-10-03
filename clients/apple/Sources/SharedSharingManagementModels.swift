@@ -31,6 +31,24 @@ struct SharedSharingEndpoint: Codable, Equatable {
         }
     }
 }
+struct SharedSharingEndpointFields: Identifiable {
+    let id = UUID()
+    var ipv4 = ""
+    var ipv6 = ""
+    var tsFqdn = ""
+    var port = "8443"
+    var pin = ""
+    init() {}
+    init(_ endpoint: SharedSharingEndpoint) {
+        ipv4 = endpoint.ipv4; ipv6 = endpoint.ipv6 ?? ""; tsFqdn = endpoint.tsFqdn
+        port = String(endpoint.port); pin = endpoint.spkiSha256
+    }
+    func validated() throws -> SharedSharingEndpoint {
+        guard let number = Int(port), String(number) == port else { throw SharedSharingManagementError.invalid("Enter a canonical port from 1 to 65535.") }
+        let endpoint = SharedSharingEndpoint(ipv4: ipv4, ipv6: ipv6.isEmpty ? nil : ipv6, tsFqdn: tsFqdn, port: number, spkiSha256: pin)
+        try endpoint.validate(); return endpoint
+    }
+}
 struct SharedSharingEndpointManifest: Decodable { let revision: Int64; let endpoints: [SharedSharingEndpoint] }
 struct SharedSharingExportGrant: Decodable {
     let id: String
@@ -198,6 +216,18 @@ enum SharedSharingValidation {
 
 /// Secrets live only in this account-bound draft, never defaults or navigation arguments.
 final class SharedSharingSecretDraft: ObservableObject {
+    private final class WeakDraft { weak var value: SharedSharingSecretDraft?; init(_ value: SharedSharingSecretDraft) { self.value = value } }
+    private static let registryLock = NSLock()
+    private static var registry: [UUID: WeakDraft] = [:]
+    private let draftId = UUID()
+    /// A refused current management authorization clears transient material without changing Session semantics.
+    static func retireAuthorization(generation: UInt64) {
+        registryLock.lock(); let drafts = registry.values.compactMap(\.value); registryLock.unlock()
+        drafts.filter { $0.authorization.generation == generation }.forEach { $0.retire() }
+    }
+    private func removeDraftRegistration() {
+        Self.registryLock.lock(); Self.registry.removeValue(forKey: draftId); Self.registryLock.unlock()
+    }
     let objectWillChange = ObservableObjectPublisher()
     struct Snapshot { let revision: UInt64; let invitation: String; let pairingCode: String }
     private let lock = NSLock()
@@ -214,9 +244,10 @@ final class SharedSharingSecretDraft: ObservableObject {
     private func installObserver() {
         let registration = Session.shared.observeAuthorizationChanges { [weak self] _ in self?.retire() }
         observation = registration.id
+        Self.registryLock.lock(); Self.registry[draftId] = WeakDraft(self); Self.registryLock.unlock()
         if registration.generation != authorization.generation || !current() { retire() }
     }
-    deinit { if let observation { Session.shared.removeAuthorizationObserver(observation) } }
+    deinit { removeDraftRegistration(); if let observation { Session.shared.removeAuthorizationObserver(observation) } }
     private func current() -> Bool {
         let now = Session.shared.playbackAuthorization
         return now.generation == authorization.generation && now.origin == authorization.origin && now.token == authorization.token && now.token != nil
@@ -253,7 +284,7 @@ final class SharedSharingSecretDraft: ObservableObject {
         DispatchQueue.main.async { [weak self] in self?.objectWillChange.send() }
     }
     func leave() {
-        retire()
+        retire(); removeDraftRegistration()
         if let observation { Session.shared.removeAuthorizationObserver(observation); self.observation = nil }
     }
 }
