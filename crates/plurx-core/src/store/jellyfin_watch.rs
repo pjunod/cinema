@@ -168,7 +168,10 @@ WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12), eligible AS (
  AND (json_type(json_extract(p.payload,'$.selection_json'),'$.source.probe') IS NULL OR native_file.probe_json IS json_extract(json_extract(p.payload,'$.selection_json'),'$.source.probe'))
  LEFT JOIN watch_state w ON w.user_id=p.user_id AND w.item_id=p.item_id
  WHERE p.play_id=$6 AND p.user_id=$4 AND p.token_digest=$7 AND p.device_digest=$8 AND p.client_family=$9
- AND p.item_id=$1 AND p.state='active' AND ($12 IS NOT NULL OR EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$5)) AND p.manual_revision=$10 AND COALESCE(w.manual_revision,0)=$10
+ AND p.item_id=$1 AND p.state='active' AND ((p.direct_grant_id IS NOT NULL AND ($12 IS NOT NULL OR EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$5)))
+ OR EXISTS(SELECT 1 FROM media_sessions m WHERE m.incarnation_id=p.native_incarnation_id AND m.user_id=p.user_id AND m.playback_id=p.playback_id AND m.request_fingerprint=json_extract(p.payload,'$.native_request_fingerprint') AND m.media_origin_ms=json_extract(p.payload,'$.source_origin_ms')
+ AND ((m.state='active' AND m.publication_ready_at_ms=0 AND m.lease_expires_at_ms>$5*1000 AND EXISTS(SELECT 1 FROM media_playback_pointers ptr WHERE ptr.user_id=p.user_id AND ptr.playback_id=p.playback_id AND ptr.current_incarnation_id=m.incarnation_id))
+ OR ($12 IS NOT NULL AND m.state='ended' AND m.terminal_reason='deleted' AND NOT EXISTS(SELECT 1 FROM media_playback_pointers ptr WHERE ptr.user_id=p.user_id AND ptr.playback_id=p.playback_id))))) AND p.manual_revision=$10 AND COALESCE(w.manual_revision,0)=$10
  AND ($11 IS NULL OR (w.item_id IS NOT NULL AND w.position_ms=json_extract($11,'$.position_ms') AND w.duration_ms IS json_extract($11,'$.duration_ms') AND w.watched=json_extract($11,'$.watched') AND w.updated_at=json_extract($11,'$.updated_at')))
 ), input(duration_ms) AS (
  SELECT COALESCE((SELECT CASE WHEN i.kind='audiobook' THEN SUM(f.duration_ms) ELSE MAX(f.duration_ms) END FROM items i JOIN files f ON f.item_id=i.id WHERE i.id=$1 AND f.duration_ms>0 GROUP BY i.kind),CASE WHEN $2>0 THEN $2 END)
@@ -224,7 +227,8 @@ SELECT EXISTS(SELECT 1 FROM jellyfin_plays p
  AND (json_type(json_extract(p.payload,'$.selection_json'),'$.source.probe') IS NULL OR native_file.probe_json IS json_extract(json_extract(p.payload,'$.selection_json'),'$.source.probe'))
  LEFT JOIN watch_state w ON w.user_id=p.user_id AND w.item_id=p.item_id
  WHERE p.play_id=$1 AND p.user_id=$2 AND p.token_digest=$3 AND p.device_digest=$4 AND p.client_family=$5
- AND p.item_id=$7 AND p.state='active' AND EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$8) AND p.manual_revision=$6 AND COALESCE(w.manual_revision,0)=$6) AS current
+ AND p.item_id=$7 AND p.state='active' AND (EXISTS(SELECT 1 FROM file_grants g WHERE g.id=p.direct_grant_id AND g.user_id=p.user_id AND g.file_id=p.file_id AND g.source_token_hash=p.token_digest AND g.revoked_at IS NULL AND g.expires_at>$8)
+ OR EXISTS(SELECT 1 FROM media_sessions m JOIN media_playback_pointers ptr ON ptr.user_id=m.user_id AND ptr.playback_id=m.playback_id AND ptr.current_incarnation_id=m.incarnation_id WHERE m.incarnation_id=p.native_incarnation_id AND m.user_id=p.user_id AND m.playback_id=p.playback_id AND m.state='active' AND m.publication_ready_at_ms=0 AND m.lease_expires_at_ms>$8*1000 AND m.request_fingerprint=json_extract(p.payload,'$.native_request_fingerprint') AND m.media_origin_ms=json_extract(p.payload,'$.source_origin_ms'))) AND p.manual_revision=$6 AND COALESCE(w.manual_revision,0)=$6) AS current
 "#;
 #[cfg(feature = "hiqlite-store")]
 pub(crate) struct CurrentRow {

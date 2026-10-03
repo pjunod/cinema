@@ -1443,3 +1443,156 @@ async fn jellyfin_progress_rejects_a_changed_probe_even_when_source_size_and_mti
         assert_eq!(store.watch_state(play.scope.user_id, play.item_id).await.expect(backend).expect("watch").position_ms, 1000);
     }).await;
 }
+
+#[tokio::test]
+async fn jellyfin_media_progress_requires_the_live_exact_native_pointer_and_preserves_deleted_final_retry(
+) {
+    for_each_backend(|store, backend| async move {
+        let mut play = fixture(&store).await;
+        play.source_origin_ms = 0;
+        assert!(store
+            .create_jellyfin_play(play.clone())
+            .await
+            .expect("negotiation"));
+        let native = current_media_session(
+            store.as_ref(),
+            play.scope.user_id,
+            &play.playback_id,
+            "11111111-1111-4111-8111-111111111401",
+            "11111111-1111-4111-8111-111111111402",
+            backend,
+        )
+        .await;
+        assert!(store
+            .activate_jellyfin_play(
+                &play.play_id,
+                &play.scope,
+                Activation::MediaIncarnation(native.incarnation_id.clone()),
+                1_001
+            )
+            .await
+            .expect("binding"));
+        let beat = progress_write(&play, 0, 120_000, false);
+        assert!(!store
+            .jellyfin_progress_is_current(&beat)
+            .await
+            .expect("expired native lease"));
+        assert!(store
+            .put_jellyfin_progress(beat.clone(), None)
+            .await
+            .expect("expired write")
+            .is_none());
+        let renewed = store
+            .renew_media_sessions(
+                &native.owner_node_id,
+                &[MediaSessionRenewal {
+                    incarnation_id: native.incarnation_id.clone(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 180_000,
+                    fetched_through_ms: 120_000,
+                    media_sequence: 20,
+                }],
+                1_001,
+                unix_seconds() * 1000 + 1_800_000,
+            )
+            .await
+            .expect("renew exact native owner");
+        assert_eq!(renewed.len(), 1);
+        assert!(store
+            .jellyfin_progress_is_current(&beat)
+            .await
+            .expect("live native owner"));
+        assert_eq!(
+            store
+                .put_jellyfin_progress(beat, None)
+                .await
+                .expect("native progress")
+                .expect("accepted")
+                .position_ms,
+            120_000,
+            "original media clock, no resume offset"
+        );
+        store
+            .end_media_session(&native.session_id, "deleted", 1_002)
+            .await
+            .expect("native Stop cleanup")
+            .expect("exact route");
+        assert!(!store
+            .jellyfin_progress_is_current(&progress_write(&play, 0, 121_000, false))
+            .await
+            .expect("deleted admission"));
+        assert!(store
+            .put_jellyfin_progress(progress_write(&play, 0, 121_000, false), None)
+            .await
+            .expect("deleted ordinary progress")
+            .is_none());
+        assert!(store
+            .put_jellyfin_progress(progress_write(&play, 0, 122_000, true), None)
+            .await
+            .expect("retry final after native cleanup")
+            .is_some());
+        assert_eq!(
+            store
+                .jellyfin_play(&play.play_id, &play.scope)
+                .await
+                .expect("terminal binding")
+                .expect("binding")
+                .state,
+            "ended"
+        );
+
+        let mut next = play.clone();
+        next.play_id = uuid::Uuid::new_v4().simple().to_string();
+        assert!(store
+            .create_jellyfin_play(next.clone())
+            .await
+            .expect("next negotiation"));
+        let next_native = current_media_session(
+            store.as_ref(),
+            next.scope.user_id,
+            &next.playback_id,
+            "11111111-1111-4111-8111-111111111403",
+            "11111111-1111-4111-8111-111111111404",
+            backend,
+        )
+        .await;
+        assert!(store
+            .activate_jellyfin_play(
+                &next.play_id,
+                &next.scope,
+                Activation::MediaIncarnation(next_native.incarnation_id.clone()),
+                1_001
+            )
+            .await
+            .expect("next binding"));
+        current_media_session(
+            store.as_ref(),
+            next.scope.user_id,
+            &next.playback_id,
+            "11111111-1111-4111-8111-111111111405",
+            "11111111-1111-4111-8111-111111111406",
+            backend,
+        )
+        .await;
+        assert_eq!(
+            store
+                .jellyfin_play(&next.play_id, &next.scope)
+                .await
+                .expect("binding")
+                .expect("binding")
+                .state,
+            "active",
+            "unmapped native replacement leaves this row to be fenced by native ownership"
+        );
+        assert!(!store
+            .jellyfin_progress_is_current(&progress_write(&next, 0, 123_000, false))
+            .await
+            .expect("replaced native pointer"));
+        assert!(store
+            .put_jellyfin_progress(progress_write(&next, 0, 123_000, true), None)
+            .await
+            .expect("late native final")
+            .is_none());
+    })
+    .await;
+}
