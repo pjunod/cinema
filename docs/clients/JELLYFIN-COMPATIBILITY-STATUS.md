@@ -81,7 +81,7 @@ scratch after retaining minimized fixtures and findings.
 | Missing duration | New copy/encoded regression refuses absent, zero and negative durations without attaching sessions/renditions | Native prerequisite evidence; HTTP/client mapping pending |
 | Native prototype create with positive duration, missing index | Copy: immediate `vod_index_pending`; encoded: 200 in about 0.13 s, closed fMP4 playlist, physical Android renders native fragments | Single-fixture alias spike; production adapter and per-create policy pending |
 | First-minute engine attestation | Ready at 2.931 s; immediate encoded request returned 200 in 1.732 s; media-engine spawn attestation 0.048434 s | Isolated restart measured within first minute; transient/persistent fault outcomes below |
-| Long-pause real-client resurrection and VOD-only worker/relay propagation | Corrected Android recovery passes; trusted remote worker receives both policies and starts VOD; activated relay and Infuse repeat pending | Required J0 hard-seam experiments |
+| Long-pause real-client resurrection and VOD-only worker/relay propagation | Corrected Android recovery passes; trusted worker startup and activated relay pass; Infuse repeat pending | Required J0 hard-seam experiments |
 
 ### Physical Android TV — reference recovered; direct and encoded HLS rendered
 
@@ -306,8 +306,11 @@ HTTP worker starts now ran from an isolated voter to a distinct live learner
 with both internal policies selected and rolling recovery globally enabled:
 unindexed copy returned 422 in 4.4 ms; encoded VOD returned 201 in 1.403 s
 with an activation generation. Its unconfirmed provisional worker later
-received native terminal cleanup. This proves worker start, while durable
-facade activation and relay media delivery remain separate acceptance items. The passive route spike now passes ten focused
+received native terminal cleanup. A subsequent ordinary 480p placement selected that learner, retained both
+policies in its active durable recipe, and delivered playlist/init/fragment
+200 responses through the voter relay. Stop returned 204 and a late relayed
+fragment returned typed 410. Facade activation, physical remote-worker
+decoding and transparent owner failover remain separate acceptance items. The passive route spike now passes ten focused
 regressions, including real reader detach/resurrection, current-play identity,
 quotas, terminal/replacement fencing, reader-free owner renewal and expiry,
 and a public fragment GET against real indexed media retaining the same
@@ -325,7 +328,7 @@ remaining facade/worker/race boundaries are still pending; see the
 
 | Milestone | State | Remaining admission evidence |
 |---|---|---|
-| J0 | In progress | Both required physical flows; carrier/base-path traces; lifecycle/preparation experiments; frozen protocol subset and revised estimate |
+| J0 | In progress | Corrected physical Infuse long-pause repeat; final protocol freeze after that receipt |
 | J1 | Waiting on J0 | Identity, deterministic retirement/replacement guard, token-only service seams |
 | J2 | Waiting on J1 and traced artwork policy | Connect/browse, bounded misses and cold-node first sync |
 | J3 | Waiting on J2 | Direct/watch, Store revisions and per-play final durability |
@@ -341,3 +344,37 @@ Unperformed operations remain **not tested**. Do not mark
 J0 complete, start the full facade route build or reduce the required client
 matrix to compensate. No compatibility release, setting graduation or fleet
 deployment has occurred.
+
+## 5. Measured protocol candidate and revised estimate
+
+The pinned observations now cover movie playback, series/season/episode
+navigation, subtitle URL construction and replacement without an old Stopped
+report. They support the following candidate subset for J1–J5. Freeze it only
+after the corrected Infuse recovery receipt; a later client trace which needs
+an additional route requires an explicit contract amendment.
+
+| Request family | Candidate behavior justified by the retained traces |
+|---|---|
+| Bootstrap and authentication | Public system/user information, password authentication and observed Quick Connect capability behavior under the configured base path |
+| Catalog and navigation | User views, grouping options, virtual folders, item detail/list/latest/resume, NextUp, series seasons/episodes and observed RandomSeriesItems |
+| Artwork | Observed primary/backdrop paths, cache tags and bounded native artwork service; Android's anonymous image requests require the reviewed artwork policy |
+| Preferences and ancillary | Observed display preferences, local trailers, special features, MediaSegments and Intros with their defined semantic empty results |
+| Negotiation and media | PlaybackInfo, authenticated direct Range delivery, native immutable VOD aliases, and the measured Infuse master/item-relative playlist plus init-prefix representation |
+| Tracks | Requested audio selection and VTT metadata/delivery; native extraction and selection remain subject to J5 validation |
+| Playback reports | Playing, Progress and Stopped scoped to the authenticated device/current play; missing old Stopped cannot keep a predecessor alive |
+
+A malformed `/Items//` 404 in the trace is not a route to implement. Reference
+TS requests establish negotiation behavior; the measured native fMP4 probes
+define the candidate transport. First-page browsing does not qualify full
+library paging, and observed WebSocket handshakes do not justify inventing a
+remote-control implementation.
+
+**Revised planning estimate:** 6–10 engineer-weeks cumulative for the useful
+release, versus the reviewed 5–9 week estimate. This is an engineering estimate,
+not a calendar completion promise. The additional allowance covers passive
+route lifetime integration, Infuse's measured representation and their
+publication/race/physical qualification. The native policy and Android proof
+are already implemented, but facade identity/watch storage and the complete
+physical/cluster matrix remain substantial work. Re-estimate after J1's
+storage seams and J4's production transport tests; passing the J0 spike does
+not make those milestones complete.

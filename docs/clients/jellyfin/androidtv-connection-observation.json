@@ -5069,5 +5069,34 @@
       }
     ],
     "boundary": "Actual remote HTTP worker start accepts internal policies; no facade activation, relay media delivery or transparent owner failover claim."
+  },
+  "trusted_worker_activated_relay_probe": {
+    "source_commit": "5aae2a6f4",
+    "topology": "Disposable loopback voter and distinct live learner; normal native placement selected the learner.",
+    "observation": {
+      "height": 480,
+      "start_status": 200,
+      "elapsed_seconds": 0.2401935420348309,
+      "owner_is_distinct_learner": true,
+      "state": "active",
+      "vod_only": true,
+      "passive_vod": true,
+      "playlist": {
+        "status": 200,
+        "bytes": 10369
+      },
+      "init": {
+        "status": 200,
+        "bytes": 1279
+      },
+      "fragment": {
+        "status": 200,
+        "bytes": 517638
+      },
+      "stop_status": 204,
+      "late_fragment_status": 410,
+      "late_fragment_error_code": "media_session_ended"
+    },
+    "boundary": "Archived controlled native ingress selects the internal policies; real worker startup, target-owned durable activation and public voter-to-owner relay execute without a facade. No physical remote-worker decoding, passive remote-worker recovery or owner failover claim."
   }
 }

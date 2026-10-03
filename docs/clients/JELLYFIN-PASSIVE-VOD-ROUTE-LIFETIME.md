@@ -203,3 +203,17 @@ receives typed `vod_passive_capacity` without evicting those grants. Cancelling
 the pending create leaves the session map empty and permits a subsequent
 real create to use the released slot. This proves cancellation at that
 admission boundary; it does not claim 63 physically playing clients.
+
+### Activated worker relay — normal placement selected the learner
+
+A subsequent synthetic 480p start through the isolated voter's ordinary
+placement selected the distinct learner. The durable route was active at
+owner epoch 1 and its recipe retained both internal policies. Public media
+GETs entered the voter and relayed to the learner: playlist 200 (10,369 bytes),
+init 200 (1,279 bytes), fragment 200 (517,638 bytes). Native Stop returned 204;
+a late relayed fragment returned typed `410 media_session_ended`.
+
+This exercised actual worker start, target-owned durable activation and
+voter-to-owner media relay on the archived controlled-ingress build of
+`5aae2a6f4`. It does not prove facade activation, physical decoding of a remote
+worker stream, passive remote-worker recovery, or transparent owner failover.
