@@ -47,6 +47,7 @@ pub mod sharing_catalogue;
 pub mod sharing_catalogue_details;
 pub mod sharing_dns;
 pub mod sharing_file_locators;
+pub mod sharing_receiver_delivery;
 pub mod sharing_receiver_progress;
 pub mod sharing_receiver_retirement;
 pub mod sharing_receiver_sessions;
