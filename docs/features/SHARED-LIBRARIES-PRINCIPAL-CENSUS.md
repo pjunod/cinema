@@ -822,3 +822,57 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store
 cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tests
 cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
 ```
+
+
+## Actual VOD producer lifetime checkpoint
+
+The VOD segment producer now registers an opaque identity while attaching its
+actual child, descendant job and encode permit. Retirement transfers those
+objects into one detached process owner, so cancelling the caller waiting for
+retirement cannot drop admission. A failed child wait retries with the same
+owner and retains its resources. A cancelled or panicked writer task cannot
+certify settlement: its missing confirmation leaves the bounded owner
+quarantined. Successful child wait and joined stdout/diagnostic readers are
+both required before the owner drops admission and mints its generation
+receipt. An old receipt cannot retire a successor generation.
+
+The stdout generation task requests exact retirement before waiting for its
+own writer barrier. Diagnostics are bounded by a five-second deadline after
+retirement starts, preserving ordinary long-running producer diagnostics.
+Lifecycle outcome handling follows confirmed process and raw-reader
+settlement. The existing scheduling policy, metrics and Local VOD namespaces
+are retained.
+
+This receipt proves one actual process generation only. It neither authorizes
+Source binding release nor proves viewer demand, durable terminal projection,
+route cleanup or all downstream writers settled. Source creation and
+publication remain closed. Missing-init head regeneration is a separate helper
+and is not qualified by this segment-producer receipt. A future Source actor
+must retain each immutable binding and every associated physical generation,
+then require its own last demand and complete terminal settlement before a
+retirement writer can release its durable obligation.
+
+The checkpoint merges frozen Root
+`4ebb852268cff912f21e8e3bbf95917baf0186ca` as
+`7f1b1c200e2a058b6ad92c962cb674efbebfd0dd`. Pinned Rust 1.97.1 checked the
+actual daemon. The new cancellation regression uses an actual spawned child,
+actual encode admission, an injected first wait error and an independently
+paused retry. Admission remains held after caller cancellation, wait error and
+successful wait before writer settlement; it is released after both barriers,
+and the old exact receipt leaves a new live generation untouched. It passed
+with one test and zero ignored tests in 9.81 seconds on the final source. All twelve existing
+process-slot contracts passed in 0.03 seconds. Their macOS process-state
+inspection requires running outside the restricted sandbox. The actual ffmpeg
+held-capacity regression passed in 2.10 seconds and the NTSC forward/backward
+restart regression passed in 3.08 seconds, each with one test and zero ignored
+tests. Daemon all-target check passed in 54.92 seconds. Clippy with denied
+warnings passed in 1 minute 10 seconds.
+
+```sh
+cargo test --locked -p plurxd --bin plurxd source_registered_producer_retains_real_permit_until_wait_and_writers -- --nocapture
+cargo test --locked -p plurxd --bin plurxd prodrun::tests -- --nocapture
+cargo test --locked -p plurxd --bin plurxd encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap -- --nocapture
+cargo test --locked -p plurxd --bin plurxd encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts -- --nocapture
+cargo check --locked -p plurxd --all-targets
+cargo clippy --locked -p plurxd --all-targets -- -D warnings
+```
