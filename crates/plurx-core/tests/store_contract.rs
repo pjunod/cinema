@@ -22,6 +22,8 @@ use queue_fixture::QueueFixture;
 mod background_jobs;
 #[path = "store_contract/sharing.rs"]
 mod sharing;
+#[path = "store_contract/sharing_catalogue.rs"]
+mod sharing_catalogue;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

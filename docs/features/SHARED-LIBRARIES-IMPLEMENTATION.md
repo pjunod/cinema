@@ -1464,7 +1464,7 @@ implied by the build handoff.
 | S1 | implemented; task gate pending | `codex/sharing-s1-state` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Task PR/gate remain pending. |
 | S2 | not started | — | — |
 | S3 | not started | — | — |
-| S4 | not started | — | — |
+| S4 | catalogue primitives and private history implemented; qualification pending | `codex/sharing-s4-catalogue` | Signed live-list boundaries, closed source references and bounded batch inputs; receiver-only ordered watch transactions. Runtime catalogue/routes/revisions/cache/artwork and real scan liveness remain open. |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
 | S7 | not started | — | — |
@@ -1574,3 +1574,52 @@ and Docker profiles; S7/S8 require physical Apple TV/Google TV and the
 cluster/resource matrix. No network, shared playback, native client, promotion
 or Developer graduation evidence is claimed by S1. S2–S8 remain work after
 the S1 task is integrated; no deployment is authorized.
+
+
+### 16.5 Parallel S4 implementation — catalogue boundaries and private progress
+
+The isolated task starts from S1 effort landing `971265536`, using the pinned
+Rust 1.97.1 compiler. It does not enable a peer or viewer route.
+
+**Built:** [catalogue values](../../crates/plurx-core/src/sharing_catalogue.rs)
+keep full import/server/catalogue/library/item identities and canonical string
+IDs. Cursor MACs derive a catalogue key from the provisioned credential key and
+use a fixed catalogue purpose prefix; key bytes are not exported. Cursors last five minutes, are
+bounded to 4 KiB, and bind the grant, library, query and exact sort boundary.
+A changed order revision retains that boundary. Current authority still has
+to be read with the page; a signed cursor is never an authorization grant.
+Batch parsing stops before retaining more than 200 IDs. Logical browse
+identity retention suppresses duplicates across evicted pages.
+
+The [private watch Store](../../crates/plurx-core/src/store/sharing_catalogue.rs)
+uses the existing receiver-only table. A single guarded write checks current
+import, viewer assignment and captured lifecycle/assignment generations.
+Higher sequences replace progress; identical retries replay; lower sequences
+and conflicting same-sequence values cannot overwrite a newer position.
+A changed item/library identity is refused. Reads check current assignments,
+so disconnect or unassignment hides retained progress. No statement writes
+local household watch state or source-side history. The HTTP caller still
+has to verify a live local login and current source item membership; these
+Store methods do not attest foreign metadata.
+
+**Observed:** four catalogue/progress unit regressions passed with zero ignored
+tests (0.10 seconds). The private-watch contract passed on both SQLite modes and
+three actual Hiqlite voters (9.33 seconds, one contract, zero ignored tests).
+The reference/dedup fixture retained 40,000 distinct references; this is not
+a process-memory measurement. Documentation indexing passed four tests and
+catalog lint passed. Clippy passed all core targets with denied warnings
+and the replicated contract feature (39.10 seconds). The focused
+pinned-toolchain commands were:
+
+```sh
+cargo test --locked --offline -p plurx-core --features hiqlite-store --lib sharing_catalogue -- --nocapture
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_private_watch -- --nocapture
+cargo clippy --locked --offline -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+**Still owed:** consistent source catalogue reads and order-revision updates,
+closed presentation DTOs, peer/viewer route wiring, scoped artwork, bounded
+metadata/art caches, batch concurrency, source revalidation of Continue
+Watching, and measured paging under actual continuous scan writes. Cursor
+unit tests that advance revisions are not the scan-liveness receipt. S4 is
+partial; no Tailscale, playback, client or promotion qualification is claimed.

@@ -325,6 +325,20 @@ impl CredentialKey {
         &self.id
     }
 
+    /// Authenticate a bounded catalogue cursor without exporting credential key material.
+    /// The fixed purpose prefix prevents reuse of an envelope or other sharing MAC.
+    pub(crate) fn sharing_catalogue_cursor_mac(&self, payload: &[u8]) -> [u8; 32] {
+        let root = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let derived = ring::hmac::sign(&root, b"cinema-sharing-catalogue-key-v1");
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, derived.as_ref());
+        let mut context = ring::hmac::Context::with_key(&key);
+        context.update(b"cinema-sharing-catalogue-cursor-v1\0");
+        context.update(payload);
+        let mut result = [0; 32];
+        result.copy_from_slice(context.sign().as_ref());
+        result
+    }
+
     /// Mint fresh key material that is never written anywhere.
     ///
     /// For callers with no data directory to resolve a key file from. Anything
