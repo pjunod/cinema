@@ -325,6 +325,7 @@ mod tests {
             source_object_version: "object:1".into(),
             policy_generation: "policy:1".into(),
             intent: intent.clone(),
+            candidate_catalog: None,
             scratch_bytes: 1000,
             reason: "recent_demand".into(),
         };
@@ -493,6 +494,7 @@ mod tests {
                 source_object_version: "object:1".into(),
                 policy_generation: "copy:1".into(),
                 intent: intent.clone(),
+                candidate_catalog: None,
                 scratch_bytes: 1000,
                 reason: "recent_demand".into(),
             },

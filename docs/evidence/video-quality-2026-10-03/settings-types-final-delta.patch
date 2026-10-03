@@ -1,0 +1,22 @@
+diff --git a/crates/plurxd/src/web/pages/settings-developer.js b/crates/plurxd/src/web/pages/settings-developer.js
+index c4ed9f39d..672da27d2 100644
+--- a/crates/plurxd/src/web/pages/settings-developer.js
++++ b/crates/plurxd/src/web/pages/settings-developer.js
+@@ -588,7 +588,7 @@ function contentEncodingCard(settings){
+ async function saveContentEncoding(btn){
+   const err=document.getElementById("content-encoding-error");if(err)err.textContent="";btn.disabled=true;
+   try{
+-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{content_aware_encoding:document.getElementById("content-encoding").checked}}));
++    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{content_aware_encoding:(/** @type {HTMLInputElement} */ (document.getElementById("content-encoding"))).checked}}));
+     const card=document.getElementById("content-encoding-card");if(card)card.outerHTML=contentEncodingCard(saved);
+   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+ }
+@@ -603,7 +603,7 @@ function vodReorderCard(settings){
+ async function saveVodReorder(btn){
+   const err=document.getElementById("vod-reorder-error");if(err)err.textContent="";btn.disabled=true;
+   try{
+-    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:document.getElementById("vod-reorder").checked?2:0}}));
++    const saved=cacheSettings(await api("/settings",{method:"PUT",body:{vod_reorder_frames:(/** @type {HTMLInputElement} */ (document.getElementById("vod-reorder"))).checked?2:0}}));
+     const card=document.getElementById("vod-reorder-card");if(card)card.outerHTML=vodReorderCard(saved);
+   }catch(error){if(err)err.textContent=error.message;}finally{btn.disabled=false;}
+ }

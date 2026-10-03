@@ -22,13 +22,15 @@ use crate::http::peer_transport::{deadline_after, PeerAuthMode, PeerTransport};
 use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
+pub(crate) const QUALITY_CANDIDATES_V2_PATH: &str = "/internal/v2/media/quality-candidates";
 pub(crate) const QUALITY_CANDIDATES_PATH: &str = "/internal/v1/media/quality-candidates";
 pub(crate) const QUALITY_CATALOG_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 7 requires pre-filter HEVC proof and source-fenced copy VOD.
-/// Exact-version placement/takeover checks exclude pre-fix workers. Old
-/// public ingress and existing sessions must still be drained on rollout.
-pub(crate) const PROTOCOL_VERSION: i64 = 7;
+/// Protocol 8 preserves canonical capability and planning bindings at dispatch,
+/// in addition to pre-filter HEVC proof and source-fenced copy VOD. Exact-version
+/// placement excludes strict older workers. Old ingress and sessions must be
+/// drained on rollout.
+pub(crate) const PROTOCOL_VERSION: i64 = 8;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -196,29 +198,74 @@ pub(crate) struct QualityCatalogRequest {
 }
 
 impl QualityCatalogRequest {
-    pub(crate) fn is_valid(&self) -> bool {
-        self.audio_claim
+    pub(crate) fn validate(&self) -> Result<(), CatalogValidationError> {
+        let failure = |clause: &str, observed, limit| CatalogValidationError {
+            clause: clause.to_owned(),
+            observed,
+            limit,
+        };
+        if self
+            .audio_claim
             .as_ref()
-            .is_none_or(|claim| claim.valid_snapshot())
-            && self
-                .audio_delivery
-                .as_ref()
-                .is_none_or(|audio| audio.valid_snapshot())
-            && self
-                .copy_contract
-                .is_none_or(|(_, preserve, convert)| !convert || preserve)
-            && self.file_id > 0
-            && self.source_size >= 0
-            && self.source_mtime >= 0
-            && self.caps.v == plurx_core::playback::DeviceCaps::VERSION
-            && self.caps.video.len() <= MAX_CAPABILITIES
-            && self.caps.validate_audio_sinks().is_ok()
-            && self.caps.validate_progressive_hevc_sample_entries().is_ok()
-            && (-15_000..=15_000).contains(&self.audio_offset_ms)
-            && [self.audio_index, self.subtitle_burn]
-                .into_iter()
-                .flatten()
-                .all(|index| (0..=MAX_TRACK_INDEX).contains(&index))
+            .is_some_and(|claim| !claim.valid_snapshot())
+        {
+            return Err(failure("audio_claim", 1, 0));
+        }
+        if self
+            .audio_delivery
+            .as_ref()
+            .is_some_and(|audio| !audio.valid_snapshot())
+        {
+            return Err(failure("audio_delivery", 1, 0));
+        }
+        if self
+            .copy_contract
+            .is_some_and(|(_, preserve, convert)| convert && !preserve)
+        {
+            return Err(failure("copy_contract", 1, 0));
+        }
+        if self.file_id <= 0 || self.source_size < 0 || self.source_mtime < 0 {
+            return Err(failure("source_identity", 0, 1));
+        }
+        if self.caps.v != plurx_core::playback::DeviceCaps::VERSION {
+            return Err(failure("caps_version", usize::from(self.caps.v), 2));
+        }
+        if self.caps.video.len() > plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES {
+            return Err(failure(
+                "video_entries",
+                self.caps.video.len(),
+                plurx_core::playback::MAX_CLIENT_DECODER_ENTRIES,
+            ));
+        }
+        if self.caps.validate_audio_sinks().is_err() {
+            return Err(failure("audio_sinks", self.caps.audio_sinks.len(), 0));
+        }
+        if self
+            .caps
+            .validate_progressive_hevc_sample_entries()
+            .is_err()
+        {
+            return Err(failure("progressive_hevc_sample_entries", 1, 0));
+        }
+        if !(-15_000..=15_000).contains(&self.audio_offset_ms) {
+            return Err(failure(
+                "audio_offset",
+                self.audio_offset_ms.unsigned_abs() as usize,
+                15_000,
+            ));
+        }
+        if [self.audio_index, self.subtitle_burn]
+            .into_iter()
+            .flatten()
+            .any(|index| !(0..=MAX_TRACK_INDEX).contains(&index))
+        {
+            return Err(failure("track_index", 1, MAX_TRACK_INDEX as usize));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_valid(&self) -> bool {
+        self.validate().is_ok()
     }
 }
 
@@ -227,6 +274,138 @@ impl QualityCatalogRequest {
 pub(crate) struct WorkerQualityCandidate {
     pub node_id: String,
     pub candidate: plurx_core::playback::candidate::QualityCandidate,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding: Option<PlanningBinding>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub partial: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dispatch_supported: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CatalogValidationError {
+    pub clause: String,
+    pub observed: usize,
+    pub limit: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum CatalogCause {
+    RequestInvalid(CatalogValidationError),
+    LocalDeadline,
+    PeerDeadline,
+    PeerBusy,
+    Transport,
+    Maintenance,
+    StaleSource,
+    AuthorityRefused,
+    SnapshotUnavailable,
+    PeerProtocol,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PlanningBinding {
+    pub generation: i64,
+    pub source_digest: String,
+}
+impl PlanningBinding {
+    pub(crate) fn from_snapshot(snapshot: &plurx_core::store::PlaybackPlanningSnapshot) -> Self {
+        use sha2::{Digest, Sha256};
+        let encoded = serde_json::to_vec(&(
+            "plurx:planning-source-reorder:v1",
+            &snapshot.file,
+            &snapshot.probe_json,
+            crate::transcode::TranscodeManager::vod_reorder_from_snapshot(snapshot),
+        ))
+        .expect("source snapshot serializes");
+        Self {
+            generation: snapshot.generation,
+            source_digest: hex::encode(Sha256::digest(encoded)),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct BudgetedCatalogRequest {
+    pub expected_binding: Option<PlanningBinding>,
+    pub budget_ms: u32,
+    pub request: QualityCatalogRequest,
+}
+
+#[derive(Clone)]
+pub(crate) struct CreateStartupBudget {
+    pub deadline: tokio::time::Instant,
+    calls: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    binding: std::sync::Arc<std::sync::Mutex<Option<PlanningBinding>>>,
+}
+impl CreateStartupBudget {
+    pub(crate) fn new(remaining_ms: u64) -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + Duration::from_millis(remaining_ms.min(10_000)),
+            calls: Default::default(),
+            binding: Default::default(),
+        }
+    }
+    pub(crate) fn calls(&self) -> u32 {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+    pub(crate) fn scope<T>(
+        &self,
+        future: impl std::future::Future<Output = T>,
+    ) -> impl std::future::Future<Output = T> {
+        CREATE_STARTUP_BUDGET.scope(self.clone(), Box::pin(future))
+    }
+}
+/// A local worker is owned past HTTP cancellation, but its critical-path
+/// Store reads and remaining startup allowance still belong to the create.
+pub(crate) fn spawn_create_worker<T: Send + 'static>(
+    future: impl std::future::Future<Output = T> + Send + 'static,
+) -> tokio::task::JoinHandle<T> {
+    let counts = plurx_core::store::current_http_store_operations().unwrap_or_default();
+    let budget = CREATE_STARTUP_BUDGET.try_with(Clone::clone).ok();
+    let future = Box::pin(future);
+    tokio::spawn(async move {
+        let work = plurx_core::store::scope_http_store_operations(counts, future);
+        if let Some(budget) = budget {
+            budget.scope(work).await
+        } else {
+            work.await
+        }
+    })
+}
+
+pub(crate) fn create_stage_deadline(maximum: Duration) -> tokio::time::Instant {
+    let deadline = deadline_after(maximum);
+    CREATE_STARTUP_BUDGET
+        .try_with(|budget| deadline.min(budget.deadline - Duration::from_millis(250)))
+        .unwrap_or(deadline)
+}
+
+pub(crate) fn capture_create_planning_binding(
+    snapshot: &plurx_core::store::PlaybackPlanningSnapshot,
+) {
+    let _ = CREATE_STARTUP_BUDGET.try_with(|budget| {
+        *budget
+            .binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(PlanningBinding::from_snapshot(snapshot));
+    });
+}
+
+tokio::task_local! { static CREATE_STARTUP_BUDGET: CreateStartupBudget; }
+
+/// Completion and bounded causes survive aggregation; empty rows alone are
+/// never proof that discovery completed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct QualityCatalogResult {
+    pub candidates: Vec<WorkerQualityCandidate>,
+    pub authority_refused: bool,
+    pub complete: bool,
+    pub causes: Vec<CatalogCause>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -902,24 +1081,60 @@ impl MediaPool {
         state: &AppState,
         request: QualityCatalogRequest,
     ) -> Vec<WorkerQualityCandidate> {
-        if !request.is_valid() {
-            return Vec::new();
+        self.quality_catalog(state, request).await.candidates
+    }
+
+    pub(crate) async fn quality_catalog(
+        &self,
+        state: &AppState,
+        request: QualityCatalogRequest,
+    ) -> QualityCatalogResult {
+        let started = tokio::time::Instant::now();
+        let deadline = CREATE_STARTUP_BUDGET
+            .try_with(|budget| {
+                let count = budget
+                    .calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                tracing::info!(
+                    file_id = request.file_id,
+                    catalog_call = count,
+                    "create catalog accounting"
+                );
+                deadline_after(QUALITY_CATALOG_DEADLINE)
+                    .min(budget.deadline - Duration::from_millis(500))
+            })
+            .unwrap_or_else(|_| deadline_after(QUALITY_CATALOG_DEADLINE));
+        if let Err(error) = request.validate() {
+            tracing::warn!(
+                file_id = request.file_id,
+                video_entries = request.caps.video.len(),
+                clause = error.clause,
+                observed = error.observed,
+                limit = error.limit,
+                elapsed_ms = started.elapsed().as_millis(),
+                "quality catalog request_invalid before discovery"
+            );
+            return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
         }
-        let deadline = deadline_after(QUALITY_CATALOG_DEADLINE);
-        let local = tokio::time::timeout_at(deadline, local_quality_candidates(state, &request));
+        let expected_binding = CREATE_STARTUP_BUDGET
+            .try_with(|budget| {
+                budget
+                    .binding
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            })
+            .ok()
+            .flatten();
+        let local = local_quality_catalog(state, &request, deadline, expected_binding.as_ref());
         let remote = async {
-            let peers = tokio::time::timeout_at(deadline, self.membership.media_peers())
-                .await
-                .ok()
-                .and_then(Result::ok)
-                .unwrap_or_default();
-            let Ok(body) = serde_json::to_vec(&request) else {
-                return Vec::new();
+            let peers = match tokio::time::timeout_at(deadline, self.membership.media_peers()).await
+            {
+                Ok(Ok(peers)) => peers,
+                _ => return vec![QualityCatalogResult::unavailable(CatalogCause::Transport)],
             };
-            if body.len() > MAX_REQUEST_BYTES {
-                return Vec::new();
-            }
-            stream::iter(
+            let results = stream::iter(
                 peers
                     .into_iter()
                     .filter(|peer| {
@@ -927,51 +1142,175 @@ impl MediaPool {
                     })
                     .take(MAX_PEERS)
                     .map(|peer| {
-                        let body = body.clone();
+                        let request = request.clone();
+                        let expected_binding = expected_binding.clone();
                         async move {
-                            let base = peer.http_base.as_deref()?;
+                            let Some(base) = peer.http_base.as_deref() else {
+                                return QualityCatalogResult::unavailable(CatalogCause::Transport);
+                            };
+                            // Clock independent duration: subtract both transit reserves before
+                            // signing, and never restart the parent deadline on fallback.
+                            let budget_ms = deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                .saturating_sub(Duration::from_millis(500))
+                                .as_millis()
+                                .min(1500) as u32;
+                            if budget_ms == 0 {
+                                return QualityCatalogResult::unavailable(
+                                    CatalogCause::PeerDeadline,
+                                );
+                            }
+                            let Ok(body) = serde_json::to_vec(&BudgetedCatalogRequest {
+                                budget_ms,
+                                request: request.clone(),
+                                expected_binding,
+                            }) else {
+                                return QualityCatalogResult::unavailable(
+                                    CatalogCause::PeerProtocol,
+                                );
+                            };
+                            if body.len() > MAX_REQUEST_BYTES {
+                                return QualityCatalogResult::unavailable(
+                                    CatalogCause::PeerProtocol,
+                                );
+                            }
                             let response = self
                                 .transport
                                 .request(
                                     &peer.node_id,
                                     base,
                                     reqwest::Method::POST,
-                                    QUALITY_CANDIDATES_PATH,
+                                    QUALITY_CANDIDATES_V2_PATH,
                                     body,
                                     deadline,
                                     MAX_OFFER_BYTES,
                                     PeerAuthMode::ExactRequest,
                                 )
-                                .await
-                                .ok()?;
-                            if !response.status.is_success() {
-                                return None;
+                                .await;
+                            let mut response = match response {
+                                Ok(response) => response,
+                                Err(crate::http::peer_transport::PeerTransportError::TimedOut) => return QualityCatalogResult::unavailable(CatalogCause::PeerDeadline),
+                                Err(crate::http::peer_transport::PeerTransportError::InvalidResponse) => return QualityCatalogResult::unavailable(CatalogCause::PeerProtocol),
+                                Err(crate::http::peer_transport::PeerTransportError::Unreachable) => return QualityCatalogResult::unavailable(CatalogCause::Transport),
+                            };
+                            let legacy = response.status == reqwest::StatusCode::NOT_FOUND;
+                            if legacy {
+                                let Ok(body) = serde_json::to_vec(&request) else {
+                                    return QualityCatalogResult::unavailable(
+                                        CatalogCause::PeerProtocol,
+                                    );
+                                };
+                                if body.len() > MAX_REQUEST_BYTES {
+                                    return QualityCatalogResult::unavailable(
+                                        CatalogCause::PeerProtocol,
+                                    );
+                                }
+                                response = match self
+                                    .transport
+                                    .request(
+                                        &peer.node_id,
+                                        base,
+                                        reqwest::Method::POST,
+                                        QUALITY_CANDIDATES_PATH,
+                                        body,
+                                        deadline,
+                                        MAX_OFFER_BYTES,
+                                        PeerAuthMode::ExactRequest,
+                                    )
+                                    .await
+                                {
+                                    Ok(response) => response,
+                                    Err(_) => {
+                                        return QualityCatalogResult::unavailable(
+                                            CatalogCause::Transport,
+                                        )
+                                    }
+                                };
                             }
-                            let candidates: Vec<WorkerQualityCandidate> =
-                                serde_json::from_slice(&response.body).ok()?;
-                            (candidates.len() <= 32
-                                && candidates.iter().all(|entry| {
-                                    entry.node_id == peer.node_id
-                                        && entry.candidate.identity_matches()
-                                        && (1..=16_384).contains(&entry.candidate.width)
-                                        && (1..=16_384).contains(&entry.candidate.height)
-                                }))
-                            .then_some(candidates)
+                            if !response.status.is_success() {
+                                let cause =
+                                    match response.status.as_u16() {
+                                        429 => CatalogCause::PeerBusy,
+                                        504 => CatalogCause::PeerDeadline,
+                                        400 => CatalogCause::PeerProtocol,
+                                        _ => {
+                                            if serde_json::from_slice::<serde_json::Value>(
+                                                &response.body,
+                                            )
+                                            .ok()
+                                            .is_some_and(|value| {
+                                                value.get("code").and_then(|code| code.as_str())
+                                                    == Some("serving_fenced")
+                                            }) {
+                                                CatalogCause::AuthorityRefused
+                                            } else {
+                                                CatalogCause::Transport
+                                            }
+                                        }
+                                    };
+                                return QualityCatalogResult::unavailable(cause);
+                            }
+                            let outcome = if legacy {
+                                serde_json::from_slice::<Vec<WorkerQualityCandidate>>(
+                                    &response.body,
+                                )
+                                .map(|candidates| {
+                                    QualityCatalogResult {
+                                        candidates,
+                                        complete: false,
+                                        causes: vec![CatalogCause::PeerProtocol],
+                                        authority_refused: false,
+                                    }
+                                })
+                            } else {
+                                serde_json::from_slice::<QualityCatalogResult>(&response.body)
+                            };
+                            let Ok(outcome) = outcome else {
+                                return QualityCatalogResult::unavailable(
+                                    CatalogCause::PeerProtocol,
+                                );
+                            };
+                            if outcome.candidates.len() > 32
+                                || outcome.causes.len() > 16
+                                || outcome.candidates.iter().any(|entry| {
+                                    entry.node_id != peer.node_id
+                                        || !entry.candidate.identity_matches()
+                                        || !(1..=16_384).contains(&entry.candidate.width)
+                                        || !(1..=16_384).contains(&entry.candidate.height)
+                                        || entry.binding.as_ref().is_some_and(|binding| {
+                                            binding.generation < 0
+                                                || binding.source_digest.len() != 64
+                                        })
+                                })
+                            {
+                                return QualityCatalogResult::unavailable(
+                                    CatalogCause::PeerProtocol,
+                                );
+                            }
+                            outcome
                         }
                     }),
             )
             .buffer_unordered(8)
-            .filter_map(|result| async move { result })
             .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
+            .await;
+            results
         };
-        let (local, remote) = tokio::join!(local, remote);
-        let mut candidates = local.unwrap_or_default();
-        candidates.extend(remote);
-        candidates
+        let (mut result, remote) = tokio::join!(local, remote);
+        for outcome in remote {
+            result.complete &= outcome.complete;
+            result.authority_refused |= outcome.authority_refused;
+            result.candidates.extend(outcome.candidates);
+            for cause in outcome.causes {
+                if result.causes.len() < 16 && !result.causes.contains(&cause) {
+                    result.causes.push(cause);
+                }
+            }
+        }
+        tracing::info!(file_id = request.file_id, video_entries = request.caps.video.len(),
+            candidate_count = result.candidates.len(), complete = result.complete, causes = ?result.causes,
+            elapsed_ms = started.elapsed().as_millis(), "quality catalog discovery finished");
+        result
     }
 
     pub(crate) async fn offers(
@@ -1262,43 +1601,102 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
     }
 }
 
-pub(crate) async fn local_quality_candidates(
+impl QualityCatalogResult {
+    pub(crate) fn unavailable(cause: CatalogCause) -> Self {
+        Self {
+            candidates: Vec::new(),
+            authority_refused: cause == CatalogCause::AuthorityRefused,
+            complete: false,
+            causes: vec![cause],
+        }
+    }
+}
+
+pub(crate) async fn local_quality_catalog(
     state: &AppState,
     request: &QualityCatalogRequest,
-) -> Vec<WorkerQualityCandidate> {
-    if !request.is_valid()
-        || state.membership.local_maintenance_active()
-        || !state.serving.accepting_new_media().await
-    {
-        return Vec::new();
+    deadline: tokio::time::Instant,
+    expected_binding: Option<&PlanningBinding>,
+) -> QualityCatalogResult {
+    if deadline <= tokio::time::Instant::now() {
+        return QualityCatalogResult::unavailable(CatalogCause::LocalDeadline);
     }
-    let Ok(Some(file)) = state.store.get_file(request.file_id).await else {
-        return Vec::new();
+    if let Err(error) = request.validate() {
+        return QualityCatalogResult::unavailable(CatalogCause::RequestInvalid(error));
+    }
+    if state.membership.local_maintenance_active() {
+        return QualityCatalogResult::unavailable(CatalogCause::Maintenance);
+    }
+    let progress = std::sync::Mutex::new(Vec::new());
+    let binding = std::sync::Mutex::new(None);
+    let work = async {
+        if !state.serving.accepting_new_media().await {
+            return Err(CatalogCause::AuthorityRefused);
+        }
+        let snapshot = state
+            .store
+            .playback_planning_snapshot(request.file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .map_err(|_| CatalogCause::SnapshotUnavailable)?
+            .ok_or(CatalogCause::StaleSource)?;
+        if snapshot.file.size != request.source_size || snapshot.file.mtime != request.source_mtime
+        {
+            return Err(CatalogCause::StaleSource);
+        }
+        if expected_binding
+            .is_some_and(|expected| *expected != PlanningBinding::from_snapshot(&snapshot))
+        {
+            return Err(CatalogCause::StaleSource);
+        }
+        *binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(PlanningBinding::from_snapshot(&snapshot));
+        state
+            .transcode
+            .quality_catalog_from_snapshot_progress(
+                &snapshot,
+                &request.caps,
+                request.audio_index,
+                request.audio_offset_ms,
+                request.subtitle_burn,
+                request.presentation,
+                request.copy_contract,
+                request.audio_delivery.as_ref(),
+                request.audio_claim.as_ref(),
+                Some(&progress),
+                None,
+            )
+            .await;
+        Ok(())
     };
-    if file.size != request.source_size || file.mtime != request.source_mtime {
-        return Vec::new();
-    }
-    state
-        .transcode
-        .quality_candidates_with_copy_contract(
-            &file,
-            &request.caps,
-            request.audio_index,
-            request.audio_offset_ms,
-            request.subtitle_burn,
-            request.presentation,
-            request.copy_contract,
-            request.audio_delivery.as_ref(),
-            request.audio_claim.as_ref(),
-        )
-        .await
+    let (complete, causes) = match tokio::time::timeout_at(deadline, work).await {
+        Ok(Ok(())) => (true, Vec::new()),
+        Ok(Err(cause)) => (false, vec![cause]),
+        Err(_) => (false, vec![CatalogCause::LocalDeadline]),
+    };
+    let binding = binding
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let candidates = progress
+        .into_inner()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .into_iter()
         .take(32)
         .map(|candidate| WorkerQualityCandidate {
             node_id: state.node_id.clone(),
             candidate,
+            binding: binding.clone(),
+            partial: !complete,
+            dispatch_supported: true,
         })
-        .collect()
+        .collect();
+    QualityCatalogResult {
+        candidates,
+        authority_refused: causes.contains(&CatalogCause::AuthorityRefused),
+        complete,
+        causes,
+    }
 }
 
 pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -> MediaOffer {
@@ -1796,6 +2194,57 @@ mod tests {
             live_tv_processing: false,
             live_tv_resource_processing: true,
         }
+    }
+
+    #[test]
+    fn catalog_validation_retains_video_count_clause() {
+        let caps = serde_json::from_value(serde_json::json!({
+            "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec": "h264", "present": ["sdr"]})).collect::<Vec<_>>()
+        })).expect("valid decoder rows");
+        let request = QualityCatalogRequest {
+            audio_claim: None,
+            audio_delivery: None,
+            copy_contract: None,
+            file_id: 1,
+            source_size: 10,
+            source_mtime: 1,
+            caps,
+            audio_index: Some(1),
+            audio_offset_ms: 0,
+            subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        assert_eq!(
+            request.validate(),
+            Err(CatalogValidationError {
+                clause: "video_entries".to_owned(),
+                observed: 65,
+                limit: 64,
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_remaining_allowance_is_capped_and_keeps_one_deadline() {
+        let before = tokio::time::Instant::now();
+        let bounded = CreateStartupBudget::new(u64::MAX);
+        assert!(bounded.deadline <= before + Duration::from_millis(10_001));
+        let short = CreateStartupBudget::new(25);
+        let deadline = short.deadline;
+        short
+            .scope(async {
+                assert_eq!(
+                    CREATE_STARTUP_BUDGET.with(|budget| budget.deadline),
+                    deadline
+                );
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                assert_eq!(
+                    CREATE_STARTUP_BUDGET.with(|budget| budget.deadline),
+                    deadline
+                );
+            })
+            .await;
+        assert!(short.deadline < bounded.deadline);
     }
 
     #[test]

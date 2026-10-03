@@ -201,12 +201,15 @@ impl TranscodeManager {
         file_id: i64,
         plan: &ResolvedTranscode,
         source_object_version: Option<&str>,
+        reorder_frames: bool,
     ) -> bool {
         let (Some(source_object_version), Some(pipeline)) = (source_object_version, self.digest())
         else {
             return false;
         };
-        let Ok(recipe) = self.candidate_recipe_digest(plan, super::Presentation::Vod) else {
+        let Ok(recipe) =
+            self.candidate_recipe_digest(plan, super::Presentation::Vod, reorder_frames)
+        else {
             return false;
         };
         self.vod

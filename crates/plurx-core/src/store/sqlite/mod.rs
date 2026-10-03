@@ -1183,17 +1183,25 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::background_jobs::RECEIPT_PRESSURE_SCHEMA,
     // v87: expiring viewer interests follow exact analysis into fragment work.
     super::background_jobs::VIEWER_ANALYSIS_SCHEMA,
-    // v88: preserve the resolved audio recipe across offline queue retries.
+    // v88: bounded fragment retention probes, including empty result keys.
+    super::fragment_index_cluster::ANALYSIS_RESULT_TARGET_FORCE_SCHEMA,
+    // v89: file/source-indexed preparation status reads.
+    super::background_jobs::PREPARATION_INDEX_SCHEMA,
+    // v90: distinguish explicit conversion attempts from automatic discovery.
+    super::dv_conversion::DV_REQUEST_PROVENANCE_COLUMN,
+    // v91: transactional playback planning settings generation.
+    super::PLAYBACK_INPUT_SCHEMA,
+    // v92: preserve the resolved audio recipe across offline queue retries.
     "ALTER TABLE offline_packages ADD COLUMN audio_recipe TEXT;",
-    // v89: independently attributed completed-transfer Link negatives.
+    // v93: independently attributed completed-transfer Link negatives.
     super::telemetry::NETWORK_PRIOR_LINK_COLUMNS,
-    // v90: exact candidate-bound node-local Link samples, never legacy inference.
+    // v94: exact candidate-bound node-local Link samples, never legacy inference.
     super::candidate_link::SCHEMA,
-    // v91: copy preparation follows the same exact source cancellation guards.
+    // v95: copy preparation follows the same exact source cancellation guards.
     super::background_jobs::COPY_OUTPUT_SCHEMA,
-    // v92: authenticated candidate failures, independent of network priors.
+    // v96: authenticated candidate failures, independent of network priors.
     super::candidate_recovery::SCHEMA,
-    // v93: exact encoded preparation shares source-revision cancellation.
+    // v97: exact encoded preparation shares source-revision cancellation.
     super::background_jobs::ENCODED_OUTPUT_SCHEMA,
 ];
 
@@ -1572,15 +1580,41 @@ impl SqliteStore {
         Ok(count == 1)
     }
 
+    fn dv_request_provenance_column_exists(conn: &Connection) -> Result<bool, StoreError> {
+        let shape = conn
+            .query_row(
+                r#"SELECT type, "notnull", dflt_value FROM pragma_table_info('dv_conversions')
+               WHERE name = 'requested_manually'"#,
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        match shape {
+            None => Ok(false),
+            Some((kind, true, Some(default))) if kind == "INTEGER" && default == "0" => Ok(true),
+            Some(_) => Err(StoreError::Migration(
+                "invalid Dolby Vision request provenance column".into(),
+            )),
+        }
+    }
+
     fn migrate(conn: &Connection) -> Result<(), StoreError> {
         let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         let target = SQLITE_SCHEMA_VERSION;
         if current > target {
             return Err(StoreError::Migration(format!(
                 "database schema is v{current}, but this binary only knows v{target} — \
-                 refusing to open a database from a newer plurx"
+                refusing to open a database from a newer plurx"
             )));
         }
+        super::schema_lineage::bridge_sqlite(conn, current)?;
+        let current: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         // A database written by a pre-merge effort build sits at v45 with the
         // attempt-history column and without the negative fragment index,
         // because those two migrations swapped numbers when they met. Rewind
@@ -1611,6 +1645,7 @@ impl SqliteStore {
                 || (version == 46 && Self::attempt_errors_column_exists(conn)?)
                 || (version == 47 && Self::video_identity_column_exists(conn)?)
                 || (version == 51 && Self::drain_deadline_column_exists(conn)?)
+                || (version == 90 && Self::dv_request_provenance_column_exists(conn)?)
             {
                 Ok(())
             } else {
@@ -1649,6 +1684,43 @@ impl SqliteStore {
             )?;
             tracing::info!(instance_id = %id, "generated new instance id");
         }
+        Ok(())
+    }
+
+    /// Synthetic source-bound old lineage, never a historical capture.
+    #[cfg(feature = "hiqlite-contract-tests")]
+    #[doc(hidden)]
+    pub fn validation_seed_schema_lineage(
+        path: &Path,
+        marker: i64,
+        private: bool,
+    ) -> Result<(), StoreError> {
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        if private {
+            if !(88..=93).contains(&marker) {
+                return Err(StoreError::Migration(
+                    "invalid synthetic private SQLite marker".to_owned(),
+                ));
+            }
+            for sql in MIGRATIONS
+                .iter()
+                .take(87)
+                .chain(MIGRATIONS.iter().skip(91).take((marker - 87) as usize))
+            {
+                conn.execute_batch(sql)?;
+            }
+        } else {
+            if !(88..=91).contains(&marker) {
+                return Err(StoreError::Migration(
+                    "invalid synthetic published SQLite marker".to_owned(),
+                ));
+            }
+            for sql in MIGRATIONS.iter().take(marker as usize) {
+                conn.execute_batch(sql)?;
+            }
+        }
+        conn.pragma_update(None, "user_version", marker)?;
         Ok(())
     }
 
@@ -3017,9 +3089,14 @@ mod tests {
         // v79–v85 add predictions, embeddings, probe/integrity work, Live TV
         // resource claims, subtitle reconciliation and bounded job history;
         // v86 compacts settled receipts under waiter pressure; v87 adds
-        // expiring viewer interests through analysis and artifacts.
+        // expiring viewer interests through analysis and artifacts; v88 adds the
+        // unconditional result-key/target/force index for bounded cleanup.
+        // v89 indexes preparation history; v90 records explicit DV requests;
+        // v91 records transactional planning generation.
+        // v92–v97 append offline audio, independent Link columns/table,
+        // copy preparation, candidate recovery and encoded preparation.
         assert_eq!(
-            version, 87,
+            version, 97,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

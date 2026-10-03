@@ -2477,6 +2477,7 @@
             .expect("staging user");
         let incarnation_id = uuid::Uuid::new_v4().to_string();
         let predecessor_request = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             control_sequence: None,
             file_id: fixture.file_id(),
@@ -2504,6 +2505,7 @@
         let predecessor_recipe = RemoteStartRequest {
             retained_output: None,
             retained_output_receiver: None,
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2518,6 +2520,7 @@
         };
         let predecessor_start = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,

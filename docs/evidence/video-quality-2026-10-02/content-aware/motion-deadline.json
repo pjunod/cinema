@@ -1,0 +1,14 @@
+{
+  "commands": [
+    [
+      "/opt/homebrew/Cellar/ffmpeg/9.0.1_1/bin/ffmpeg",
+      "-version"
+    ]
+  ],
+  "error": "total wall-clock budget exhausted",
+  "outcome": "inconclusive",
+  "production_qualified": false,
+  "recommendation": null,
+  "schema_version": 1,
+  "scope": "offline_sample_recommendation"
+}

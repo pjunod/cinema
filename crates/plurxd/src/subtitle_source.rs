@@ -207,6 +207,16 @@ pub(crate) enum TrackKind {
     TextStyled,
 }
 
+impl TrackKind {
+    pub(crate) fn representations(self) -> &'static [RepresentationFormat] {
+        match self {
+            Self::Pgs => &[RepresentationFormat::Sup],
+            Self::Text => &[RepresentationFormat::Webvtt],
+            Self::TextStyled => &[RepresentationFormat::Webvtt, RepresentationFormat::Matroska],
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum RepresentationFormat {

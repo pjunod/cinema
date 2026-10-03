@@ -284,13 +284,13 @@ impl LocalSourceSnapshot {
     }
 
     #[cfg(unix)]
-    fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
+    pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
         file.metadata()
             .map(|metadata| Self::from_metadata(&metadata))
     }
 
     #[cfg(windows)]
-    fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
+    pub(super) fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
         let metadata = file.metadata()?;
         let identity = plurx_core::fs_secure::std_file_identity(file)?;
         let modified = metadata

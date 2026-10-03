@@ -527,15 +527,33 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertNotIn("selection_provenance", facts_digest)
         self.assertNotIn("source_identity", facts_digest)
 
-        # One selection rule, shared by planning and the quality catalog.
+        # Planning, the quality catalog and the HDR cadence projection all
+        # describe FFmpeg's 0:v:0. The HDR projection is a third consumer of
+        # the same facts rule, not a new selection or provenance identity.
         daemon_facts = (ROOT / "crates/plurxd/src/decode_facts.rs").read_text(
             encoding="utf-8"
         )
         self.assertIn("pub(crate) fn legacy_ordinal_facts(", daemon_facts)
-        self.assertEqual(self.daemon_transcode.count("legacy_ordinal_facts("), 2)
-        for path in ("plan.rs", "candidates.rs"):
+        consumers = {
+            "plan.rs": ("resolve_restricted_movie_plan", "vaapi_hdr10_source_fits"),
+            "candidates.rs": ("quality_facts_from_probe",),
+        }
+        self.assertEqual(
+            self.daemon_transcode.count("legacy_ordinal_facts("),
+            sum(len(functions) for functions in consumers.values()),
+        )
+        for path, functions in consumers.items():
             source = (ROOT / "crates/plurxd/src/transcode/manager" / path).read_text()
-            self.assertEqual(source.count("crate::decode_facts::legacy_ordinal_facts("), 1)
+            self.assertEqual(
+                source.count("crate::decode_facts::legacy_ordinal_facts("), len(functions)
+            )
+            for function in functions:
+                with self.subTest(selection_consumer=function):
+                    body = source.split(f"fn {function}(", 1)[1].split("\n    pub", 1)[0]
+                    self.assertEqual(body.count("crate::decode_facts::legacy_ordinal_facts("), 1)
+                    self.assertRegex(
+                        body, r"absolute_video_ordinal\(\s*&?probe,\s*0\s*\)"
+                    )
         self.assertNotIn(
             "DecodeFacts::from_ffprobe_json_with_catalog(", self.daemon_transcode
         )
@@ -1023,9 +1041,12 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertEqual(
             sorted(self._manifest_digest_arguments()),
             sorted(
-                ["None"] * 27
+                ["None"] * 28
                 + ["digest", "digest", "manifest_digest", "manifest_digest"]
                 + ['Some("d1")', 'Some("d2")', "written"]
+                # Exact-generation invalidation seeds an unqualified cache
+                # above, then a replacement carrying this explicit digest.
+                + ['Some("replacement-digest")']
             ),
         )
         # The two production writers are the off-queue completion arms, and

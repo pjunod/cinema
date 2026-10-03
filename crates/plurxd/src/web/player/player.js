@@ -84,12 +84,13 @@
  * @property {string|null} [attemptReason] cold-start | resume | seek | quality | …
  * @property {number} [attemptAt]          performance.now() at the attempt
  * @property {any} [openToken]             the open attempt's token (PLAY_OPEN_GATE)
+ * @property {{began:number,current:function():boolean,owner:any,promise:Promise<any>,page:any}|null} [nextEpisodePreparation] bounded read-only successor metadata
  * @property {any} [pendingOpenAttempt]    the open attempt this player was minted for, until it settles
  * @property {any} [retiringOpenAttempt]   an open attempt being retired by a reopen
  * @property {Player|null} [mediaPredecessor] the outgoing player kept until preparation succeeds
  * @property {boolean} [internalMediaReset] the next media reset is ours, not a fault
  * @property {any} [mediaAttachment]       the current media attachment token
- * @property {{sessionId:string|null,attachment:any,reason:string|null}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
+ * @property {{sessionId:string|null,attachment:any,reason:string|null,message?:string}|null} [sessionTerminal] definitive terminal fact bound to the current attachment
  * @property {{key:string,sinceMs:number,lastMs:number}|null} [recoveryHealth] contiguous healthy recovery evidence
  * @property {any} [transportCommand] original transport command awaiting an actual element transition
  * @property {number} [_transportCommandSequence] causal command ordinal within this attempt
@@ -177,6 +178,7 @@
  * @property {number} [controlPresentedFrames]
  * @property {boolean} [controlHasFrameCallbacks]
  * @property {any} [controlFrameCancel]    cancels the frame-callback loop
+ * @property {()=>void} [controlFrameRearm] renews observation for the current seek
  * @property {any} [controlReporter]       the PlaybackControl reporter for this player
  * @property {any[]} [controlWaiters]      callers waiting for the reporter's next exchange
  * @property {number} [controlPresentationEpoch]
@@ -221,6 +223,7 @@
  * @property {number|null} _seekPreview    seek-bar hover position, seconds
  * @property {number|null} _seekPending    keyboard seek target, seconds
  * @property {boolean} [_seekDragging]
+ * @property {number} [_streamProbeOrdinal] sequence of same-attachment diagnostic probes
  * @property {number} [_seekToken]         generation of the latest seek
  * @property {string} _lastFocusedControl  the control focus returns to
  * @property {any} _opener                 the element that opened the player
@@ -373,7 +376,16 @@ function noteStreamFailure(status, body, evidence){
     &&previous.resource===owned.resource
     &&previous.request_ordinal!=null&&owned.request_ordinal!=null
     &&Number(previous.request_ordinal||0)>Number(owned.request_ordinal||0)) return previous;
+  // Retirement is an attachment fact, not a retryable probe opinion. Later
+  // generic refusals cannot rename its cause while the same session is bound.
+  if(previous&&previous.code==='serving_fenced'&&previous.attachment
+    &&previous.attachment===owned.attachment) return previous;
   Object.assign(parsed,{at:Date.now()},owned);
+  if(parsed.code==='serving_fenced'&&owned.attachment&&typeof PLAYER!=='undefined'
+    &&PLAYER&&PLAYER.mediaAttachment===owned.attachment){
+    PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:owned.attachment,
+      reason:'serving_fenced',message:parsed.message};
+  }
   STREAM_FAILURE=parsed;
   return parsed;
 }
@@ -389,6 +401,13 @@ function clearStreamFailureFor(hls){
     clearStreamFailure();
 }
 function currentStreamFailureOverlay(){
+  const terminal=PLAYER&&PLAYER.sessionTerminal;
+  if(terminal&&terminal.attachment===PLAYER.mediaAttachment
+    &&terminal.sessionId===PLAYER.sessionId
+    &&['serving_fenced','authority_fenced'].includes(terminal.reason)) return {
+      title:'The server retired this stream.',
+      detail:terminal.message||'Playback authority was lost. Your place is saved; reopen the stream to continue.',
+      retryable:false};
   if(STREAM_FAILURE&&STREAM_FAILURE.attachment&&PLAYER
     &&STREAM_FAILURE.attachment!==PLAYER.mediaAttachment) return null;
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());
@@ -466,7 +485,8 @@ function playbackAttemptTerminallyStopped(player,attachment){
 }
 function hlsStartupCurrent(player,episode){
   return !!(player&&episode&&PLAYER===player&&player.hlsStartup===episode
-    &&player.hls===episode.hls&&episode.attachment.current()
+    &&(episode.transport==='native'?player.hls==null:player.hls===episode.hls)
+    &&episode.attachment.current()
     &&!playbackAttemptTerminallyStopped(player,
       episode.mediaAttachment||player.mediaAttachment));
 }
@@ -477,13 +497,17 @@ function hlsStartupIncomplete(player){
 function hlsStartupManifestRequest(context){
   return !!(context&&(context.type==='manifest'||/\.m3u8(?:\?|$)/i.test(String(context.url||''))));
 }
-function abortHlsStartupLoaders(episode){
+function abortHlsStartupLoaders(episode,detachMetadata=false){
   if(!episode) return;
   for(const loader of [...episode.loaders]){
     try{loader.abort()}catch(e){}
     try{loader.destroy()}catch(e){}
   }
   episode.loaders.clear();
+  if(detachMetadata&&episode.native?.metadataListener){
+    episode.native.video.removeEventListener('loadedmetadata',episode.native.metadataListener);
+    episode.native.metadataListener=null;
+  }
 }
 function cancelHlsStartup(player,reason){
   const episode=player&&player.hlsStartup;
@@ -492,15 +516,17 @@ function cancelHlsStartup(player,reason){
     episode.establishedSuspension=null;
     return;
   }
+  clearTimeout(episode.native?.deadlineTimer);
   episode.state='cancelled'; episode.cancelledReason=reason||'cancelled';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
-  abortHlsStartupLoaders(episode);
+  abortHlsStartupLoaders(episode,true);
 }
 function completeHlsStartup(player){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active'
     ||player.controlSeek?.executed) return false;
   episode.state='presenting';
+  clearTimeout(episode.native?.deadlineTimer);
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   clearTimeout(player.stallTimer); player.stallTimer=null;
   reportTtff();
@@ -515,11 +541,14 @@ function configureHlsStartupDeadline(player,graceMs){
   if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting') return;
   const grace=Number(graceMs)||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms;
   episode.deadlineMs=Math.min(episode.deadlineMs,performance.now()+grace);
+  if(episode.transport==='native') armNativeHlsDeadline(player,episode);
 }
 function diagnoseHlsStartup(player){
   const episode=player&&player.hlsStartup;
   const failure=episode&&episode.latestFailure;
   const explained=failure&&PlaybackPolicy.streamFailureOverlay(failure,Date.now());
+  if(episode?.transport==='native'&&episode.state==='exhausted'&&failure?.message) return {
+    title:'The native stream could not start.',detail:failure.message};
   if(explained&&failure.code==='startup_timeout') return {
     title:'The stream did not become ready in time.',detail:explained.detail};
   if(episode&&episode.manifestState!=='parsed'){
@@ -528,6 +557,9 @@ function diagnoseHlsStartup(player){
       detail:failure&&failure.message?failure.message:
         `The playlist did not load before the startup deadline${status?` (HTTP ${status})`:''}.`};
   }
+  if(episode?.transport==='native'&&episode.native.attached) return {
+    title:'Playback did not start.',
+    detail:'The native playlists were ready, but no presentation progress was observed. The decoder cause is not known.'};
   if(episode&&!episode.mediaLoaded) return {
     title:'The video data did not arrive in time.',
     detail:'The playlist loaded, but no media arrived before the startup deadline.'};
@@ -538,16 +570,23 @@ function exhaustHlsStartup(player,reason){
   const episode=player&&player.hlsStartup;
   if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting'
     ||episode.state==='cancelled') return false;
+  if(episode.transport==='native'){
+    if(episode.diagnosisScheduled) return true;
+    episode.diagnosisScheduled=true;
+    clearTimeout(episode.native.deadlineTimer);
+    clearTimeout(player.stallTimer);player.stallTimer=null;
+  }
   if(episode.state!=='exhausted'){
     episode.state='exhausted'; episode.exhaustedReason=reason||'deadline';
     clearTimeout(episode.retry.timer); episode.retry.timer=null;
-    abortHlsStartupLoaders(episode);
+    abortHlsStartupLoaders(episode,true);
     try{episode.hls.stopLoad()}catch(e){}
   }
   setTimeout(()=>stallDiagnose().catch(()=>{}),0);
   return true;
 }
 function armHlsStartupRetry(video,player,episode){
+  if(episode.transport==='native') return armNativeHlsReadiness(video,player,episode);
   clearTimeout(episode.retry.timer);
   const delay=Math.max(0,episode.retry.dueMs-performance.now());
   episode.retry.timer=setTimeout(()=>{
@@ -611,6 +650,9 @@ function resumeHlsStartup(video,player){
       return false;
     }
     const at=Math.max(0,Number(video&&video.currentTime)||0);
+    if(episode.transport==='native'){
+      episode.establishedSuspension=null;applyPlaybackTransportIntent(video,player);return true;
+    }
     try{
       episode.hls.startLoad(at);
       episode.establishedSuspension=null;
@@ -622,6 +664,17 @@ function resumeHlsStartup(video,player){
   }
   if(episode.state!=='paused') return false;
   episode.intentGeneration=player.controlIntentGeneration||0;
+  if(episode.transport==='native'){
+    episode.state='active';
+    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'paused_past_deadline');
+    armNativeHlsDeadline(player,episode);
+    if(!episode.native.attached) armNativeHlsReadiness(video,player,episode);
+    else if(episode.native.pendingError?.execution===episode.native.execution&&!episode.native.classifying){
+      const pending=episode.native.pendingError;episode.native.pendingError=null;
+      classifyNativeHlsError(video,player,pending.code,pending.message).catch(()=>{});
+    }else applyPlaybackTransportIntent(video,player);
+    return true;
+  }
   if(performance.now()>=episode.deadlineMs){
     episode.state='active'; return exhaustHlsStartup(player,'paused_past_deadline');
   }
@@ -871,7 +924,7 @@ function beginHlsAttachment(video,attachedPlayer){
   attachedPlayer.hlsRetryUsed=0;
   return attachment;
 }
-function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt){
+function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,transport='hlsjs'){
   // Buffer targets, in SECONDS, and deliberately not in bytes.
   //
   // An earlier version of this raised maxBufferSize to 400MB on the theory
@@ -895,7 +948,9 @@ function hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt){
   // for the whole film.
   const tgt=bufferTargets(PLAYER&&PLAYER.bufSegSecs);
   PLAYER.bufTarget=tgt;
-  const startup={player:attachedPlayer,attachment,playlistUrl,
+  const startup={player:attachedPlayer,attachment,playlistUrl,transport,
+    native:transport==='native'?{execution:0,attached:false,busy:false,reloadUsed:false,
+      classifying:false,retries:0,metadataListener:null,deadlineTimer:null}:null,
     startAt:Math.max(0,Number(startAt)||0),hls:null,state:'active',
     manifestState:'unknown',mediaLoaded:false,decoderFailed:false,
     startedAt:performance.now(),
@@ -912,7 +967,7 @@ function constructHls(startup,tgt,video,startAt,observesCurrent){
   const attachedPlayer=startup.player;
   const playlistUrl=startup.playlistUrl;
   const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
-  const hls=new Hls({
+  const hls=new Hls({preferManagedMediaSource:false,
     maxBufferLength:tgt.fwd,
     backBufferLength:tgt.back,
     ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
@@ -1278,13 +1333,265 @@ function onHlsError(hls,startup,video,observesCurrent){
   };
 }
 function attachNativeHls(video,playlistUrl,startAt,attachedPlayer,attachment){
-  // Native HLS: the session id in the URL is the credential, so the
-  // Apple TV can fetch segments itself when AirPlaying.
-  PLAYER.segSrc=tok(playlistUrl); PLAYER.segTimes=null; PLAYER._segIdx=null;
-  refreshSegTimes();
-  setPlaybackMediaSource(video,tok(playlistUrl));
-  const go=()=>{ video.removeEventListener("loadedmetadata",go);
-    applyPlaybackAttachmentPosition(video,attachedPlayer,attachment,startAt); };
-  video.addEventListener("loadedmetadata",go);
-  applyPlaybackTransportIntent(video,attachedPlayer);
+  const {startup}=hlsStartupEpisode(attachedPlayer,attachment,playlistUrl,startAt,'native');
+  startup.native.video=video;
+  armNativeHlsDeadline(attachedPlayer,startup);
+  attachedPlayer.segSrc=null; attachedPlayer.segTimes=null; attachedPlayer._segIdx=null;
+  if(attachedPlayer.wantsPlayback===false) startup.state='paused';
+  // The caller still owns pendingOpenAttempt / pendingMediaChange until its
+  // attachment continuation settles. Start on the next task, after that
+  // handover, rather than cancelling the only fetch before it can dispatch.
+  else armNativeHlsReadiness(video,attachedPlayer,startup,0);
+}
+// Use the current startup episode; no source assignment or decoder fallback
+// occurs until the master and selected media playlist have become usable.
+function armNativeHlsDeadline(player,episode){
+  clearTimeout(episode.native.deadlineTimer);
+  episode.native.deadlineTimer=setTimeout(()=>{
+    episode.native.deadlineTimer=null;
+    if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&episode.state==='active')
+      exhaustHlsStartup(player,'deadline');
+  },Math.max(0,episode.deadlineMs-performance.now()));
+}
+function nativeHlsCurrent(player,episode,execution,intent){
+  return hlsStartupCurrent(player,episode)&&episode.transport==='native'
+    &&playbackOwnsAttachedMedia(player)
+    &&episode.native.execution===execution&&episode.state==='active'
+    &&player.wantsPlayback!==false&&(player.controlIntentGeneration||0)===intent;
+}
+function nativeHlsResourceUrl(uri,parent){
+  const origin=new URL(parent,location.href),child=new URL(uri,origin);
+  const scope=origin.pathname.slice(0,origin.pathname.lastIndexOf('/')+1);
+  if(child.origin!==origin.origin||!child.pathname.startsWith(scope))
+    throw Object.assign(new Error('The HLS playlist points outside this session.'),{terminal:true});
+  for(const key of ['token']) if(!child.searchParams.has(key)&&origin.searchParams.has(key))
+    child.searchParams.set(key,origin.searchParams.get(key));
+  return child.href;
+}
+async function nativeHlsFetch(player,episode,url,{init=false}={}){
+  const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  if(!current()) throw Object.assign(new Error('Native readiness was superseded.'),{cancelled:true});
+  if(performance.now()>=episode.deadlineMs||(!init&&episode.dispatches>=PlaybackPolicy.HLS_STARTUP.manifest_dispatch_ceiling))
+    throw Object.assign(new Error('Native readiness budget exhausted.'),{terminal:true});
+  const ordinal=init?++episode.evidenceOrdinal:++episode.dispatches;
+  const ctl=new AbortController(),loader={abort:()=>ctl.abort(),destroy:()=>{}};
+  episode.loaders.add(loader);
+  let timer,abortListener,bodyReader;
+  const remaining=Math.min(12000,Math.max(0,episode.deadlineMs-performance.now()));
+  const bound=new Promise((_,reject)=>{
+    abortListener=()=>{bodyReader?.cancel().catch(()=>{});
+      reject(Object.assign(new Error('Native readiness cancelled.'),{cancelled:true}));};
+    ctl.signal.addEventListener('abort',abortListener,{once:true});
+    timer=setTimeout(()=>{reject(new Error('Native readiness request timed out.'));ctl.abort();},remaining);
+  });
+  try{
+    return await Promise.race([bound,(async()=>{
+      const headers=init?{Range:'bytes=0-1048575'}:{};
+      const res=await fetch(url,{signal:ctl.signal,headers,cache:'no-store',redirect:'error'});
+      const max=init?1048576:65536;
+      if(!res.body?.getReader) throw Object.assign(new Error('Native readiness response has no bounded body.'),{terminal:true});
+      const reader=res.body.getReader(),chunks=[];bodyReader=reader;let size=0;
+      if(ctl.signal.aborted){reader.cancel().catch(()=>{});throw Object.assign(new Error('Native readiness cancelled.'),{cancelled:true});}
+      try{
+        while(true){const {done,value}=await reader.read();if(done) break;
+          size+=value.byteLength;if(size>max) throw Object.assign(new Error('Native readiness body exceeds its byte limit.'),{terminal:true});
+          chunks.push(value);
+        }
+      }finally{reader.cancel().catch(()=>{});}
+      if(!current()) throw Object.assign(new Error('Native readiness was superseded.'),{cancelled:true});
+      const bytes=new Uint8Array(size);let at=0;for(const chunk of chunks){bytes.set(chunk,at);at+=chunk.byteLength;}
+      if(!res.ok){
+        const text=new TextDecoder().decode(bytes);
+        const failure=noteStreamFailure(res.status,text,{attachment:episode.mediaAttachment,
+          resource:init?'native_init':'native_readiness',request_ordinal:ordinal});
+        episode.latestFailure=failure||{status:res.status,message:`HLS readiness returned HTTP ${res.status}.`};
+        throw Object.assign(new Error(episode.latestFailure.message||'The stream is not ready.'),{
+          terminal:res.status<500||PlaybackPolicy.hlsStartupResponseAction(episode.latestFailure)==='terminal'});
+      }
+      if(init){
+        // Init availability is transfer evidence, never sample decode proof.
+        const mime=String(res.headers.get('content-type')||'');
+        const box=String.fromCharCode(...bytes.slice(4,8));
+        if(!size||/json|html/.test(mime)||bytes.length<8||!['ftyp','moov'].includes(box))
+          throw Object.assign(new Error('The initialization response was not media.'),{terminal:true});
+        return {bytes,url:res.url||url};
+      }
+      const text=new TextDecoder().decode(bytes);
+      if(!text.trimStart().startsWith('#EXTM3U'))
+        throw Object.assign(new Error('The HLS readiness response is not a playlist.'),{terminal:true});
+      return {text,url:res.url||url};
+    })()]);
+  }finally{clearTimeout(timer);ctl.signal.removeEventListener('abort',abortListener);ctl.abort();episode.loaders.delete(loader);}
+}
+async function nativeHlsPlaylists(player,episode){
+  episode.manifestState='loading';
+  const master=await nativeHlsFetch(player,episode,tok(episode.playlistUrl));
+  let media=master;
+  const lines=master.text.split(/\r?\n/).map(line=>line.trim());
+  const variants=lines.map((line,i)=>line.startsWith('#EXT-X-STREAM-INF:')?i:-1).filter(i=>i>=0);
+  if(variants.length){
+    // The session master has one video variant. Ambiguity needs an explicit
+    // contract, not a guess at an audio/subtitle URI or a different recipe.
+    if(variants.length!==1) throw Object.assign(new Error('Native readiness requires one session video variant.'),{terminal:true});
+    const uri=lines[variants[0]+1];
+    if(!uri||uri.startsWith('#')) throw Object.assign(new Error('The HLS master has no selected media URI.'),{terminal:true});
+    media=await nativeHlsFetch(player,episode,nativeHlsResourceUrl(uri,master.url));
+  }
+  const times=parseSegTimes(media.text);
+  if(!times.length||!times.every(time=>Number.isFinite(time)&&time>0))
+    throw Object.assign(new Error('The media playlist contains no usable segments.'),{terminal:true});
+  episode.manifestState='parsed';
+  return media;
+}
+function armNativeHlsReadiness(video,player,episode,delayMs){
+  clearTimeout(episode.retry.timer);
+  const wait=delayMs??Math.min(4000,1000*2**Math.min(episode.native.retries++,2));
+  episode.retry.timer=setTimeout(()=>{
+    episode.retry.timer=null;
+    if(hlsStartupCurrent(player,episode)&&episode.state==='active')
+      runNativeHlsReadiness(video,player,episode).catch(()=>{});
+  },Math.min(wait,Math.max(0,episode.deadlineMs-performance.now())));
+}
+// Reuse the attachment's authority owner after every asynchronous readiness
+// boundary. A retired session must never be reloaded or codec-rescued.
+function nativeHlsRecoverAuthority(video,player,episode,execution){
+  if(!hlsStartupCurrent(player,episode)||episode.native.execution!==execution
+    ||!['active','paused'].includes(episode.state)||!playbackOwnsAttachedMedia(player)) return false;
+  return recoverServingFencedAttachment(video,player);
+}
+function nativeHlsAuthenticationRefused(player,episode){
+  const failure=episode.latestFailure;
+  if(!hlsStartupCurrent(player,episode)||!playbackOwnsAttachedMedia(player)
+    ||![401,403].includes(failure?.status)) return false;
+  // Cancel startup work before handing the typed refusal to the existing
+  // authentication surface, which owns Sign in / Close in every context.
+  cancelHlsStartup(player,'authentication_refused');
+  return showSessionOpenFailure({streamFailure:failure},'start');
+}
+async function runNativeHlsReadiness(video,player,episode){
+  if(episode.native.busy||episode.state!=='active'||!hlsStartupCurrent(player,episode)) return;
+  if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+  // An asynchronous handover may still be pending at the first wakeup.
+  // Retain one bounded retry under the original deadline; do not dispatch
+  // for a player that does not yet own the media, or abandon its startup.
+  if(!playbackOwnsAttachedMedia(player)) return armNativeHlsReadiness(video,player,episode);
+  const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const readinessAt=performance.now();
+  episode.native.busy=true;
+  try{
+    const media=await nativeHlsPlaylists(player,episode);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
+    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
+    player.segSrc=media.url;player.segTimes=parseSegTimes(media.text);player._segIdx=null;
+    clearStreamFailure();episode.latestFailure=null;
+    player.controlRenderOverride=null;
+    const go=()=>{
+      video.removeEventListener('loadedmetadata',go);episode.native.metadataListener=null;
+      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&episode.native.execution===execution
+        &&['active','paused'].includes(episode.state))
+        applyPlaybackAttachmentPosition(video,player,episode.attachment,episode.startAt);
+    };
+    episode.native.metadataListener=go;video.addEventListener('loadedmetadata',go);
+    episode.native.frameBaseline=video.getVideoPlaybackQuality?.().totalVideoFrames||0;
+    episode.native.attached=true;
+    clientLog(Object.assign({level:'info',event:'native_hls_readiness',
+      execution,dispatches:episode.dispatches,
+      elapsed_ms:Math.round(performance.now()-episode.startedAt),
+      readiness_ms:Math.round(performance.now()-readinessAt),
+      remaining_ms:Math.max(0,Math.round(episode.deadlineMs-performance.now())),
+      message:'Current master and selected media playlist are ready; attaching native HLS.'},playbackContext()));
+    setPlaybackMediaSource(video,tok(episode.playlistUrl));
+    applyPlaybackTransportIntent(video,player);
+  }catch(error){
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return;
+    if(!nativeHlsCurrent(player,episode,execution,intent)) return;
+    if(nativeHlsAuthenticationRefused(player,episode)) return;
+    if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
+      exhaustHlsStartup(player,'native_readiness_refused');}
+    else if(!error.cancelled) armNativeHlsReadiness(video,player,episode);
+  }finally{
+    episode.native.busy=false;
+    // A pause can abort a request while Resume has already arrived. Join its
+    // settlement before scheduling another fetch, retaining the same clock.
+    if(episode.state==='active'&&!episode.native.attached
+      &&hlsStartupCurrent(player,episode)&&(player.controlIntentGeneration||0)!==intent)
+      armNativeHlsReadiness(video,player,episode);
+  }
+}
+async function classifyNativeHlsError(video,player,code,message){
+  const episode=player&&player.hlsStartup;
+  if(!episode||episode.transport!=='native'||episode.native.video!==video
+    ||!episode.native.attached||![3,4].includes(code)
+    ||episode.state==='presenting'||!hlsStartupCurrent(player,episode)) return false;
+  if(episode.native.classifying) return true;
+  if(episode.state==='paused'||player.wantsPlayback===false){
+    episode.native.pendingError={code,message,execution:episode.native.execution};return true;
+  }
+  episode.native.classifying=true;
+  const execution=episode.native.execution,intent=player.controlIntentGeneration||0;
+  const current=()=>nativeHlsCurrent(player,episode,execution,intent);
+  try{
+    const media=await nativeHlsPlaylists(player,episode);
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(!current()) throw Object.assign(new Error('Native classification was superseded.'),{cancelled:true});
+    const init=/^#EXT-X-MAP:.*?URI="([^"]+)"/m.exec(media.text);
+    if(!init) throw Object.assign(new Error('The native init shape could not be verified.'),{terminal:true});
+    await nativeHlsFetch(player,episode,nativeHlsResourceUrl(init[1],media.url),{init:true});
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(!current()) return true;
+    if(!episode.native.reloadUsed){
+      episode.native.reloadUsed=true;episode.native.execution++;
+      abortHlsStartupLoaders(episode,true);episode.native.attached=false;
+      player.controlRenderOverride=null;
+      player.internalMediaReset=true;pausePlaybackInternally(video,'native_reload');
+      video.removeAttribute('src');video.load();resetPlaybackTransportEvents(video);
+      runNativeHlsReadiness(video,player,episode).catch(()=>{});
+      return true;
+    }
+    if(player.triedFallback) return exhaustHlsStartup(player,'fallback_spent');
+    if(!qualityCatalogSelectionCurrent(player)||!Array.isArray(player.qualityCandidates)){
+      episode.latestFailure={message:'The compatible route could not be verified for this selection.'};
+      return exhaustHlsStartup(player,'compatible_route_unverified');
+    }
+    const encode=player.qualityCandidates.some(row=>row?.route==='encode'&&row.decoder_compatible===true);
+    if(!encode){episode.latestFailure={message:'No compatible encode route is available for this selection.'};
+      return exhaustHlsStartup(player,'candidate_encode_route_unavailable');}
+    player.triedFallback=true;
+    const evidence=video.readyState>=1||video.videoWidth>0
+      ||(video.getVideoPlaybackQuality?.().totalVideoFrames||0)>episode.native.frameBaseline;
+    const note=evidence?'Native rejection after media readiness.':'Native rejection unverified, refused before decode.';
+    notifyPlaybackControl('failed');clearStall();
+    clientLog(Object.assign({level:'warn',event:'native_hls_rejected',code,
+      message:note+(message?' '+message:'')},playbackContext()));
+    startTranscodeFallback('stream-rejected',note);
+    return true;
+  }catch(error){
+    if(nativeHlsRecoverAuthority(video,player,episode,execution)) return true;
+    if(!current()){
+      if(hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)
+        &&['paused','active'].includes(episode.state))
+        episode.native.pendingError={code,message,execution};
+      return true;
+    }
+    if(nativeHlsAuthenticationRefused(player,episode)) return true;
+    if(error.terminal){episode.latestFailure=episode.latestFailure||{message:error.message};
+      exhaustHlsStartup(player,'native_readiness_refused');}
+    else if(!error.cancelled){
+      episode.native.execution++;episode.native.attached=false;
+      abortHlsStartupLoaders(episode,true);
+      player.internalMediaReset=true;pausePlaybackInternally(video,'native_readiness');
+      video.removeAttribute('src');video.load();resetPlaybackTransportEvents(video);
+      armNativeHlsReadiness(video,player,episode);
+    }
+    return true;
+  }finally{
+    episode.native.classifying=false;
+    const pending=episode.native.pendingError;
+    if(pending&&pending.execution===episode.native.execution&&episode.state==='active'
+      &&hlsStartupCurrent(player,episode)&&playbackOwnsAttachedMedia(player)&&player.wantsPlayback!==false){
+      episode.native.pendingError=null;
+      classifyNativeHlsError(video,player,pending.code,pending.message).catch(()=>{});
+    }
+  }
 }

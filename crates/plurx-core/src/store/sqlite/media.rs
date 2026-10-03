@@ -1836,6 +1836,26 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<crate::store::PlaybackPlanningSnapshot>, StoreError> {
+        let keys = crate::store::selected_settings_json(keys)?;
+        self.with_read(move |conn| {
+            conn.query_row(&format!("SELECT {FILE_COLS}, probe_json AS planning_probe, \
+                (SELECT generation FROM playback_input_generation WHERE singleton = 1) AS planning_generation, \
+                (SELECT json_group_object(key, value) FROM settings WHERE key IN (SELECT value FROM json_each(?2))) AS planning_settings \
+                FROM files WHERE id = ?1"), params![file_id, keys], |row| {
+                let encoded: String = row.get("planning_settings")?;
+                let settings = serde_json::from_str(&encoded).map_err(|error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(error)))?;
+                Ok(crate::store::PlaybackPlanningSnapshot { file: file_from_row(row)?,
+                    probe_json: row.get("planning_probe")?, settings,
+                    generation: row.get("planning_generation")? })
+            }).optional().map_err(StoreError::from)
+        }).await
+    }
+
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
         // The per-request metadata lookup: session starts, decisions, VTT.
         // Read-only, so it takes a read connection instead of queuing behind
@@ -1902,6 +1922,27 @@ impl MediaStore for SqliteStore {
                     SET probe_json = json_set(probe_json, '$.plurx_hevc_parameter_sets', json(?1))
                   WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
                 params![census, file_id, size, mtime],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
+    ) -> Result<bool, StoreError> {
+        let report = report_json.to_owned();
+        self.with_conn(move |conn| {
+            // The same in-SQL graft as the chapters above, fenced to the
+            // measured revision.
+            Ok(conn.execute(
+                "UPDATE files
+                    SET probe_json = json_set(probe_json, '$.plurx_content_encoding', json(?1))
+                  WHERE id = ?2 AND size = ?3 AND mtime = ?4 AND probe_json IS NOT NULL",
+                params![report, file_id, size, mtime],
             )? == 1)
         })
         .await
@@ -2636,6 +2677,74 @@ mod tests {
         NewLibrary, ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
+
+    #[tokio::test]
+    async fn content_encoding_publication_is_source_fenced_and_reprobe_invalidates_it() {
+        let store = SqliteStore::open_in_memory().expect("fixture succeeds");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/media")],
+                anime: false,
+            })
+            .await
+            .expect("fixture succeeds");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Sample".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("fixture succeeds");
+        let probe = ProbeResult {
+            raw_json: Some("{\"streams\":[]}".into()),
+            ..Default::default()
+        };
+        let file = store
+            .upsert_file(item, "/media/sample.mkv", 100, 1, &probe)
+            .await
+            .expect("fixture succeeds");
+        assert!(store
+            .merge_file_probe_content_encoding(file, 100, 1, "{\"outcome\":\"measured\"}")
+            .await
+            .expect("fixture succeeds"));
+        assert!(!store
+            .merge_file_probe_content_encoding(file, 101, 1, "{}")
+            .await
+            .expect("fixture succeeds"));
+        assert!(!store
+            .merge_file_probe_content_encoding(file, 100, 2, "{}")
+            .await
+            .expect("fixture succeeds"));
+        let document: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file)
+                .await
+                .expect("fixture succeeds")
+                .expect("fixture succeeds"),
+        )
+        .expect("fixture succeeds");
+        assert_eq!(document["plurx_content_encoding"]["outcome"], "measured");
+        store
+            .upsert_file(item, "/media/sample.mkv", 101, 2, &probe)
+            .await
+            .expect("fixture succeeds");
+        let document: serde_json::Value = serde_json::from_str(
+            &store
+                .get_file_probe_json(file)
+                .await
+                .expect("fixture succeeds")
+                .expect("fixture succeeds"),
+        )
+        .expect("fixture succeeds");
+        assert!(document.get("plurx_content_encoding").is_none());
+    }
 
     /// The whole-catalogue statement `recently_added` ran before K-05, kept
     /// as the oracle the windowed read must agree with.

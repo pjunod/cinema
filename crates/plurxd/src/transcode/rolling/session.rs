@@ -913,7 +913,6 @@ impl Session {
         let lease = self.control.snapshot().await;
         let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
         let playback_rate = rolling_playback_rate(demand);
-        let initial_runway_ms = rolling_initial_runway_ms(playback_rate);
         let producer_speed = self.progress.recent_speed();
         let media_origin_ms = (self.media_origin_seconds * 1_000.0).round() as i64;
         let wants_early_publication = lease.as_ref().is_some_and(|lease| {
@@ -953,8 +952,14 @@ impl Session {
                 clock.staged_end_ms =
                     Some(clock.staged_end_ms.map_or(end_ms, |old| old.max(end_ms)));
             }
-            let budget =
+            let mut budget =
                 clock.publication_budget_at(now, producer_attempt, lease.as_ref(), media_origin_ms);
+            clock.update_reserve_phase(lease.as_ref(), &budget);
+            if clock.served.is_none() {
+                // Keep steady production/allowance intact. Only first snapshot
+                // readiness and endpoint selection use the frozen policy.
+                budget.desired_end_ms = clock.first_ready_end_ms(&budget, lease.as_ref());
+            }
             let publish = match clock.served.as_ref() {
                 None => end_list || end_ms >= budget.desired_end_ms,
                 Some(served) if served.producer_attempt != producer_attempt => false,
@@ -980,7 +985,13 @@ impl Session {
                     // Before the first snapshot there is no deadline to
                     // restart, and a held producer's recent speed is the last
                     // one it measured before the stop, not a capacity reading.
-                    None => !held_for_scratch && end_ms >= initial_runway_ms,
+                    // Capacity becomes measurable at the fixed initial runway,
+                    // independently of the publication frontier advancing with
+                    // elapsed time. Clearing a hold must not defer rejection.
+                    None => {
+                        !held_for_scratch
+                            && end_ms >= clock.startup_policy.bootstrap_ms(playback_rate)
+                    }
                     Some(served) => {
                         clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                             && end_ms <= served.end_ms
@@ -1030,13 +1041,59 @@ impl Session {
             };
             selected.index
         } else {
+            // The producer retains its steady allowance plus a complete-cut
+            // envelope. An isolated candidate may use less of that paid allowance:
+            // keep its first advertised endpoint within the policy ceiling.
+            let first_web_snapshot = previous_served.is_none()
+                && self
+                    .publication
+                    .lock()
+                    .await
+                    .startup_policy
+                    .uses_small_bootstrap();
+            let selection_allowed_end_ms = if first_web_snapshot {
+                budget.allowed_end_ms.min(
+                    budget
+                        .consumed_end_ms
+                        .saturating_add(ROLLING_RESERVE_MAX_MS),
+                )
+            } else {
+                budget.allowed_end_ms
+            };
             let earned = index.segs.iter().find(|segment| {
                 segment.index >= first_new_segment
                     && segment.end_ms >= budget.desired_end_ms
-                    && segment.end_ms <= budget.allowed_end_ms
+                    && segment.end_ms <= selection_allowed_end_ms
             });
+            let low_reserve = {
+                let clock = self.publication.lock().await;
+                clock.startup_policy.uses_small_bootstrap()
+                    && clock.reserve_phase != RollingReservePhase::Steady
+            };
             let floor = earned.or_else(|| {
                 budget.demand_sequence.and_then(|_| {
+                    if first_web_snapshot {
+                        // At the 124s bootstrap ceiling the next complete cut
+                        // may be paid for but exceed the first snapshot limit.
+                        // Round down by at most one bounded
+                        // segment, never fall through to the first tiny object.
+                        return index.segs.iter().rev().find(|segment| {
+                            segment.end_ms <= selection_allowed_end_ms
+                                && segment.end_ms
+                                    >= budget.desired_end_ms.saturating_sub(ROLLING_SEGMENT_MAX_MS)
+                        });
+                    }
+                    // While reserve grows, include every completed eligible
+                    // object. One segment per 16 s cycle can lose to 1x even
+                    // when sustained production is 1.05x.
+                    if low_reserve && previous_served.is_some() {
+                        return index.segs.iter().rev().find(|segment| {
+                            segment.index >= first_new_segment
+                                && segment.end_ms <= budget.allowed_end_ms
+                                && segment.end_ms.saturating_sub(budget.consumed_end_ms)
+                                    <= ROLLING_RESERVE_MAX_MS
+                        });
+                    }
                     index.segs.iter().find(|segment| {
                         segment.index >= first_new_segment
                             && segment.end_ms.saturating_sub(budget.consumed_end_ms)
@@ -1085,7 +1142,26 @@ impl Session {
             .map_or(window_first_segment, |retained| {
                 retained.max(window_first_segment)
             });
-        let first_segment = requested_first_segment.min(protected_first_segment);
+        let mut first_segment = requested_first_segment.min(protected_first_segment);
+        if !end_list
+            && previous_served
+                .as_ref()
+                .is_some_and(|served| first_segment > served.first_segment)
+        {
+            // Short bootstrap is permitted; removing a prefix must still leave
+            // three target durations. Retain the old prefix until it can.
+            let old_first = previous_served
+                .as_ref()
+                .expect("previous snapshot checked")
+                .first_segment;
+            let max_start = selected_end_ms.saturating_sub(ROLLING_INITIAL_RUNWAY_MS);
+            first_segment = index
+                .segs
+                .iter()
+                .rev()
+                .find(|segment| segment.index <= first_segment && segment.start_ms <= max_start)
+                .map_or(old_first, |segment| segment.index.max(old_first));
+        }
         let served_raw = served_live_playlist(
             raw,
             Some(first_segment),
@@ -1171,6 +1247,9 @@ impl Session {
                 phase = "writer_inventory_to_first_snapshot",
                 elapsed_ms = clock.first_staged_at.map(|at| available_at.saturating_duration_since(at).as_millis() as u64),
                 produced_end_ms = end_ms,
+                startup_policy = ?clock.startup_policy,
+                bootstrap_ms = clock.startup_policy.bootstrap_ms(playback_rate),
+                consumed_end_ms = budget.consumed_end_ms,
                 served_end_ms,
                 requested_position_ms = (self.start_seconds * 1_000.0).round() as i64,
                 media_origin_ms,
@@ -1213,6 +1292,18 @@ impl Session {
             end_list,
             available_at,
         });
+        // The newly committed prefix can establish steady reserve even when
+        // the previous prefix was low at this cycle's consumed position.
+        // Compare with the steady frontier, never the smaller first gate.
+        clock.update_reserve_phase(
+            lease.as_ref(),
+            &RollingPublicationBudget {
+                desired_end_ms: budget
+                    .consumed_end_ms
+                    .saturating_add(rolling_initial_runway_ms(playback_rate)),
+                ..budget
+            },
+        );
         clock.carried_surplus_ms = served_end_ms.saturating_sub(budget.desired_end_ms).max(0);
         clock.next_publish_at = (!end_list).then(|| available_at + ROLLING_PUBLICATION_TARGET);
         clock.hard_deadline = (!end_list).then(|| available_at + ROLLING_PUBLICATION_HARD);
@@ -1465,7 +1556,7 @@ impl Session {
             self.ahead_bytes.store(0, Relaxed);
         }
         *self.segments.lock().await = SegmentIndex::default();
-        *self.publication.lock().await = RollingPublicationClock::default();
+        self.publication.lock().await.clear_attempt();
         if matches!(&self.kind, SessionKind::Transcode { .. }) {
             self.playlist_published.store(false, Relaxed);
         }
@@ -1482,7 +1573,7 @@ impl Session {
         self.fetched_end_ms.store(0, Relaxed);
         self.ahead_bytes.store(0, Relaxed);
         *self.segments.lock().await = SegmentIndex::default();
-        *self.publication.lock().await = RollingPublicationClock::default();
+        self.publication.lock().await.clear_attempt();
         self.playlist_published.store(false, Relaxed);
         self.suspended.store(false, Release);
         *self.suspended_at.lock().await = None;

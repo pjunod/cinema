@@ -272,7 +272,7 @@
         // And the mint precedes placement, because the session that carries it
         // is built by the task the placement loop spawns.
         let placement = source
-            .find("let mut start_task = tokio::spawn(async move {")
+            .find("let mut start_task = crate::media_pool::spawn_create_worker(async move {")
             .expect("the placement task");
         let mint = source
             .find("let recovery_epoch = recovery_epoch_for(activation_predecessor.as_ref());")
@@ -905,6 +905,7 @@
         let recipe = RemoteStartRequest {
             retained_output: None,
             retained_output_receiver: None,
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -916,7 +917,8 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 control_sequence: None,
                 file_id: 1,
                 playback_id: "control-transition".to_owned(),
@@ -939,6 +941,7 @@
         };
         let start = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -1797,6 +1800,7 @@
             .replace("\"user_id\":7", &format!("\"user_id\":{}", user.id));
         let start = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -2077,6 +2081,7 @@
         let recipe = RemoteStartRequest {
             retained_output: None,
             retained_output_receiver: None,
+            candidate_catalog: None,
             candidate_id: None,
             presentation_target: None,
             decoder_caps: None,
@@ -2088,7 +2093,8 @@
             typeless_playlist: true,
             library_channel: None,
             request: crate::transcode::SessionRequest {
-                candidate_context: None,
+                quality_catalog: None,
+            candidate_context: None,
                 control_sequence: None,
                 file_id: fixture.file_id(),
                 playback_id: "terminal-cancellation".to_owned(),
@@ -2111,6 +2117,7 @@
         };
         let start = StartResponse {
             delivered_audio: None,
+        quality_catalog_status: None,
             display_aware_auto_protocol: Some("route-v1".to_owned()),
             quality_candidate_id: None,
             quality_candidates: None,
@@ -2347,6 +2354,7 @@
             let recipe = RemoteStartRequest {
                 retained_output: None,
                 retained_output_receiver: None,
+                candidate_catalog: None,
                 candidate_id: None,
                 presentation_target: None,
                 decoder_caps: None,
@@ -2358,7 +2366,8 @@
                 typeless_playlist: true,
                 library_channel: None,
                 request: crate::transcode::SessionRequest {
-                    candidate_context: None,
+                    quality_catalog: None,
+            candidate_context: None,
                     control_sequence: None,
                     file_id: fixture.file_id(),
                     playback_id: format!("terminal-{label}"),
@@ -2381,6 +2390,7 @@
             };
             let start = StartResponse {
                 delivered_audio: None,
+        quality_catalog_status: None,
                 display_aware_auto_protocol: Some("route-v1".to_owned()),
                 quality_candidate_id: None,
                 quality_candidates: None,

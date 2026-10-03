@@ -22,6 +22,7 @@ pub(crate) const DV_CONVERSIONS_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS dv_co
     error          TEXT,
     queued_at_ms   INTEGER NOT NULL,
     finished_at_ms INTEGER,
+    requested_manually INTEGER NOT NULL DEFAULT 0 CHECK (requested_manually IN (0,1)),
     recovery_guard_id TEXT CHECK
                         (state != 'committed' OR original_path IS NOT NULL
                          OR recovery_guard_id IS NOT NULL)
@@ -112,13 +113,95 @@ macro_rules! dv_queue_admission_trigger {
     };
 }
 
-pub(crate) const DV_QUEUE_ADMISSION_TRIGGER: &str = dv_queue_admission_trigger!("IF NOT EXISTS ");
+// Keep the v25 trigger above immutable for upgrades through historical schemas.
+macro_rules! dv_queue_admission_provenance_trigger {
+    ($if_not_exists:literal) => {
+        concat!(
+            "CREATE TRIGGER ",
+            $if_not_exists,
+            "dv_queue_admission_settings_ai
+     AFTER INSERT ON settings
+     WHEN NEW.key GLOB '__plurx_internal.dv_queue_admission.*' BEGIN
+       INSERT INTO dv_conversions (file_id, state, queued_at_ms, requested_manually)
+       SELECT f.id,
+              'queued',
+              CAST(json_extract(NEW.value, '$.requested_queued_at_ms') AS INTEGER),
+              COALESCE(CAST(json_extract(NEW.value, '$.requested_manually') AS INTEGER), 0)
+         FROM files f
+         JOIN items i ON i.id = f.item_id
+         JOIN settings mode_setting ON mode_setting.key = 'library.dv_disk_convert'
+        WHERE f.id = CAST(json_extract(NEW.value, '$.requested_file_id') AS INTEGER)
+          AND json_extract(NEW.value, '$.request_kind') = 'single'
+          AND json_extract(NEW.value, '$.outcome') = 'queued'
+          AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
+          AND f.dv_bl_compat_id IN (1, 6)
+          AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+          AND json_valid(mode_setting.value)
+          AND json_type(mode_setting.value) = 'object'
+          AND json_extract(
+                mode_setting.value, '$.\"' || i.library_id || '\"')
+              IN ('manual', 'auto')
+       ON CONFLICT(file_id) DO UPDATE SET
+         state = 'queued', el_type = NULL, original_path = NULL,
+         bytes_before = NULL, bytes_after = NULL, error = NULL,
+         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+         recovery_guard_id = NULL, requested_manually = excluded.requested_manually
+       WHERE dv_conversions.state = 'failed';
+       INSERT INTO dv_conversions (file_id, state, queued_at_ms, requested_manually)
+       SELECT f.id,
+              'queued',
+              CAST(json_extract(NEW.value, '$.requested_queued_at_ms') AS INTEGER),
+              COALESCE(CAST(json_extract(NEW.value, '$.requested_manually') AS INTEGER), 0)
+         FROM json_each(NEW.value, '$.candidate_ids') candidate
+         JOIN files f ON f.id = CAST(candidate.value AS INTEGER)
+         JOIN items i ON i.id = f.item_id
+         JOIN settings mode_setting ON mode_setting.key = 'library.dv_disk_convert'
+    LEFT JOIN dv_conversions d ON d.file_id = f.id
+        WHERE json_extract(NEW.value, '$.request_kind') = 'library_batch'
+          AND json_extract(NEW.value, '$.outcome') = 'queued'
+          AND i.library_id =
+                CAST(json_extract(NEW.value, '$.requested_library_id') AS INTEGER)
+          AND LOWER(f.container) = 'mkv' AND f.dv_profile = 7
+          AND f.dv_bl_compat_id IN (1, 6)
+          AND f.dv_el_present = 1 AND f.dv_rpu_present = 1
+          AND json_valid(mode_setting.value)
+          AND json_type(mode_setting.value) = 'object'
+          AND json_extract(
+                mode_setting.value, '$.\"' || i.library_id || '\"')
+              IN ('manual', 'auto')
+          AND (d.file_id IS NULL OR
+               (json_extract(NEW.value, '$.retry_failed') = 1
+                AND d.state = 'failed'))
+       ON CONFLICT(file_id) DO UPDATE SET
+         state = 'queued', el_type = NULL, original_path = NULL,
+         bytes_before = NULL, bytes_after = NULL, error = NULL,
+         queued_at_ms = excluded.queued_at_ms, finished_at_ms = NULL,
+         recovery_guard_id = NULL, requested_manually = excluded.requested_manually
+       WHERE json_extract(NEW.value, '$.retry_failed') = 1
+         AND dv_conversions.state = 'failed';
+       DELETE FROM settings WHERE key = NEW.key;
+     END"
+        )
+    };
+}
+
+pub(crate) const DV_QUEUE_ADMISSION_TRIGGER: &str =
+    dv_queue_admission_provenance_trigger!("IF NOT EXISTS ");
 
 /// Versioned migrations must create the trigger themselves rather than rely
 /// on the fresh-cluster installer. Strict DDL makes a pre-existing trigger at
 /// a v24 marker fail closed: the migration can advance to v25 only when it
 /// created this exact canonical body in the same replicated transaction.
 pub(crate) const DV_QUEUE_ADMISSION_MIGRATION_TRIGGER: &str = dv_queue_admission_trigger!("");
+
+#[cfg(feature = "hiqlite-contract-tests")]
+pub fn validation_pre_provenance_admission_trigger() -> &'static str {
+    DV_QUEUE_ADMISSION_MIGRATION_TRIGGER
+}
+
+pub(crate) const DV_REQUEST_PROVENANCE_TRIGGER: &str = dv_queue_admission_provenance_trigger!("");
+pub(crate) const DV_REQUEST_PROVENANCE_COLUMN: &str =
+    "ALTER TABLE dv_conversions ADD COLUMN requested_manually INTEGER NOT NULL DEFAULT 0 CHECK (requested_manually IN (0,1));";
 
 /// Permanent, non-cascading witness for a replacement that must outlive its
 /// catalogue row. `guard_id`, not `file_id`, is the durable identity: SQLite
@@ -322,6 +405,8 @@ impl DvConversionState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DvConversion {
+    /// True only for an explicit file or library request; legacy rows default false.
+    pub requested_manually: bool,
     pub file_id: i64,
     pub state: DvConversionState,
     pub el_type: Option<String>,
@@ -431,6 +516,7 @@ pub trait DvConversionStore: Send + Sync + 'static {
         queued_at_ms: i64,
         retry_failed: bool,
         limit: i64,
+        requested_manually: bool,
     ) -> Result<DvConversionQueueBatch, StoreError>;
 
     async fn dv_conversion_candidates(
@@ -596,10 +682,101 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versioned_queue_trigger_is_the_strict_canonical_shape() {
-        assert!(!DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.contains("IF NOT EXISTS"));
+    fn request_provenance_migration_preserves_history_and_tracks_admissions() {
+        let db = rusqlite::Connection::open_in_memory().expect("open provenance fixture");
+        db.execute_batch(r#"CREATE TABLE items(id INTEGER PRIMARY KEY, library_id INTEGER);
+            CREATE TABLE files(id INTEGER PRIMARY KEY, item_id INTEGER, container TEXT,
+                dv_profile INTEGER, dv_bl_compat_id INTEGER, dv_el_present INTEGER, dv_rpu_present INTEGER);
+            CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO items VALUES(1, 7);
+            INSERT INTO files VALUES(11,1,'mkv',7,1,1,1),(12,1,'mkv',7,1,1,1);
+            INSERT INTO settings VALUES('library.dv_disk_convert','{"7":"manual"}');"#).expect("seed legacy catalog");
+        db.execute_batch(DV_CONVERSIONS_MIGRATION_SCHEMA)
+            .expect("create legacy conversion ledger");
+        db.execute_batch(DV_RECOVERY_GUARDS_MIGRATION_COLUMN)
+            .expect("add recovery link");
+        db.execute_batch(DV_QUEUE_ADMISSION_MIGRATION_TRIGGER)
+            .expect("install legacy admission trigger");
+        db.execute_batch(
+            "INSERT INTO dv_conversions(file_id,state,error,queued_at_ms)
+            VALUES(11,'failed','historical failure',1);",
+        )
+        .expect("seed historical failure");
+        db.execute_batch(DV_REQUEST_PROVENANCE_COLUMN)
+            .expect("migrate request provenance");
+        db.execute_batch("DROP TRIGGER dv_queue_admission_settings_ai")
+            .expect("replace old admission trigger");
+        db.execute_batch(DV_REQUEST_PROVENANCE_TRIGGER)
+            .expect("install provenance admission trigger");
+        let origin = |id| {
+            db.query_row(
+                "SELECT requested_manually FROM dv_conversions WHERE file_id=?1",
+                [id],
+                |r| r.get::<_, bool>(0),
+            )
+            .expect("read stored request origin")
+        };
+        assert!(
+            !origin(11),
+            "legacy failures have no proof of manual admission"
+        );
         assert_eq!(
-            DV_QUEUE_ADMISSION_MIGRATION_TRIGGER.replacen(
+            db.query_row(
+                "SELECT error FROM dv_conversions WHERE file_id=11",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .expect("read preserved historical error"),
+            "historical failure"
+        );
+        let admit = |value: serde_json::Value| {
+            db.execute(
+                "INSERT INTO settings VALUES('__plurx_internal.dv_queue_admission.test',?1)",
+                [value.to_string()],
+            )
+            .expect("admit conversion request");
+        };
+        admit(
+            serde_json::json!({"request_kind":"library_batch","outcome":"queued",
+            "requested_library_id":7,"requested_queued_at_ms":2,"retry_failed":0,
+            "requested_manually":0,"candidate_ids":[12]}),
+        );
+        assert!(!origin(12));
+        admit(
+            serde_json::json!({"request_kind":"single","outcome":"queued",
+            "requested_file_id":11,"requested_queued_at_ms":3,"requested_manually":1}),
+        );
+        assert!(origin(11), "explicit retry replaces historical origin");
+        db.execute_batch("UPDATE dv_conversions SET state='failed' WHERE file_id=12")
+            .expect("fail automatic attempt");
+        admit(
+            serde_json::json!({"request_kind":"library_batch","outcome":"queued",
+            "requested_library_id":7,"requested_queued_at_ms":4,"retry_failed":1,
+            "requested_manually":1,"candidate_ids":[12]}),
+        );
+        assert!(
+            origin(12),
+            "explicit library retry replaces automatic origin"
+        );
+        db.execute_batch("UPDATE dv_conversions SET state='failed' WHERE file_id=12")
+            .expect("fail attempt before legacy-node retry");
+        admit(
+            serde_json::json!({"request_kind":"library_batch","outcome":"queued",
+            "requested_library_id":7,"requested_queued_at_ms":5,"retry_failed":1,
+            "candidate_ids":[12]}),
+        );
+        assert!(
+            !origin(12),
+            "old nodes can still admit requests without provenance"
+        );
+        assert_eq!(db.query_row("SELECT COUNT(*) FROM settings WHERE key GLOB '__plurx_internal.dv_queue_admission.*'", [], |r| r.get::<_, i64>(0)).expect("verify admission envelope retired"), 0);
+    }
+
+    #[test]
+    fn versioned_queue_trigger_is_the_strict_canonical_shape() {
+        assert!(!DV_REQUEST_PROVENANCE_TRIGGER.contains("IF NOT EXISTS"));
+        assert_eq!(
+            DV_REQUEST_PROVENANCE_TRIGGER.replacen(
                 "CREATE TRIGGER ",
                 "CREATE TRIGGER IF NOT EXISTS ",
                 1

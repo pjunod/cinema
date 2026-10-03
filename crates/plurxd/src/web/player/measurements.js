@@ -68,8 +68,8 @@ const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Network preparation has one absolute lifetime, separate from presentation.
 // A moving predecessor cannot extend it. Cancellation/timeout settles even a
 // transport that ignores abort, and its eventual session result is released.
-function beginPlaybackPreparation(isCurrent){
-  beginPlaybackPreparation.active?.cancel();
+function beginPlaybackPreparation(isCurrent,{background=false}={}){
+  if(!background) beginPlaybackPreparation.active?.cancel();
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
@@ -120,7 +120,7 @@ function beginPlaybackPreparation(isCurrent){
       }finally{clearTimeout(timer);rejectPending=null;}
     }
   };
-  beginPlaybackPreparation.active=owner;
+  if(!background) beginPlaybackPreparation.active=owner;
   return owner;
 }
 // Set by a caller that is about to re-enter play() for a reason play()
@@ -622,6 +622,35 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
   else seekTo(position,true,recoveryHeight,false,p.recoveringStall);
+}
+// Native decode errors after an authoritative retirement use the existing
+// one-recovery owner and seek/create retry path. Admission waits for fresh
+// server authority; no new timer or codec recipe is introduced here.
+function recoverServingFencedAttachment(v,p){
+  const terminal=p&&p.sessionTerminal;
+  if(!playbackOwnsAttachedMedia(p)||!terminal
+    ||terminal.attachment!==p.mediaAttachment||terminal.sessionId!==p.sessionId
+    ||!['serving_fenced','authority_fenced'].includes(terminal.reason)) return false;
+  if(p.recoveringStall) return true;
+  if(p.wantsPlayback===false){
+    raisePlaybackSurface('control_hold',{context:'attached',
+      title:'The server retired this stream.',detail:'Your place is saved. Play reopens the stream.',
+      actions:['retry','close']},{once:true});
+    return true;
+  }
+  if((p.stallRecoveries||0)>=1){
+    showStallRecoveryFailure(terminal.message||'The server retired this stream after losing playback authority.');
+    return true;
+  }
+  const position=positionForPlaybackIntent(v,p);
+  p.stallRecoveries=(p.stallRecoveries||0)+1;
+  p.recoveringStall=stallRecoverySnapshot(p,v,{began:performance.now(),kind:'supply',
+    cause:'authority',action:'restart',position,targetHeight:null});
+  endWait(false);
+  raisePlaybackSurface('owner_recovery_step',{title:'Reconnecting the retired stream…',
+    detail:'Waiting for playback authority. Your place is saved.'});
+  seekTo(position,true,null,false,p.recoveringStall);
+  return true;
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;

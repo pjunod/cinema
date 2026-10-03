@@ -70,6 +70,45 @@ lane. Milestones are logical commits and Execution-log rows in that PR; M0 and
 M6 are measurement milestones whose deliverable includes a table in this
 document.
 
+## Video-quality batch continuation — 2026-10-03
+
+[PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) adds one candidate
+plain-HDR10 path: software decode/10-bit scale, P010 upload, `hevc_vaapi`
+Main10 at the existing 1080p rung. The installed m6 Jellyfin encoder advertises
+that profile and P010 hardware surfaces; advertisement alone is not a
+qualification. Source implementation and compile checks precede the final
+adversarial review and once-only validation/measurement pass.
+
+The old coupling was concrete: grade selection knew only software/QSV,
+VAAPI's upload always selected 8-bit NV12, and the HDR argument builder applied
+software `-preset`/`-x265-params` to every non-QSV family. The new family recipe
+uses P010, Main10 and VAAPI IDR controls, with its own existing-style boot
+capability result threaded through system diagnostics, planning and ceilings.
+A refused graph uses the ordinary SDR route. No new playback retry or watchdog
+owns it. Its encoder, pipeline and grade remain inputs to existing immutable
+recipe/cache identity.
+
+The scope is plain PQ/BT.2020 at 1080p with known cadence at most 30 fps.
+The same source-facts contract informs grade selection and checks the final
+plan; high, variable or unknown rates retain SDR with their original cadence. Dolby RPU reshaping, 4K VAAPI HDR and
+HDR subtitle burn are not advertised: burning subtitles still selects SDR
+composition, avoiding nominal subtitle white at the PQ peak. The HDR ceiling
+now asks for the selected route's own proof; plain QSV HDR no longer
+accidentally requires the unrelated Dolby QSV proof. The output remains HEVC Main10/PQ. The isolated capture found VAAPI's
+actual non-packed constraint byte is `B0`, so its declaration is
+`hvc1.2.4.H120.B0`; software/QSV retain their existing measured declarations.
+The selected encoder now informs rolling, cached and VOD presentation facts.
+The diagnostic MP4 also exposed the muxer's default `hev1` entry. Encoded HEVC
+VOD now explicitly writes the advertised `hvc1` entry, through the existing
+parameter-set normalizer. Its actual argv already feeds immutable VOD identity,
+so old and corrected init contracts cannot share a rendition key.
+
+`encoder-calibration-args --grade hdr10 --family vaapi` exports the production
+encoder/upload arguments and 1080p plain-HDR filter for an isolated capture.
+The exporter is evidence plumbing, not a capability or qualification verdict.
+The execution ledger will distinguish encoder/decoded output evidence from
+physical panel or native-device evidence that has not been obtained.
+
 ## 2. Contract today
 
 Re-verify line numbers at build time; they are from `0f02b7ea`.
@@ -326,7 +365,7 @@ labels:
 
   # HELP plurx_tone_map_pipeline_sessions_total Sessions started on each tone-map pipeline.
   # TYPE plurx_tone_map_pipeline_sessions_total counter
-  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
+  plurx_tone_map_pipeline_sessions_total{pipeline="vpp_qsv|tonemap_vaapi|libplacebo_vaapi|libplacebo|tonemap_opencl|dovi_tonemapx|dovi_passthrough|hdr10_passthrough|cpu"} N
 ```
 
 Both label sets are closed enums (`Encoder`, `Pipeline`), so cardinality is
@@ -713,6 +752,46 @@ The private source's size/mtime/inode were unchanged before/after; this is
 not a full-source hash. This longer fixture supersedes no earlier limited
 sample receipt and has not been decoded, independently reshaped/graded or
 physically compared. M1's all-class corpus and fidelity acceptance stay open.
+
+**2026-10-02 M1 reference-association implementation — incomplete corpus:**
+`scripts/codec-qualification-corpus.json` now accounts for all thirteen existing
+generators, including the separate ten-bit gradient, real-PGS input and genuine
+P5 input. It is a versioned metadata plan, not a completed acquisition receipt.
+Known full acquired-fixture hashes retain their historical source identity;
+the separate 70-second H.264, grain, SDR4K and PQ4K inputs are not relabelled as
+the default 45-second generator output. Unknown hashes stay null. Current file
+availability, decoded grade, captured-session output and fidelity are unmeasured.
+
+Run `scripts/bench qualification-corpus` to validate this metadata without
+opening media, generating fixtures, probing tools or connecting to a server.
+`--require-associated` refuses missing reference associations only in this
+measurement command; it never controls ordinary playback. Metadata JSON reads
+are bounded to 1 MiB per regular no-follow file and 4 MiB total, with held-file
+identity and receipt-hash checks. The summary always reports
+`measurement_executed: false` and `qualified: false`, even when associations are
+complete. The existing capture, rate-control and scoring commands are unchanged.
+
+SDR source references remain in the BT.709 VMAF domain. PQ-to-PQ references
+remain in PQ code values; PQ-to-SDR requires a separately hash-bound independent
+BT.709 grade receipt matching the parent, reference and zero-start interval.
+An association validates those receipt fields, **not** its pixels or graph:
+the independent [HDR scorer](../performance/HDR-REFERENCE-SCORING.md) still
+validates decoded metadata, parent geometry, the exact grade graph and scoring
+execution. HLG and unreshaped DV explicitly retain unsupported/unmeasured
+associations; no SDR score is substituted. This does not complete §3.1.3's
+all-class corpus, §3.6's fidelity checks, the session matrix or M1 acceptance.
+The historical acceptance command below still needs a domain-aware measurement
+consumer; this metadata command does not pretend the SDR-only rate-control
+loader can consume PQ/HLG/DV references.
+
+For the unchanged 64-document local-unit receipt bound, this task retires only
+the inactive merged-PR671 discovery copy
+`validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+Its exact 1,262-byte SHA-256 is the filename; Git blob is
+`963c29967b09561bc077844ac5a0f2f5838da190`. Original null-source attribution,
+authenticated comment6937 and landing history remain unchanged. Recover the
+original with `git show b353c4f8c0129b17e6217680f6bdf757a3ede65b:validation/python-unit-local/1d47b568736d9e306fee3f643db49e9118b9b4b85598c6325df8e35d6c6d4b62.json`.
+No active-task proof, receipt loader, cap or replay policy is changed.
 
 Code: five new `FIXTURES` entries (§3.5) in `scripts/bench`, a new
 `scripts/codec-qualification-corpus.json` at schema version 1 with
@@ -1246,3 +1325,10 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |
 | 2026-09-30 | gpt-6.1-sol | agent:/root/k06_runtime_sol61 | M2 runtime; M1 generator seams, incomplete | pending | Typed contract drives the actual resolved plan/delivered presentation; all legacy selections and golden recipe identity preserved, five focused storage-enabled core regressions green. Three fixture-seam tests and all 59 existing harness tests green. No new HEVC qualification/default or production change. Current four-node hardware/compiled/existing-probe evidence above, with unknown ordinary-session observations retained. Organic week now supplementary by Paul's ruling; M1 remains open for genuine P5 acquisition, actual generation/session burn and HDR-aware scoring/fidelity evidence. |
 | 2026-10-01 | gpt-6.1-sol | agent:/root/s09_665_resume_sol61 | M1 bench metadata/acquisition continuation, incomplete | candidate | Two new focused guards passed once after negative controls; first is argument-only. Actual x265-parameter-only counterexample retained; final metadata-only frame tail proves tiny SPS and full unchanged 45-second ten-bit gradient metadata. Three other generated fixtures plus a distinct requested-45-second genuine P5/RPU fixture acquired; GOP extent and source-stat limits recorded above. Organic week is supplementary, not M1/M2 eligibility. No production encoder/default, GPU, independent HDR grade or whole-corpus qualification. |
+
+The batch's [isolated VAAPI receipt](../evidence/video-quality-2026-10-03/vaapi-qualification.json)
+verifies the actual sample entry, profile/tier/constraints, all 96 timestamps,
+PQ/BT.2020 tags, complete decode and a continuous neutral ramp on m6. A separate
+discontinuous fixture exceeded its worst-pixel limit; see the
+[execution ledger](../performance/VIDEO-QUALITY-STATUS.md#final-qualification--retained-per-check-receipts)
+for that failed result and the exact limits of the passing capture.

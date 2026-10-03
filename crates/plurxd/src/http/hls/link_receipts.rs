@@ -854,23 +854,48 @@ pub(crate) async fn measured_outputs(
     file: &MediaFile,
     request: &crate::media_pool::QualityCatalogRequest,
     accepted: &[crate::media_pool::WorkerQualityCandidate],
+    snapshot: Option<&plurx_core::store::PlaybackPlanningSnapshot>,
 ) -> Option<Vec<crate::vodserve::retained::MeasuredCandidateOutput>> {
     if !accepted.iter().any(|entry| entry.node_id == state.node_id) {
         return None;
     }
-    let projected = tokio::time::timeout(
-        Duration::from_millis(100),
-        state.transcode.quality_candidates_with_measured_outputs(
-            file,
-            &request.caps,
-            request.audio_index,
-            request.audio_offset_ms,
-            request.subtitle_burn,
-            request.presentation,
-            request.copy_contract,
-            request.audio_delivery.as_ref(),
-            request.audio_claim.as_ref(),
-        ),
+    let projected = tokio::time::timeout_at(
+        crate::media_pool::create_stage_deadline(Duration::from_millis(100)),
+        async {
+            if let Some(snapshot) = snapshot {
+                state
+                    .transcode
+                    .quality_catalog_from_snapshot_progress(
+                        snapshot,
+                        &request.caps,
+                        request.audio_index,
+                        request.audio_offset_ms,
+                        request.subtitle_burn,
+                        request.presentation,
+                        request.copy_contract,
+                        request.audio_delivery.as_ref(),
+                        request.audio_claim.as_ref(),
+                        None,
+                        None,
+                    )
+                    .await
+            } else {
+                state
+                    .transcode
+                    .quality_candidates_with_measured_outputs(
+                        file,
+                        &request.caps,
+                        request.audio_index,
+                        request.audio_offset_ms,
+                        request.subtitle_burn,
+                        request.presentation,
+                        request.copy_contract,
+                        request.audio_delivery.as_ref(),
+                        request.audio_claim.as_ref(),
+                    )
+                    .await
+            }
+        },
     )
     .await
     .ok()?;
@@ -1244,9 +1269,7 @@ mod tests {
     }
 
     async fn typed_recovery_controls(review_controls: bool) {
-        use crate::transcode::{
-            CandidateExecutionContext, ReopenReason, SessionKind, SessionRequest,
-        };
+        use crate::transcode::{ReopenReason, SessionKind, SessionRequest};
         use axum::{
             extract::{Path, Query, State},
             http::HeaderMap,
@@ -1261,16 +1284,15 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("user-agent", "Mozilla/5.0".parse().expect("UA"));
         let remote = "192.168.4.9:1234".parse().expect("socket");
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(
+            serde_json::json!({"v":2,"video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]})
+        ).expect("actual request caps");
         let decision = crate::http::stream::decision(
             crate::http::extract::AuthUser(user.clone()),
             State(state.clone()),
             Path(file.id),
             Query(crate::http::stream::Caps {
-                caps_v2: Some(
-                    serde_json::from_value(serde_json::json!({"v":2,
-                "video":[{"codec":"h264","present":["sdr"]}],"containers":["mp4"]}))
-                    .expect("caps"),
-                ),
+                caps_v2: Some(caps.clone()),
                 force: Some("auto".into()),
                 ..Default::default()
             }),
@@ -1297,6 +1319,7 @@ mod tests {
             &user.password_hash,
         ));
         let mut request = SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             file_id: file.id,
             playback_id: "typed-player".into(),
@@ -1319,13 +1342,28 @@ mod tests {
         };
         let now = crate::media_sessions::unix_ms();
         let incarnation = uuid::Uuid::new_v4().to_string();
+        request.request_id = Some(incarnation.clone());
+        let planning = state
+            .store
+            .playback_planning_snapshot(file.id, &crate::transcode::QUALITY_PLANNING_KEYS)
+            .await
+            .expect("planning snapshot")
+            .expect("source");
         let session = uuid::Uuid::new_v4().to_string();
         let recipe = crate::media_sessions::RemoteStartRequest {
             retained_output_receiver: None,
             retained_output: None,
             candidate_id: Some(incumbent.id),
+            candidate_catalog: Some(crate::media_sessions::CandidateCatalogContext {
+                caps: caps.clone(),
+                candidate: incumbent.clone(),
+                binding: crate::media_pool::PlanningBinding::from_snapshot(&planning),
+            }),
             presentation_target: None,
-            decoder_caps: None,
+            decoder_caps: Some(
+                crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1)
+                    .expect("actual decoder constraints"),
+            ),
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
             incarnation_id: incarnation.clone(),
             user_id: user.id,
@@ -1385,15 +1423,13 @@ mod tests {
         .await
         .expect("authenticated full current candidate");
         request.previous_session_id = Some(session.clone());
-        request.candidate_context = Some(CandidateExecutionContext {
-            retained_output: None,
-            owner_node_id: Some(state.node_id.clone()),
-            candidate_id: proposed.id,
-            recipe_digest: proposed.recipe_digest,
-            normalized_geometry: proposed.normalized_geometry,
-            grade: proposed.grade,
-            profile: None,
-        });
+        let mut context = crate::transcode::TranscodeManager::candidate_context(&proposed);
+        context.canonical_caps = Some(caps);
+        context.planning_binding =
+            Some(crate::media_pool::PlanningBinding::from_snapshot(&planning));
+        context.planning_snapshot = Some(Arc::new(planning));
+        context.owner_node_id = Some(state.node_id.clone());
+        request.candidate_context = Some(Box::new(context));
         for cause in [
             ReopenReason::Link,
             ReopenReason::Encode,

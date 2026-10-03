@@ -111,6 +111,7 @@ impl TranscodeManager {
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
             hdr10_passthrough_qsv: false,
+            hdr10_passthrough_vaapi: false,
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
@@ -157,6 +158,11 @@ impl TranscodeManager {
         self
     }
 
+    pub fn with_hdr10_passthrough_vaapi(mut self, proved: bool) -> Self {
+        self.hdr10_passthrough_vaapi = proved;
+        self
+    }
+
     /// The tallest frame this node can actually encode HDR10 at, or 0.
     ///
     /// `/decision` needs this and cannot derive it: the renderer proofs answer
@@ -170,14 +176,23 @@ impl TranscodeManager {
     /// here: this is the ceiling a plain PQ source can reach, and a node that
     /// proved only the Dolby half still cannot encode one.
     pub async fn hdr10_ceiling(&self) -> i64 {
-        if !self.hdr10_passthrough {
-            return 0;
-        }
-        match self.encoder().await {
+        self.hdr10_ceiling_with_preference(
+            &self
+                .store
+                .get_setting(keys::HWACCEL)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn hdr10_ceiling_with_preference(&self, preference: &str) -> i64 {
+        match self.caps.choose(preference) {
+            Encoder::Vaapi if self.hdr10_passthrough_vaapi => HDR10_HEIGHT,
+            _ if !self.hdr10_passthrough => 0,
             Encoder::Qsv if self.hdr10_passthrough_qsv => HDR10_4K_HEIGHT,
             Encoder::Qsv | Encoder::Software => HDR10_HEIGHT,
-            // No measured Main10 route on this family, and dropping to
-            // software x265 costs realtime — see `hdr10_grade_for`.
             _ => 0,
         }
     }

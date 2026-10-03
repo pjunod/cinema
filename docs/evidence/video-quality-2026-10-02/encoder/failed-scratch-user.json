@@ -1,0 +1,155 @@
+{
+  "acceptance_eligible": false,
+  "bench_sha256": "086318857a832f6526cee1e4e4fd6ec943f60412ba4e03a2f75af624185afe6f",
+  "capture_environment": {
+    "container_cpu_limit": 2,
+    "container_memory_bytes": 2147483648,
+    "container_network": "none",
+    "deployed_revision": "4fa50b79e4b3b196797a9b7a1a7a4abd2184ea43",
+    "encoder_sha256": "90004301255382e1beb441a294fa8b75ac7fbb54678837f224d3458032e38787",
+    "fixture_generation_threads": 1,
+    "host": "nuc4",
+    "image_id": "sha256:1e9ced2c79aa086e0faf4dd2576b413b6a97458aae6228e22f439ae904564753",
+    "max_scratch_media_bytes": 536870912,
+    "viewer_watch_seconds": 2
+  },
+  "corpus_sha256": "fdddc70db9cd7e678f212e00c9ce11713b49f0308f4c51c63abdfb6c1824cd0c",
+  "duration_seconds": 12.0,
+  "encoder": {
+    "build": "ffmpeg version 8.1.3-Jellyfin Copyright (c) 2000-2026 the FFmpeg developers",
+    "executable": "/tmp/plurx-encoder-screen-20261003/encoder-ffmpeg"
+  },
+  "encoder_export": {
+    "bitrate_kbps": 8000,
+    "family": "qsv",
+    "input_args": [
+      "-init_hw_device",
+      "qsv=hw",
+      "-filter_hw_device",
+      "hw"
+    ],
+    "modes": {
+      "qvbr": {
+        "encoder_args": [
+          "-c:v",
+          "h264_qsv",
+          "-global_quality",
+          "22",
+          "-b:v",
+          "8000k",
+          "-maxrate",
+          "12000k",
+          "-bufsize",
+          "16000k",
+          "-forced_idr",
+          "1"
+        ],
+        "recipe_value": "qvbr:q22:maxrate1.5x:bufsize2x"
+      },
+      "vbr": {
+        "encoder_args": [
+          "-c:v",
+          "h264_qsv",
+          "-b:v",
+          "8000k",
+          "-maxrate",
+          "12000k",
+          "-bufsize",
+          "16000k",
+          "-forced_idr",
+          "1"
+        ],
+        "recipe_value": "vbr:maxrate1.5x:bufsize2x"
+      }
+    },
+    "output_grade": "sdr",
+    "quality": 22,
+    "schema_version": 1,
+    "scope": "encoder_arguments_only",
+    "software_threads": 2,
+    "upload_filter": "hwupload=extra_hw_frames=64,format=qsv"
+  },
+  "encoder_export_sha256": "2b7ec7dea0e794060fcbbb0bcdb15525f0d1844efe05b980c09f71c6a73fb5e9",
+  "error": "command failed (243): libva info: VA-API version 1.24.0\nlibva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\nlibva info: Found init function __vaDriverInit_1_24\nlibva info: va_openDriver() returns 0\nlibva info: VA-API version 1.24.0\nlibva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\nlibva info: Found init function __vaDriverInit_1_24\nlibva info: va_openDriver() returns 0\nInput #0, matroska,webm, from '/tmp/plurx-encoder-screen-20261003/captures/easy-1080p-h264/reference.mkv':\n  Metadata:\n    encoder         : Lavf\n  Duration: 00:00:12.02, start: 0.000000, bitrate: 13080 kb/s\n  Stream #0:0: Video: h264 (Constrained Baseline), yuv420p(tv, progressive), 1920x1080 [SAR 1:1 DAR 16:9], 24 fps, 24 tbr, 1k tbn\n    Metadata:\n      ENCODER         : Lavc libx264\n      DURATION        : 00:00:12.000000000\n  Stream #0:1: Audio: aac (LC), 44100 Hz, mono, fltp\n    Metadata:\n      ENCODER         : Lavc aac\n      DURATION        : 00:00:12.023000000\n[out#0/mp4 @ 0x5b655814b140] Error opening output /tmp/plurx-encoder-screen-20261003/captures/easy-1080p-h264/vbr.mp4: Permission denied\nError opening output file /tmp/plurx-encoder-screen-20261003/captures/easy-1080p-h264/vbr.mp4.\nError opening output files: Permission denied\n",
+  "fixture": {
+    "class": "easy",
+    "dynamic_range": "sdr",
+    "filename": "1080p-h264.mkv",
+    "identity": "easy-1080p-h264",
+    "output_grade": "sdr",
+    "reference": "../bench-media/1080p-h264.mkv",
+    "reference_sha256": "8e4f356daf8a64c989c0ca6d01ba3accf81edfbc23bb257ab1b1f8382f5f9513",
+    "rung": 1080,
+    "trim": {
+      "duration_seconds": 30,
+      "start_seconds": 0
+    }
+  },
+  "fixture_generator": {
+    "build": "ffmpeg version 8.0.1-3ubuntu2 Copyright (c) 2000-2025 the FFmpeg developers",
+    "executable": "/tmp/plurx-encoder-screen-20261003/fixture-ffmpeg"
+  },
+  "limitations": [
+    "Synthetic fixtures are not representative movie or sports evidence.",
+    "No production daemon, transport, served-segment peak or fleet p10-speed qualification.",
+    "Single-run encode elapsed times include process startup; no default change is authorized.",
+    "Software decode, video-only MP4, fixed GOP and no frame reordering are screening overrides."
+  ],
+  "modes": {},
+  "partial_media_removed": true,
+  "reference": {
+    "argv": [
+      "/tmp/plurx-encoder-screen-20261003/fixture-ffmpeg",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc2=size=1920x1080:rate=24:duration=12.0",
+      "-f",
+      "lavfi",
+      "-i",
+      "sine=frequency=440:duration=12.0",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "ultrafast",
+      "-g",
+      "48",
+      "-map_metadata",
+      "-1",
+      "-fflags",
+      "+bitexact",
+      "-flags:v",
+      "+bitexact",
+      "-flags:a",
+      "+bitexact",
+      "-threads",
+      "1",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-shortest",
+      "-y",
+      "-fs",
+      "178956970",
+      "/tmp/plurx-encoder-screen-20261003/captures/easy-1080p-h264/reference.mkv"
+    ],
+    "elapsed_seconds": 1.3132493880111724,
+    "file": "reference.mkv",
+    "matches_pinned_n2": false,
+    "sha256": "178b766ade07b69de20eca52bcfeeba39eaa319977c3bf9eef584902ff693501"
+  },
+  "resource_limits": {
+    "cpu_threads": 2,
+    "max_media_bytes": 536870912,
+    "one_encode_at_a_time": true,
+    "process_timeout_seconds": 180
+  },
+  "schema_version": 1,
+  "scope": "offline_encoder_screen_non_acceptance",
+  "source_revision": "cfb52bf402e603523f6fd5b3d71b6ffa2c751565",
+  "status": "failed"
+}

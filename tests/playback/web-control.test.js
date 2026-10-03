@@ -2,6 +2,8 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
+// Native startup is part of the same required web-control lane.
+require("./native-hls-startup.test.js");
 const fs = require("node:fs");
 const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
@@ -24,6 +26,14 @@ function shippedSource(name) {
 }
 function transportTelemetrySources(){
   return ["playbackTransportRecord","logPlaybackTransportRecord","queuePlaybackTransportCommand","playbackTransportMarker"].map(shippedSource).join("\n");
+}
+
+// Extracted intent owners retain the real next-episode invalidation edge.
+// Individual scenarios can install an owner.cancel spy on their player.
+function nextEpisodeCancellationSources(){
+  return ["let AUTOPLAY_NEXT_PREPARED=null;",
+    shippedSource("cancelNextEpisodePreparation"),
+    shippedSource("clearAutoplayNextPreparation")].join("\n");
 }
 
 // The sliced owners now call these production telemetry edges. Keep their
@@ -85,6 +95,7 @@ function fullOpenHarness() {
   const policy = require("../../crates/plurxd/src/web/playback-policy.js");
   return new Function("PlaybackPolicy", [
     "const SERVER={playback_display_aware_auto:false};",
+    "const nextEpisodeTicks=[];function prepareNextEpisodeIfNearEnd(...args){nextEpisodeTicks.push(args);}",
     "let PLAYER=null,PENDING_ATTEMPT_REASON=null,PENDING_DEFAULT_SUB_OFF=false,PENDING_LIBRARY_CHANNEL_PLAYBACK=null,STATS_TIMER=null; const decisions=[],sessions=[],released=[],media=[];",
     "let quality='auto';const localStorage={getItem:()=>quality,setItem:(key,value)=>{quality=value;}}; const DECODE_LIMIT_TTL_MS=1,DECODE_LIMIT_RETEST_MS=1;",
     "let modalOpen=true; const node={classList:{contains:()=>modalOpen,add(){modalOpen=true;},toggle(){},remove(...names){if(names.includes('open'))modalOpen=false;}},style:{},dataset:{},focus(){},setAttribute(){}};",
@@ -130,7 +141,7 @@ function fullOpenHarness() {
     shippedSource("createPlaybackOpenGate"), "const PLAY_OPEN_GATE=createPlaybackOpenGate();",
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
-    shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
+    shippedSource("positionForPlaybackIntent"), nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
     seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
@@ -213,8 +224,8 @@ function fullOpenHarness() {
     "function incumbentWaiting(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
-      shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+      shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",(?:async)?\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,nextEpisodeTicks,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),installPlayerMediaSession,updatePlayerMediaSession,mediaHandlers,mediaLog,mediaSession:navigator.mediaSession,setInputState(value){inputState=value;},spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100,{epoch:PLAYER.controlPresentationEpoch||0,attachment:PLAYER.mediaAttachment,intent:PLAYER.controlSeek?.sequence}),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -848,21 +859,27 @@ async function main() {
     surfaceSeam(),
     "function clearPlaybackControlWaiters(){}",
     "function notifyPlaybackControl(){notifications+=1;}",
-    shippedSource("supersedePlaybackControlIntent"),
+    nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
+    "AUTOPLAY_NEXT_PREPARED={page:{id:'next-episode'}};",
     seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
     shippedSource("markPlaybackControlSeekExecuted"),
     shippedSource("samplePlaybackPresentationClock"),
     shippedSource("settlePlaybackControlSeek"),
     shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
     "return {begin(p,target){PLAYER=p;return beginPlaybackControlSeek(p,target);},mark:markPlaybackControlSeekExecuted,"+
-      "settle:settlePlaybackControlSeek,sample:samplePlaybackPresentationClock,"+
-      "notifications:()=>notifications};",
+      "settle(v,p,time,frames){return settlePlaybackControlSeek(v,p,time,frames,{epoch:p.controlPresentationEpoch||0,attachment:p.mediaAttachment,intent:p.controlSeek?.sequence});},sample:samplePlaybackPresentationClock,"+
+      "notifications:()=>notifications,nextPrepared:()=>AUTOPLAY_NEXT_PREPARED};",
   ].join("\n"))({now:()=>presentationNow});
+  let nextEpisodeCancelled=0;
   const intentPlayer={started:true,offset:0,source:{video_codec:"h264"},
+    nextEpisodePreparation:{owner:{cancel(){nextEpisodeCancelled++;}}},
     controlPresentedFrames:0,controlHasFrameCallbacks:true};
   const intentVideo={currentTime:10,seeking:false,readyState:4,paused:false,playbackRate:1};
   const firstIntent=seekIntentAdapter.begin(intentPlayer,30);
   const finalIntent=seekIntentAdapter.begin(intentPlayer,90);
+  assert.equal(nextEpisodeCancelled,1,"the first directed seek cancels the obsolete episode preparation once");
+  assert.equal(intentPlayer.nextEpisodePreparation,null);
+  assert.equal(seekIntentAdapter.nextPrepared(),null);
   assert.equal(finalIntent.sequence,firstIntent.sequence+1,"later seeks supersede monotonically");
   assert.equal(seekIntentAdapter.settle(intentVideo,intentPlayer,90,1),false,
     "a target-looking frame before execution cannot settle the intent");
@@ -935,10 +952,9 @@ async function main() {
     seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
     callbacks[0](presentationNow,{mediaTime:80});
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
-    callbacks[1](presentationNow,{mediaTime:80});
-    assert.notEqual(epochs[0],p.controlPresentationEpoch,
-      "a callback queued by the predecessor cannot settle the new execution");
-    assert.equal(epochs[1],p.controlPresentationEpoch);
+    callbacks[2](presentationNow,{mediaTime:80});
+    assert.deepEqual(epochs,[p.controlPresentationEpoch],
+      "execution cancels the old observer and renews the sole destination frame");
     presentationNow+=1000;
     assert.equal(seekIntentAdapter.settle(v,p,81,1),true,
       "delayed video presentation is checked against the active media timeline");
@@ -1092,7 +1108,7 @@ async function main() {
       "function releaseSession(id){released.push(id);}",
       "function attachSession(v,p,info,pos){markPlaybackControlSeekExecuted(p,pos);return pos;}",
       "function remuxUrl(path,audio,pos){calls.push({kind:'remux',position:pos*1000});return '/remux';}",
-      shippedSource("supersedePlaybackControlIntent"),
+      nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
       shippedSource("positionForPlaybackIntent"),
       seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
       shippedSource("markPlaybackControlSeekExecuted"),
@@ -1278,7 +1294,7 @@ async function main() {
       "const document={getElementById:()=>video}; const window={Hls:true}; const TOKEN=null;",
       "class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',BUFFER_APPENDED:'append'}; static isSupported(){return true;} constructor(){this.events={};instances.push(this);} on(e,f){this.events[e]=f;} loadSource(){} attachMedia(){} destroy(){}}",
       "const PlaybackPolicy={bandwidthSeedBps:()=>null,HLS_STARTUP:{cold_deadline_ms:40000,manifest_load_policy:{default:{}}}}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
-      "function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
+      "const nextTasks=[];function setTimeout(fn,delay){if(delay===0)nextTasks.push(fn);return 0;}function clearTimeout(){} function parseSegTimes(){return [8,16,24,32];}function nativeHlsPlaylists(){return Promise.resolve({url:\"/session/index.m3u8\",text:\"#EXTM3U\\n#EXTINF:8,\\nseg00000.ts\\n\"});}function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
       // Teardown now settles a staged successor before it destroys the
       // incumbent, so the scope carries that path rather than a stub of it.
       "function clientLog(){} function playbackContext(){return {};} function notifyPlaybackControl(){}",
@@ -1303,11 +1319,15 @@ async function main() {
       shippedSource("attachHls"),shippedSource("beginHlsAttachment"),
       shippedSource("hlsStartupEpisode"),shippedSource("constructHls"),
       shippedSource("wireHlsObservers"),shippedSource("onHlsError"),
-      shippedSource("attachNativeHls"),
+      shippedSource("attachNativeHls"),shippedSource("hlsStartupCurrent"),
+      shippedSource("nativeHlsCurrent"),shippedSource("armNativeHlsDeadline"),shippedSource("armNativeHlsReadiness"),
+      shippedSource("nativeHlsRecoverAuthority"),shippedSource("recoverServingFencedAttachment"),
+      shippedSource("nativeHlsAuthenticationRefused"),shippedSource("runNativeHlsReadiness"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
-      "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
+      "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),runNextTasks:()=>nextTasks.splice(0).forEach(fn=>fn()),teardownHls};",
     ].join("\n"))(native);
-    h.attach();
+    h.attach();h.runNextTasks();
+    if(native)await new Promise(resolve=>setImmediate(resolve));
     h.p.controlSeekSequence=2;
     h.p.controlSeek={sequence:2,targetMs:90_000,executed:true};
     if(native){
@@ -1370,6 +1390,7 @@ async function main() {
     assert.equal(h.decisions.length,2,'cold decision timeout has a working Retry without PLAYER');
     resolveDecision(h.decisions[1]);await retry;
     assert.equal(h.current().fileId,'cold');
+    assert.equal(h.nextEpisodeTicks.at(-1)[0],h.current(), 'the shipped progress tick prepares metadata only for its current player');
   }
   for(const prior of ['cold','different-title']){
     const h=fullOpenHarness();if(prior==='different-title')h.attach(fullPlayer());
@@ -1574,12 +1595,13 @@ async function main() {
       assert.equal((h.sessions[0]||h.decisions[0]).signal.aborted,true,'original preparation retains its20s bound');
     }
   }
-  for(const delayedBoundary of [0,1,2,3]){
+  for(const delayedBoundary of [0,1,2,3,4]){
     for(const interruption of ['title','seek','open']){
       const h=new Function([
         "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0;const pending=[],loading=[],location={hash:''},ITEM_FOR_FILE={f:'e1'};",
         surfaceSeam(),
         "function api(){return new Promise(resolve=>pending.push(resolve));}function exactWireId(x){return x.id;}function toast(){}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
+        nextEpisodeCancellationSources(),shippedSource("resolveNextEpisodePage"),
         shippedSource("playbackContinuation"),shippedSource("playNextEpisode"),shippedSource("finishPlayback"),
         shippedSource("beginPlaybackPreparation"),
         "return {pending,location,loading,surface:surfacePainted,events:()=>surfaceEvents,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),interrupt(kind){if(kind==='title')PLAYER={fileId:'other'};else if(kind==='seek')PLAYER.controlIntentGeneration=1;else PLAYER.pendingOpenAttempt={};}};",
@@ -1587,7 +1609,8 @@ async function main() {
       const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
         {children:[{id:'e1',kind:'episode'}]},
         {children:[{id:'s1',kind:'season'},{id:'s2',kind:'season'}]},
-        {children:[{id:'e2',kind:'episode',title:'Next'}]}];
+        {children:[{id:'e2',kind:'episode',title:'Next'}]},
+        {item:{id:'e2',kind:'episode',title:'Next'},files:[]}];
       const opening=h.start();
       for(let i=0;i<delayedBoundary;i++){h.pending[i](replies[i]);await flush();await flush();}
       h.interrupt(interruption);h.pending[delayedBoundary](replies[delayedBoundary]);await opening;
@@ -1601,20 +1624,22 @@ async function main() {
         'and cannot retire it either — the intent it belongs to never settled');
     }
   }
-  for(const delayedBoundary of [0,1,2,3])for(const boundary of ['headers','body']){
+  for(const delayedBoundary of [0,1,2,3,4])for(const boundary of ['headers','body']){
     const h=new Function([
       "let PLAYER={fileId:'f',attemptId:'a1'},AUTOPLAY=null,closed=0,now=0,timerId=0;const pending=[],loading=[],notices=[],timers=new Map(),location={hash:''},ITEM_FOR_FILE={f:'e1'};",
       surfaceSeam(),
       "const performance={now:()=>now};const API='/api',TOKEN=null,AUTH_GENERATION=0;function logout(){}function fetch(url,options){return new Promise(resolve=>pending.push({url,options,resolve}));}",
       "function setTimeout(fn,ms){const id=++timerId;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}function exactWireId(x){return x.id;}function toast(text){notices.push(text);}function autoNextOn(){return true;}function setLoading(value){loading.push(value);}function closePlayer(){closed++;}",
       apiPrelude()+shippedSource('api'),shippedSource('beginPlaybackPreparation'),
+      nextEpisodeCancellationSources(),shippedSource('resolveNextEpisodePage'),
       shippedSource('playbackContinuation'),shippedSource('playNextEpisode'),shippedSource('finishPlayback'),
       "return {pending,loading,notices,surface:surfacePainted,events:()=>surfaceEvents,location,start:()=>finishPlayback(true),result:()=>({AUTOPLAY,closed}),advance(ms){now+=ms;for(const[id,t]of [...timers])if(t.at<=now){timers.delete(id);t.fn();}}};",
     ].join('\n'))();
     const replies=[{item:{kind:'episode'},ancestors:[{id:'show'},{id:'s1'}]},
       {children:[{id:'e1',kind:'episode'}]},
       {children:[{id:'s1',kind:'season'},{id:'s2',kind:'season'}]},
-      {children:[{id:'e2',kind:'episode',title:'Next'}]}];
+      {children:[{id:'e2',kind:'episode',title:'Next'}]},
+        {item:{id:'e2',kind:'episode',title:'Next'},files:[]}];
     const opening=h.start();
     for(let i=0;i<delayedBoundary;i++){
       if(i===0)h.advance(19_000);
@@ -2565,7 +2590,7 @@ async function main() {
         surfaceSeam(),
         shippedSource("createPlaybackOpenGate"),"const PLAY_OPEN_GATE=createPlaybackOpenGate();",
         askConstants,
-        shippedSource("supersedePlaybackControlIntent"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
         shippedSource("holdReasonText"),
         shippedSource("controlVerdictText"),
         shippedSource("armedPlaybackControlVerdict"),
@@ -4082,7 +4107,7 @@ async function main() {
         shippedConst("PREPARED_OFFER_CADENCE_MS"),
         shippedSource("playbackControlSelection"),
         shippedSource("positionForPlaybackIntent"),
-        shippedSource("supersedePlaybackControlIntent"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),
         seekTelemetrySources(), shippedSource("beginPlaybackControlSeek"),
         shippedSource("clearPlaybackControlWaiters"),
         shippedSource("settlePlaybackControlWaiters"),
@@ -6893,7 +6918,7 @@ async function vendoredHlsStartupTests(){
         shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
         shippedSource("observeStreamFailureResponse"),
         shippedSource("createHlsStartupLoader"),
-        shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
+        nextEpisodeCancellationSources(),shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
         shippedSource("scheduleHlsNetworkRetry"),
         "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
         "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
@@ -7061,4 +7086,74 @@ test("terminal attachment fencing discards stale retried requests",async()=>{
   assert.equal(requests.length,3);assert.equal(requests[2].position_ms,8000,
     "successor capture wins over the obsolete ended retry");
   subject.stop();
+});
+
+function quorumDiagnosisHarness(fetcher){
+  const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+  return new Function('PlaybackPolicy','fetch',[
+    "let STREAM_FAILURE=null; const PLAYER={method:'remux',probeUrl:'/stream',started:false,sessionId:'retired',mediaAttachment:{}}; const faults=[],stops=[];",
+    "const TOKEN=null,document={getElementById:()=>({})},performance={now:()=>1},console={warn(){}};",
+    "function playbackOwnsAttachedMedia(p){return p===PLAYER;}function hlsStartupIncomplete(){return false;}function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function stopPlayerForExhaustion(){stops.push(true);}function raisePlaybackSurface(source,fault){faults.push(fault);}function playbackStallActions(){return ['retry','close'];}",
+    shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),
+    shippedSource('probePlaybackSource'),shippedSource('stallDiagnose'),
+    "return {player:PLAYER,faults,stops,diagnose:stallDiagnose,note:(status,body)=>noteStreamFailure(status,body,{attachment:PLAYER.mediaAttachment,resource:'media',request_ordinal:1})};",
+  ].join('\n'))(policy,fetcher);
+}
+
+test("probes preserve fenced retirement and describe unknown HTTP failures factually",async()=>{
+  for(const status of [404,410,503]) for(const body of [null,'']){
+    const h=quorumDiagnosisHarness(async()=>new Response(body,{status}));
+    await h.diagnose();
+    assert.match(h.faults[0].detail,new RegExp(`HTTP ${status}`));
+    assert.doesNotMatch(JSON.stringify(h.faults),/ad.block|extension|ffmpeg failed/i);
+    let probes=0;
+    const fenced=quorumDiagnosisHarness(async()=>{probes++;return new Response('',{status});});
+    fenced.note(503,JSON.stringify({code:'serving_fenced',message:'serving proof expired'}));
+    fenced.note(410,JSON.stringify({code:'session_gone',message:'missing session'}));
+    await fenced.diagnose();
+    assert.equal(probes,0);assert.match(fenced.faults[0].detail,/serving proof expired/);
+  }
+  const typed=quorumDiagnosisHarness(async()=>new Response(JSON.stringify({code:'serving_fenced',message:'authority unavailable'}),{status:503}));
+  await typed.diagnose();
+  assert.equal(typed.player.sessionTerminal.reason,'serving_fenced');
+  assert.match(typed.faults[0].detail,/authority unavailable/);
+});
+
+test("a probe arriving after attachment replacement cannot diagnose the successor",async()=>{
+  const waiting=deferred();
+  const h=quorumDiagnosisHarness(()=>waiting.promise);
+  const operation=h.diagnose();
+  h.player.mediaAttachment={};
+  waiting.resolve(new Response(JSON.stringify({code:'serving_fenced',message:'old attachment'}),{status:503}));
+  await operation;
+  assert.equal(h.faults.length,0);assert.equal(h.stops.length,0);
+  assert.equal(h.player.sessionTerminal,undefined);
+});
+
+
+test("late control terminal and typed 410 preserve authority retirement before native error 3",()=>{
+  const policy=require('../../crates/plurxd/src/web/playback-policy.js');
+  for(const exchange of [
+    {response:{action:{type:'terminal',code:'source_decode_failed'}}},
+    {error:Object.assign(new Error('expired'),{status:410,terminalReason:'control_expired'})},
+  ]){
+    const build=new Function('PlaybackPolicy',[
+      "let STREAM_FAILURE=null,PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0,controlIntentGeneration:0}; const callbacks={},reopens=[],rescues=[];",
+      "const CONTROL_CLIENT_ID='test',window={PlurxPlaybackControl:{}},performance={now:()=>1},console={warn(){}},document={getElementById:()=>({})};",
+      "class Reporter{constructor(config){this.config=config;}start(){}notify(){return null;}} const PlurxPlaybackControl={Reporter,capture:(snapshot,intentGeneration,owner)=>({intentGeneration,owner})};",
+      "function stopPlaybackControl(){}function continueStoppingPlaybackControl(){return false;}function playbackOwnsAttachedMedia(p){return p===PLAYER;}function playbackControlSnapshot(){return {};}function sendPlaybackControl(){}function settlePlaybackControlWaiters(){}function settlePlaybackControlAcknowledgement(){}",
+      "function notifyPlaybackControl(){return null;}function clearStall(){}function pbTick(){}function pbSyncPlayIcon(){}function endWait(){}function clientLog(){}function playbackContext(){return {};}function playbackSurfaceGeneration(){return null;}",
+      "function positionForPlaybackIntent(){return 42;}function stallRecoverySnapshot(p,v,facts){return facts;}function seekTo(...args){reopens.push(args);}function raisePlaybackSurface(){}function showStallRecoveryFailure(){throw Error('unexpected exhausted recovery');}function startTranscodeFallback(){rescues.push(true);}function finishStallRecovery(){return false;}function playbackIsReal(){return false;}function streamRejectionFacts(){return {};}",
+      shippedSource('noteStreamFailure'),shippedSource('currentStreamFailureOverlay'),shippedSource('startPlaybackControl'),
+      shippedSource('recoverServingFencedAttachment'),shippedSource('wirePlayerMedia'),
+      "const v={error:{code:3},currentSrc:'/retired',getAttribute:()=>'/retired',addEventListener:(name,fn)=>callbacks[name]=fn};",
+      "const reporter=startPlaybackControl(v,PLAYER,{lease_timeout_ms:1000});if(!reporter)throw Error('control owner did not start');wirePlayerMedia(v);",
+      "return {player:PLAYER,reopens,rescues,retire:()=>noteStreamFailure(503,JSON.stringify({code:'serving_fenced',message:'proof expired'}),{attachment:PLAYER.mediaAttachment}),exchange:event=>reporter.config.onExchange({...event,request:{demand:'active',render_state:'playing'},capture:reporter.config.capture()}),error:()=>callbacks.error(),overlay:currentStreamFailureOverlay};",
+    ].join('\n'));
+    const h=build(policy);h.retire();const fact=h.player.sessionTerminal;h.exchange(exchange);
+    assert.strictEqual(h.player.sessionTerminal,fact,'control cannot rename an attachment authority retirement');
+    assert.match(h.overlay().detail,/proof expired/);
+    if(exchange.response)assert.strictEqual(h.player.controlVerdict,exchange.response.action,'producer action remains independently recorded');
+    h.error();assert.equal(h.reopens.length,1);assert.equal(h.rescues.length,0);
+  }
 });

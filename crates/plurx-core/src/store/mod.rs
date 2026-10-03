@@ -15,6 +15,10 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+/// Application-owned measurement metadata grafted onto a stored FFprobe report.
+/// Source comparisons must omit this member; it is not emitted by FFprobe.
+pub const CONTENT_ENCODING_PROBE_KEY: &str = "plurx_content_encoding";
+
 pub mod classification;
 pub use classification::ClassificationStore;
 mod downloaded_subtitles;
@@ -36,6 +40,9 @@ pub use candidate_recovery::{
 };
 mod fragindex;
 mod fragment_index_cluster;
+#[cfg(test)]
+#[path = "../../tests/support/fragment_prune_budget.rs"]
+mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
 mod renditionplan;
@@ -45,6 +52,10 @@ mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod schema_lineage;
+#[cfg(feature = "hiqlite-contract-tests")]
+#[doc(hidden)]
+pub use schema_lineage::{validation_sqlite_bridge_rollback, validation_sqlite_union_fingerprint};
 mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
@@ -140,6 +151,8 @@ pub mod offline_expiry;
 pub mod replicated;
 pub mod watched_drain;
 
+#[cfg(feature = "hiqlite-contract-tests")]
+pub use dv_conversion::validation_pre_provenance_admission_trigger;
 pub use dv_conversion::{
     DvConversion, DvConversionCandidate, DvConversionMode, DvConversionProgress,
     DvConversionProgressSnapshot, DvConversionQueueBatch, DvConversionState, DvConversionStore,
@@ -939,10 +952,10 @@ pub use fragment_index_cluster::{
     CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
     DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
     DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
-    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
-    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
-    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT,
-    SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
+    FRAGMENT_PRUNE_CANDIDATES, FRAGMENT_PRUNE_TERMINAL_JOBS, MAX_ACTIVE_ANALYSIS_REQUESTS,
+    MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS,
+    MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS,
+    MIN_SUBTITLE_WINDOW_SECS, SUBTITLE_SOURCE_REPAIR_LIMIT, SUBTITLE_SOURCE_REPAIR_WINDOW_MS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{prometheus_sqlite_health, SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -1644,6 +1657,35 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
     })
 }
 
+/// One consistent source/settings read, shared by both durable backends.
+#[derive(Clone, Debug)]
+pub struct PlaybackPlanningSnapshot {
+    pub file: crate::domain::MediaFile,
+    pub probe_json: Option<String>,
+    pub settings: BTreeMap<String, String>,
+    pub generation: i64,
+}
+
+/// All playback/transcode keys invalidate planning. Triggers cover every write
+/// path (including import SQL), deletions and same-timestamp changes. Job keys
+/// deliberately do not invalidate playback. Overflow aborts the mutation.
+pub(crate) const PLAYBACK_INPUT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS playback_input_generation (
+ singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+ generation INTEGER NOT NULL CHECK(typeof(generation) = 'integer' AND generation >= 0)
+);
+INSERT OR IGNORE INTO playback_input_generation(singleton, generation) VALUES(1, 0);
+CREATE TRIGGER IF NOT EXISTS playback_settings_insert AFTER INSERT ON settings
+WHEN NEW.key GLOB 'playback.*' OR NEW.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+CREATE TRIGGER IF NOT EXISTS playback_settings_update AFTER UPDATE ON settings
+WHEN NEW.key GLOB 'playback.*' OR NEW.key GLOB 'transcode.*' OR OLD.key GLOB 'playback.*' OR OLD.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+CREATE TRIGGER IF NOT EXISTS playback_settings_delete AFTER DELETE ON settings
+WHEN OLD.key GLOB 'playback.*' OR OLD.key GLOB 'transcode.*'
+BEGIN UPDATE playback_input_generation SET generation = generation + 1 WHERE singleton = 1; END;
+"#;
+
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
@@ -1740,6 +1782,8 @@ pub mod keys {
     /// Requested rate-control family. Missing/`bitrate` preserves the legacy
     /// VBR path exactly; `quality` is validated against every usable encoder
     /// before an effective snapshot is published.
+    pub const VOD_REORDER_FRAMES: &str = "playback.vod_reorder_frames";
+    pub const CONTENT_AWARE_ENCODING: &str = "transcode.content_aware_encoding";
     pub const TRANSCODE_RATE_MODE: &str = "transcode.rate_mode";
     /// Optional integer quality override. Empty/absent means the calibrated
     /// per-family default; the value matters only when rate mode is quality.
@@ -2057,6 +2101,8 @@ pub mod keys {
     /// Node-local, like the transcode-cleanup stamp: an index lives on the
     /// node that built it, so when it last ran is a fact about that node.
     pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
+    /// Shared success stamp for catalog retention, independent of discovery.
+    pub const JOB_LAST_FRAGMENT_INDEX_CLEANUP: &str = "jobs.last_fragment_index_cleanup";
     /// Last file examined by this node's bounded VOD index walk. Without a
     /// cursor, one slow or malformed title at the front of a library consumes
     /// every pass and later files can never become playable.
@@ -2124,6 +2170,7 @@ pub trait SettingsStore: Send + Sync + 'static {
     /// Cheap liveness probe of the backing storage (drives `/readyz`).
     async fn ping(&self) -> Result<(), StoreError>;
     async fn get_setting(&self, key: &str) -> Result<Option<String>, StoreError>;
+
     /// Atomically seed an absent setting and return the durable winner.
     async fn get_or_init_setting(&self, key: &str, seed: &str) -> Result<String, StoreError>;
     /// Read two related settings from one database snapshot.
@@ -3044,6 +3091,12 @@ pub trait MediaStore: Send + Sync + 'static {
         mtime: i64,
         probe: &ProbeResult,
     ) -> Result<i64, StoreError>;
+    /// File/probe, selected settings and generation from exactly one statement.
+    async fn playback_planning_snapshot(
+        &self,
+        file_id: i64,
+        keys: &[&str],
+    ) -> Result<Option<PlaybackPlanningSnapshot>, StoreError>;
     async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError>;
     /// False means duplicate, full, or a source revision replaced during download.
     async fn add_downloaded_subtitle(
@@ -3217,6 +3270,15 @@ pub trait MediaStore: Send + Sync + 'static {
         size: i64,
         mtime: i64,
         census_json: &str,
+    ) -> Result<bool, StoreError>;
+    /// Persist a bounded, measured encoding result only for the source revision
+    /// that was analyzed. Reprobing replaces the containing JSON and invalidates it.
+    async fn merge_file_probe_content_encoding(
+        &self,
+        file_id: i64,
+        size: i64,
+        mtime: i64,
+        report_json: &str,
     ) -> Result<bool, StoreError>;
     /// Files whose probe never succeeded (`probe_json IS NULL`), oldest scan
     /// first. `library_id` narrows to one library; `None` is server-wide. These
@@ -5498,13 +5560,20 @@ tokio::task_local! {
     static HTTP_STORE_OPERATION_COUNTS: HttpStoreOperationCounts;
 }
 
+/// Capture the active request accounting without replacing its attribution.
+#[must_use]
+pub fn current_http_store_operations() -> Option<HttpStoreOperationCounts> {
+    HTTP_STORE_OPERATION_COUNTS.try_with(Clone::clone).ok()
+}
+
 /// Scope one HTTP request so replicated Store operations can be attributed
 /// after its response is ready without putting route labels in `plurx-core`.
-pub async fn scope_http_store_operations<T>(
+pub fn scope_http_store_operations<T>(
     counts: HttpStoreOperationCounts,
     future: impl std::future::Future<Output = T>,
-) -> T {
-    HTTP_STORE_OPERATION_COUNTS.scope(counts, future).await
+) -> impl std::future::Future<Output = T> {
+    // Keep task-local polling from placing the request state machine on the stack.
+    HTTP_STORE_OPERATION_COUNTS.scope(counts, Box::pin(future))
 }
 
 pub(super) fn record_http_store_operation(class_index: usize) {

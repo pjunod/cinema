@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 use plurx_core::domain::MediaFile;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
-    vod_pipe_args, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions, VodFrameGrid,
+    vod_pipe_args_with_reorder, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions,
+    VodFrameGrid,
 };
 use sha2::{Digest, Sha256};
 
@@ -17,7 +18,43 @@ use crate::seam_hooks::{HookFuture, HookReady};
 
 use crate::admission::{
     Admissions, HwSlot, LiveWait, PoolSnapshot, Priority, SwPermit, TranscodeResourceEstimate,
+    Workload,
 };
+
+/// Freeze the encoder allowance without reducing whole-pipeline accounting.
+pub(crate) fn frozen_software_threads(work: &Workload<'_>, budget: usize) -> u32 {
+    work.software_threads().min(budget).max(1) as u32
+}
+
+/// Current policy must still allow the frozen encoder. The shared admission
+/// pool owns the conservative pipeline claim and its isolated oversize rule.
+pub(crate) fn try_admit_frozen_bundle(
+    admissions: &Admissions,
+    hardware_limit: usize,
+    software_budget: usize,
+    resources: &TranscodeResourceEstimate,
+    options: &TranscodeOptions,
+    priority: Priority,
+    claim: Option<u64>,
+) -> Result<crate::admission::TranscodePermit, bool> {
+    let frozen_floor = if resources.hardware_slot {
+        // Hardware output ignores the software encoder cap. Its CPU decode
+        // and filter estimate remains the operative policy floor.
+        resources.cpu_threads
+    } else {
+        resources.cpu_threads.min(
+            options
+                .software_threads
+                .map_or(resources.cpu_threads, |threads| threads as usize),
+        )
+    };
+    if frozen_floor > software_budget {
+        return Err(true);
+    }
+    admissions
+        .try_admit_bundle_claiming(hardware_limit, software_budget, resources, priority, claim)
+        .ok_or(false)
+}
 
 /// Resolved once before attachment. A restart cannot silently change encoder,
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
@@ -27,6 +64,8 @@ pub(crate) struct Encoding {
     pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
     pub grid: VodFrameGrid,
+    /// Saved operator choice, frozen for this rendition and hashed into identity.
+    pub reorder_frames: bool,
     pub subtitle: Option<Arc<std::fs::File>>,
     pub subtitle_digest: Option<String>,
     pub ffmpeg_build: String,
@@ -76,6 +115,11 @@ pub(crate) struct ActiveProductionEvidence {
 }
 
 impl CandidateProductionProofs {
+    #[cfg(test)]
+    pub(crate) fn record_for_test(&self, recipe: [u8; 32], proof: ActiveProductionEvidence) {
+        self.record(recipe, proof);
+    }
+
     pub(crate) fn get(&self, recipe: [u8; 32]) -> Option<ActiveProductionEvidence> {
         let now = Instant::now();
         let mut rows = self.rows.lock().expect("candidate production proofs");
@@ -271,6 +315,7 @@ impl Encoding {
             resources: self.resources,
             options: self.options.clone(),
             grid: self.grid,
+            reorder_frames: self.reorder_frames,
             subtitle: self.subtitle.clone(),
             subtitle_digest: self.subtitle_digest.clone(),
             ffmpeg_build: self.ffmpeg_build.clone(),
@@ -438,24 +483,20 @@ impl Encoding {
             });
             None
         };
-        // The shared pool deliberately admits one oversize job when otherwise
-        // idle. A frozen VOD recipe cannot shrink its thread demand on retry,
-        // so an operator lowering the budget below that exact plan is an
-        // explicit refusal rather than an oversize exception.
-        if self.resources.cpu_threads > software_budget {
-            return refuse(true);
-        }
         let claim = (priority != Priority::Background)
             .then(|| *self.handoff_claim.lock().expect("VOD handoff claim"))
             .flatten();
-        let Some(bundle) = self.admissions.try_admit_bundle_claiming(
+        let bundle = match try_admit_frozen_bundle(
+            &self.admissions,
             hardware_limit,
             software_budget,
             &self.resources,
+            &self.options,
             priority,
             claim,
-        ) else {
-            return refuse(false);
+        ) {
+            Ok(bundle) => bundle,
+            Err(over_budget) => return refuse(over_budget),
         };
         let (hardware, software) = bundle.into_parts();
         let permit = EncodePermit {
@@ -534,7 +575,14 @@ impl Encoding {
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
             .expect("frozen VOD execution remains valid");
-        vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)
+        vod_pipe_args_with_reorder(
+            file,
+            &self.plan,
+            &execution,
+            self.grid,
+            duration_seconds,
+            self.reorder_frames,
+        )
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
@@ -546,6 +594,8 @@ impl Encoding {
         hash.update(self.executable.digest.as_bytes());
         hash.update(self.engine.digest.as_bytes());
         hash.update(self.plan.plan_digest().as_bytes());
+        hash.update(b"vod-reorder-choice-v1\0");
+        hash.update([u8::from(self.reorder_frames)]);
         for argument in self.args(file, 0.0, duration_seconds) {
             hash.update((argument.len() as u64).to_le_bytes());
             hash.update(argument.as_bytes());

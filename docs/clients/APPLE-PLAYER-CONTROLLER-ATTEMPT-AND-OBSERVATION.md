@@ -1,6 +1,6 @@
 # Apple PlayerController attempt and observation — nine epochs made explicit, one item observer, polls that keep their deadlines
 
-**Status:** ready for review · **Executes:** A3, A4, A6, A7 and
+**Status:** 5.1–5.6 code merged; three of this plan's own `AttemptScopesTests` fail on the effort branch (§6.1, 2026-10-02); physical acceptance open · **Executes:** A3, A4, A6, A7 and
 F-apple-3, F-apple-4, F-apple-6, F-apple-7, F-apple-9, F-apple-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -454,6 +454,61 @@ the lock-screen state ever disagreed with the app for more than a second.
 Rollout: TestFlight/fleet via [CLIENT-DEPLOY-PROMPT.md](CLIENT-DEPLOY-PROMPT.md)
 after each `apple-build-bump`; rollback is the previous build number.
 
+### 6.1 Status and remaining physical evidence (2026-10-02)
+
+**Simulator suite, 2026-10-02.** `make apple-test`'s steps (xcodegen, then
+`build-for-testing` and `test-without-building` per platform) ran once on maca,
+the macOS CI runner (Xcode 27.0, iPhone 17 Pro and Apple TV 4K (3rd generation) simulators, iOS and
+tvOS 26.5 runtimes) against a plain source copy of
+`effort/architecture-review-2026-09-20` @ `6f6466ebc`. Both builds succeeded.
+iOS: **742 tests, 735 passed, 7 failed**. tvOS: **726 tests, 719 passed, 7
+failed**. The same seven failed on both platforms and failed again when rerun
+alone, so they are deterministic and pre-existing on the effort branch (the
+run carried no Apple source change):
+
+- `AttemptScopesTests` — `testEachMigratedFenceComparesExactlyTheFieldsItsConjunctionDid`,
+  `testEveryMigratedFenceRefusesAContinuationAcrossAViewerPause`,
+  `testEveryMigratedFenceRefusesAContinuationFromThePreviousTitle`. `AttemptFence`
+  has grown cases the census table does not list (the `autoBoundary*`,
+  `autoResume*`, decoder- and stall-candidate acknowledgement,
+  `preparedPressure*`, `blackFrameDecoderAcknowledgement` and
+  `seekIntentAfterOptionalBoundary` fences), and two auto-boundary seek fences
+  survive a viewer Pause.
+- `AppleClientTests.testRefusalBodiesAreKeptWithoutDisturbingTheMatchersThatPredateThem`
+  and `AppleClientTests.testTheOwnerStopsThePlayerInExactlyOnePlace`.
+- `AutoQualityPolicyTests.testSharedAutoQualityFixture` (the shared fixture's
+  switch-budget case and key set disagree with the Swift policy).
+- `PausedRetirementTests.testResumeConsumesTheLatchBeforeAnyInPlaceResumePath`
+  (a source pin whose anchor no longer matches).
+
+Three of the seven are this plan's own census tests (5.1), so the claim that
+the census keeps the decomposition honest is not currently true on the effort
+branch: the new auto-quality fences were added without their scope rows. That
+is recorded here, not repaired in this documentation pass. The four
+`PlayerItemObserverTests` (5.2) and the other eight `AttemptScopesTests`
+passed on both platforms.
+
+**§5.4 grep drift.** `grep -c "milliseconds(50)" clients/apple/Sources/PlayerController.swift`
+now returns **2**, not 1: the extra hit is the `resumeSampleDelay` constant
+(a named delay, not a second poll). The 50 ms seek poll is still the only poll
+at that interval.
+
+What only a physical device can close — maca has no paired Apple device. Ship
+an Apple build at or above the source counter (204) first and report the
+installed build with each result:
+
+1. **§5.5 tvOS remote commands.** The Apple TV prompt above: from Home, Now
+   Playing play/pause twice pauses and resumes plurx; elapsed time advances
+   without jumps; Siri Remote pause and unpause inside plurx show on the Now
+   Playing card within 1 s.
+2. **iPhone lock screen.** The iPhone prompt above: lock-screen play/pause
+   twice, a +1 min scrub, then unlock; the film position matches the slider
+   and the lock-screen state never disagrees with the app for more than 1 s.
+3. **§7 Q4.** Whether tvOS shows the Now Playing card without an explicit
+   `setActive(true)` — observed during step 1.
+4. **§7 Q1** (simulator-feasible, not yet run): what
+   `AVPlayerItemErrorLogEvent.uri` carries for an injected 404 on a segment.
+
 ---
 
 ## 7. Open questions
@@ -497,3 +552,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | 5.2 finite observer and 5.5 credential lock, partial | [draft PR #506](http://192.168.4.7:3000/noirr/plurx/pulls/506) · `f30ef466b`, `89d3c3672` | `Session.credentials` now reads and writes origin and token under one lock, with all callers migrated and a concurrent-pair regression test. The finite player now installs one cancellable `AVPlayerItemObserver` at its four attach sites and consumes typed status, end and fatal events in one stream; `PlayerItemFailure.classify` gives fatal error, item error and matching-URI log entry their required precedence, and new-log/stall events do not advance the ladder. Both iOS and tvOS `make apple-build` passed and the iOS test target compiled without executing tests. The prepared successor observer, Live TV/channels, polls, Now Playing, tvOS commands and strict concurrency remain; unit tests and the one adversarial review wait for the ready PR. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | 5.3-5.6 implementation, acceptance pending | [durable branch](http://192.168.4.7:3000/noirr/plurx/src/branch/codex/a02-restore-20260924) · `c5edddc84`, `5916edb83`, `ae31fcde6`, `c353d1349` | Live TV and Library Channels now consume the shared item stream with their own policies. Finite readiness observes status with its original 15 s deadline; prepared metadata observes status against the original 6 s open clock, with the 12 s runway bound preserved. The 2 s server response still drives recovery and panel telemetry, now through separate named functions. Now Playing is published from state changes and no longer from the periodic callback; finite, Live TV and channels share one current remote-command owner, including tvOS. `SWIFT_STRICT_CONCURRENCY: targeted` builds iOS and tvOS. Unique warnings observed across incremental target builds: `LiveTv.swift` 4 existing async `NSLock`, `DvrRecordings.swift` 2 missing Combine imports, and `PlayerController.swift` 1 deprecated tvOS display criteria; no new concurrency warning remains in the A-02 edits. No unit test or device acceptance is claimed yet. The seek-presentation 50 ms poll remains, while a separate 50 ms resume-sample default explains why the plan's literal `grep -c "milliseconds(50)" = 1` does not describe this tree. |
 | 2026-09-24 | gpt-6 | none:openai:2026-09-24 | 5.4 remaining wakeups, acceptance pending | [durable branch](http://192.168.4.7:3000/noirr/plurx/src/branch/codex/a02-restore-20260924) | The control-answer bridge now wakes both bounded asks from exchange arrivals and viewer supersession, retaining the stall ask's original deadline, one-time extension and hard cap and the prepared ask's 12 s bound plus staging cadence. The seek video-output delegate wakes the existing 50 ms pixel-buffer poll but does not decide presentation. iOS/tvOS compile passed; the required tests wait for the ready PR's single adversarial review and fast lane. |
+| 2026-10-02 | claude-opus-5-5 | https://claude.ai/code/session_01CAyBrYCQ7PpAtuZwUxKfp7 | Simulator suite and remaining evidence | `opus/client-evidence` into the architecture effort | iOS 742/735/7 and tvOS 726/719/7 (total/passed/failed) on maca, Xcode 27.0, at `6f6466ebc`; the same seven fail on both platforms and on rerun, three of them this plan's `AttemptScopesTests` (the census lacks the auto-quality fences). `PlayerItemObserverTests` pass. Physical items listed in §6.1. |

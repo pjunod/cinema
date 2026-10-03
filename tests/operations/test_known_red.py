@@ -84,7 +84,9 @@ class KnownRedContractTest(unittest.TestCase):
             "http::tests::public_copy_wire::public_copy_new_retained_attachment_freezes_measured_master_and_exact_mux_wire",
         )
         admitted_identities = {capture_identity, public_wire_identity}
-        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 20)
+        # Main's native FFmpeg/libvmaf qualification remains independently
+        # admitted; keep it in addition to effort's two acquisition identities.
+        self.assertEqual(len(tuple(item for item in ignored if item.identity not in admitted_identities)), 21)
         validate_listed_tests(public_wires, (public_wire.cargo_name,))
         with self.assertRaisesRegex(KnownRedError, "absent"):
             validate_listed_tests(public_wires, ())

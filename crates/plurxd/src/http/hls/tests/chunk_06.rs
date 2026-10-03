@@ -265,19 +265,22 @@
                     }),
                 )
                 .await
-                .is_ok()
             })
         };
         let first = spawn_create(DesiredQuality::Original);
         let second = spawn_create(DesiredQuality::Manual { height: 720 });
         let (first, second) = tokio::join!(first, second);
-        let accepted = [first.expect("first task"), second.expect("second task")]
+        let first = first.expect("first task");
+        let second = second.expect("second task");
+        let accepted = [first.is_ok(), second.is_ok()]
             .into_iter()
             .filter(|accepted| *accepted)
             .count();
         assert!(
             accepted >= 1,
-            "with control off, a viewer who asks twice must still get a session"
+            "with control off, a viewer who asks twice must still get a session: first={:?}, second={:?}",
+            first.as_ref().err(),
+            second.as_ref().err(),
         );
 
         // Whatever the pointer ended up naming, it names the ask that is
@@ -442,6 +445,7 @@
         };
         assert!(!body.candidate_auto_policy(), "the original wire copy was not candidate Auto");
         let resolved = resolve_plan(PlanInputs {
+            snapshot: None,
             state: &state, user_id: 7, file_id: id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None,
         }, None, body).await.expect("geometry-promoted plan");
         assert!(matches!(resolved.request.kind, crate::transcode::SessionKind::Transcode { .. }));
@@ -458,6 +462,7 @@
         };
         resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state,
                 user_id: 7,
                 file_id: source.id,
@@ -563,6 +568,7 @@
             };
             let resolved = resolve_plan(
                 PlanInputs {
+            snapshot: None,
                     state: &state,
                     user_id: 7,
                     file_id: source.id,
@@ -607,6 +613,7 @@
             ..bare_create()
         };
         let inputs = || PlanInputs {
+            snapshot: None,
             state: &state,
             user_id: 7,
             file_id: source.id,
@@ -673,6 +680,7 @@
         let expected = review.notes.clone();
         let resolved = resolve_plan(
             PlanInputs {
+            snapshot: None,
                 state: &state,
                 user_id: 7,
                 file_id: source.id,
@@ -1902,6 +1910,70 @@
         parse_avc_init(&feed)
     }
 
+    /// Preparation can outlive the five-second response admission phase;
+    /// both native entry points share the fixed outer preparation deadline.
+    #[tokio::test]
+    async fn native_master_preparation_can_wait_six_seconds_for_exact_init() {
+        let dir = crate::test_tempdir().expect("delayed native init");
+        let fixture =
+            HlsDeliveryFixture::publish_copy_actor_managed(dir.path(), "delayed-native-init").await;
+        fixture.mark_started().await;
+        let init_path = dir.path().join("init.mp4");
+        let feed = plurx_core::testfixtures::pipe("h264");
+        let init = parse_avc_init(&feed);
+        // Copy response admission validates its first fragment as well as
+        // init. Seed that fragment so this isolates delayed init preparation,
+        // rather than waiting for a missing first-media authorization object.
+        tokio::fs::write(dir.path().join("seg00000.m4s"), &feed[init.bytes.len()..])
+            .await
+            .expect("complete first AVC fragment");
+        let writer = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(6)).await;
+            tokio::fs::write(init_path, init.bytes)
+                .await
+                .expect("delayed exact init");
+        });
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(12);
+        let query = || PlaylistQuery {
+            native: Some(1),
+            subtitle: None,
+            diagnostic: None,
+        };
+        let (master, legacy) = tokio::join!(
+            master_playlist_response_local_before(
+                &fixture.state,
+                "delayed-native-init",
+                query(),
+                deadline,
+                deadline
+            ),
+            playlist_local_before(
+                &fixture.state,
+                "delayed-native-init",
+                query(),
+                deadline,
+                deadline
+            ),
+        );
+        assert_eq!(
+            master.expect("master waits through preparation").status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            legacy
+                .expect("legacy native bridge waits through preparation")
+                .status(),
+            StatusCode::OK
+        );
+        assert!(started.elapsed() >= Duration::from_secs(6));
+        assert!(
+            started.elapsed() < Duration::from_secs(12),
+            "no renewed outer deadline"
+        );
+        writer.await.expect("init writer");
+    }
+
     #[tokio::test]
     async fn actual_avc_init_binds_video_without_inventing_missing_audio_facts() {
         let dir = crate::test_tempdir().expect("segment directory");
@@ -2705,6 +2777,7 @@
         // drives: a 2160p copy being delivered, and the viewer asks for 1080p.
         let source = staging_source(&fixture).await;
         let mut recipe = crate::transcode::SessionRequest {
+            quality_catalog: None,
             candidate_context: None,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
@@ -2739,6 +2812,7 @@
                 recipe: RemoteStartRequest {
                     retained_output: None,
                     retained_output_receiver: None,
+                    candidate_catalog: None,
                     candidate_id: None,
                     presentation_target: None,
                     decoder_caps: None,
@@ -3207,8 +3281,11 @@
             normalized_geometry:true, width:3840, height:2160, target_height:2160, average_bps:Some(90_000_000), peak_bps:None,
             grade:plurx_core::transcode::OutputGrade::Sdr, decoder_compatible:true, complete_cache:false, sustainable:true};
         let mut request = serde_json::from_str::<RemoteStartRequest>(&route.recipe_json).expect("recipe").request;
-        request.candidate_context = Some(crate::transcode::CandidateExecutionContext {retained_output:None, owner_node_id:Some(fixture.state.node_id.clone()),
-            candidate_id:candidate.id, recipe_digest:digest, normalized_geometry:true, grade:candidate.grade, profile:None});
+        request.candidate_context = Some(Box::new(crate::transcode::CandidateExecutionContext {
+            planning_snapshot:None,
+            retained_output:None, canonical_caps:None, selected_candidate:candidate.clone(), planning_binding:None,
+            owner_node_id:Some(fixture.state.node_id.clone()),
+            candidate_id:candidate.id, recipe_digest:digest, normalized_geometry:true, grade:candidate.grade, profile:None}));
         assert!(observation.proposed_proof(&fixture.state, &file, &mut request, &candidate).await.is_none(), "header without EOF cannot start a trial");
         eof(std::time::Instant::now(), unix_ms());
         assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&session), &sample).await.is_some());
@@ -3347,4 +3424,99 @@
         sample.receipt = second; sample.object_name = "seg00002.m4s".into(); sample.etag = "etag2".into();
         assert!(gate.begin_abort_preparation_for_owner(&incarnation, i64::try_from(request.control_epoch).expect("A05 prepared fixture")).await);
         assert!(fixture.state.link_receipts.accept(&fixture.state, &network, Some(&staged), &sample).await.is_none(), "aborted actor refuses its still-completed body");
+    }
+
+    #[test]
+    fn planning_binding_detects_same_timestamp_probe_and_generation_changes() {
+        let mut snapshot = plurx_core::store::PlaybackPlanningSnapshot {
+            file: staged_source_file(), probe_json: Some("{\"streams\":[]}".to_owned()),
+            settings: Default::default(), generation: 1,
+        };
+        let original = crate::media_pool::PlanningBinding::from_snapshot(&snapshot);
+        snapshot.probe_json = Some("{\"streams\":[{\"codec_name\":\"hevc\"}]}".to_owned());
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        snapshot.probe_json = Some("{\"streams\":[]}".to_owned());
+        snapshot.generation += 1;
+        assert_ne!(original, crate::media_pool::PlanningBinding::from_snapshot(&snapshot));
+        assert_eq!(snapshot.file.mtime, staged_source_file().mtime);
+    }
+
+    #[tokio::test]
+    async fn expired_catalog_budget_refuses_before_validation_or_source_work() {
+        let state = resolver_state();
+        let request = crate::media_pool::QualityCatalogRequest {
+            audio_claim: None, audio_delivery: None,
+            file_id: -1, source_size: -1, source_mtime: -1,
+            caps: Default::default(), copy_contract: None, audio_index: None,
+            audio_offset_ms: 0, subtitle_burn: None,
+            presentation: crate::transcode::Presentation::Vod,
+        };
+        let outcome = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now(), None,
+        ).await;
+        assert!(!outcome.complete);
+        assert!(outcome.candidates.is_empty());
+        assert_eq!(outcome.causes, vec![crate::media_pool::CatalogCause::LocalDeadline]);
+        let invalid = crate::media_pool::local_quality_catalog(
+            &state, &request, tokio::time::Instant::now() + Duration::from_secs(1), None,
+        ).await;
+        assert!(matches!(invalid.causes.as_slice(), [crate::media_pool::CatalogCause::RequestInvalid(_)]));
+    }
+
+    #[tokio::test]
+    async fn required_legacy_auto_discovery_reports_overflow_but_copy_and_manual_survive() {
+        let state = resolver_state();
+        state.store.put_setting(plurx_core::store::keys::PLAYBACK_DISPLAY_AWARE_AUTO, "1").await.expect("enable saved choice");
+        let source = staged_source_file();
+        let caps: plurx_core::playback::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v": 2, "video": (0..65).map(|_| serde_json::json!({"codec":"h264", "present":["sdr"]})).collect::<Vec<_>>(),
+            "audio":["aac"], "containers":["mp4"], "transports":["hls"]
+        })).expect("legacy caps");
+        for (auto, copy, height, expected) in [
+            (true, false, None, StatusCode::BAD_REQUEST),
+            (false, false, Some(1440), StatusCode::BAD_REQUEST),
+            (false, false, Some(720), StatusCode::OK),
+            (true, true, None, StatusCode::OK),
+        ] {
+            let body = CreateSession { playback_id: "legacy-catalog-contract".into(), caps: Some(caps.clone()), quality_auto: Some(auto), copy: Some(copy), height, ..bare_create() };
+            let result = resolve_plan(PlanInputs { snapshot: None, state: &state, user_id: 1, file_id: source.id, source: Some(&source), network_prior: None, network_identity: None, incumbent_receipt: None }, None, body).await;
+            assert_eq!(result.map(|_| StatusCode::OK).unwrap_or_else(|error| error.into_response().status()), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn local_worker_preserves_request_accounting_and_remaining_budget() {
+        let state = resolver_state();
+        let counts = plurx_core::store::HttpStoreOperationCounts::default();
+        let budget = crate::media_pool::CreateStartupBudget::new(2_000);
+        let parent_deadline = crate::media_pool::create_stage_deadline(Duration::from_secs(10));
+        plurx_core::store::scope_http_store_operations(counts.clone(), budget.scope(async {
+            let store = Arc::clone(&state.store);
+            crate::media_pool::spawn_create_worker(async move {
+                store.watch_state(1, 1).await.expect("worker read");
+                assert!(crate::media_pool::create_stage_deadline(Duration::from_secs(50)) < parent_deadline);
+            }).await.expect("owned worker");
+            let store = Arc::clone(&state.store);
+            tokio::spawn(async move { store.watch_state(1, 1).await.expect("unrelated background read"); }).await.expect("background task");
+        })).await;
+        assert_eq!(counts.watch_reads(), 1, "only the owned critical-path read belongs to the request");
+    }
+
+    #[tokio::test]
+    async fn manual_and_copy_preparation_retain_a_request_local_catalog() {
+        let state = resolver_state();
+        let source = staged_source_file();
+        let route = crate::media_sessions::takeover_eligible_route("old", "00000000-0000-4000-8000-0000000000a1");
+        let mut predecessor = staged_predecessor_recipe(&route);
+        let caps = caps_v2(r#"{"v":2,"video":[{"codec":"h264","present":["sdr"],"max_height":2160}],"audio":["eac3"],"containers":["mkv","mp4"],"transports":["hls"]}"#);
+        predecessor.decoder_caps = Some(crate::playback_control::DecoderCapsSnapshot::from_device_caps(&caps, 1).expect("decoder evidence"));
+        for quality in [crate::playback_control::QualitySelection::Original, crate::playback_control::QualitySelection::Manual { height: 720 }] {
+            let selection = crate::playback_control::ClientSelection { quality, audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection { mode: crate::playback_control::SubtitleMode::Off, track: None },
+                audio_offset_ms: 0, codec: crate::playback_control::CodecPolicy::Auto, dynamic_range: crate::playback_control::DynamicRangePolicy::Auto };
+            let request = plan_preparation_candidate(&state, &predecessor, Some(&caps), None, &selection, &source, 1080).await.expect("ordinary successor plan");
+            assert!(request.candidate_context.is_none());
+            let catalog = request.quality_catalog.as_ref().expect("optional canonical ladder is retained independently");
+            assert!(!catalog.complete, "missing source is incomplete, not proof of an empty ladder");
+        }
     }
