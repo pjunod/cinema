@@ -99,6 +99,15 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     for result in timeout_store(client.txn(statements)).await? {
         result.map_err(database_error)?;
     }
+    // Match encoded preparation routing and source guards on fresh clusters.
+    validate_sql(super::background_jobs::ENCODED_OUTPUT_SCHEMA)?;
+    let statements: Vec<(String, hiqlite::Params)> = super::background_jobs::ENCODED_OUTPUT_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| (sql.to_owned(), params!()))
+        .collect();
+    for result in timeout_store(client.txn(statements)).await? {
+        result.map_err(database_error)?;
+    }
     Ok(())
 }
 
