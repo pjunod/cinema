@@ -325,6 +325,38 @@ impl CredentialKey {
         &self.id
     }
 
+    /// Public coordinated-purpose master fingerprint. This fixed HMAC domain
+    /// is independent of credential envelopes, cursor MACs and signing keys;
+    /// only the canonical 256-bit fingerprint leaves the key object.
+    pub fn sharing_purpose_master_fingerprint(&self) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        hex_encode(
+            ring::hmac::sign(&key, b"cinema-sharing-purpose-master-fingerprint-v1\0").as_ref(),
+        )
+    }
+
+    /// Bind coordinator qualification to the selected startup master encoded
+    /// in the existing private join-secrets object, without exporting bytes.
+    #[cfg(feature = "hiqlite-store")]
+    pub(crate) fn matches_purpose_master_encoding(&self, encoded: &str) -> bool {
+        let Some(bytes) = hex_decode(encoded.trim()) else {
+            return false;
+        };
+        let bytes = Zeroizing::new(bytes);
+        if bytes.len() != KEY_LEN {
+            return false;
+        }
+        let selected = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.key);
+        let recorded = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &bytes);
+        let proof = ring::hmac::sign(&recorded, b"cinema-sharing-purpose-master-fingerprint-v1\0");
+        ring::hmac::verify(
+            &selected,
+            b"cinema-sharing-purpose-master-fingerprint-v1\0",
+            proof.as_ref(),
+        )
+        .is_ok()
+    }
+
     /// Authenticate a bounded catalogue cursor without exporting credential key material.
     /// The fixed purpose prefix prevents reuse of an envelope or other sharing MAC.
     pub(crate) fn sharing_catalogue_cursor_mac(&self, payload: &[u8]) -> [u8; 32] {
@@ -1207,5 +1239,34 @@ mod sharing_tests {
                 .expect("synthetic secret fixture"),
         );
         assert_eq!(census.sealed_rows(), 2);
+    }
+    #[test]
+    fn sharing_purpose_master_fingerprint_is_canonical_stable_and_domain_separated() {
+        let key = CredentialKey::from_bytes([48; 32]);
+        let fingerprint = key.sharing_purpose_master_fingerprint();
+        assert_eq!(fingerprint.len(), 64);
+        assert!(fingerprint
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)));
+        assert_eq!(
+            fingerprint,
+            CredentialKey::from_bytes([48; 32]).sharing_purpose_master_fingerprint()
+        );
+        assert_ne!(
+            fingerprint,
+            CredentialKey::from_bytes([49; 32]).sharing_purpose_master_fingerprint()
+        );
+        assert_ne!(fingerprint, hex_encode(&[48; 32]));
+        assert_ne!(
+            fingerprint,
+            hex_encode(&key.sharing_catalogue_cursor_mac(b""))
+        );
+        assert_ne!(fingerprint, key.id());
+        #[cfg(feature = "hiqlite-store")]
+        {
+            assert!(key.matches_purpose_master_encoding(&hex_encode(&[48; 32])));
+            assert!(!key.matches_purpose_master_encoding(&hex_encode(&[49; 32])));
+            assert!(!key.matches_purpose_master_encoding("not a master"));
+        }
     }
 }
