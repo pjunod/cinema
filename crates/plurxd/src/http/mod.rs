@@ -12034,12 +12034,16 @@ mod tests {
         let lose_claim = Arc::new(AtomicBool::new(true));
         let lose_rotation = Arc::new(AtomicBool::new(true));
         let server = ScanWorker(tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
             loop {
-                let (stream, _) = acceptor.accept().await.expect("fixture TLS acceptance");
+                let (stream, _) = tokio::select! {
+                    accepted = acceptor.accept() => accepted.expect("fixture TLS acceptance"),
+                    _ = connections.join_next(), if !connections.is_empty() => continue,
+                };
                 let router = peer_router.clone();
                 let claim = lose_claim.clone();
                 let rotation = lose_rotation.clone();
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let service = hyper::service::service_fn(
                         move |request: Request<hyper::body::Incoming>| {
                             let router = router.clone();

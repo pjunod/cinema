@@ -1692,3 +1692,13 @@ verified explicitly. Docs index passed 4/4 and Developer section tests 36/36.
 The complete sharing store filter passed 7/7 scenarios (zero ignored, 63.80
 seconds), covering both SQLite modes, three-voter authority, populated import,
 endpoint CAS/re-pair and the new capacity refusal contract.
+
+**S2 ownership review, 2026-10-02:** run 3924 on `aeb0d7b91` stopped at the
+module-wide task/timer/process-shape inventory before compilation. The new
+transport sites are now inventoried: daemon listener/claim loops belong to
+shutdown; blocking TLS work is awaited; the Hyper connection driver belongs
+to its abort-on-drop peer; eight timers bound those owners. Eight additional
+status-shaped calls launch no process. The response-loss fixture now owns its
+accepted connections in a JoinSet, and client fixture servers are aborted and
+awaited. The seven ownership-inventory tests passed after this review. The
+changed candidate must pass its focused transport tests and a fresh effort gate.
