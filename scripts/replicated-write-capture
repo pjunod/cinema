@@ -462,6 +462,125 @@ class _NoAfterRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError("AFTER metrics redirects are forbidden")
 
 
+def observe_after_tick(deployment_raw, deployment_digest, credentials, fetch, epoch):
+    """Digest is an independently authenticated admission input, not self-attestation."""
+    if not re.fullmatch(r"[0-9a-f]{64}", deployment_digest or "") or hashlib.sha256(deployment_raw).hexdigest() != deployment_digest:
+        raise ValueError("independently authenticated deployment receipt required")
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate observer key")
+            result[key] = value
+        return result
+    deployment = json.loads(deployment_raw, object_pairs_hook=unique)
+    if set(deployment) != {"schema", "observations"} or deployment["schema"] != "k03-deployment-binding-v1":
+        raise ValueError("wrong deployment binding schema")
+    rows = deployment["observations"]
+    if not isinstance(rows, list) or len(rows) != len(NODES) or set(credentials) != set(NODES):
+        raise ValueError("incomplete deployment/credential roster")
+    observed = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"node", "build", "source_commit", "origin"}:
+            raise ValueError("deployment binding fields must be exact")
+        node = row["node"]
+        if node not in NODES or node in seen or row["origin"] != AFTER_URLS[node].removesuffix("/metrics"):
+            raise ValueError("unknown/duplicate deployment origin")
+        seen.add(node)
+        after_source(row["build"], row["source_commit"])
+        token = credentials[node]
+        if not isinstance(token, str) or not 1 <= len(token) <= 4096 or any(ord(c) < 33 or ord(c) > 126 for c in token):
+            raise ValueError("invalid observer credential")
+        metrics, _ = after_metrics(fetch(AFTER_URLS[node], None))
+        if metrics["build"] != row["build"]:
+            raise ValueError("observed build differs from authenticated deployment")
+        settings_raw = fetch(row["origin"] + "/api/v1/settings", token)
+        if len(settings_raw) > AFTER_MAX_RESPONSE:
+            raise ValueError("settings response oversized")
+        settings = json.loads(settings_raw, object_pairs_hook=unique)
+        pair = {key: settings.get(key) for key in (
+            "cluster_media_pool_enabled", "cluster_session_takeover_enabled")}
+        if any(type(value) is not bool for value in pair.values()) or all(pair.values()):
+            raise ValueError("actual switch pair missing/malformed/on-on")
+        observed.append(dict(node=node, build=metrics["build"], source_commit=row["source_commit"],
+                             epoch=epoch(), **pair))
+        # Never return, log or persist the credential-bearing settings DTO.
+        del settings, settings_raw
+    raw = json.dumps(dict(schema=AFTER_SCHEMA, observations=observed), sort_keys=True).encode()
+    now = epoch()
+    first = observed[0]
+    for node in NODES:
+        after_acquisition(raw, now, node, first["build"], first["source_commit"])
+    return raw
+
+
+def observe_after(output_dir, deployment_path, deployment_digest, credentials_path, max_seconds):
+    """Finite separate observer; no settings writes, deployment or qualification."""
+    if not 1 <= max_seconds <= AFTER_MAX_SECONDS:
+        raise ValueError("observer requires 1..90000 seconds")
+    if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        raise ValueError("observer requires a dedicated POSIX timer")
+    deadline = time.monotonic() + max_seconds
+    root = Path(output_dir)
+    root.mkdir(mode=0o700)  # create-only ownership; failed partials remain
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoAfterRedirect())
+    def expired(_number, _frame):
+        raise TimeoutError("observer original allowance expired")
+    previous = signal.signal(signal.SIGALRM, expired)
+    def arm(limit=None):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("observer original allowance expired")
+        signal.setitimer(signal.ITIMER_REAL, min(remaining, limit) if limit else remaining)
+    def fetch(url, token):
+        arm(5)
+        request = urllib.request.Request(url, headers={"Authorization": "Bearer " + token} if token else {})
+        try:
+            with opener.open(request, timeout=5) as response:
+                if response.status != 200:
+                    raise ValueError("observer non-200 response")
+                raw = response.read(AFTER_MAX_RESPONSE + 1)
+            if len(raw) > AFTER_MAX_RESPONSE:
+                raise ValueError("observer response oversized")
+            return raw
+        finally:
+            arm()
+    count = size = 0
+    try:
+        arm()
+        while True:
+            started = time.monotonic()
+            deployment = after_read_regular(deployment_path, 16 * 1024)
+            credential_raw = after_read_regular(credentials_path, 16 * 1024)
+            credentials = json.loads(credential_raw)
+            raw = observe_after_tick(deployment, deployment_digest, credentials, fetch, lambda: int(time.time()))
+            del credentials, credential_raw
+            count += 1
+            size += len(raw)
+            # Include both the current manifest and the temporary replacement.
+            if count + 2 > AFTER_MAX_FILES or size + 2 * len(raw) > AFTER_MAX_BYTES:
+                raise ValueError("observer retained evidence allowance exceeded")
+            target = root / (hashlib.sha256(raw).hexdigest() + ".json")
+            descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+            temporary = root / "manifest.next"
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+            os.replace(temporary, root / "manifest.json")
+            arm()
+            remaining = deadline - time.monotonic()
+            delay = max(0, 60 - (time.monotonic() - started))
+            if remaining <= delay:
+                return 0
+            time.sleep(delay)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
 def sample_after(output_dir, acquisition_path, expected_build, source, max_seconds):
     """One finite POSIX owner; external observer is explicitly not this tool."""
     after_source(expected_build, source)
@@ -663,10 +782,25 @@ def main(argv=None) -> int:
     sample.add_argument("--expected-build", required=True)
     sample.add_argument("--source-commit", required=True)
     sample.add_argument("--max-seconds", type=int, required=True)
+    observer = sub.add_parser("observe-after")
+    observer.add_argument("--output-dir", required=True)
+    observer.add_argument("--deployment-receipt", required=True)
+    observer.add_argument("--deployment-sha256", required=True)
+    observer.add_argument("--credentials-file", required=True)
+    observer.add_argument("--max-seconds", type=int, required=True)
     at = sub.add_parser("attribute")
     at.add_argument("wal", nargs="+")
     at.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
+
+    if args.command == "observe-after":
+        try:
+            return observe_after(args.output_dir, args.deployment_receipt, args.deployment_sha256,
+                                 args.credentials_file, args.max_seconds)
+        except Exception:
+            # HTTP/JSON errors can include private response values or tokens.
+            print("AFTER observer refused; sanitized partial evidence retained", file=sys.stderr)
+            return 1
 
     if args.command == "sample-after":
         try:
