@@ -267,16 +267,19 @@ pub(super) fn project_decoded_decision(
 }
 
 fn v4(id: Uuid) -> bool {
-    id.get_version_num() == 4 && !id.is_nil()
+    id.get_version_num() == 4 && id.get_variant() == uuid::Variant::RFC4122 && !id.is_nil()
 }
 
 /// Exact ordinary B session namespace. Source IDs/URLs are never published;
-/// every quality, timing, HDR/DV, VOD and control epoch field is retained.
+/// Quality, timing, HDR/DV and VOD fields are retained. Control identity
+/// names the actual receiver owner, rather than exposing Source ownership.
 /// This pure projection cannot create or bind a session.
 pub(crate) fn project_shared_start(
     mut response: StartResponse,
     source_session: Uuid,
     receiver_session: Uuid,
+    receiver_incarnation: Uuid,
+    receiver_owner_epoch: i64,
 ) -> Result<StartResponse> {
     if !response.start_seconds.is_finite()
         || response.start_seconds < 0.0
@@ -289,6 +292,9 @@ pub(crate) fn project_shared_start(
             .is_some_and(|ms| !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&ms))
         || !v4(source_session)
         || !v4(receiver_session)
+        || !v4(receiver_incarnation)
+        || !(1..=9_007_199_254_740_991).contains(&receiver_owner_epoch)
+        || response.control.is_none()
         || source_session == receiver_session
         || response.session_id != source_session.to_string()
     {
@@ -326,6 +332,8 @@ pub(crate) fn project_shared_start(
             return Err(SharingResourceUnsupported);
         }
         control.url = format!("/api/v1/hls/{receiver_session}/control");
+        control.generation = receiver_incarnation.to_string();
+        control.control_epoch = receiver_owner_epoch as u64;
     }
     response.playlist_url = format!("/api/v1/hls/{receiver_session}/{suffix}");
     response.session_id = receiver_session.to_string();
@@ -667,26 +675,70 @@ mod tests {
     fn sharing_start_projection_retains_every_engine_field_and_rejects_source_url_escape() {
         let source = Uuid::new_v4();
         let receiver = Uuid::new_v4();
+        let receiver_incarnation = Uuid::new_v4();
         let original = start(source);
+        let source_incarnation = original
+            .control
+            .as_ref()
+            .expect("control")
+            .generation
+            .clone();
         let mut expected = serde_json::to_value(&original).expect("engine wire");
         expected["session_id"] = json!(receiver);
         expected["playlist_url"] = json!(format!(
             "/api/v1/hls/{receiver}/index.m3u8?native=1&subtitle=2"
         ));
         expected["control"]["url"] = json!(format!("/api/v1/hls/{receiver}/control"));
+        expected["control"]["generation"] = json!(receiver_incarnation);
+        expected["control"]["control_epoch"] = json!(9);
         let actual = serde_json::to_value(
-            project_shared_start(original, source, receiver).expect("projection"),
+            project_shared_start(original, source, receiver, receiver_incarnation, 9)
+                .expect("projection"),
         )
         .expect("wire");
         assert_eq!(actual, expected);
-        assert_eq!(actual["control"]["control_epoch"], json!(7));
-        assert!(project_shared_start(start(source), source, source).is_err());
-        assert!(project_shared_start(start(source), Uuid::new_v4(), receiver).is_err());
-        assert!(project_shared_start(start(source), source, Uuid::nil()).is_err());
+        assert_eq!(actual["control"]["control_epoch"], json!(9));
+        assert!(!serde_json::to_string(&actual)
+            .expect("wire")
+            .contains(&source_incarnation));
+        assert!(project_shared_start(start(source), source, receiver, Uuid::nil(), 9).is_err());
+        for epoch in [0, -1, 9_007_199_254_740_992] {
+            assert!(project_shared_start(
+                start(source),
+                source,
+                receiver,
+                receiver_incarnation,
+                epoch
+            )
+            .is_err());
+        }
+        let mut absent_control = start(source);
+        absent_control.control = None;
+        assert!(
+            project_shared_start(absent_control, source, receiver, receiver_incarnation, 9)
+                .is_err()
+        );
+        assert!(
+            project_shared_start(start(source), source, source, receiver_incarnation, 9).is_err()
+        );
+        assert!(project_shared_start(
+            start(source),
+            Uuid::new_v4(),
+            receiver,
+            receiver_incarnation,
+            9
+        )
+        .is_err());
+        assert!(
+            project_shared_start(start(source), source, Uuid::nil(), receiver_incarnation, 9)
+                .is_err()
+        );
         for seconds in [-1.0, f64::INFINITY, f64::NAN] {
             let mut wrong = start(source);
             wrong.start_seconds = seconds;
-            assert!(project_shared_start(wrong, source, receiver).is_err());
+            assert!(
+                project_shared_start(wrong, source, receiver, receiver_incarnation, 9).is_err()
+            );
         }
         for url in [
             format!("https://source.invalid/api/v1/hls/{source}/index.m3u8"),
@@ -695,11 +747,13 @@ mod tests {
         ] {
             let mut wrong = start(source);
             wrong.playlist_url = url;
-            assert!(project_shared_start(wrong, source, receiver).is_err());
+            assert!(
+                project_shared_start(wrong, source, receiver, receiver_incarnation, 9).is_err()
+            );
         }
         let mut wrong = start(source);
         wrong.control.as_mut().expect("control").url = "https://source.invalid/control".into();
-        assert!(project_shared_start(wrong, source, receiver).is_err());
+        assert!(project_shared_start(wrong, source, receiver, receiver_incarnation, 9).is_err());
     }
     #[test]
     fn sharing_pgs_projection_preserves_cues_and_refuses_geometry_or_generation_escape() {
