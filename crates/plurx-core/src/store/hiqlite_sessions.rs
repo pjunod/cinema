@@ -1187,6 +1187,92 @@ fn valid_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok()
 }
 
+#[derive(Clone, Copy)]
+struct ActivationSql<'a> {
+    local: LocalSessionSql,
+    source: Option<&'a crate::sharing_source_sessions::SourceSessionWriteAuthority>,
+}
+impl ActivationSql<'_> {
+    fn column(self) -> &'static str {
+        if self.source.is_some() {
+            "owner_key"
+        } else {
+            self.local.column()
+        }
+    }
+    fn equals(self, parameter: usize) -> String {
+        if self.source.is_some() {
+            format!("owner_key=${parameter}")
+        } else {
+            self.local.equals(parameter)
+        }
+    }
+    fn insert_columns(self) -> &'static str {
+        self.local.insert_columns()
+    }
+    fn insert_values(self, parameter: usize) -> String {
+        if self.source.is_some() {
+            // The bound key comes only from the typed, sealed Sharing principal.
+            format!(", ${parameter}, 'sharing', substr(${parameter},7,36), substr(${parameter},44)")
+        } else {
+            self.local.insert_values(parameter)
+        }
+    }
+    fn user_id_value(self, parameter: usize) -> String {
+        if self.source.is_some() {
+            "NULL".to_owned()
+        } else {
+            format!("${parameter}")
+        }
+    }
+    fn existing_user(self, parameter: usize) -> String {
+        if self.source.is_some() {
+            String::new()
+        } else {
+            self.local.existing_user(parameter)
+        }
+    }
+    fn principal_value(self, activation: &MediaSessionActivation) -> Result<Param, StoreError> {
+        Ok(match self.source {
+            Some(authority) => Param::Text(authority.assignment.binding.principal.owner_key()),
+            None => Param::Integer(crate::store::local_media_principal_id(
+                &activation.principal,
+            )?),
+        })
+    }
+}
+
+fn source_statement(
+    statement: super::sharing::Statement,
+) -> Result<(String, hiqlite::Params), StoreError> {
+    let (sql, values) = super::sharing::ordered(&statement.0, statement.1)?;
+    Ok((
+        sql,
+        values
+            .into_iter()
+            .map(|value| match value {
+                super::sharing::Value::Integer(value) => Param::Integer(value),
+                super::sharing::Value::Text(value) => Param::Text(value),
+            })
+            .collect(),
+    ))
+}
+
+fn ordered_source_lifecycle_statement(
+    statement: (String, hiqlite::Params),
+) -> Result<(String, hiqlite::Params), StoreError> {
+    let values = statement
+        .1
+        .into_iter()
+        .map(|value| match value {
+            Param::Integer(value) => Ok(super::sharing::Value::Integer(value)),
+            Param::Text(value) => Ok(super::sharing::Value::Text(value)),
+            _ => Err(crate::sharing::invalid()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    source_statement((statement.0, values))
+}
+
 fn valid_terminal_ack(ack: &MediaSessionTerminalAck) -> bool {
     valid_uuid(&ack.incarnation_id)
         && valid_uuid(&ack.session_id)
@@ -1238,9 +1324,22 @@ fn validate_claim(
 }
 
 fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreError> {
+    if !activation
+        .principal
+        .local_user_id()
+        .is_some_and(|id| id > 0)
+    {
+        return Err(StoreError::Task(
+            "invalid media-session activation".to_owned(),
+        ));
+    }
+    validate_activation_shape(activation)
+}
+
+fn validate_activation_shape(activation: &MediaSessionActivation) -> Result<(), StoreError> {
     let valid = valid_uuid(&activation.incarnation_id)
         && valid_uuid(&activation.session_id)
-        && activation.principal.local_user_id().is_some_and(|id| id > 0)
+        && activation.principal.valid_admission_shape()
         && !activation.playback_id.is_empty()
         && activation.playback_id.len() <= 128
         && activation
@@ -1556,6 +1655,494 @@ async fn claim_existing_or_reacquire(
     claim_from_row(store, row, fingerprint, playback_id).await
 }
 
+async fn activate_with_authority(
+    store: &HiqliteAuthStore,
+    activation: &MediaSessionActivation,
+    authority: Option<&crate::sharing_source_sessions::SourceSessionWriteAuthority>,
+) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+    let local = LocalSessionSql::load(store).await?;
+    let layout = ActivationSql {
+        local,
+        source: authority,
+    };
+    if authority.is_some() && !local.rebuilt {
+        return Ok(None);
+    }
+    let principal_value = layout.principal_value(activation)?;
+    let user_value_1 = layout.user_id_value(1);
+    let user_value_3 = layout.user_id_value(3);
+    if let Some(authority) = authority {
+        let Some(guard) =
+            super::sharing_source_sessions::source_activation_guard(authority, activation)?
+        else {
+            return Ok(None);
+        };
+        match super::sharing::Backend::sharing_txn(store, vec![guard]).await {
+            Ok(counts) if counts.as_slice() == [0] => {}
+            Ok(_) => return Err(crate::sharing::invalid()),
+            Err(error) if super::sharing_source_sessions::source_write_refused(&error) => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let owner_1 = layout.equals(1);
+    let owner_2 = layout.equals(2);
+    let owner_3 = layout.equals(3);
+    let owner_5 = layout.equals(5);
+    let owner_6 = layout.equals(6);
+    let owner_column = layout.column();
+    let extra_columns = layout.insert_columns();
+    let extra_values_1 = layout.insert_values(1);
+    let extra_values_3 = layout.insert_values(3);
+    let user_exists_1 = layout.existing_user(1);
+    let user_exists_3 = layout.existing_user(3);
+    let user_exists_6 = layout.existing_user(6);
+    let current_pointer = store
+        .client()
+        .query_consistent_map::<PointerRow, _>(
+            format!(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+            ),
+            params!(principal_value.clone(), activation.playback_id.as_str()),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0);
+    #[cfg(feature = "hiqlite-contract-tests")]
+    {
+        let pointer_read_pause = {
+            let mut pause = ACTIVATION_POINTER_READ_PAUSE
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            pause.take()
+        };
+        if let Some((reached, release)) = pointer_read_pause {
+            let _ = reached.send(());
+            let _ = release.await;
+        }
+    }
+    if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
+        let route = route_by(store, "incarnation_id", &activation.incarnation_id)
+            .await?
+            .filter(|route| activation_route_matches(route, activation));
+        let Some(route) = route else {
+            return Ok(None);
+        };
+        let predecessor = match activation.expected_predecessor_incarnation_id.as_deref() {
+            Some(incarnation_id) => route_by(store, "incarnation_id", incarnation_id)
+                .await?
+                .filter(|route| route.principal == activation.principal),
+            None => None,
+        };
+        return Ok(Some(MediaSessionActivationOutcome { route, predecessor }));
+    }
+    if activation.fence_predecessor
+        && current_pointer.as_deref() != activation.expected_predecessor_incarnation_id.as_deref()
+    {
+        return Ok(None);
+    }
+    let request_id = activation.request_id.as_deref().unwrap_or("");
+    let predecessor_incarnation = activation
+        .expected_predecessor_incarnation_id
+        .as_deref()
+        .or(current_pointer.as_deref())
+        .unwrap_or("");
+    let lease_resource = format!("session:{}", activation.incarnation_id);
+    let removed_owner_key = removed_job_owner_key(&activation.owner_node_id);
+    let mut statements = vec![
+            (
+                format!("INSERT INTO job_leases
+                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
+                 SELECT $1, $2, 1, 1, $3, $4
+                  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media_playback_pointers
+                       WHERE {owner_6} AND playback_id = $7
+                         AND current_incarnation_id = $8)
+                    AND NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $8 AND NOT ({owner_6}))
+                    {user_exists_6}
+                 ON CONFLICT(resource) DO UPDATE SET
+                    expires_at_ms = excluded.expires_at_ms,
+                    revision = job_leases.revision + 1,
+                    updated_at_ms = excluded.updated_at_ms
+                 WHERE job_leases.owner_node_id = excluded.owner_node_id
+                   AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
+                   AND job_leases.revision < 9223372036854775807
+                   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE {owner_6} AND playback_id = $7
+                        AND current_incarnation_id = $8)
+                   AND NOT EXISTS (SELECT 1 FROM media_sessions
+                     WHERE incarnation_id = $8 AND NOT ({owner_6})){user_exists_6}"),
+                params!(
+                    lease_resource.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.lease_expires_at_ms,
+                    activation.now_ms,
+                    removed_owner_key.as_str(),
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str()
+                ),
+            ),
+            (
+                format!("INSERT INTO media_sessions
+                    (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
+                     owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
+                     response_json, produced_playable_through_ms, fetched_through_ms,
+                     media_origin_ms, media_sequence, discontinuity_sequence,
+                     updated_at_ms, publication_ready_at_ms, recovery_epoch{extra_columns})
+                 SELECT $1, $2, {user_value_3}, $4, $5, $6, 1, $7, 'active', $8, $9,
+                        0, 0, $10, 0, 0, $11, $12, $13{extra_values_3}
+                  WHERE (SELECT COUNT(*) FROM media_sessions
+                          WHERE {owner_3} AND state IN ('starting', 'active')
+                            AND lease_expires_at_ms > $11
+                            AND incarnation_id != $1
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE {owner_3} AND playback_id = $4), '')) < $14
+                    AND ($15 = '' OR EXISTS (
+                      SELECT 1 FROM media_session_requests
+                       WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
+                         AND request_fingerprint = $5 AND playback_id = $4
+                         AND owner_node_id = $6
+                         AND ((state = 'starting' AND claim_expires_at_ms > $11)
+                           OR (state = 'resolved' AND response_json = $9))
+                         AND (COALESCE(json_type($8, '$.library_channel'), 'null') = 'null' OR EXISTS (
+                           SELECT 1 FROM library_channel_session_recipes
+                            WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
+                              AND recipe_json = $8))))
+                    AND EXISTS (SELECT 1 FROM job_leases
+                      WHERE resource = $16 AND owner_node_id = $6 AND fence = 1
+                        AND expires_at_ms = $7 AND expires_at_ms > $11
+                        AND updated_at_ms = $11
+                        AND revision < 9223372036854775807)
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE {owner_3} AND incarnation_id != $1) < $17
+                    AND (SELECT COUNT(*) FROM media_sessions
+                          WHERE owner_node_id = $6 AND state = 'active'
+                            AND lease_expires_at_ms > $11
+                            AND incarnation_id != $1
+                            AND incarnation_id != COALESCE((
+                              SELECT current_incarnation_id FROM media_playback_pointers
+                               WHERE {owner_3} AND playback_id = $4), '')) < $18
+                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $19)
+                    AND ($20 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $20 AND state = 'active'
+                        AND publication_ready_at_ms != 0))
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media_playback_pointers
+                       WHERE {owner_3} AND playback_id = $4
+                         AND current_incarnation_id = $1)
+                    AND ($20 = '' OR EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $20 AND {owner_3} AND playback_id = $4))
+                    {user_exists_3}
+                 -- The epoch is written once, with the row. An idempotent
+                 -- replay refreshes the lease and the response and
+                 -- deliberately not this: a replay that re-minted the budget
+                 -- identity would hand one playback a second automatic
+                 -- recovery, which is what the ledger exists to refuse.
+                 ON CONFLICT(incarnation_id) DO UPDATE SET
+                    lease_expires_at_ms = excluded.lease_expires_at_ms,
+                    response_json = excluded.response_json,
+                    updated_at_ms = excluded.updated_at_ms
+                 WHERE media_sessions.session_id = excluded.session_id
+                   AND media_sessions.{owner_column} = excluded.{owner_column}
+                   AND media_sessions.playback_id = excluded.playback_id
+                   AND media_sessions.request_fingerprint = excluded.request_fingerprint
+                   AND media_sessions.owner_node_id = excluded.owner_node_id
+                   AND media_sessions.owner_epoch = 1 AND media_sessions.state = 'active'"),
+                params!(
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str(),
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.request_fingerprint.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.lease_expires_at_ms,
+                    activation.recipe_json.as_str(),
+                    activation.response_json.as_str(),
+                    activation.media_origin_ms,
+                    activation.now_ms,
+                    activation.publication_ready_at_ms,
+                    activation.recovery_epoch.as_str(),
+                    MAX_CURRENT_PER_USER,
+                    request_id,
+                    lease_resource.as_str(),
+                    MAX_SESSION_ROWS_PER_USER,
+                    MAX_OWNED,
+                    removed_owner_key.as_str(),
+                    predecessor_incarnation
+                ),
+            ),
+            (
+                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded', lease_expires_at_ms = $1,
+                        publication_ready_at_ms = $2, updated_at_ms = $1
+                  WHERE incarnation_id = (SELECT current_incarnation_id
+                      FROM media_playback_pointers WHERE {owner_3} AND playback_id = $4)
+                    AND incarnation_id != $5 AND state != 'ended' AND {owner_3}
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $5 AND session_id = $6
+                        AND owner_node_id = $7 AND state = 'active' AND {owner_3})
+                    AND $8 != '' AND incarnation_id = $8
+                    -- The same ask the pointer write is gated on, and it has
+                    -- to be here too. A replicated transaction cannot branch:
+                    -- every statement applies or refuses on its own predicates.
+                    -- Gating only the pointer left this one free to end the
+                    -- predecessor while the pointer stayed put, so a refused
+                    -- activation stopped the viewer's session and started
+                    -- nothing — strictly worse than the race the compare was
+                    -- added to prevent. The three-voter lane caught it; the
+                    -- single-writer backend cannot, because there the refusal
+                    -- is a rollback.
+                    AND ($9 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                      WHERE {owner_3} AND playback_id = $4 AND revision != $9))"),
+                params!(
+                    activation.now_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str(),
+                    activation.owner_node_id.as_str(),
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
+                ),
+            ),
+            (
+                format!("DELETE FROM cache_consumer_pins
+                  WHERE consumer_kind = 'media_session'
+                    AND consumer_id IN (
+                      SELECT incarnation_id FROM media_sessions
+                       WHERE {owner_1} AND playback_id = $2
+                         AND incarnation_id != $3 AND state = 'ended'
+                         AND updated_at_ms = $4)"),
+                params!(
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    activation.now_ms
+                ),
+            ),
+            (
+                format!("UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                        revision = revision + 1, updated_at_ms = $1
+                  WHERE revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_sessions AS session
+                      WHERE 'session:' || session.incarnation_id = job_leases.resource
+                        AND session.{owner_2} AND session.playback_id = $3
+                        AND session.incarnation_id != $4 AND session.state = 'ended'
+                        AND session.incarnation_id = $5
+                        AND session.updated_at_ms = $1
+                        AND session.owner_node_id = job_leases.owner_node_id
+                        AND session.owner_epoch = job_leases.fence)"),
+                params!(
+                    activation.now_ms,
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    predecessor_incarnation
+                ),
+            ),
+            (
+                format!("INSERT INTO media_playback_pointers
+                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
+                     desired_revision{extra_columns})
+                 SELECT {user_value_1}, $2, $3, $4,
+                        -- See the SQLite twin: the row records the ask current
+                        -- when it was written, and only a writer without the
+                        -- column can leave a null here.
+                        (SELECT revision FROM media_playback_desired
+                          WHERE {owner_1} AND playback_id = $2){extra_values_1}
+                  WHERE EXISTS (
+                   SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
+                     AND owner_node_id = $6 AND state = 'active' AND {owner_1})
+                   AND (($7 = '' AND NOT EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE {owner_1} AND playback_id = $2)) OR EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE {owner_1} AND playback_id = $2
+                        AND current_incarnation_id IN ($7, $3)))
+                   -- On the `SELECT` only. A row the `SELECT` does not produce
+                   -- cannot conflict, so the same predicate on the `ON CONFLICT`
+                   -- arm is unreachable, and a guard no test can tell from its
+                   -- absence is not a guard. Matches the SQLite twin exactly.
+                   AND ($8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
+                     WHERE {owner_1} AND playback_id = $2 AND revision != $8))
+                   {user_exists_1}
+                 ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
+                    current_incarnation_id = excluded.current_incarnation_id,
+                    updated_at_ms = excluded.updated_at_ms,
+                    desired_revision = excluded.desired_revision
+                  WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
+                    AND media_playback_pointers.current_incarnation_id
+                        != excluded.current_incarnation_id"),
+                params!(
+                    principal_value.clone(),
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    activation.now_ms,
+                    activation.session_id.as_str(),
+                    activation.owner_node_id.as_str(),
+                    predecessor_incarnation,
+                    activation.expected_desired_revision.unwrap_or(0)
+                ),
+            ),
+            (
+                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
+                        publication_ready_at_ms = $2, updated_at_ms = $1
+                  WHERE incarnation_id = $3 AND session_id = $4 AND state = 'active' AND {owner_5}
+                    AND NOT EXISTS (SELECT 1 FROM media_playback_pointers
+                      WHERE {owner_5} AND playback_id = $6
+                        AND current_incarnation_id = $3)"),
+                params!(
+                    activation.now_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str(),
+                    principal_value.clone(),
+                    activation.playback_id.as_str()
+                ),
+            ),
+            (
+                format!("UPDATE job_leases
+                    SET expires_at_ms = CASE
+                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                        revision = revision + 1, updated_at_ms = $1
+                  WHERE resource = $2 AND owner_node_id = $3 AND fence = 1
+                    AND revision < 9223372036854775807
+                    AND EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $4 AND session_id = $5 AND state = 'ended'
+                        AND updated_at_ms = $1 AND {owner_6})"),
+                params!(
+                    activation.now_ms,
+                    lease_resource.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.incarnation_id.as_str(),
+                    activation.session_id.as_str(),
+                    principal_value.clone()
+                ),
+            ),
+            (
+                "DELETE FROM job_leases WHERE resource = $1 AND owner_node_id = $2
+                    AND fence = 1 AND revision = 1
+                    AND NOT EXISTS (SELECT 1 FROM media_sessions
+                      WHERE incarnation_id = $3)".to_owned(),
+                params!(
+                    lease_resource.as_str(),
+                    activation.owner_node_id.as_str(),
+                    activation.incarnation_id.as_str()
+                ),
+            ),
+        ];
+    if let Some(authority) = authority {
+        let Some(guard) =
+            super::sharing_source_sessions::source_activation_guard(authority, activation)?
+        else {
+            return Ok(None);
+        };
+        statements = statements
+            .into_iter()
+            .map(ordered_source_lifecycle_statement)
+            .collect::<Result<Vec<_>, _>>()?;
+        statements.insert(0, source_statement(guard)?);
+    }
+    let statement_count = statements.len();
+    let committed = match store.client().txn(statements).await.map_err(database_error) {
+        Ok(committed) => committed,
+        Err(error)
+            if authority.is_some()
+                && super::sharing_source_sessions::source_write_refused(&error) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    let mut changed = match committed
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)
+    {
+        Ok(changed) => changed,
+        Err(error)
+            if authority.is_some()
+                && super::sharing_source_sessions::source_write_refused(&error) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
+    };
+    if authority.is_some() {
+        if changed.first().copied() != Some(0) {
+            return Err(crate::sharing::invalid());
+        }
+        changed.remove(0);
+    }
+    let statement_count = statement_count - usize::from(authority.is_some());
+    let fresh_activation = changed.first().copied() == Some(1)
+        && changed.get(1).copied() == Some(1)
+        && changed.get(5).copied() == Some(1)
+        && changed.get(6).copied() == Some(0);
+    // The optimistic pointer read above may lose a race to this exact
+    // activation and a later renewal. Every write in that replay path is
+    // guarded inside the transaction, so the only valid alternative to a
+    // fresh activation is a wholly read-only transaction. The exact
+    // post-transaction projection below distinguishes that replay from a
+    // transaction which merely failed all of its preconditions.
+    let transaction_replay =
+        changed.len() == statement_count && changed.iter().all(|affected| *affected == 0);
+    if !fresh_activation && !transaction_replay {
+        return Ok(None);
+    }
+    // INSERT conflict is an idempotent replay, not proof that every field
+    // still equals the activation input. Handoff settlement, renewal, or
+    // takeover may already have advanced the durable row. Return an exact
+    // post-commit projection so replay cannot regress a finite/ready fence
+    // or overwrite progress in the route cache. Read failure remains
+    // commit-unknown to the caller's exact activation reconciler.
+    let route = route_by(store, "incarnation_id", &activation.incarnation_id)
+        .await?
+        .filter(|route| activation_route_matches(route, activation));
+    let Some(route) = route else {
+        return Ok(None);
+    };
+    let committed_pointer = store
+        .client()
+        .query_consistent_map::<PointerRow, _>(
+            format!(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE {owner_1} AND playback_id = $2"
+            ),
+            params!(principal_value.clone(), activation.playback_id.as_str()),
+        )
+        .await?
+        .into_iter()
+        .next()
+        .map(|row| row.0);
+    if committed_pointer.as_deref() != Some(activation.incarnation_id.as_str()) {
+        return Ok(None);
+    }
+    // Takeover may have advanced the predecessor between the pointer read
+    // and this transaction. Once the CAS above ends that incarnation it
+    // can no longer advance, so this post-commit row is the authoritative
+    // owner/epoch the terminal projection must acknowledge.
+    let predecessor = match (!predecessor_incarnation.is_empty()).then_some(predecessor_incarnation)
+    {
+        Some(incarnation) => route_by(store, "incarnation_id", incarnation)
+            .await?
+            .filter(|route| route.principal == activation.principal),
+        None => None,
+    };
+    Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
+}
+
 #[async_trait]
 impl MediaSessionStore for HiqliteAuthStore {
     async fn claim_media_session_request(
@@ -1752,433 +2339,22 @@ impl MediaSessionStore for HiqliteAuthStore {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
         validate_activation(activation)?;
-        let layout = LocalSessionSql::load(self).await?;
-        let owner_1 = layout.equals(1);
-        let owner_2 = layout.equals(2);
-        let owner_3 = layout.equals(3);
-        let owner_5 = layout.equals(5);
-        let owner_6 = layout.equals(6);
-        let owner_column = layout.column();
-        let extra_columns = layout.insert_columns();
-        let extra_values_1 = layout.insert_values(1);
-        let extra_values_3 = layout.insert_values(3);
-        let user_exists_1 = layout.existing_user(1);
-        let user_exists_3 = layout.existing_user(3);
-        let user_exists_6 = layout.existing_user(6);
-        let current_pointer = self
-            .client()
-            .query_consistent_map::<PointerRow, _>(
-                format!(
-                    "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE {owner_1} AND playback_id = $2"
-                ),
-                params!(
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str()
-                ),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| row.0);
-        #[cfg(feature = "hiqlite-contract-tests")]
-        {
-            let pointer_read_pause = {
-                let mut pause = ACTIVATION_POINTER_READ_PAUSE
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                pause.take()
-            };
-            if let Some((reached, release)) = pointer_read_pause {
-                let _ = reached.send(());
-                let _ = release.await;
-            }
+        activate_with_authority(self, activation, None).await
+    }
+
+    async fn activate_source_media_session(
+        &self,
+        authority: &crate::sharing_source_sessions::SourceSessionWriteAuthority,
+        activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        validate_activation_shape(activation)?;
+        if !matches!(
+            activation.principal,
+            crate::playback_principal::PlaybackPrincipal::Sharing { .. }
+        ) {
+            return Err(crate::sharing::invalid());
         }
-        if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
-            let route = route_by(self, "incarnation_id", &activation.incarnation_id)
-                .await?
-                .filter(|route| activation_route_matches(route, activation));
-            let Some(route) = route else {
-                return Ok(None);
-            };
-            let predecessor = match activation.expected_predecessor_incarnation_id.as_deref() {
-                Some(incarnation_id) => route_by(self, "incarnation_id", incarnation_id)
-                    .await?
-                    .filter(|route| route.principal == activation.principal),
-                None => None,
-            };
-            return Ok(Some(MediaSessionActivationOutcome { route, predecessor }));
-        }
-        if activation.fence_predecessor
-            && current_pointer.as_deref()
-                != activation.expected_predecessor_incarnation_id.as_deref()
-        {
-            return Ok(None);
-        }
-        let request_id = activation.request_id.as_deref().unwrap_or("");
-        let predecessor_incarnation = activation
-            .expected_predecessor_incarnation_id
-            .as_deref()
-            .or(current_pointer.as_deref())
-            .unwrap_or("");
-        let lease_resource = format!("session:{}", activation.incarnation_id);
-        let removed_owner_key = removed_job_owner_key(&activation.owner_node_id);
-        let statements = vec![
-            (
-                format!("INSERT INTO job_leases
-                    (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
-                 SELECT $1, $2, 1, 1, $3, $4
-                  WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
-                    AND NOT EXISTS (
-                      SELECT 1 FROM media_playback_pointers
-                       WHERE {owner_6} AND playback_id = $7
-                         AND current_incarnation_id = $8)
-                    AND NOT EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $8 AND NOT ({owner_6}))
-                    {user_exists_6}
-                 ON CONFLICT(resource) DO UPDATE SET
-                    expires_at_ms = excluded.expires_at_ms,
-                    revision = job_leases.revision + 1,
-                    updated_at_ms = excluded.updated_at_ms
-                 WHERE job_leases.owner_node_id = excluded.owner_node_id
-                   AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
-                   AND job_leases.revision < 9223372036854775807
-                   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
-                   AND NOT EXISTS (
-                     SELECT 1 FROM media_playback_pointers
-                      WHERE {owner_6} AND playback_id = $7
-                        AND current_incarnation_id = $8)
-                   AND NOT EXISTS (SELECT 1 FROM media_sessions
-                     WHERE incarnation_id = $8 AND NOT ({owner_6})){user_exists_6}"),
-                params!(
-                    lease_resource.as_str(),
-                    activation.owner_node_id.as_str(),
-                    activation.lease_expires_at_ms,
-                    activation.now_ms,
-                    removed_owner_key.as_str(),
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str()
-                ),
-            ),
-            (
-                format!("INSERT INTO media_sessions
-                    (incarnation_id, session_id, user_id, playback_id, request_fingerprint,
-                     owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json,
-                     response_json, produced_playable_through_ms, fetched_through_ms,
-                     media_origin_ms, media_sequence, discontinuity_sequence,
-                     updated_at_ms, publication_ready_at_ms, recovery_epoch{extra_columns})
-                 SELECT $1, $2, $3, $4, $5, $6, 1, $7, 'active', $8, $9,
-                        0, 0, $10, 0, 0, $11, $12, $13{extra_values_3}
-                  WHERE (SELECT COUNT(*) FROM media_sessions
-                          WHERE {owner_3} AND state IN ('starting', 'active')
-                            AND lease_expires_at_ms > $11
-                            AND incarnation_id != $1
-                            AND incarnation_id != COALESCE((
-                              SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE {owner_3} AND playback_id = $4), '')) < $14
-                    AND ($15 = '' OR EXISTS (
-                      SELECT 1 FROM media_session_requests
-                       WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
-                         AND request_fingerprint = $5 AND playback_id = $4
-                         AND owner_node_id = $6
-                         AND ((state = 'starting' AND claim_expires_at_ms > $11)
-                           OR (state = 'resolved' AND response_json = $9))
-                         AND (COALESCE(json_type($8, '$.library_channel'), 'null') = 'null' OR EXISTS (
-                           SELECT 1 FROM library_channel_session_recipes
-                            WHERE {owner_3} AND request_id = $15 AND incarnation_id = $1
-                              AND recipe_json = $8))))
-                    AND EXISTS (SELECT 1 FROM job_leases
-                      WHERE resource = $16 AND owner_node_id = $6 AND fence = 1
-                        AND expires_at_ms = $7 AND expires_at_ms > $11
-                        AND updated_at_ms = $11
-                        AND revision < 9223372036854775807)
-                    AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE {owner_3} AND incarnation_id != $1) < $17
-                    AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE owner_node_id = $6 AND state = 'active'
-                            AND lease_expires_at_ms > $11
-                            AND incarnation_id != $1
-                            AND incarnation_id != COALESCE((
-                              SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE {owner_3} AND playback_id = $4), '')) < $18
-                    AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $19)
-                    AND ($20 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $20 AND state = 'active'
-                        AND publication_ready_at_ms != 0))
-                    AND NOT EXISTS (
-                      SELECT 1 FROM media_playback_pointers
-                       WHERE {owner_3} AND playback_id = $4
-                         AND current_incarnation_id = $1)
-                    AND ($20 = '' OR EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $20 AND {owner_3} AND playback_id = $4))
-                    {user_exists_3}
-                 -- The epoch is written once, with the row. An idempotent
-                 -- replay refreshes the lease and the response and
-                 -- deliberately not this: a replay that re-minted the budget
-                 -- identity would hand one playback a second automatic
-                 -- recovery, which is what the ledger exists to refuse.
-                 ON CONFLICT(incarnation_id) DO UPDATE SET
-                    lease_expires_at_ms = excluded.lease_expires_at_ms,
-                    response_json = excluded.response_json,
-                    updated_at_ms = excluded.updated_at_ms
-                 WHERE media_sessions.session_id = excluded.session_id
-                   AND media_sessions.{owner_column} = excluded.{owner_column}
-                   AND media_sessions.playback_id = excluded.playback_id
-                   AND media_sessions.request_fingerprint = excluded.request_fingerprint
-                   AND media_sessions.owner_node_id = excluded.owner_node_id
-                   AND media_sessions.owner_epoch = 1 AND media_sessions.state = 'active'"),
-                params!(
-                    activation.incarnation_id.as_str(),
-                    activation.session_id.as_str(),
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.request_fingerprint.as_str(),
-                    activation.owner_node_id.as_str(),
-                    activation.lease_expires_at_ms,
-                    activation.recipe_json.as_str(),
-                    activation.response_json.as_str(),
-                    activation.media_origin_ms,
-                    activation.now_ms,
-                    activation.publication_ready_at_ms,
-                    activation.recovery_epoch.as_str(),
-                    MAX_CURRENT_PER_USER,
-                    request_id,
-                    lease_resource.as_str(),
-                    MAX_SESSION_ROWS_PER_USER,
-                    MAX_OWNED,
-                    removed_owner_key.as_str(),
-                    predecessor_incarnation
-                ),
-            ),
-            (
-                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'superseded', lease_expires_at_ms = $1,
-                        publication_ready_at_ms = $2, updated_at_ms = $1
-                  WHERE incarnation_id = (SELECT current_incarnation_id
-                      FROM media_playback_pointers WHERE {owner_3} AND playback_id = $4)
-                    AND incarnation_id != $5 AND state != 'ended' AND {owner_3}
-                    AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $5 AND session_id = $6
-                        AND owner_node_id = $7 AND state = 'active' AND {owner_3})
-                    AND $8 != '' AND incarnation_id = $8
-                    -- The same ask the pointer write is gated on, and it has
-                    -- to be here too. A replicated transaction cannot branch:
-                    -- every statement applies or refuses on its own predicates.
-                    -- Gating only the pointer left this one free to end the
-                    -- predecessor while the pointer stayed put, so a refused
-                    -- activation stopped the viewer's session and started
-                    -- nothing — strictly worse than the race the compare was
-                    -- added to prevent. The three-voter lane caught it; the
-                    -- single-writer backend cannot, because there the refusal
-                    -- is a rollback.
-                    AND ($9 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                      WHERE {owner_3} AND playback_id = $4 AND revision != $9))"),
-                params!(
-                    activation.now_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str(),
-                    activation.session_id.as_str(),
-                    activation.owner_node_id.as_str(),
-                    predecessor_incarnation,
-                    activation.expected_desired_revision.unwrap_or(0)
-                ),
-            ),
-            (
-                format!("DELETE FROM cache_consumer_pins
-                  WHERE consumer_kind = 'media_session'
-                    AND consumer_id IN (
-                      SELECT incarnation_id FROM media_sessions
-                       WHERE {owner_1} AND playback_id = $2
-                         AND incarnation_id != $3 AND state = 'ended'
-                         AND updated_at_ms = $4)"),
-                params!(
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str(),
-                    activation.now_ms
-                ),
-            ),
-            (
-                format!("UPDATE job_leases
-                    SET expires_at_ms = CASE
-                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
-                        revision = revision + 1, updated_at_ms = $1
-                  WHERE revision < 9223372036854775807
-                    AND EXISTS (SELECT 1 FROM media_sessions AS session
-                      WHERE 'session:' || session.incarnation_id = job_leases.resource
-                        AND session.{owner_2} AND session.playback_id = $3
-                        AND session.incarnation_id != $4 AND session.state = 'ended'
-                        AND session.incarnation_id = $5
-                        AND session.updated_at_ms = $1
-                        AND session.owner_node_id = job_leases.owner_node_id
-                        AND session.owner_epoch = job_leases.fence)"),
-                params!(
-                    activation.now_ms,
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str(),
-                    predecessor_incarnation
-                ),
-            ),
-            (
-                format!("INSERT INTO media_playback_pointers
-                    (user_id, playback_id, current_incarnation_id, updated_at_ms,
-                     desired_revision{extra_columns})
-                 SELECT $1, $2, $3, $4,
-                        -- See the SQLite twin: the row records the ask current
-                        -- when it was written, and only a writer without the
-                        -- column can leave a null here.
-                        (SELECT revision FROM media_playback_desired
-                          WHERE {owner_1} AND playback_id = $2){extra_values_1}
-                  WHERE EXISTS (
-                   SELECT 1 FROM media_sessions WHERE incarnation_id = $3 AND session_id = $5
-                     AND owner_node_id = $6 AND state = 'active' AND {owner_1})
-                   AND (($7 = '' AND NOT EXISTS (
-                     SELECT 1 FROM media_playback_pointers
-                      WHERE {owner_1} AND playback_id = $2)) OR EXISTS (
-                     SELECT 1 FROM media_playback_pointers
-                      WHERE {owner_1} AND playback_id = $2
-                        AND current_incarnation_id IN ($7, $3)))
-                   -- On the `SELECT` only. A row the `SELECT` does not produce
-                   -- cannot conflict, so the same predicate on the `ON CONFLICT`
-                   -- arm is unreachable, and a guard no test can tell from its
-                   -- absence is not a guard. Matches the SQLite twin exactly.
-                   AND ($8 = 0 OR NOT EXISTS (SELECT 1 FROM media_playback_desired
-                     WHERE {owner_1} AND playback_id = $2 AND revision != $8))
-                   {user_exists_1}
-                 ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
-                    current_incarnation_id = excluded.current_incarnation_id,
-                    updated_at_ms = excluded.updated_at_ms,
-                    desired_revision = excluded.desired_revision
-                  WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
-                    AND media_playback_pointers.current_incarnation_id
-                        != excluded.current_incarnation_id"),
-                params!(
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str(),
-                    activation.incarnation_id.as_str(),
-                    activation.now_ms,
-                    activation.session_id.as_str(),
-                    activation.owner_node_id.as_str(),
-                    predecessor_incarnation,
-                    activation.expected_desired_revision.unwrap_or(0)
-                ),
-            ),
-            (
-                format!("UPDATE media_sessions SET state = 'ended', terminal_reason = 'replaced', lease_expires_at_ms = $1,
-                        publication_ready_at_ms = $2, updated_at_ms = $1
-                  WHERE incarnation_id = $3 AND session_id = $4 AND state = 'active' AND {owner_5}
-                    AND NOT EXISTS (SELECT 1 FROM media_playback_pointers
-                      WHERE {owner_5} AND playback_id = $6
-                        AND current_incarnation_id = $3)"),
-                params!(
-                    activation.now_ms,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED,
-                    activation.incarnation_id.as_str(),
-                    activation.session_id.as_str(),
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str()
-                ),
-            ),
-            (
-                format!("UPDATE job_leases
-                    SET expires_at_ms = CASE
-                          WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
-                        revision = revision + 1, updated_at_ms = $1
-                  WHERE resource = $2 AND owner_node_id = $3 AND fence = 1
-                    AND revision < 9223372036854775807
-                    AND EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $4 AND session_id = $5 AND state = 'ended'
-                        AND updated_at_ms = $1 AND {owner_6})"),
-                params!(
-                    activation.now_ms,
-                    lease_resource.as_str(),
-                    activation.owner_node_id.as_str(),
-                    activation.incarnation_id.as_str(),
-                    activation.session_id.as_str(),
-                    crate::store::local_media_principal_id(&activation.principal)?
-                ),
-            ),
-            (
-                "DELETE FROM job_leases WHERE resource = $1 AND owner_node_id = $2
-                    AND fence = 1 AND revision = 1
-                    AND NOT EXISTS (SELECT 1 FROM media_sessions
-                      WHERE incarnation_id = $3)".to_owned(),
-                params!(
-                    lease_resource.as_str(),
-                    activation.owner_node_id.as_str(),
-                    activation.incarnation_id.as_str()
-                ),
-            ),
-        ];
-        let statement_count = statements.len();
-        let changed = self
-            .client()
-            .txn(statements)
-            .await?
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        let fresh_activation = changed.first().copied() == Some(1)
-            && changed.get(1).copied() == Some(1)
-            && changed.get(5).copied() == Some(1)
-            && changed.get(6).copied() == Some(0);
-        // The optimistic pointer read above may lose a race to this exact
-        // activation and a later renewal. Every write in that replay path is
-        // guarded inside the transaction, so the only valid alternative to a
-        // fresh activation is a wholly read-only transaction. The exact
-        // post-transaction projection below distinguishes that replay from a
-        // transaction which merely failed all of its preconditions.
-        let transaction_replay =
-            changed.len() == statement_count && changed.iter().all(|affected| *affected == 0);
-        if !fresh_activation && !transaction_replay {
-            return Ok(None);
-        }
-        // INSERT conflict is an idempotent replay, not proof that every field
-        // still equals the activation input. Handoff settlement, renewal, or
-        // takeover may already have advanced the durable row. Return an exact
-        // post-commit projection so replay cannot regress a finite/ready fence
-        // or overwrite progress in the route cache. Read failure remains
-        // commit-unknown to the caller's exact activation reconciler.
-        let route = route_by(self, "incarnation_id", &activation.incarnation_id)
-            .await?
-            .filter(|route| activation_route_matches(route, activation));
-        let Some(route) = route else {
-            return Ok(None);
-        };
-        let committed_pointer = self
-            .client()
-            .query_consistent_map::<PointerRow, _>(
-                format!(
-                    "SELECT current_incarnation_id FROM media_playback_pointers
-                  WHERE {owner_1} AND playback_id = $2"
-                ),
-                params!(
-                    crate::store::local_media_principal_id(&activation.principal)?,
-                    activation.playback_id.as_str()
-                ),
-            )
-            .await?
-            .into_iter()
-            .next()
-            .map(|row| row.0);
-        if committed_pointer.as_deref() != Some(activation.incarnation_id.as_str()) {
-            return Ok(None);
-        }
-        // Takeover may have advanced the predecessor between the pointer read
-        // and this transaction. Once the CAS above ends that incarnation it
-        // can no longer advance, so this post-commit row is the authoritative
-        // owner/epoch the terminal projection must acknowledge.
-        let predecessor =
-            match (!predecessor_incarnation.is_empty()).then_some(predecessor_incarnation) {
-                Some(incarnation) => route_by(self, "incarnation_id", incarnation)
-                    .await?
-                    .filter(|route| route.principal == activation.principal),
-                None => None,
-            };
-        Ok(Some(MediaSessionActivationOutcome { route, predecessor }))
+        activate_with_authority(self, activation, Some(authority)).await
     }
 
     async fn prepare_media_session(

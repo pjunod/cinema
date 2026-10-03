@@ -363,3 +363,122 @@ async fn sharing_receiver_content_authority_is_read_only_and_fences_current_logi
     })
     .await;
 }
+
+#[tokio::test]
+async fn sharing_continue_groups_isolate_sources_filter_assignments_and_refuse_hidden_overflow() {
+    for_each_backend(|s, b| async move {
+        let user = s
+            .create_user("sharing-continue-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let other = s
+            .create_user("sharing-continue-other", "synthetic-hash", false)
+            .await
+            .expect("other viewer");
+        let a = assigned_import(s.as_ref(), user.id).await;
+        let c = assigned_import(s.as_ref(), user.id).await;
+        s.save_remote_watch(update(a, user.id, 2, 2200))
+            .await
+            .expect("A history");
+        s.save_remote_watch(update(c, user.id, 3, 3300))
+            .await
+            .expect("C same-ID history");
+        let groups = s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("bounded current groups");
+        assert_eq!(groups.len(), 2, "{b}");
+        assert_eq!(groups[0].scope.import_id, c, "newest import first");
+        assert_eq!(groups[0].items[0].item_id, groups[1].items[0].item_id);
+        assert_ne!(
+            groups[0].scope.source_server_id,
+            groups[1].scope.source_server_id
+        );
+        assert_eq!(groups[0].items[0].watch.position_ms, 3300);
+        assert_eq!(groups[1].items[0].watch.position_ms, 2200);
+        let single = s
+            .remote_continue_watch_groups(user.id, 1)
+            .await
+            .expect("requested newest row");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].scope.import_id, c);
+        assert!(s
+            .remote_continue_watch_groups(other.id, 200)
+            .await
+            .expect("other user")
+            .is_empty());
+        assert!(s.remote_continue_watch_groups(0, 200).await.is_err());
+        assert!(s.remote_continue_watch_groups(user.id, 201).await.is_err());
+        s.assign_share_viewers(c, 2, Vec::new(), 1010)
+            .await
+            .expect("remove current assignment");
+        let current = s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("current assignments");
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].scope.import_id, a);
+        let mut finished = update(a, user.id, 3, 60000);
+        finished.progress.watched = true;
+        s.save_remote_watch(finished).await.expect("finished item");
+        assert!(s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("watched is not resumable")
+            .is_empty());
+        for n in 1..=200 {
+            let mut row = update(a, user.id, 1, 1000);
+            row.item_id = source_id(&(9007199254740993_i64 + n).to_string());
+            assert_eq!(
+                s.save_remote_watch(row)
+                    .await
+                    .expect("bounded progress fixture"),
+                RemoteProgressOutcome::Applied
+            );
+        }
+        let full = s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("exact bound");
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].items.len(), 200);
+        let repeat = s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("deterministic recent order");
+        assert_eq!(
+            full[0]
+                .items
+                .iter()
+                .map(|i| i.item_id.clone())
+                .collect::<Vec<_>>(),
+            repeat[0]
+                .items
+                .iter()
+                .map(|i| i.item_id.clone())
+                .collect::<Vec<_>>()
+        );
+        let mut excess = update(a, user.id, 1, 1000);
+        excess.item_id = source_id("9223372036854775807");
+        s.save_remote_watch(excess)
+            .await
+            .expect("overflow sentinel fixture");
+        assert!(
+            s.remote_continue_watch_groups(user.id, 200).await.is_err(),
+            "{b}/201st row refuses whole result"
+        );
+        assert!(
+            s.remote_continue_watch_groups(user.id, 1).await.is_err(),
+            "small client limit cannot hide physical overflow"
+        );
+        s.disable_share_import(a, 2000)
+            .await
+            .expect("disable current import");
+        assert!(s
+            .remote_continue_watch_groups(user.id, 200)
+            .await
+            .expect("disabled import hidden")
+            .is_empty());
+    })
+    .await;
+}

@@ -638,6 +638,7 @@ struct ReceiverSourceScope {
 struct ReceiverContentAuthority {
     hash: String,
     user: i64,
+    scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
     sources: Vec<ReceiverSourceScope>,
 }
 fn receiver_scope(
@@ -690,17 +691,13 @@ async fn receiver_content_current(state: &AppState, authority: &ReceiverContentA
         if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
             return Some(false);
         }
-        let scopes = authority
-            .sources
-            .iter()
-            .map(|s| s.scope.clone())
-            .collect::<Vec<_>>();
+        let scopes = &authority.scopes;
         if !state
             .store
             .receiver_catalogue_authorized(
                 &authority.hash,
                 authority.user,
-                &scopes,
+                scopes,
                 clock_ms() / 1000,
             )
             .await
@@ -729,7 +726,7 @@ async fn receiver_content_current(state: &AppState, authority: &ReceiverContentA
             .receiver_catalogue_authorized(
                 &authority.hash,
                 authority.user,
-                &scopes,
+                scopes,
                 clock_ms() / 1000,
             )
             .await
@@ -745,12 +742,24 @@ async fn receiver_json(
     sources: Vec<ReceiverSourceScope>,
     value: Value,
 ) -> Result<Response, ApiError> {
-    if sources.len() > 32 {
+    let scopes = sources.iter().map(|s| s.scope.clone()).collect();
+    receiver_json_scoped(state, token, user, scopes, sources, value).await
+}
+async fn receiver_json_scoped(
+    state: &AppState,
+    token: &str,
+    user: i64,
+    scopes: Vec<plurx_core::store::sharing_catalogue::ReceiverCatalogueScope>,
+    sources: Vec<ReceiverSourceScope>,
+    value: Value,
+) -> Result<Response, ApiError> {
+    if scopes.len() > 32 || sources.len() > 32 {
         return Err(invalid());
     }
     let authority = ReceiverContentAuthority {
         hash: plurx_core::auth::hash_token(token),
         user,
+        scopes,
         sources,
     };
     // This also fences history reads whose import changed during a network read.
@@ -823,6 +832,11 @@ async fn receiver_content_guard(
 pub(crate) fn viewer_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/shared/libraries", get(viewer_assigned_libraries))
+        .route("/shared/continue-watching", get(viewer_continue_groups))
+        .route(
+            "/shared/imports/{import}/continue-watching",
+            get(viewer_continue_import),
+        )
         .route("/shared/imports/{import}/libraries", get(viewer_libraries))
         .route(
             "/shared/imports/{import}/libraries/{library}/items",
@@ -879,6 +893,142 @@ fn shared_item(summary: &plurx_core::sharing::ImportSummary, item: SourceCatalog
     });
     json!({"source":"shared","reference":reference,"parent":parent,"title":item.title,"sort_title":item.sort_title,"kind":item.kind,"year":item.year,"overview":item.overview,"genres":item.genres,"season_number":item.season_number,"episode_number":item.episode_number})
 }
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ContinueQuery {
+    limit: Option<usize>,
+}
+fn continue_limit(raw: Option<&str>) -> Result<usize, ApiError> {
+    let raw = raw.unwrap_or("");
+    if raw.len() > 128 {
+        return Err(invalid());
+    }
+    let uri: axum::http::Uri = format!("/?{raw}").parse().map_err(|_| invalid())?;
+    let axum::extract::Query(query) =
+        axum::extract::Query::<ContinueQuery>::try_from_uri(&uri).map_err(|_| invalid())?;
+    let limit = query.limit.unwrap_or(200);
+    if !(1..=200).contains(&limit) {
+        return Err(invalid());
+    }
+    Ok(limit)
+}
+async fn viewer_continue_groups(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    super::extract::RawToken(token): super::extract::RawToken,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, ApiError> {
+    let groups = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state
+            .store
+            .remote_continue_watch_groups(user.id, continue_limit(raw.as_deref())?),
+    )
+    .await
+    .map_err(|_| {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_history_unavailable",
+        )
+    })?
+    .map_err(unavailable)?;
+    let scopes = groups.iter().map(|g| g.scope.clone()).collect();
+    let groups=groups.into_iter().map(|g|json!({"import_id":g.scope.import_id,"server_id":g.scope.source_server_id,"catalogue_epoch":g.scope.catalogue_epoch,"source_name":g.source_name,"count":g.items.len()})).collect::<Vec<_>>();
+    receiver_json_scoped(
+        &state,
+        &token,
+        user.id,
+        scopes,
+        Vec::new(),
+        json!({"groups":groups}),
+    )
+    .await
+}
+async fn viewer_continue_import(
+    State(state): State<AppState>,
+    super::extract::AuthUser(user): super::extract::AuthUser,
+    super::extract::RawToken(token): super::extract::RawToken,
+    Path(import): Path<String>,
+    RawQuery(raw): RawQuery,
+) -> Result<Response, ApiError> {
+    let import = import_id(&import)?;
+    let groups = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        state
+            .store
+            .remote_continue_watch_groups(user.id, continue_limit(raw.as_deref())?),
+    )
+    .await
+    .map_err(|_| {
+        fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_history_unavailable",
+        )
+    })?
+    .map_err(unavailable)?;
+    let group = groups
+        .into_iter()
+        .find(|g| g.scope.import_id == import)
+        .ok_or_else(missing)?;
+    let mut sources = Vec::new();
+    let mut items = Vec::new();
+    let availability = match state
+        .sharing
+        .read_catalogue(
+            &state,
+            import,
+            user.id,
+            crate::sharing::CatalogueRead::Batch(MetadataBatch {
+                item_ids: group.items.iter().map(|i| i.item_id.clone()).collect(),
+            }),
+        )
+        .await
+    {
+        Ok((summary, crate::sharing::CatalogueReply::Batch(batch))) => {
+            if summary.source_server_id != group.scope.source_server_id
+                || summary.catalogue_epoch != group.scope.catalogue_epoch
+                || summary.lifecycle_generation != group.scope.lifecycle_generation
+                || summary.claim_id != group.scope.claim_id
+                || summary.remote_grant_id != Some(group.scope.remote_grant_id)
+            {
+                return Err(fail(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "sharing_history_authority_unavailable",
+                ));
+            }
+            let mut tuples = Vec::new();
+            for entry in batch.items {
+                let Some(item) = entry.item else {
+                    continue;
+                };
+                let Some(history) = group
+                    .items
+                    .iter()
+                    .find(|h| h.item_id == item.item_id && h.library_id == item.library_id)
+                else {
+                    continue;
+                };
+                // A fresh changed library is not an implicit history move.
+                tuples.push((item.library_id.clone(), item.item_id.clone()));
+                items.push(json!({"item":shared_item(&summary,item),"watch":history.watch}));
+            }
+            if !tuples.is_empty() {
+                sources.push(receiver_scope(
+                    &summary,
+                    tuples.iter().map(|t| t.0.clone()).collect(),
+                    tuples,
+                    Vec::new(),
+                )?);
+            }
+            "online"
+        }
+        Err(crate::sharing_client::PeerError::Rejected(StatusCode::TOO_MANY_REQUESTS)) => "busy",
+        Err(_) => "unavailable",
+        _ => return Err(invalid()),
+    };
+    receiver_json_scoped(&state,&token,user.id,vec![group.scope.clone()],sources,json!({"import_id":group.scope.import_id,"server_id":group.scope.source_server_id,"catalogue_epoch":group.scope.catalogue_epoch,"source_name":group.source_name,"count":group.items.len(),"availability":availability,"items":items})).await
+}
+
 async fn viewer_libraries(
     State(state): State<AppState>,
     super::extract::AuthUser(user): super::extract::AuthUser,
@@ -2100,7 +2250,10 @@ mod tests {
     #[tokio::test]
     async fn sharing_receiver_blocked_http1_and_http2_cancel_on_login_loss() {
         let _serial = BODY_FIXTURES.lock().await;
-        for h2 in [false, true] {
+        for (h2, loss) in [false, true]
+            .into_iter()
+            .flat_map(|h2| (0..3).map(move |loss| (h2, loss)))
+        {
             let fixture = body_fixture().await;
             let user = fixture
                 .state
@@ -2116,7 +2269,90 @@ mod tests {
                 .create_token(&hash, user.id, None)
                 .await
                 .expect("login");
-            let app=Router::new().route("/test/shared/items",get(|State(state):State<AppState>,super::super::extract::AuthUser(user):super::super::extract::AuthUser,super::super::extract::RawToken(token):super::super::extract::RawToken|async move{receiver_json(&state,&token,user.id,Vec::new(),json!({"receiver_test_payload":"x".repeat(2*1024*1024)})).await}))
+            let import = uuid::Uuid::new_v4();
+            let local = fixture
+                .state
+                .store
+                .sharing_identity(1000)
+                .await
+                .expect("B identity");
+            let seal = |purpose, value: &str| {
+                fixture
+                    .state
+                    .sharing
+                    .key
+                    .seal_sharing(purpose, local.server_id, import, value)
+                    .expect("sealed fixture")
+            };
+            fixture
+                .state
+                .store
+                .create_share_import(NewImport {
+                    id: import,
+                    source: SharingIdentity {
+                        server_id: uuid::Uuid::new_v4(),
+                        catalogue_epoch: uuid::Uuid::new_v4(),
+                        created_at_ms: 1000,
+                    },
+                    source_name: "Configured offline Source".into(),
+                    claim_id: uuid::Uuid::new_v4(),
+                    credential: seal(
+                        plurx_core::secrets::SharingSecretPurpose::Credential,
+                        "synthetic-credential",
+                    ),
+                    claim_secret: seal(
+                        plurx_core::secrets::SharingSecretPurpose::Claim,
+                        "synthetic-claim",
+                    ),
+                    endpoints: vec![Endpoint {
+                        ipv4: "100.101.102.103".parse().expect("IP"),
+                        ipv6: None,
+                        ts_fqdn: "offline.fixture.ts.net".into(),
+                        port: 1,
+                        spki_sha256: "a".repeat(64),
+                    }],
+                    now_ms: 1000,
+                })
+                .await
+                .expect("import");
+            fixture
+                .state
+                .store
+                .settle_share_claim(import, uuid::Uuid::new_v4(), true, 1001)
+                .await
+                .expect("claim");
+            fixture
+                .state
+                .store
+                .assign_share_viewers(
+                    import,
+                    1,
+                    vec![Assignment {
+                        library_id: source_id("12").expect("ID"),
+                        user_id: user.id,
+                    }],
+                    1002,
+                )
+                .await
+                .expect("assignment");
+            let summary = fixture
+                .state
+                .store
+                .sharing_imports()
+                .await
+                .expect("imports")
+                .into_iter()
+                .find(|i| i.id == import)
+                .expect("current import");
+            let scope = receiver_scope(
+                &summary,
+                vec![source_id("12").expect("ID")],
+                Vec::new(),
+                Vec::new(),
+            )
+            .expect("scope")
+            .scope;
+            let app=Router::new().route("/test/shared/items",get(move |State(state):State<AppState>,super::super::extract::AuthUser(user):super::super::extract::AuthUser,super::super::extract::RawToken(token):super::super::extract::RawToken| { let scope = scope.clone(); async move{receiver_json_scoped(&state,&token,user.id,vec![scope],Vec::new(),json!({"receiver_test_payload":"x".repeat(2*1024*1024)})).await} }))
                 .route_layer(middleware::from_fn_with_state(fixture.state.clone(),receiver_content_guard)).with_state(fixture.state.clone());
             let baseline = RECEIVER_MONITORS.available_permits();
             let body_dropped = Arc::new(AtomicBool::new(false));
@@ -2151,12 +2387,31 @@ mod tests {
                 before,
                 "monitor must not renew idle login"
             );
-            fixture
-                .state
-                .store
-                .delete_token(&hash)
-                .await
-                .expect("revoke login");
+            match loss {
+                0 => {
+                    assert!(fixture
+                        .state
+                        .store
+                        .delete_token(&hash)
+                        .await
+                        .expect("revoke login"));
+                }
+                1 => fixture
+                    .state
+                    .store
+                    .disable_share_import(import, 1003)
+                    .await
+                    .expect("disable import"),
+                2 => {
+                    fixture
+                        .state
+                        .store
+                        .assign_share_viewers(import, 2, Vec::new(), 1003)
+                        .await
+                        .expect("remove assignment");
+                }
+                _ => unreachable!(),
+            }
             tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
                 .await
                 .expect("blocked B connection closes");
@@ -2353,6 +2608,44 @@ mod tests {
                     assert!(started.elapsed() < std::time::Duration::from_secs(1));
                     drop(peer);
                 }
+                if change == 1 {
+                    use plurx_core::store::sharing_catalogue::{RemoteWatch, RemoteWatchUpdate};
+                    let item_ids: Vec<i64> = {
+                        let writer = rusqlite::Connection::open(&source.path)
+                            .expect("Source identity reader");
+                        let mut statement = writer
+                            .prepare("SELECT id FROM items WHERE library_id=?1 ORDER BY id")
+                            .expect("IDs");
+                        let rows = statement
+                            .query_map([source.library], |row| row.get(0))
+                            .expect("current IDs")
+                            .collect::<Result<Vec<_>, _>>()
+                            .expect("closed IDs");
+                        rows
+                    };
+                    assert_eq!(item_ids.len(), 200);
+                    for item in item_ids {
+                        receiver
+                            .store
+                            .save_remote_watch(RemoteWatchUpdate {
+                                import_id: import,
+                                library_id: library.clone(),
+                                item_id: source_id(&item.to_string()).expect("ID"),
+                                user_id: user.id,
+                                lifecycle_generation: 1,
+                                assignment_generation: 2,
+                                progress: RemoteWatch {
+                                    position_ms: 1000,
+                                    duration_ms: Some(60000),
+                                    watched: false,
+                                    sequence: 1,
+                                    updated_at_ms: 1001,
+                                },
+                            })
+                            .await
+                            .expect("B-owned Continue Watching history");
+                    }
+                }
                 let details = matches!(change, 3 | 4);
                 if details {
                     use plurx_core::sharing_catalogue_details::CatalogueRevisionKey;
@@ -2392,7 +2685,9 @@ mod tests {
                 let baseline = RECEIVER_MONITORS.available_permits();
                 let (b_address, captured, stop, served) =
                     body_server_app(app, body_dropped.clone(), data_dropped.clone()).await;
-                let path = if details {
+                let path = if change == 1 {
+                    format!("/api/v1/shared/imports/{import}/continue-watching?limit=200")
+                } else if details {
                     format!("/api/v1/shared/imports/{import}/items/{}", source.item)
                 } else {
                     format!(
@@ -2554,11 +2849,13 @@ mod tests {
                             .execute("UPDATE files SET item_id=?1 WHERE id=1", [source.item + 1])
                             .expect("Source file move");
                     }
-                    5 => receiver
-                        .store
-                        .delete_token(&hash)
-                        .await
-                        .expect("B login revoke"),
+                    5 => {
+                        assert!(receiver
+                            .store
+                            .delete_token(&hash)
+                            .await
+                            .expect("B login revoke"));
+                    }
                     6 => receiver
                         .store
                         .disable_share_import(import, 2000)
@@ -2643,6 +2940,201 @@ mod tests {
                     .expect("Source result");
             }
         }
+    }
+
+    #[tokio::test]
+    async fn sharing_continue_http_keeps_offline_groups_separate_without_stale_titles() {
+        use plurx_core::{
+            secrets::SharingSecretPurpose,
+            store::sharing_catalogue::{RemoteWatch, RemoteWatchUpdate},
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let (_, state) = super::super::tests::test_app_with_state();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+            .await
+            .expect("enable B");
+        let user = state
+            .store
+            .create_user("continue-current-viewer", "synthetic-hash", false)
+            .await
+            .expect("viewer");
+        let token = "synthetic-continue-login";
+        state
+            .store
+            .create_token(&plurx_core::auth::hash_token(token), user.id, None)
+            .await
+            .expect("login");
+        let local = state
+            .store
+            .sharing_identity(1000)
+            .await
+            .expect("B identity");
+        let mut imports = Vec::new();
+        for n in 1..=2 {
+            let import = uuid::Uuid::new_v4();
+            let secret = new_secret().expect("synthetic credential");
+            let credential = crate::sharing::ImportCredential::encode(
+                &secret,
+                uuid::Uuid::new_v4(),
+                1000,
+                "Fixture B",
+                2000,
+                None,
+            )
+            .expect("closed credential");
+            state
+                .store
+                .create_share_import(NewImport {
+                    id: import,
+                    source: SharingIdentity {
+                        server_id: uuid::Uuid::new_v4(),
+                        catalogue_epoch: uuid::Uuid::new_v4(),
+                        created_at_ms: 1000,
+                    },
+                    source_name: format!("B configured Source {n}"),
+                    claim_id: uuid::Uuid::new_v4(),
+                    credential: state
+                        .sharing
+                        .key
+                        .seal_sharing(
+                            SharingSecretPurpose::Credential,
+                            local.server_id,
+                            import,
+                            credential.expose(),
+                        )
+                        .expect("seal"),
+                    claim_secret: state
+                        .sharing
+                        .key
+                        .seal_sharing(
+                            SharingSecretPurpose::Claim,
+                            local.server_id,
+                            import,
+                            "synthetic-claim",
+                        )
+                        .expect("claim"),
+                    endpoints: vec![Endpoint {
+                        ipv4: "100.101.102.103".parse().expect("fixture IP"),
+                        ipv6: None,
+                        ts_fqdn: "offline.fixture.ts.net".into(),
+                        port: 1,
+                        spki_sha256: "a".repeat(64),
+                    }],
+                    now_ms: 1000,
+                })
+                .await
+                .expect("import");
+            state
+                .store
+                .settle_share_claim(import, uuid::Uuid::new_v4(), true, 1001)
+                .await
+                .expect("active import");
+            state
+                .store
+                .assign_share_viewers(
+                    import,
+                    1,
+                    vec![Assignment {
+                        library_id: source_id("12").expect("ID"),
+                        user_id: user.id,
+                    }],
+                    1002,
+                )
+                .await
+                .expect("assignment");
+            state
+                .store
+                .save_remote_watch(RemoteWatchUpdate {
+                    import_id: import,
+                    library_id: source_id("12").expect("ID"),
+                    item_id: source_id("9007199254740993").expect("ID"),
+                    user_id: user.id,
+                    lifecycle_generation: 1,
+                    assignment_generation: 2,
+                    progress: RemoteWatch {
+                        position_ms: n * 1000,
+                        duration_ms: Some(60000),
+                        watched: false,
+                        sequence: n,
+                        updated_at_ms: 1000 + n,
+                    },
+                })
+                .await
+                .expect("B history");
+            imports.push(import);
+        }
+        let app = super::super::router(state.clone());
+        let call = |path: String| {
+            let app = app.clone();
+            let connection = crate::SharingConnectionCancellation::new();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(path)
+                            .header("authorization", format!("Bearer {token}"))
+                            .extension(connection.clone())
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("response");
+                let status = response.status();
+                let bytes = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                let value: Value = serde_json::from_slice(&bytes).expect("JSON");
+                drop(connection);
+                (status, value)
+            }
+        };
+        let start = std::time::Instant::now();
+        let (status, index) = call("/api/v1/shared/continue-watching".into()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(index["groups"].as_array().expect("groups").len(), 2);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(1),
+            "local group index never waits for Source network"
+        );
+        assert_eq!(index["groups"][0]["count"], 1);
+        assert!(index["groups"][0].get("items").is_none());
+        for import in &imports {
+            let (status, group) =
+                call(format!("/api/v1/shared/imports/{import}/continue-watching")).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(group["availability"], "unavailable");
+            assert_eq!(group["count"], 1);
+            assert_eq!(group["items"], json!([]));
+            assert!(group["source_name"]
+                .as_str()
+                .expect("B label")
+                .starts_with("B configured"));
+            assert!(!group.to_string().contains("synthetic-continue-login"));
+        }
+        let (status, _) = call("/api/v1/shared/continue-watching?limit=201".into()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = call("/api/v1/shared/continue-watching?path=injected".into()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        state
+            .store
+            .assign_share_viewers(imports[0], 2, Vec::new(), 2000)
+            .await
+            .expect("remove assignment");
+        let (status, index) = call("/api/v1/shared/continue-watching".into()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(index["groups"].as_array().expect("groups").len(), 1);
+        state
+            .store
+            .delete_token(&plurx_core::auth::hash_token(token))
+            .await
+            .expect("logout");
+        let (status, _) = call("/api/v1/shared/continue-watching".into()).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

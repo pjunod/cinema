@@ -4663,6 +4663,16 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
 
+    /// Server-only, proof-bearing first Source activation. Backends without
+    /// the candidate conditional writer remain unavailable.
+    async fn activate_source_media_session(
+        &self,
+        _authority: &crate::sharing_source_sessions::SourceSessionWriteAuthority,
+        _activation: &MediaSessionActivation,
+    ) -> Result<Option<MediaSessionActivationOutcome>, StoreError> {
+        Ok(None)
+    }
+
     /// Stage a successor that exists without being current.
     ///
     /// `Ok(None)` means the CAS lost, and there are exactly three ways to lose

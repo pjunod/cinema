@@ -2750,6 +2750,68 @@ Clippy with the same features and `-D warnings` passed; the tracked hook checks
 the final committed tree again. Docs-index tests passed. These native results
 exclude the explicit Linux CGNAT fixture and do not replace its execution.
 
+### S4 bounded Continue Watching candidate
+
+The receiver now exposes `GET /api/v1/shared/continue-watching?limit=200`
+for a local group index and `GET
+/api/v1/shared/imports/{i}/continue-watching?limit=200` for each independent
+Source group. One current Store read selects the current user, enabled imports,
+effective library assignments and B-private unfinished history. Compound
+Source/epoch/library/item references remain distinct even when two Sources use
+the same item ID. Recent ordering is deterministic. The read refuses more than
+200 eligible rows or 32 imports before applying a smaller caller limit; each
+import is bounded to 64 libraries. It omits watched items and removed
+assignments. A moved item's changed library does not reconcile old history.
+
+The index contains only current B-configured Source labels and B-owned counts.
+A per-import request resolves its IDs through one fresh pinned Source batch,
+using the existing one-per-import/four-global admission limits. Its
+`availability` is `online`, `unavailable` or `busy`; unavailable groups return
+no stale title, artwork or cached item. Source metadata and B history are joined
+only on the full captured identity and current library. Group requests are
+independent, so one unavailable Source cannot erase other configured groups.
+
+Accepted-body authority now separates mandatory current B login/import/effective
+assignment checks from optional Source tuple checks. Index, configured-library
+labels and offline group status need only B authority. Responses carrying
+Source metadata also require current Source authority. Both retain the bounded
+connection-owned monitor through actual transport completion. The native
+blocked HTTP/1 and HTTP/2 fixture now covers B-only login, import and assignment
+loss with blocked DATA and monitor cleanup. The Linux CGNAT fixture additionally
+seeds 200 B-owned history rows, performs the production Continue Watching batch
+and revokes Source scope during a blocked response; this addition is pending
+execution of the exact committed archive and is not a Linux receipt.
+
+The focused Store contract exercises memory SQLite, pooled SQLite and actual
+three-voter Hiqlite: two Sources with identical large IDs, another user's
+isolation, current assignment filtering, deterministic ordering, the 201st-row
+sentinel even when `limit=1`. Production import creation separately enforces
+the 32-import bound. A raw reader-only corruption fixture additionally proves
+that a 33rd import cannot hide behind `limit=1`, and that oversized configured
+labels and malformed canonical item IDs refuse the entire projection. That
+fixture runs on memory and pooled SQLite and never decodes its synthetic
+credential envelope. The HTTP regression
+checks independent offline groups, configured labels/counts without stale item
+metadata, closed query parsing and current logout/assignment denial.
+
+Projection and output are bounded, and the handler imposes a one-second Store
+read deadline. The existing watch primary key does not provide a dedicated
+user/recent index; high-cardinality scan qualification and a coordinated index
+migration remain open. This checkpoint does not qualify automatic schema
+installation, scoped artwork delivery, history move reconciliation, current
+skip analysis, S5 session-bound progress writes or promotion.
+
+Final native checks passed the three-backend Continue Watching contract (9.49
+seconds), the raw corruption/projection reader test (0.32 seconds), the real
+blocked B-only writer test (14.98 seconds) and all 27 daemon sharing tests
+(28.92 seconds), each with zero ignored. Focused commands use pinned Rust
+1.97.1, `--locked --offline` and `--features hiqlite-contract-tests` for core
+or `--features plurx-core/hiqlite-contract-tests` for daemon. Filters are
+`sharing_continue_groups_isolate_sources_filter_assignments_and_refuse_hidden_overflow`
+under core `--test store_contract`, `sharing_continue_reader` under core
+`--lib`, and `sharing_` under daemon `--bin plurxd`. These native checks
+exclude the Linux-only pinned transport fixture.
+
 
 **Bounded-detail combined integration:** Source details checkpoint `7b85efec8`
 is integrated with the ownership, opaque observation and resource grammar
@@ -2780,6 +2842,29 @@ zero ignored cases. Final feature-enabled all-target core/daemon Clippy passed
 with denied warnings (1m33s). The Linux-only real CGNAT fixture is outside those native
 results and must run against the committed combined source archive. No Shared
 producer start, locator exposure or session delivery route is enabled.
+
+**Source assignment / first activation / Continue Watching integration:**
+Checkpoints `7b8d25fd7`, `5982f541b` and `a888e6356` are integrated on the
+complete receiver projection and native-wire candidate `ca879be53`.
+Assignment uses the actual local voter identity and retains the original opaque
+membership observation. First blocked Source activation reuses the existing
+Hiqlite session algorithm with a Source ownership selector, literal NULL local
+user metadata, and a current-authority assertion at the front of the same write
+transaction. Its standalone assertion also protects read-only replay. Neither
+handle is a physical encoder permit; Source publication, renewal, recovery,
+replacement, worker admission and post-reap release remain open.
+
+On the exact combined candidate, pinned Rust 1.97.1 feature-enabled core/daemon
+all-target check passed (1m23s). The actual three-voter Source contract passed
+one case (10.54 seconds); ten Source/membership units passed (12.67 seconds);
+the Continue Watching three-backend contract passed one case (9.50 seconds);
+and its malformed raw-reader regression passed one case (0.31 seconds).
+The existing Local dynamic-Store activation/preparation/settlement contract
+also passed one case (11.88 seconds). All 31 daemon sharing regressions passed
+(30.05 seconds). Every executed case
+had zero ignored tests. Feature-enabled all-target Clippy with denied warnings
+passed (1m31s), and all four docs-index tests passed. The Linux CGNAT transport
+fixture remains pending execution from this newly committed combined source.
 
 ### 16.6 S5 resource grammar foundation
 
@@ -2879,6 +2964,34 @@ denied-warning Clippy passed (32.37 seconds). This qualifies those SQLite reads
 and crypto only; the candidate table is uninstalled, and replicated key/restart,
 clone and complete activation qualification remain open.
 
+**S5 complete engine-envelope projection candidate:**
+[response projection](../../crates/plurxd/src/http/sharing_playback_wire.rs)
+preserves the actual serialized decision fields across direct, remux and
+transcode. It replaces numeric file identity with its exact Source string and
+the complete detail-style compound reference, and translates only closed engine
+file URLs to the signed B file base. HLS starts retain quality/catalogue, ladder,
+VOD, timing/origin, HDR/Dolby Vision, plan notes and actual control generation,
+epoch and lease fields while replacing session/playlist/control URLs with the
+ordinary B UUIDv4 namespace. PGS retains cue timing and geometry with string
+identity/full reference and closed relative generation/object names.
+
+Three focused regressions compare complete actual typed engine serialization
+before and after projection, including IDs above the JavaScript safe range,
+all decision methods, retained control epoch, URL/query/foreign-file refusals,
+PGS generation and geometry escape refusals, and invalid start timing. They
+passed with zero ignored cases (0.01 seconds). The projection module has no
+registered routes. Pinned feature-enabled daemon all-target check passed
+(50.62 seconds), and final all-target Clippy passed with denied warnings (1m33s).
+It grants no current viewer, Source, worker or delivery authority. Peer decision decoding, current timeline/analysis proof, session
+binding and actual relay/resource publication remain open.
+
+The first exact combined Linux archive (`352b5644a`, SHA-256
+`3e9008b55953063eb64f0cbdee2e5b7d1745aa208f5b6bb109ec1d5642f5b7b1`)
+failed compilation in its Linux-only fixture because token deletion's boolean
+was used as a unit match arm. The fixture now asserts successful token deletion
+and yields unit. That archive has no Linux runtime qualification; the corrected
+committed tree must be archived and executed again before any such claim.
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue
@@ -2953,3 +3066,20 @@ also passed fresh `lintDebug` (4m21s) with pinned Temurin 25.0.4.1 and Gradle 9.
 The normal hook passed. Integration has no native diff against that qualified
 checkpoint. These are caller/context regressions, not Shared producer, device
 playback, new Shared wire-model or UI qualification.
+
+**Native Shared wire-model candidate:** integrated checkpoint `5d42f292c`
+adds separate, lossless Shared decision/start envelopes and string-ID PGS
+models, plus a typed Local/Shared subject. Validation binds all import/Source/
+epoch/library/item/file/revision fields to the captured current-account context.
+Descriptive file URLs do not confer media authority; actual delivery still
+requires the bound B UUIDv4 session and its exact playlist/control namespace.
+The models preserve the full received B payload without interpreting private
+recipe-looking metadata as authority, and retain the PGS containment checks.
+
+The exact native checkpoint passed 10 iOS, 10 tvOS and 10 Android tests with
+zero ignored cases, Android lint (4m16s) and its normal hook. The source-only
+archive SHA-256 is
+`53a9c0b966fd9f1eed0f6fd232348a445d025efc13e973e0671d20c7ddcece8d`.
+Integration has no native source diff against that qualified tree. Shared
+navigation, settings, playback starts and progress/history remain separate
+unfinished integrations.
