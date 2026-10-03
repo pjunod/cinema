@@ -1514,6 +1514,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# are served in is a load order. One reads them, one runs them.
 	@node --test tests/web/file-context.test.js
 	@node --test tests/web/shared-libraries.test.js
+	@node --test tests/web/shared-artwork.test.js
 	@node --test tests/web/sharing-management.test.js
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
@@ -1912,3 +1913,7 @@ ripwire-doctor:
 	./scripts/ripwire doctor
 ripwire-smoke:
 	./scripts/ripwire-smoke
+
+.PHONY: web-shared-artwork-browser-check
+web-shared-artwork-browser-check: ## Qualify actual Shared artwork decode and retirement in isolated Chromium
+	@python3 tests/web/shared-artwork.browser.py
