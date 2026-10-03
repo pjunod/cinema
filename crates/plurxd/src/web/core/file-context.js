@@ -70,23 +70,38 @@ function playbackFileSuffix(suffix){
 }
 function playbackFileQuery(suffix,query){
   if(!query||typeof query!=="object"||Array.isArray(query)) playbackFileReject();
-  const capabilities=["vcodec","acodec","container","dvprofile","hdr","dv","hdr10t","maxheight"];
-  const allowed=suffix==="decision"?capabilities.concat(["force","audio","subtitle","audio_offset_ms"])
-    :suffix==="stream.mp4"?capabilities.concat(["audio","audio_offset_ms","start","stream"])
+  // Actual Caps and StreamQuery fields, including named-profile/native
+  // compatibility claims. The browser currently emits a subset in capsQuery.
+  const capabilities=["client","device","profile","vcodec","vmaxheight","acodec", "container",
+    "maxheight","hdr","dv","dvprofile","dvhls","hdr10t"];
+  const allowed=suffix==="decision"?capabilities.concat(["force","audio","subtitle","audio_offset_ms",
+    "achannels","capver","hdrtypes","dvdecoders","dvraw","dvstatus"])
+    :suffix==="stream.mp4"?capabilities.concat(["force","audio","audio_offset_ms","start","stream"])
       :suffix.startsWith("chapters/")?["v"]:[];
   return Object.entries(query).map(([key,value])=>{
     if(!allowed.includes(key)) playbackFileReject();
     const text=String(value);
-    if(["hdr","dv","hdr10t"].includes(key)){
+    if(["hdr","dv","dvhls","hdr10t"].includes(key)){
       if(!/^[01]$/.test(text)) playbackFileReject();
-    }else if(["vcodec","acodec","container","dvprofile"].includes(key)){
-      const values={vcodec:["h264","hevc","hevc10","av1","vp9","vp8"],
-        acodec:["aac","mp3","opus","flac","ac3","eac3"],
-        container:["mp4","webm","mov","m4a","m4b","mp3","aac","flac","ogg","opus","wav"],
-        dvprofile:["5","8"]};
-      if(text.length>256||text!==""&&text.split(",").some(v=>!values[key].includes(v))) playbackFileReject();
+    }else if(["vcodec","acodec","container"].includes(key)){
+      // Profile data and native decoders are not limited to browser codecs.
+      // Short tokens remain data; URL delimiters and an unbounded CSV do not.
+      if(text.length>256||text!==""&&text.split(",").some(v=>!/^[a-zA-Z0-9_-]{1,32}$/.test(v))) playbackFileReject();
+    }else if(key==="dvprofile"){
+      if(text.length>64||text!==""&&text.split(",").some(v=>!/^(0|[1-9][0-9]{0,2})$/.test(v)||Number(v)>255)) playbackFileReject();
+    }else if(key==="vmaxheight"){
+      if(text.length>256||text!==""&&text.split(",").some(v=>{
+        const parts=v.split(":");return parts.length!==2||!/^[a-zA-Z0-9_-]{1,32}$/.test(parts[0])
+          ||!/^[1-9][0-9]{0,4}$/.test(parts[1])||Number(parts[1])>65535;
+      })) playbackFileReject();
+    }else if(["client","profile"].includes(key)){
+      if(!/^[a-zA-Z0-9_.-]{1,64}$/.test(text)) playbackFileReject();
+    }else if(["device","capver","hdrtypes","dvdecoders","dvraw","dvstatus"].includes(key)){
+      if(text.length>256||/[\u0000-\u001f\u007f]/.test(text)) playbackFileReject();
+    }else if(key==="achannels"){
+      if(!/^(?:[1-9]|1[0-6])$/.test(text)) playbackFileReject();
     }else if(key==="force"){
-      if(!/^(auto|original|direct|remux|transcode|[1-9][0-9]{0,4})$/.test(text)) playbackFileReject();
+      if(!/^(auto|original|transcode)$/.test(text)) playbackFileReject();
     }else if(key==="stream"){
       if(!/^[a-zA-Z0-9_-]{1,200}$/.test(text)) playbackFileReject();
     }else if(key==="start"){

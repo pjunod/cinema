@@ -67,7 +67,7 @@ function shippedFunction(file,name){
   const node=acorn.parse(text,{ecmaVersion:"latest"}).body.find(n=>n.type==="FunctionDeclaration"&&n.id.name===name);
   assert.ok(node,`${file}::${name} exists`);return text.slice(node.start,node.end);
 }
-function callerHarness(){
+function callerHarness(capQuery="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0&dv=0&dvprofile=&hdr10t=0"){
   const ctx=vm.createContext({requests:[],console,AUTH_GENERATION:0});
   const functions=[
     ["detail/preplay-selection.js",["prePlaySelection","playbackSelection","setPrePlay","prePlaySelectionQuery","decisionUrl","askDecision"]],
@@ -80,7 +80,7 @@ function callerHarness(){
   ].flatMap(([file,names])=>names.map(name=>shippedFunction(file,name))).join("\n");
   vm.runInContext(source+`\nlet PREPLAY={},PLAYER=null,STREAM_SEQ=0;
     const PLAYBACK_ID="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",SERVER=null;
-    const CAPS_Q="vcodec=h264,hevc&acodec=aac&container=mp4&hdr=0&dv=0&dvprofile=&hdr10t=0";
+    const CAPS_Q=${JSON.stringify(capQuery)};
     function prePlayPreview(){}function currentCapsDocument(){return {video:[],audio:[]};}
     function capsDocumentIsUsable(){return false;}function qualityForce(){return "auto";}
     function vodClientContract(){return {session:{}};}function newRequestId(){return "fixture-request";}
@@ -199,4 +199,26 @@ test("actual Local play and picker handlers preserve id_text above the JS intege
   vm.runInContext(`(function(){${change}}).call({value:"1"})`,ctx);
   assert.equal(vm.runInContext(`prePlaySelection("${exact}").audio`,ctx),1);
   assert.throws(()=>{ctx.file={...file,id_text:undefined};vm.runInContext("playCall(model,file,0)",ctx);});
+});
+
+test("shipped remux and session-start callers preserve legitimate full engine capability fields",async()=>{
+  const query="client=web&device=Cinema%20browser&profile=directplay-any&vcodec=hevc,h264&vmaxheight=h264:1080,hevc:2160&acodec=aac,eac3&container=mkv,mp4&hdr=1&dv=1&dvprofile=5,8&dvhls=1&hdr10t=1&maxheight=2160";
+  const h=callerHarness(query),local=h.local("7");h.attach(local);
+  const remux=new URL(h.remux(local,1,2),"http://cinema.invalid");
+  const original=new URLSearchParams(query);
+  for(const [key,value]of original)assert.equal(remux.searchParams.get(key),value,key);
+  assert.equal(remux.searchParams.get("audio"),"1");assert.equal(remux.searchParams.get("start"),"2.0");
+  const caps={video:[{codec:"hevc",profiles:["main10"],max_height:2160}],audio:[{codec:"eac3"}],containers:["mkv","mp4"]};
+  await h.start(local,{start:2,copy:true,caps,profile:"directplay-any",client:"web"});
+  const body=h.requests[0].options.body;
+  assert.deepEqual(JSON.parse(JSON.stringify(body.caps)),caps);assert.equal(body.profile,"directplay-any");assert.equal(body.copy,true);
+  const shared=h.shared(reference,detail());h.attach(shared);
+  const remote=new URL(h.remux(shared,1,2),"http://cinema.invalid");
+  assert.ok(remote.pathname.startsWith(detail().file_base+"/stream.mp4"));
+  for(const [key,value]of original)assert.equal(remote.searchParams.get(key),value,key);
+  const extra={achannels:6,capver:"2",hdrtypes:"1,2",dvdecoders:"decoder-1",dvraw:"5,8",dvstatus:"proven"};
+  assert.ok(h.url(shared,"decision",extra).includes("achannels=6"));
+  assert.throws(()=>h.url(shared,"stream.mp4",extra));
+  assert.throws(()=>h.url(shared,"decision",{achannels:17}));
+  assert.throws(()=>h.url(shared,"stream.mp4",{vmaxheight:"hevc:999999"}));
 });
