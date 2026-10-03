@@ -1,6 +1,6 @@
 # Jellyfin compatibility — measured build progress and remaining gates
 
-**Status:** open · J0 in progress; J1–J6 not started · **Updated:** 2026-10-02 EDT.
+**Status:** open · J0 implementation admission approved with Infuse repeat deferred; J1 next · **Updated:** 2026-10-02 EDT.
 
 Companion to [the reviewed build contract](JELLYFIN-COMPATIBILITY-BUILD.md)
 (what must be built and proved) — this records execution and evidence. The
@@ -324,12 +324,12 @@ from the synthetic test during the wait, so its recovery repeat and the
 remaining facade/worker/race boundaries are still pending; see the
 [passive lifetime ADR](JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md#native-spike-evidence--actual-owner-renewal-and-fragment-recovery).
 
-## 4. Milestone admission — J0 remains open
+## 4. Milestone admission — physical Infuse repeat moves to J6
 
 | Milestone | State | Remaining admission evidence |
 |---|---|---|
-| J0 | In progress | Corrected physical Infuse long-pause repeat; final protocol freeze after that receipt |
-| J1 | Waiting on J0 | Identity, deterministic retirement/replacement guard, token-only service seams |
+| J0 | Admitted for implementation by user direction | Corrected physical Infuse repeat retained as J6 qualification requirement |
+| J1 | Ready after J0 task integration | Identity, deterministic retirement/replacement guard, token-only service seams |
 | J2 | Waiting on J1 and traced artwork policy | Connect/browse, bounded misses and cold-node first sync |
 | J3 | Waiting on J2 | Direct/watch, Store revisions and per-play final durability |
 | J4 | Waiting on J3 and J0 hard-seam decisions | VOD-only negotiation/activation, refusal mapping, bounded retries and aliases |
@@ -337,21 +337,24 @@ remaining facade/worker/race boundaries are still pending; see the
 | J6 | Waiting on J5 | Frozen physical/cluster matrix, qualification and graduation |
 
 The Android TV reference flow now renders direct and encoded HLS playback.
-Native idle recovery and production Infuse transport qualification remain open.
+Corrected native idle recovery passes on Android; production Infuse transport
+qualification remains open.
 Both physical clients have connected and played reference direct/encoded media;
 both have rendered native fragments under controlled transport probes.
 Unperformed operations remain **not tested**. Do not mark
-J0 complete, start the full facade route build or reduce the required client
-matrix to compensate. No compatibility release, setting graduation or fleet
+physical Infuse qualification complete or reduce the required client matrix.
+On 2026-10-02 Paul explicitly deferred the remaining Apple TV test until the
+end and authorized proceeding with implementation. J1–J5 may now proceed;
+the corrected Infuse repeat remains required in J6 on the frozen candidate. No compatibility release, setting graduation or fleet
 deployment has occurred.
 
 ## 5. Measured protocol candidate and revised estimate
 
 The pinned observations now cover movie playback, series/season/episode
 navigation, subtitle URL construction and replacement without an old Stopped
-report. They support the following candidate subset for J1–J5. Freeze it only
-after the corrected Infuse recovery receipt; a later client trace which needs
-an additional route requires an explicit contract amendment.
+report. They support the following candidate subset for J1–J5. The user-directed deferral permits freezing this implementation subset now,
+with corrected Infuse recovery reserved for J6. A later client trace which
+needs an additional route requires an explicit contract amendment.
 
 | Request family | Candidate behavior justified by the retained traces |
 |---|---|

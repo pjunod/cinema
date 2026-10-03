@@ -217,3 +217,13 @@ This exercised actual worker start, target-owned durable activation and
 voter-to-owner media relay on the archived controlled-ingress build of
 `5aae2a6f4`. It does not prove facade activation, physical decoding of a remote
 worker stream, passive remote-worker recovery, or transparent owner failover.
+
+## Qualification scheduling — Infuse remains required at the end
+
+On 2026-10-02 Paul confirmed the Apple TV is in use and explicitly directed
+that its remaining test be skipped until the end. Implementation can proceed
+using the native regressions, physical Android recovery and real worker
+activation/relay evidence above. Repeat corrected Infuse pause/resume/seek and
+terminal checks during J6 on the final candidate. The device remains untouched
+until Paul makes it available; this scheduling change grants no physical
+Infuse acceptance.

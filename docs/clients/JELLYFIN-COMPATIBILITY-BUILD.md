@@ -1,6 +1,6 @@
 # Jellyfin compatibility — build contract for Infuse and Android TV
 
-**Status:** open · Opus approved; R1–R8 and S1–S4 reconciled; J0 unproved ·
+**Status:** open · Opus approved; R1–R8 and S1–S4 reconciled; J0 physical Infuse repeat deferred to J6 ·
 **Written / revised:** 2026-10-02 · **Original source:** `4d7257019` ·
 **Review source independently checked:** `f1f1390f1` · **Publication base:**
 `9a719fcb7` · [First review](JELLYFIN-COMPATIBILITY-REVIEW.md) ·
@@ -888,6 +888,15 @@ Do not build the entire route list before these experiments settle the hard seam
 J0 needs the same pinned compiler loop as later Rust work. Delete owned
 prototype scripts, upstream downloads and raw captures after retaining the
 minimal fixture/findings; do not leave them in the repository.
+
+**User-directed test deferral (2026-10-02):** Paul is using the Bedroom Apple
+TV and explicitly directed that its remaining Infuse recovery test be skipped
+until the end. Proceed with J1–J5 using the retained reference/native transport
+observations, corrected Android long-pause proof and native lifecycle/worker
+regressions. The corrected physical Infuse pause/resume/seek and terminal
+checks remain required in J6 on the final candidate; no Infuse qualification,
+release, graduation or fleet rollout is granted by this deferral. Keep the
+Apple TV untouched until Paul makes it available.
 
 ### 9.1 Repository mechanics are part of J1/J2
 
