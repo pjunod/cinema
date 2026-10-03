@@ -232,7 +232,7 @@ impl DecodedDecision {
 /// Bound JSON heap shape while parsing the peer body, before a generic Value
 /// or the typed mirror can allocate an attacker-sized tree. Duplicate keys
 /// cannot change the accepted engine object through last-key-wins behavior.
-pub(super) fn bounded_decision_value<'de, D: serde::Deserializer<'de>>(
+pub(crate) fn bounded_decision_value<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Value, D::Error> {
     use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};

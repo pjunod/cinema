@@ -1680,3 +1680,18 @@ applied Raft wall clock or silently extend an earlier proof. Native/burn,
 HDR/Dolby Vision, cold restart and abrupt-death recovery remain open.
 The final unchanged-candidate `cargo check -p plurxd --all-targets` passed in
 51.20 seconds after the nine-case matrix and seam additions.
+
+Exact integration receipt: encoded checkpoint `26abdff2f` merged with clean
+Root `54792d26f` without conflicts. On that combined source, the pinned daemon
+all-target check passed in 72 seconds and denied-warning all-target Clippy in
+85 seconds. The actual encoded matrix passed nine tests, zero ignored, in
+32.06 seconds on normal stacks; the existing actual Source copy matrix passed
+13 tests, zero ignored, in 36.08 seconds. The same Local resource-estimate and
+cached HEVC proof cases passed again in 0.16 and 0.43 seconds. Documentation
+index checks passed four tests and catalog lint covered 2,708 audited files.
+These results include the newer startup and accepted-response transport base,
+without treating a test roster as production startup proof. The final tracked
+merge hook and memory/pooled guard receipt follow below.
+The exact combined memory/pooled guard regression passed one test, zero ignored,
+in 1.03 seconds with `--features hiqlite-store`; malformed private evidence,
+foreign lease/request lineage and genuine database faults remain fenced.

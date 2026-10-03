@@ -52,10 +52,12 @@ pub(crate) mod shared_library;
 pub(crate) mod shared_playback;
 #[allow(dead_code)] // Owner remains unregistered until relay/control qualify.
 pub(crate) mod shared_receiver_playback;
+pub(crate) mod shared_source_playback;
 // Candidate projection helpers remain unregistered until Source/B lifecycle
 // authority and actual delivery binding are qualified.
 pub(crate) mod sharing;
 mod sharing_decision_decode;
+pub(crate) use sharing_decision_decode::bounded_decision_value;
 #[allow(dead_code)]
 mod sharing_playback_wire;
 #[allow(dead_code)]

@@ -10,7 +10,8 @@ use crate::{
     sharing::{invalid, is_hash},
     sharing_receiver_sessions::{
         ReceiverSessionIntent, ReceiverSessionWriteAuthority, ReceiverSourceAttachment,
-        ReceiverSourcePublication, ReceiverSourceRenewal, ReceiverSourceWrite,
+        ReceiverSourceBinding, ReceiverSourceOwner, ReceiverSourcePublication,
+        ReceiverSourceRenewal, ReceiverSourceSnapshot, ReceiverSourceWrite,
     },
 };
 use async_trait::async_trait;
@@ -50,6 +51,12 @@ pub trait SharingReceiverSessionStore: Send + Sync {
         authority: &ReceiverSessionWriteAuthority,
         renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
     ) -> Result<bool, StoreError>;
+    /// Fresh B-only snapshot; no cleanup, key repair or Source authority.
+    async fn receiver_source_binding(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        owner: &ReceiverSourceOwner,
+    ) -> Result<Option<ReceiverSourceSnapshot>, StoreError>;
     async fn attach_receiver_source(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -68,6 +75,14 @@ pub trait SharingReceiverSessionStore: Send + Sync {
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverSessionStore for T {
+    async fn receiver_source_binding(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        owner: &ReceiverSourceOwner,
+    ) -> Result<Option<ReceiverSourceSnapshot>, StoreError> {
+        read_source(self, authority, owner).await
+    }
+
     async fn attach_receiver_source(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -259,29 +274,13 @@ async fn renew_pending<T: Backend>(
 // Every Source-bound writer repeats the actual B login/policy/import predicate
 // and exact route/request/lease lineage in its transaction. A Source result is
 // caller actor evidence; these guards authorize only B metadata.
-fn source_values(
+
+fn source_owner_values(
     authority: &ReceiverSessionWriteAuthority,
-    attachment: &ReceiverSourceAttachment,
+    owner: &ReceiverSourceOwner,
 ) -> Result<Option<Vec<Value>>, StoreError> {
     let actual = now_ms()?;
-    let owner = &attachment.owner;
-    let binding = &attachment.binding;
     let recipe = &authority.intent.recipe;
-    if binding.capability_envelope.as_stored().len() > 4096 {
-        return Err(invalid());
-    }
-    let envelope = binding
-        .capability_envelope
-        .to_persist()
-        .map_err(|_| invalid())?;
-    // The v1 XChaCha envelope must contain its 24-byte nonce and 16-byte tag.
-    if envelope
-        .rsplit(':')
-        .next()
-        .is_none_or(|body| body.len() < 80)
-    {
-        return Err(invalid());
-    }
     if owner.incarnation_id != recipe.source_request_id
         || owner.session_id.is_nil()
         || !(1..=256).contains(&owner.owner_node_id.len())
@@ -298,12 +297,6 @@ fn source_values(
         || authority
             .login_expires_at_s
             .is_some_and(|deadline| actual / 1000 >= deadline)
-        || binding.reference != recipe.reference
-        || binding.file_id != recipe.file_id
-        || binding.file_revision != recipe.file_revision
-        || binding.source_request_id != recipe.source_request_id
-        || binding.source_session_id.is_nil()
-        || binding.source_incarnation_id.is_nil()
     {
         return Ok(None);
     }
@@ -318,29 +311,147 @@ fn source_values(
         recipe.request_fingerprint()?.into(),
         owner.lease_expires_at_ms.into(),
         actual.into(),
+    ]);
+    Ok(Some(values))
+}
+fn source_envelope(envelope: &crate::secrets::SealedSecret) -> Result<&str, StoreError> {
+    if envelope.as_stored().len() > 4096 {
+        return Err(invalid());
+    }
+    let value = envelope.to_persist().map_err(|_| invalid())?;
+    // v1 XChaCha nonce (24 bytes) plus authentication tag (16 bytes).
+    if value.rsplit(':').next().is_none_or(|body| body.len() < 80) {
+        return Err(invalid());
+    }
+    Ok(value)
+}
+pub(crate) fn source_values(
+    authority: &ReceiverSessionWriteAuthority,
+    attachment: &ReceiverSourceAttachment,
+) -> Result<Option<Vec<Value>>, StoreError> {
+    let binding = &attachment.binding;
+    let recipe = &authority.intent.recipe;
+    let envelope = source_envelope(&binding.capability_envelope)?;
+    if binding.reference != recipe.reference
+        || binding.file_id != recipe.file_id
+        || binding.file_revision != recipe.file_revision
+        || binding.source_request_id != recipe.source_request_id
+        || binding.source_session_id.is_nil()
+        || binding.source_incarnation_id.is_nil()
+    {
+        return Ok(None);
+    }
+    let Some(mut values) = source_owner_values(authority, &attachment.owner)? else {
+        return Ok(None);
+    };
+    values.extend([
         binding.source_session_id.into(),
         binding.source_incarnation_id.into(),
         envelope.to_owned().into(),
         authority.intent.source_position_ms.into(),
-        crate::cluster::coordination::removed_job_owner_key(&owner.owner_node_id).into(),
+        crate::cluster::coordination::removed_job_owner_key(&attachment.owner.owner_node_id).into(),
     ]);
     Ok(Some(values))
 }
+async fn read_source<T: Backend>(
+    store: &T,
+    authority: &ReceiverSessionWriteAuthority,
+    owner: &ReceiverSourceOwner,
+) -> Result<Option<ReceiverSourceSnapshot>, StoreError> {
+    let Some(mut values) = source_owner_values(authority, owner)? else {
+        return Ok(None);
+    };
+    values.extend([
+        authority.intent.source_position_ms.into(),
+        crate::cluster::coordination::removed_job_owner_key(&owner.owner_node_id).into(),
+    ]);
+    // Unknown Source UUIDs come from the guarded row, never synthesized ids.
+    let current = source_current("1=1", &format!("({BLOCKED}) OR ({PUBLISHED})"))
+        .replace("$18", "$15")
+        .replace("$19", "$16");
+    let sql=format!("SELECT json_object('all_null',upstream.source_session_id IS NULL AND upstream.source_incarnation_id IS NULL AND upstream.capability_envelope IS NULL,'source_session_id',CASE WHEN typeof(upstream.source_session_id)='text' AND length(CAST(upstream.source_session_id AS BLOB))<=36 THEN upstream.source_session_id ELSE NULL END,'source_incarnation_id',CASE WHEN typeof(upstream.source_incarnation_id)='text' AND length(CAST(upstream.source_incarnation_id AS BLOB))<=36 THEN upstream.source_incarnation_id ELSE NULL END,'envelope',CASE WHEN typeof(upstream.capability_envelope)='text' AND length(CAST(upstream.capability_envelope AS BLOB))<=4096 THEN upstream.capability_envelope ELSE NULL END,'publication',route.publication_ready_at_ms,'response',CASE WHEN route.publication_ready_at_ms=0 AND typeof(route.response_json)='text' AND length(CAST(route.response_json AS BLOB))<=65536 THEN route.response_json ELSE NULL END) AS payload FROM sharing_relay_upstream upstream JOIN media_sessions route ON route.incarnation_id=upstream.incarnation_id WHERE upstream.incarnation_id=$6 AND ({current}) LIMIT 2");
+    let rows = store.sharing_read(&sql, values).await?;
+    let [row] = rows.as_slice() else {
+        return if rows.is_empty() {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        all_null: i64,
+        source_session_id: Option<String>,
+        source_incarnation_id: Option<String>,
+        envelope: Option<String>,
+        publication: i64,
+        response: Option<String>,
+    }
+    let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
+    if row.all_null == 1 {
+        return if row.publication == MEDIA_SESSION_PUBLICATION_BLOCKED {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    if row.all_null != 0 {
+        return Err(invalid());
+    }
+    let uuid = |value: Option<String>| -> Result<uuid::Uuid, StoreError> {
+        let value = value.ok_or_else(invalid)?;
+        let parsed = uuid::Uuid::parse_str(&value).map_err(|_| invalid())?;
+        if parsed.is_nil() || parsed.to_string() != value {
+            return Err(invalid());
+        }
+        Ok(parsed)
+    };
+    let session = uuid(row.source_session_id)?;
+    let incarnation = uuid(row.source_incarnation_id)?;
+    let envelope = crate::secrets::SealedSecret::from_stored(row.envelope.ok_or_else(invalid)?);
+    source_envelope(&envelope)?;
+    let response = match row.publication {
+        MEDIA_SESSION_PUBLICATION_BLOCKED if row.response.is_none() => None,
+        0 => {
+            let text = row.response.ok_or_else(invalid)?;
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| invalid())?;
+            if !value.is_object() || serde_json::to_string(&value).map_err(|_| invalid())? != text {
+                return Err(invalid());
+            }
+            Some(text)
+        }
+        _ => return Err(invalid()),
+    };
+    let recipe = &authority.intent.recipe;
+    Ok(Some(ReceiverSourceSnapshot {
+        binding: ReceiverSourceBinding {
+            reference: recipe.reference.clone(),
+            file_id: recipe.file_id.clone(),
+            file_revision: recipe.file_revision.clone(),
+            source_request_id: recipe.source_request_id,
+            source_session_id: session,
+            source_incarnation_id: incarnation,
+            capability_envelope: envelope,
+        },
+        response_json: response,
+    }))
+}
 
-const ATTACHED: &str =
+pub(crate) const ATTACHED: &str =
     "b.source_session_id=$15 AND b.source_incarnation_id=$16 AND b.capability_envelope=$17";
 const UNATTACHED: &str = "b.source_session_id IS NULL AND b.source_incarnation_id IS NULL AND b.capability_envelope IS NULL";
 const BLOCKED: &str = "s.publication_ready_at_ms=9223372036854775807 AND r.state='starting' AND r.claim_expires_at_ms=s.lease_expires_at_ms AND r.response_json IS NULL";
-const PUBLISHED: &str =
+pub(crate) const PUBLISHED: &str =
     "s.publication_ready_at_ms=0 AND r.state='resolved' AND r.response_json=s.response_json";
 
-fn source_current(binding: &str, state: &str) -> String {
+pub(crate) fn source_current(binding: &str, state: &str) -> String {
     format!("{} AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$19) AND EXISTS(SELECT 1 FROM media_sessions s JOIN sharing_relay_upstream b ON b.incarnation_id=s.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id JOIN media_session_requests r ON r.incarnation_id=s.incarnation_id AND r.user_id=s.user_id WHERE s.incarnation_id=$6 AND s.session_id=$7 AND s.user_id=$2 AND s.owner_node_id=$8 AND s.owner_epoch=$9 AND s.recipe_json=$11 AND s.request_fingerprint=$12 AND s.state='active' AND s.media_origin_ms=$18 AND s.lease_expires_at_ms=$13 AND s.lease_expires_at_ms>$14 AND j.owner_node_id=$8 AND j.fence=$9 AND j.expires_at_ms=s.lease_expires_at_ms AND r.request_id=$10 AND r.owner_node_id=$8 AND r.request_fingerprint=$12 AND r.playback_id=s.playback_id AND b.import_id=json_extract($3,'$.import_id') AND b.lifecycle_generation=json_extract($3,'$.lifecycle_generation') AND b.assignment_generation<=json_extract($3,'$.assignment_generation') AND b.endpoint_revision<=json_extract($3,'$.endpoint_generation') AND b.remote_library_id=json_extract($11,'$.reference.library_id') AND b.remote_item_id=json_extract($11,'$.reference.item_id') AND b.remote_file_id=json_extract($11,'$.file_id') AND b.remote_revision=json_extract($11,'$.file_revision') AND b.source_request_id=json_extract($11,'$.source_request_id') AND b.source_position_ms=$18 AND ({binding}) AND ({state}) AND EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.user_id=s.user_id AND p.playback_id=s.playback_id AND p.current_incarnation_id=s.incarnation_id))",authority_predicate())
 }
-fn source_assert(predicate: String, values: Vec<Value>) -> Statement {
+pub(crate) fn source_assert(predicate: String, values: Vec<Value>) -> Statement {
     (format!("INSERT INTO sharing_relay_upstream(incarnation_id,import_id,lifecycle_generation,assignment_generation,remote_library_id,remote_item_id,remote_file_id,remote_revision,source_request_id,endpoint_revision,source_position_ms) SELECT json_extract('receiver_source_authority_refused','$'),'',1,1,'0','0','0','','',1,0 WHERE NOT ({predicate})"),values)
 }
-fn source_write_refused(error: &StoreError) -> bool {
+pub(crate) fn source_write_refused(error: &StoreError) -> bool {
     // source_assert evaluates a fixed malformed-JSON expression only when its
     // closed predicate refuses. SELECT evaluates it before an INSERT trigger
     // can ignore the assertion. All JSON predicate inputs are server-serialized.
@@ -1287,6 +1398,119 @@ mod tests {
                         .expect("attach"),
                     ReceiverSourceWrite::Applied
                 );
+                let saved = attachment
+                    .binding
+                    .capability_envelope
+                    .to_persist()
+                    .expect("envelope")
+                    .to_owned();
+                for bad in ["malformed".to_owned(), "x".repeat(4097)] {
+                    store
+                        .sharing_txn(vec![(
+                            "UPDATE sharing_relay_upstream SET capability_envelope=$1".into(),
+                            vec![Value::Text(bad)],
+                        )])
+                        .await
+                        .expect("reader envelope bound fixture");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .is_err());
+                }
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_relay_upstream SET capability_envelope=$1".into(),
+                        vec![Value::Text(saved)],
+                    )])
+                    .await
+                    .expect("restore envelope");
+                let snapshot = store
+                    .receiver_source_binding(&authority, &attachment.owner)
+                    .await
+                    .expect("authorized reader")
+                    .expect("retained binding");
+                assert_eq!(
+                    snapshot.binding.source_session_id,
+                    attachment.binding.source_session_id
+                );
+                assert_eq!(
+                    snapshot
+                        .binding
+                        .capability_envelope
+                        .to_persist()
+                        .expect("envelope"),
+                    attachment
+                        .binding
+                        .capability_envelope
+                        .to_persist()
+                        .expect("envelope")
+                );
+                assert!(snapshot.response_json.is_none());
+                for (change, restore) in [
+                    (
+                        "UPDATE tokens SET token_hash='reader-revoked' WHERE token_hash='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+                        "UPDATE tokens SET token_hash='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' WHERE token_hash='reader-revoked'",
+                    ),
+                    (
+                        "UPDATE sharing_assignments SET enabled=0",
+                        "UPDATE sharing_assignments SET enabled=1",
+                    ),
+                    (
+                        "UPDATE media_sessions SET owner_epoch=owner_epoch+1",
+                        "UPDATE media_sessions SET owner_epoch=owner_epoch-1",
+                    ),
+                    (
+                        "UPDATE sharing_relay_upstream SET remote_file_id='1'",
+                        "UPDATE sharing_relay_upstream SET remote_file_id='0'",
+                    ),
+                ] {
+                    store
+                        .sharing_txn(vec![(change.into(), vec![])])
+                        .await
+                        .expect("reader scope race");
+                    let before = store
+                        .sharing_read(census, vec![])
+                        .await
+                        .expect("before read");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .expect("current refusal")
+                        .is_none());
+                    assert_eq!(
+                        store
+                            .sharing_read(census, vec![])
+                            .await
+                            .expect("unchanged read"),
+                        before
+                    );
+                    store
+                        .sharing_txn(vec![(restore.into(), vec![])])
+                        .await
+                        .expect("restore reader fixture");
+                }
+                for bad in ["", "00000000-0000-0000-0000-000000000000", "malformed"] {
+                    store
+                        .sharing_txn(vec![(
+                            "UPDATE sharing_relay_upstream SET source_session_id=$1".into(),
+                            vec![Value::Text(bad.into())],
+                        )])
+                        .await
+                        .expect("corrupt binding fixture");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .is_err());
+                }
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_relay_upstream SET source_session_id=$1".into(),
+                        vec![Value::Text(
+                            attachment.binding.source_session_id.to_string(),
+                        )],
+                    )])
+                    .await
+                    .expect("restore binding");
                 let before = store
                     .sharing_read(census, vec![])
                     .await
@@ -1383,6 +1607,26 @@ mod tests {
                         .expect("publish"),
                     ReceiverSourceWrite::Applied
                 );
+                let snapshot = store
+                    .receiver_source_binding(&authority, &attachment.owner)
+                    .await
+                    .expect("published reader")
+                    .expect("published binding");
+                assert_eq!(
+                    snapshot.response_json.as_deref(),
+                    Some(publication.response_json.as_str())
+                );
+                assert!(
+                    store
+                        .owned_media_sessions(
+                            &attachment.owner.owner_node_id,
+                            attachment.owner.now_ms
+                        )
+                        .await
+                        .expect("Local worker inventory")
+                        .is_empty(),
+                    "B actor must not enter the Local worker loop"
+                );
                 let before = store
                     .sharing_read(census, vec![])
                     .await
@@ -1450,6 +1694,381 @@ mod tests {
                         .expect("resolved request retained"),
                     request_before
                 );
+                use crate::sharing_receiver_progress::{ReceiverProgress, ReceiverProgressOutcome};
+                use crate::store::SharingReceiverProgressStore;
+                attachment.owner.lease_expires_at_ms = renewal.lease_expires_at_ms;
+                attachment.owner.now_ms = now_ms().expect("clock");
+                let current = store
+                    .prepare_receiver_session_authority(intent.clone())
+                    .await
+                    .expect("fresh progress authority")
+                    .expect("original login");
+                let mut progress = ReceiverProgress {
+                    attachment: attachment.clone(),
+                    sequence: 10,
+                    position_ms: 5000,
+                    duration_ms: Some(60_000),
+                    watched: false,
+                };
+                let history="SELECT json_array((SELECT json_group_array(json_array(source_server_id,catalogue_epoch,remote_library_id,remote_item_id,user_id,position_ms,duration_ms,watched,sequence,updated_at_ms)) FROM sharing_watch),(SELECT count(*) FROM watch_state),(SELECT count(*) FROM watched_outbox)) AS payload";
+                let before = store
+                    .sharing_read(history, vec![])
+                    .await
+                    .expect("empty private history");
+                for bad in [-1, 9_007_199_254_740_992] {
+                    let mut invalid = progress.clone();
+                    invalid.sequence = bad;
+                    assert!(store
+                        .save_receiver_progress(&current, &invalid)
+                        .await
+                        .is_err());
+                    invalid = progress.clone();
+                    invalid.position_ms = bad;
+                    assert!(store
+                        .save_receiver_progress(&current, &invalid)
+                        .await
+                        .is_err());
+                    invalid = progress.clone();
+                    invalid.duration_ms = Some(bad);
+                    assert!(store
+                        .save_receiver_progress(&current, &invalid)
+                        .await
+                        .is_err());
+                }
+                let mut expired = progress.clone();
+                expired.attachment.owner.lease_expires_at_ms = now_ms().expect("clock") - 1;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &expired)
+                        .await
+                        .expect("no expiry resurrection"),
+                    ReceiverProgressOutcome::Refused
+                );
+                expired = progress.clone();
+                expired.attachment.owner.now_ms = now_ms().expect("clock") - 5001;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &expired)
+                        .await
+                        .expect("stale captured owner"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(history, vec![])
+                        .await
+                        .expect("bounds leave history intact"),
+                    before
+                );
+                store.sharing_txn(vec![("CREATE TRIGGER receiver_ignored_history BEFORE INSERT ON sharing_watch BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("ignored history fixture");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("ignored insertion refuses"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert_eq!(
+                    store.sharing_read(history, vec![]).await.expect("rollback"),
+                    before
+                );
+                store
+                    .sharing_txn(vec![(
+                        "DROP TRIGGER receiver_ignored_history".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("remove fixture");
+                store.sharing_txn(vec![("CREATE TRIGGER receiver_history_revokes_scope AFTER INSERT ON sharing_watch BEGIN UPDATE sharing_assignments SET enabled=0; END".into(),vec![])]).await.expect("within-write revocation fixture");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("post-write current authority refuses"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(history, vec![])
+                        .await
+                        .expect("history and scope rollback"),
+                    before
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(
+                            "SELECT json_array(min(enabled)) AS payload FROM sharing_assignments",
+                            vec![]
+                        )
+                        .await
+                        .expect("scope restored by rollback"),
+                    vec!["[1]".to_owned()]
+                );
+                store
+                    .sharing_txn(vec![(
+                        "DROP TRIGGER receiver_history_revokes_scope".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("remove fixture");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("ordered progress"),
+                    ReceiverProgressOutcome::Applied
+                );
+                let before = store
+                    .sharing_read(history, vec![])
+                    .await
+                    .expect("accepted private history");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("duplicate"),
+                    ReceiverProgressOutcome::Replay
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(history, vec![])
+                        .await
+                        .expect("duplicate preserves timestamp"),
+                    before
+                );
+                progress.sequence = 9;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("old sequence"),
+                    ReceiverProgressOutcome::Stale
+                );
+                progress.sequence = 10;
+                progress.position_ms = 5001;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("conflicting duplicate"),
+                    ReceiverProgressOutcome::Conflict
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(history, vec![])
+                        .await
+                        .expect("old/conflict preserve history"),
+                    before
+                );
+                progress.sequence = 11;
+                store.sharing_txn(vec![("CREATE TRIGGER receiver_ignored_history BEFORE UPDATE ON sharing_watch BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("ignored update fixture");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("ignored update refuses"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert_eq!(
+                    store
+                        .sharing_read(history, vec![])
+                        .await
+                        .expect("update rollback"),
+                    before
+                );
+                store
+                    .sharing_txn(vec![(
+                        "DROP TRIGGER receiver_ignored_history".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("remove fixture");
+                for (change,restore) in [
+                    (format!("UPDATE tokens SET token_hash='progress-revoked' WHERE token_hash='{hash}'"),format!("UPDATE tokens SET token_hash='{hash}' WHERE token_hash='progress-revoked'")),
+                    ("UPDATE sharing_assignments SET enabled=0".into(),"UPDATE sharing_assignments SET enabled=1".into()),
+                    ("UPDATE sharing_imports SET lifecycle_generation=lifecycle_generation+1".into(),"UPDATE sharing_imports SET lifecycle_generation=lifecycle_generation-1".into()),
+                    ("UPDATE media_playback_pointers SET playback_id='foreign'".into(),"UPDATE media_playback_pointers SET playback_id='B-playback'".into()),
+                    ("UPDATE job_leases SET fence=fence+1".into(),"UPDATE job_leases SET fence=fence-1".into()),
+                    ("UPDATE sharing_relay_upstream SET source_session_id='00000000-0000-4000-a000-000000000001'".into(),format!("UPDATE sharing_relay_upstream SET source_session_id='{}'",attachment.binding.source_session_id)),
+                    ("UPDATE media_sessions SET publication_ready_at_ms=9223372036854775807".into(),"UPDATE media_sessions SET publication_ready_at_ms=0".into()),
+                ] {
+                    store.sharing_txn(vec![(change.clone(),vec![])]).await.expect("progress authority race");
+                    store.sharing_txn(vec![("CREATE TRIGGER receiver_ignored_progress_assertion BEFORE INSERT ON sharing_relay_upstream BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("suppressed assertion fixture");
+                    assert_eq!(store.save_receiver_progress(&current,&progress).await.expect("same-write authority refusal"),ReceiverProgressOutcome::Refused,"{change}");
+                    assert_eq!(store.sharing_read(history,vec![]).await.expect("history unchanged"),before);
+                    store.sharing_txn(vec![("DROP TRIGGER receiver_ignored_progress_assertion".into(),vec![]),(restore,vec![])]).await.expect("restore fixture");
+                }
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_watch SET remote_library_id='1'".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("unreconciled move fixture");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("history does not authorize move"),
+                    ReceiverProgressOutcome::Conflict
+                );
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_watch SET remote_library_id='0'".into(),
+                        vec![],
+                    )])
+                    .await
+                    .expect("restore library");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&current, &progress)
+                        .await
+                        .expect("next sequence"),
+                    ReceiverProgressOutcome::Applied
+                );
+                // A second actual B session for the same Source/item shares the
+                // existing user history sequence, not an incarnation counter.
+                let mut second_recipe = recipe.clone();
+                second_recipe.source_request_id = Uuid::new_v4();
+                let mut second_intent = intent.clone();
+                second_intent.recipe = second_recipe.clone();
+                let second_authority = store
+                    .prepare_receiver_session_authority(second_intent)
+                    .await
+                    .expect("second session authority")
+                    .expect("original login");
+                let second_now = now_ms().expect("clock");
+                let mut second = activation.clone();
+                second.incarnation_id = second_recipe.source_request_id.to_string();
+                second.session_id = Uuid::new_v4().to_string();
+                second.playback_id = "B-second".into();
+                second.request_id = Some("B-second-request".into());
+                second.request_fingerprint =
+                    second_recipe.request_fingerprint().expect("fingerprint");
+                second.recipe_json = serde_json::to_string(&second_recipe).expect("recipe");
+                second.now_ms = second_now;
+                second.lease_expires_at_ms = second_now + 30_000;
+                assert!(matches!(
+                    store
+                        .claim_media_session_request(
+                            &second.principal,
+                            "B-second-request",
+                            &second.request_fingerprint,
+                            &second.playback_id,
+                            &second.incarnation_id,
+                            second_now,
+                            second.lease_expires_at_ms
+                        )
+                        .await
+                        .expect("second claim"),
+                    MediaSessionRequestClaim::Acquired { .. }
+                ));
+                assert!(store
+                    .assign_media_session_request_owner(
+                        &second.principal,
+                        "B-second-request",
+                        &second.incarnation_id,
+                        &second.owner_node_id,
+                        second_now
+                    )
+                    .await
+                    .expect("second owner"));
+                let second_route = store
+                    .activate_receiver_media_session(&second_authority, &second)
+                    .await
+                    .expect("second activation")
+                    .expect("blocked second");
+                let mut second_attachment = attachment.clone();
+                second_attachment.owner.incarnation_id = second_recipe.source_request_id;
+                second_attachment.owner.session_id =
+                    Uuid::parse_str(&second.session_id).expect("UUID");
+                second_attachment.owner.owner_epoch = second_route.route.owner_epoch;
+                second_attachment.owner.request_id = "B-second-request".into();
+                second_attachment.owner.now_ms = second_now;
+                second_attachment.owner.lease_expires_at_ms = second.lease_expires_at_ms;
+                second_attachment.binding.source_request_id = second_recipe.source_request_id;
+                second_attachment.binding.source_session_id = Uuid::new_v4();
+                second_attachment.binding.source_incarnation_id = Uuid::new_v4();
+                let mut second_progress = progress.clone();
+                second_progress.attachment = second_attachment.clone();
+                second_progress.sequence = 12;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&second_authority, &second_progress)
+                        .await
+                        .expect("blocked second refuses progress"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert_eq!(
+                    store
+                        .attach_receiver_source(&second_authority, &second_attachment)
+                        .await
+                        .expect("second attachment"),
+                    ReceiverSourceWrite::Applied
+                );
+                assert_eq!(
+                    store
+                        .publish_receiver_source(
+                            &second_authority,
+                            &ReceiverSourcePublication {
+                                attachment: second_attachment,
+                                response_json: "{}".into()
+                            }
+                        )
+                        .await
+                        .expect("second publication"),
+                    ReceiverSourceWrite::Applied
+                );
+                second_progress.sequence = 1;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&second_authority, &second_progress)
+                        .await
+                        .expect("new session cannot reset global ordering"),
+                    ReceiverProgressOutcome::Stale
+                );
+                second_progress.sequence = 12;
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&second_authority, &second_progress)
+                        .await
+                        .expect("cross-session higher sequence"),
+                    ReceiverProgressOutcome::Applied
+                );
+                let fresh = store
+                    .prepare_receiver_session_authority(intent.clone())
+                    .await
+                    .expect("fresh first session")
+                    .expect("original login");
+                progress.attachment.owner.now_ms = now_ms().expect("clock");
+                assert_eq!(
+                    store
+                        .save_receiver_progress(&fresh, &progress)
+                        .await
+                        .expect("first session late update"),
+                    ReceiverProgressOutcome::Stale
+                );
+                let history_rows=store.sharing_read("SELECT json_array(count(*),max(sequence),(SELECT count(*) FROM watch_state),(SELECT count(*) FROM watched_outbox)) AS payload FROM sharing_watch",vec![]).await.expect("one global remote row");
+                assert_eq!(history_rows, vec!["[1,12,0,0]".to_owned()]);
+                progress.sequence = 13;
+                progress.attachment.owner.now_ms = now_ms().expect("clock");
+                second_progress.sequence = 14;
+                second_progress.position_ms = 6000;
+                second_progress.attachment.owner.now_ms = now_ms().expect("clock");
+                let race = crate::store::sharing_receiver_progress::ProgressSnapshotRace {
+                    store: &store,
+                    authority: &second_authority,
+                    progress: &second_progress,
+                    advanced: std::sync::atomic::AtomicBool::new(false),
+                };
+                assert_eq!(
+                    race.save_receiver_progress(&fresh, &progress)
+                        .await
+                        .expect("concurrent published owner advances after read"),
+                    ReceiverProgressOutcome::Refused
+                );
+                assert!(race.advanced.load(std::sync::atomic::Ordering::SeqCst));
+                assert_eq!(store.sharing_read("SELECT json_array(count(*),max(sequence),max(position_ms)) AS payload FROM sharing_watch",vec![]).await.expect("newer history preserved"),vec!["[1,14,6000]".to_owned()]);
             }
         }
     }

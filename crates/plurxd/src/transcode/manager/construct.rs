@@ -43,6 +43,7 @@ impl TranscodeManager {
         }
         TranscodeManager {
             source_workers: source_actor::SourceWorkerRegistry::default(),
+            source_http_starts: crate::http::shared_source_playback::SourceStartRegistry::default(),
             vod: crate::vodserve::VodServe::new(work_dir.join("renditions"), Arc::clone(&store)),
             store,
             work_dir,

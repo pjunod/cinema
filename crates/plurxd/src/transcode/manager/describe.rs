@@ -1,6 +1,12 @@
 use super::*;
 
 impl TranscodeManager {
+    #[cfg(test)]
+    pub(crate) fn test_hold_source_software_capacity(&self) -> Option<crate::admission::SwPermit> {
+        self.admissions
+            .try_admit_software(4, 4, crate::admission::Priority::Live)
+    }
+
     /// Describe a session that already exists, for an idempotent re-create.
     pub(super) async fn recover(&self, session_id: &str) -> Option<StartInfo> {
         if let Some(recovered) = self.vod.recovered_start(session_id).await {
