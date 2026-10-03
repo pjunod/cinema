@@ -72,6 +72,297 @@ const DERIVED_DIR: &str = "derived";
 /// original filename is content-addressed or carries `?v={updated_at}`, and a
 /// derivative key is the verified source digest.
 const ARTWORK_CACHE_CONTROL: &str = "private, max-age=604800, immutable";
+
+/// Exact opened-byte snapshot for sharing. Internal paths/identities have no
+/// diagnostic or wire implementation; B receives only digest/length/MIME.
+pub(super) struct SharedArtAsset {
+    pub(super) bytes: axum::body::Bytes,
+    pub(super) digest: [u8; 32],
+    pub(super) mime: &'static str,
+    path: std::path::PathBuf,
+    identity: ArtworkFileIdentity,
+    _local_bytes: OwnedSemaphorePermit,
+    _request_owner: Arc<super::shared_artwork::ArtBodyLease>,
+}
+impl SharedArtAsset {
+    pub(super) async fn still_current(&self) -> bool {
+        open_local_artwork(self.path.clone())
+            .await
+            .is_some_and(|opened| opened.identity == self.identity)
+    }
+}
+fn shared_art_mime(filename: &str, bytes: &[u8]) -> Option<&'static str> {
+    let extension = FsPath::new(filename)
+        .extension()?
+        .to_str()?
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "png" if bytes.starts_with(b"\x89PNG\r\n\x1a\n") => Some("image/png"),
+        "jpg" | "jpeg" if bytes.starts_with(&[0xff, 0xd8]) => Some("image/jpeg"),
+        "gif" if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") => Some("image/gif"),
+        "webp" if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => {
+            Some("image/webp")
+        }
+        _ => None,
+    }
+}
+async fn shared_opened_art(
+    state: &AppState,
+    path: std::path::PathBuf,
+    name: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<Option<SharedArtAsset>, ApiError> {
+    let Some(opened) = open_local_artwork(path.clone()).await else {
+        return Ok(None);
+    };
+    let identity = opened.identity;
+    let Some(local) = state.artwork_fetch.local_permit(identity.bytes + 1).await else {
+        return Err(artwork_capacity_error());
+    };
+    let Some((bytes, digest, local, lease)) = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        // Cancellation cannot release either budget while this descriptor read
+        // still owns allocation/work. The existing worker settles its CPU own.
+        let request_owner = lease;
+        let mut file = opened.file;
+        let mut bytes = Vec::with_capacity(identity.bytes as usize + 1);
+        (&mut file)
+            .take(identity.bytes + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 != identity.bytes
+            || artwork_file_identity(&file.metadata().ok()?) != identity
+        {
+            return None;
+        }
+        let digest = Sha256::digest(&bytes).into();
+        Some((axum::body::Bytes::from(bytes), digest, local, request_owner))
+    })
+    .await
+    .ok()
+    .flatten() else {
+        return Ok(None);
+    };
+    let Some(mime) = shared_art_mime(name, &bytes) else {
+        return Ok(None);
+    };
+    if !artwork_digest_matches_name(name, digest) {
+        return Ok(None);
+    }
+    Ok(Some(SharedArtAsset {
+        bytes,
+        digest,
+        mime,
+        path,
+        identity,
+        _local_bytes: local,
+        _request_owner: lease,
+    }))
+}
+struct SharedArtDownloadOwner {
+    _lease: Arc<super::shared_artwork::ArtBodyLease>,
+    _local: Option<tokio::sync::OwnedSemaphorePermit>,
+    _peer: Option<tokio::sync::OwnedSemaphorePermit>,
+    _workspace: tokio::sync::OwnedSemaphorePermit,
+}
+struct SharedArtDownload {
+    bytes: bytes::Bytes,
+    _owner: Arc<SharedArtDownloadOwner>,
+}
+impl AsRef<[u8]> for SharedArtDownload {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+/// One collector at a time, preallocated to its charged object/sentinel cap.
+/// Only trusted current-cluster artwork URLs and node proofs reach this helper.
+async fn shared_peer_snapshot(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    auth: &ArtworkPeerAuth,
+    name: &str,
+    owner: Arc<SharedArtDownloadOwner>,
+) -> Option<SharedArtDownload> {
+    let response = client
+        .get(url)
+        .header(NODE_ID_HEADER, &auth.node_id)
+        .header(TIMESTAMP_HEADER, auth.timestamp_ms)
+        .header(SIGNATURE_HEADER, &auth.signature)
+        .send()
+        .await
+        .ok()?;
+    if response.status() != reqwest::StatusCode::OK
+        || response
+            .content_length()
+            .is_some_and(|len| len == 0 || len > MAX_ARTWORK_BYTES)
+        || !response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| matches!(v, "image/png" | "image/jpeg" | "image/gif" | "image/webp"))
+    {
+        return None;
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::with_capacity(MAX_ARTWORK_BYTES as usize + 1);
+    let mut digest = Sha256::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.ok()?;
+        if chunk.len() > MAX_ARTWORK_BYTES as usize - bytes.len() {
+            return None;
+        }
+        digest.update(&chunk);
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty()
+        || shared_art_mime(name, &bytes).is_none()
+        || !artwork_digest_matches_name(name, digest.finalize().into())
+    {
+        return None;
+    }
+    Some(SharedArtDownload {
+        bytes: bytes.into(),
+        _owner: owner,
+    })
+}
+async fn shared_materialize_original(
+    state: &AppState,
+    selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
+    credential_hash: &str,
+    name: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<bool, ApiError> {
+    let Some(peer_permit) = state.artwork_fetch.peer_permit() else {
+        return Err(artwork_capacity_error());
+    };
+    let Some(local_permit) = state
+        .artwork_fetch
+        .local_permit(MAX_ARTWORK_BYTES + 1)
+        .await
+    else {
+        return Err(artwork_capacity_error());
+    };
+    // Charge a second object workspace for transport buffers independently of
+    // the collector. HTTP/1 keeps the pinned Hyper adaptive receive buffer
+    // bounded; no multiplexed H2 receive windows are admitted by this client.
+    let workspace = super::shared_artwork::ArtBodyLease::source_collection_workspace()?;
+    let client = reqwest::Client::builder()
+        .http1_only()
+        .connect_timeout(Duration::from_millis(750))
+        .timeout(Duration::from_secs(2))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|_| artwork_capacity_error())?;
+    let peers = state
+        .membership
+        .reachable_peer_http_urls()
+        .await
+        .unwrap_or_default();
+    let Ok(auth) = state.membership.artwork_peer_auth(name) else {
+        return Ok(false);
+    };
+    let owner = Arc::new(SharedArtDownloadOwner {
+        _lease: lease,
+        _local: Some(local_permit),
+        _peer: Some(peer_permit),
+        _workspace: workspace,
+    });
+    tokio::time::timeout(Duration::from_secs(2),async {
+        // Three roster destinations total, sequential. The ordinary three-peer
+        // racer is deliberately unchanged and never consumes this reservation.
+        for peer in peers.into_iter().take(3) {
+            let Some(url)=peer_artwork_url(&peer,name) else {continue;};
+            let Some(download)=shared_peer_snapshot(&client,url,&auth,name,owner.clone()).await else {continue;};
+            let current=state.store.source_art_snapshot(credential_hash,selection.reference().grant_id,selection.reference()).await.map_err(super::error::ApiError::from)?;
+            if !matches!(current,plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(ref value) if selection.same_selection(value))
+                || !super::shared_library::source_art_scope_current(state,selection.reference()).await {return Ok(false);}
+            // Move the collector allocation and Source reservation directly into
+            // the held-directory blocking writer. No second bitmap allocation.
+            if plurx_core::fs_secure::atomic_write_child_owned(&state.artwork_dir,name,download).await.is_ok() {return Ok(true);}
+            return Ok(false);
+        }
+        Ok(false)
+    }).await.unwrap_or(Ok(false))
+}
+pub(super) async fn shared_artwork_asset(
+    state: &AppState,
+    selection: &plurx_core::store::sharing_catalogue_artwork::SourceArtSnapshot,
+    credential_hash: &str,
+    lease: Arc<super::shared_artwork::ArtBodyLease>,
+) -> Result<Option<SharedArtAsset>, ApiError> {
+    let name = safe_artwork_name(selection.filename())?;
+    let variant = selection.reference().variant;
+    let path = state.artwork_dir.join(name);
+    let mut original = shared_opened_art(state, path.clone(), name, lease.clone()).await?;
+    if original.is_none() {
+        if !shared_materialize_original(state, selection, credential_hash, name, lease.clone())
+            .await?
+        {
+            return Ok(None);
+        }
+        original = shared_opened_art(state, path, name, lease.clone()).await?;
+    }
+    let Some(original) = original else {
+        return Ok(None);
+    };
+    use plurx_core::sharing_artwork::ArtVariant;
+    let size = match variant {
+        ArtVariant::Original => return Ok(Some(original)),
+        ArtVariant::W300 => ArtworkSize::W300,
+        ArtVariant::W500 => ArtworkSize::W500,
+        ArtVariant::W780 => ArtworkSize::W780,
+    };
+    let Some(spec) = worker::spec(original.digest, size, name).await else {
+        return Ok(None);
+    };
+    let Some(location) = worker::shared_local_variant(state, &spec).await else {
+        // No render demand follows an authority refusal. The worker's own
+        // canonical job/CPU/storage settlement remains independent of this
+        // request's later cancellation.
+        let current = tokio::time::timeout(
+            Duration::from_secs(1),
+            state.store.source_art_snapshot(
+                credential_hash,
+                selection.reference().grant_id,
+                selection.reference(),
+            ),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok);
+        if !matches!(current,Some(plurx_core::store::sharing_catalogue_artwork::SourceArtRead::Authorized(ref snapshot)) if selection.same_selection(snapshot))
+            || !original.still_current().await
+            || !super::shared_library::source_art_scope_current(state, selection.reference()).await
+        {
+            return Ok(None);
+        }
+        worker::request(state, spec).await;
+        return Ok(None); // The canonical job owns settlement; no original fallback.
+    };
+    let Some(variant_name) = worker::location_filename(&location) else {
+        return Ok(None);
+    };
+    let Some(asset) = shared_opened_art(
+        state,
+        state.artwork_dir.join(DERIVED_DIR).join(&variant_name),
+        &variant_name,
+        lease,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    if asset.bytes.len() as i64 != location.bytes
+        || hex::encode(asset.digest) != location.blob_sha256
+        || !image_dimensions(&variant_name, &asset.bytes)
+            .is_some_and(|(width, height)| width > 0 && height > 0 && Some(width) <= size.width())
+    {
+        return Ok(None);
+    }
+    drop(original);
+    Ok(Some(asset))
+}
 /// A fallback answers a `?size=` URL with the original bytes, which is not the
 /// resource that URL names. `immutable` would freeze that substitution in every
 /// client cache for a week, and a cold grid load falls back on nearly every
@@ -2714,6 +3005,80 @@ mod tests {
     use plurx_core::store::SqliteStore;
 
     use super::*;
+    #[tokio::test]
+    async fn sharing_art_opened_digest_refuses_symlinks_and_rehashes_inode_changes() {
+        let _serial = super::super::shared_artwork::ART_FIXTURES.lock().await;
+        let (_, state) = super::super::tests::test_app_with_state();
+        let directory = crate::test_tempdir().expect("owned images");
+        let path = directory.path().join("private.png");
+        let bytes = b"\x89PNG\r\n\x1a\nfirst";
+        std::fs::write(&path, bytes).expect("first");
+        let first = shared_opened_art(
+            &state,
+            path.clone(),
+            "private.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+        )
+        .await
+        .expect("read")
+        .expect("asset");
+        assert_eq!(first.digest, <[u8; 32]>::from(Sha256::digest(bytes)));
+        std::fs::write(&path, b"\x89PNG\r\n\x1a\nother").expect("same inode same size rewrite");
+        assert!(!first.still_current().await);
+        drop(first);
+        let second = shared_opened_art(
+            &state,
+            path.clone(),
+            "private.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease"),
+        )
+        .await
+        .expect("read")
+        .expect("asset");
+        assert_ne!(second.digest, <[u8; 32]>::from(Sha256::digest(bytes)));
+        drop(second);
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&replacement, bytes).expect("replace");
+        std::fs::rename(replacement, &path).expect("rename");
+        assert_eq!(
+            shared_opened_art(
+                &state,
+                path.clone(),
+                "private.png",
+                super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+            )
+            .await
+            .expect("read")
+            .expect("asset")
+            .digest,
+            <[u8; 32]>::from(Sha256::digest(bytes))
+        );
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(&path).expect("remove");
+            std::os::unix::fs::symlink(directory.path().join("outside"), &path).expect("symlink");
+            assert!(shared_opened_art(
+                &state,
+                path.clone(),
+                "private.png",
+                super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+            )
+            .await
+            .expect("closed")
+            .is_none());
+        }
+        let huge = std::fs::File::create(directory.path().join("huge.png")).expect("huge");
+        huge.set_len(MAX_ARTWORK_BYTES + 1).expect("size");
+        assert!(shared_opened_art(
+            &state,
+            directory.path().join("huge.png"),
+            "huge.png",
+            super::super::shared_artwork::ArtBodyLease::source(false).expect("lease")
+        )
+        .await
+        .expect("closed")
+        .is_none());
+    }
 
     #[test]
     fn artwork_inventory_deduplicates_bare_names_and_rejects_paths() {
@@ -3543,6 +3908,92 @@ mod tests {
         );
         headers.remove(SIGNATURE_HEADER);
         assert!(peer_auth_from_headers(&headers).is_none());
+    }
+
+    #[tokio::test]
+    async fn sharing_art_single_peer_collector_keeps_owned_capacity_and_refuses_invalid_bytes() {
+        let _fixture = super::super::shared_artwork::ART_FIXTURES.lock().await;
+        async fn peer(Path(name): Path<String>, headers: HeaderMap) -> Response {
+            if headers
+                .get(SIGNATURE_HEADER)
+                .and_then(|value| value.to_str().ok())
+                != Some("proof")
+            {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            if name == "redirect.jpg" {
+                return (StatusCode::FOUND, [(header::LOCATION, "/original.jpg")]).into_response();
+            }
+            let bytes = if name == "invalid.jpg" {
+                Bytes::from_static(b"not an image")
+            } else {
+                Bytes::from_static(b"\xff\xd8\xff bounded peer")
+            };
+            ([(header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/art/{name}", get(peer)))
+                .await
+                .expect("server");
+        });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .build()
+            .expect("client");
+        let lease = super::super::shared_artwork::ArtBodyLease::source(false).expect("lease");
+        let owner = Arc::new(SharedArtDownloadOwner {
+            _lease: lease,
+            _local: None,
+            _peer: None,
+            _workspace: super::super::shared_artwork::ArtBodyLease::source_collection_workspace()
+                .expect("workspace"),
+        });
+        let auth = ArtworkPeerAuth {
+            node_id: "peer".to_owned(),
+            timestamp_ms: 123,
+            signature: "proof".to_owned(),
+        };
+        for name in ["invalid.jpg", "redirect.jpg"] {
+            assert!(shared_peer_snapshot(
+                &client,
+                reqwest::Url::parse(&format!("http://{address}/art/{name}")).expect("url"),
+                &auth,
+                name,
+                owner.clone()
+            )
+            .await
+            .is_none());
+        }
+        let download = shared_peer_snapshot(
+            &client,
+            reqwest::Url::parse(&format!("http://{address}/art/original.jpg")).expect("url"),
+            &auth,
+            "original.jpg",
+            owner.clone(),
+        )
+        .await
+        .expect("validated collector");
+        assert_eq!(download.as_ref(), b"\xff\xd8\xff bounded peer");
+        drop(owner);
+        assert_eq!(super::super::shared_artwork::source_capacity().0, 3);
+        let directory = crate::test_tempdir().expect("directory");
+        plurx_core::fs_secure::atomic_write_child_owned(directory.path(), "original.jpg", download)
+            .await
+            .expect("owned publication");
+        assert_eq!(
+            tokio::fs::read(directory.path().join("original.jpg"))
+                .await
+                .expect("bytes"),
+            b"\xff\xd8\xff bounded peer"
+        );
+        assert_eq!(super::super::shared_artwork::source_capacity().0, 4);
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

@@ -3014,3 +3014,95 @@ also passed fresh `lintDebug` (4m21s) with pinned Temurin 25.0.4.1 and Gradle 9.
 The normal hook passed. Integration has no native diff against that qualified
 checkpoint. These are caller/context regressions, not Shared producer, device
 playback, new Shared wire-model or UI qualification.
+
+### S4 opaque artwork candidate (2026-10-03, integration qualification open)
+
+Source catalogue rows may now carry at most eight closed artwork facts, each a
+kind, variant and 143-character opaque resource. Source paths are
+`/sharing/v1/art/{resource}`. B translates fresh facts into user/import-bound
+272-character resources under `/api/v1/shared/imports/{import}/art/{resource}`;
+`poster_url` (poster/w300) and `backdrop_url` (backdrop/w780) exist only with the
+corresponding mapped resource. Missing existing purpose material leaves artwork
+fields absent. There is no numeric Local image route or original fallback for
+an unpublished canonical variant.
+
+The MAC domains are distinct from file revision, cursor and media locator
+signatures. They use the existing stable Source/epoch catalogue key and B/epoch
+file-locator key material; neither key is exported or initialized by a read.
+Resources bind the full Source/epoch/grant/library/item/kind/variant, and B also
+binds current user and import lifecycle. Expiry uses the actual captured server
+clock, with a maximum five-minute lifetime and thirty-second mint buckets.
+Credential rotation and sealing-master rewrap preserve purpose material. Current
+Store authority is still required on every request; the opaque resource is no
+replacement for current login, effective assignment, grant, catalogue floor or
+import fence.
+
+Source resolves only the current private persisted artwork name, opens through
+the no-follow descriptor helper, and hashes the actual bounded bytes every time.
+A canonical derivative requires a current published local Store location; the
+shared reader bypasses the existing twenty-four-hour location cache. Current
+item/grant authority is checked before demand and again after asset selection.
+The existing worker retains its fragment admission, derive permit, claim and
+joined child cancellation through settlement and cleanup. Its demand table is
+bounded to 4,096 entries/30-second deduplication, candidate pages to 128, and
+encoder work to five seconds/15 MiB output. This preserves the existing worker
+and governor path; it adds no assertion of a new hard encoder RSS limit.
+
+An absent local original uses a Shared-specific collector: at most three current
+trusted roster destinations are tried sequentially within two seconds, with one
+preallocated 15 MiB object plus sentinel and a separately charged object-sized
+transport workspace. Its HTTP/1-only client uses no proxy or redirect, node proof,
+actual content signature and digest validation. It rechecks current authority
+before moving its allocation directly into the held-directory blocking writer.
+Source, local-image and peer permits remain owned through actual write settlement.
+The ordinary three-peer racer and derivative scheduler are unchanged.
+
+A successful asset response identifies the exact opened-byte snapshot with its
+SHA-256, byte count, closed MIME and variant. Source and B each admit at most
+four operations without queuing, with an independent 64 MiB byte budget and a
+15 MiB payload limit. Foreground Source derivatives reserve original plus
+variant; B reserves bounded fetch/disk working space. Reservations include the
+read sentinel and shrink only after work settles. Blocking reads, disk hashers
+and atomic writers retain actual lease ownership after their async caller is
+cancelled. Accepted connection monitors retain the remaining body lease until
+actual connection completion; neither Body Drop nor another H2 stream's flush
+releases it. Idle accepted artwork responses therefore occupy bounded capacity.
+Revocation closes the accepted connection, including unrelated multiplexed H2
+streams. A benign asset replacement affects the next fresh read while an already
+accepted snapshot remains under current grant/item body authority.
+
+B's private `sharing-art-v1` managed disk namespace is bounded to 256 MiB and
+2,048 entries. Serialized publication evicts deterministically by current file
+age/name, uses held-directory atomic writes, and refuses malformed files,
+symlinks or an invalid cache shape. Each reuse hashes the current opened cache
+file only after a fresh pinned Source response proves that exact digest. The
+response uses fresh Source bytes; offline, busy or revoked Source authority
+never serves disk bytes. Cache keys include user, import lifecycle, full Source
+identity, grant, item, kind, variant and digest. Artwork RAM has its own byte
+owners and is not retained in the 32 MiB catalogue metadata cache.
+
+Focused native checks cover purpose separation/rewrap, large decimal IDs,
+malformed and oversized resources, closed optional artwork arrays, current
+memory/pooled Store scope and private-name bounds, opened inode replacement,
+same-inode changes, symlinks, binary digest/size/encoding/variant and redirect
+refusal, nonqueued byte capacity, disk LRU concurrency and user isolation, and
+actual blocked H1/H2 Source response cleanup, completed idle H2 capacity, and
+refused variant demand with existing worker deduplication. The three-voter candidate Store
+reader and owned atomic-write cancellation test exercise the production Store
+and filesystem boundaries. Final exact-tree receipts are appended after
+integration. The opt-in pinned CGNAT fixture now includes B artwork cases 9–15:
+Source grant/item deletion/move, B login/import/assignment loss and Source
+unavailability, with accepted DATA, operation/byte cleanup and H2 collateral
+checks. Its artwork extension remains unqualified until the exact committed
+Linux source archive runs. Source schema/key installation, capability
+advertisement, actual Tailscale/two-NAT topology and physical-device artwork
+qualification remain open, as do the separately recorded S5 history-progress
+binding and explicit history-move reconciliation dependencies.
+
+The pre-integration candidate passed pinned Rust 1.97.1 all-target core/daemon
+checking; core artwork tests (2 passed); daemon artwork tests (6 passed, zero
+ignored, 13.87 seconds); existing worker publication/child-cancellation tests
+(2 passed); the actual three-voter artwork Store test (1 passed, zero ignored);
+and the owned filesystem writer cancellation test (1 passed). Documentation
+index checks passed (4 tests). These receipts qualify the candidate on its
+recorded base, not the newer integrated effort or the Linux-only artwork cases.

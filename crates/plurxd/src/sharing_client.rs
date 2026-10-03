@@ -75,6 +75,11 @@ pub(crate) struct Identity {
     pub protocol_min: u8,
     pub protocol_max: u8,
 }
+pub(crate) struct PeerArtwork {
+    pub bytes: axum::body::Bytes,
+    pub digest: [u8; 32],
+    pub mime: &'static str,
+}
 pub(crate) struct PeerConnection {
     sender: SendRequest<Body>,
     connection: tokio::task::JoinHandle<()>,
@@ -303,6 +308,121 @@ impl PeerConnection {
                 return Err(PeerError::Rejected(status));
             }
             serde_json::from_slice(&bytes).map_err(|_| PeerError::InvalidResponse)
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+    /// Only this closed binary operation has the artwork response budget.
+    /// Caller owns the byte reservation before any frame is collected.
+    pub async fn artwork(
+        &mut self,
+        credential: &Secret,
+        resource: &plurx_core::sharing_artwork::SourceArtResource,
+    ) -> Result<PeerArtwork, PeerError> {
+        use sha2::{Digest, Sha256};
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let expected = resource
+                .reference_unverified()
+                .map_err(|_| PeerError::InvalidResponse)?;
+            let mut auth = HeaderValue::from_str(&format!("CinemaShare {}", credential.expose()))
+                .map_err(|_| PeerError::InvalidResponse)?;
+            auth.set_sensitive(true);
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/sharing/v1/art/{}", resource.as_str()))
+                .header(header::HOST, &self.host)
+                .header(header::AUTHORIZATION, auth)
+                .header(header::ACCEPT_ENCODING, "identity")
+                .body(Body::empty())
+                .map_err(|_| PeerError::InvalidResponse)?;
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let response = self
+                .sender
+                .send_request(request)
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let status = response.status();
+            if status != StatusCode::OK {
+                axum::body::to_bytes(Body::new(response.into_body()), MANAGEMENT_RESPONSE_BYTES)
+                    .await
+                    .map_err(|_| PeerError::InvalidResponse)?;
+                return Err(if status == StatusCode::UNAUTHORIZED {
+                    PeerError::Authentication
+                } else {
+                    PeerError::Rejected(status)
+                });
+            }
+            let headers = response.headers();
+            for name in [
+                "x-plurx-art-bytes",
+                "content-length",
+                "content-encoding",
+                "x-plurx-art-variant",
+                "x-plurx-art-sha256",
+                "content-type",
+            ] {
+                if headers.get_all(name).iter().count() != 1 {
+                    return Err(PeerError::InvalidResponse);
+                }
+            }
+            let text = |name: &str| {
+                headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .ok_or(PeerError::InvalidResponse)
+            };
+            let len_text = text("x-plurx-art-bytes")?;
+            let len = len_text
+                .parse::<usize>()
+                .map_err(|_| PeerError::InvalidResponse)?;
+            if len == 0
+                || len > plurx_core::sharing_artwork::MAX_ART_BYTES
+                || len.to_string() != len_text
+                || text("content-length")? != len_text
+                || text("content-encoding")? != "identity"
+                || text("x-plurx-art-variant")? != expected.variant.label()
+            {
+                return Err(PeerError::InvalidResponse);
+            }
+            let digest_text = text("x-plurx-art-sha256")?;
+            let digest: [u8; 32] = hex::decode(digest_text)
+                .map_err(|_| PeerError::InvalidResponse)?
+                .try_into()
+                .map_err(|_| PeerError::InvalidResponse)?;
+            if hex::encode(digest) != digest_text {
+                return Err(PeerError::InvalidResponse);
+            }
+            let mime = match text("content-type")? {
+                "image/jpeg" => "image/jpeg",
+                "image/png" => "image/png",
+                "image/gif" => "image/gif",
+                "image/webp" => "image/webp",
+                _ => return Err(PeerError::InvalidResponse),
+            };
+            let mut body = response.into_body();
+            let mut bytes = Vec::with_capacity(len);
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|_| PeerError::Unavailable)?;
+                if let Ok(data) = frame.into_data() {
+                    if data.len() > len.saturating_sub(bytes.len()) {
+                        return Err(PeerError::InvalidResponse);
+                    }
+                    bytes.extend_from_slice(&data);
+                } else {
+                    return Err(PeerError::InvalidResponse);
+                }
+            }
+            if bytes.len() != len || <[u8; 32]>::from(Sha256::digest(&bytes)) != digest {
+                return Err(PeerError::InvalidResponse);
+            }
+            Ok(PeerArtwork {
+                bytes: axum::body::Bytes::from(bytes),
+                digest,
+                mime,
+            })
         })
         .await
         .map_err(|_| PeerError::Unavailable)?
@@ -549,6 +669,116 @@ mod tests {
             requests,
             server,
         )
+    }
+    #[tokio::test]
+    async fn sharing_art_client_rejects_redirects_bad_digests_encodings_and_size_claims() {
+        use plurx_core::{
+            secrets::CredentialKey,
+            sharing_artwork::{artwork_expiry, ArtKind, ArtVariant, SourceArtReference},
+            sharing_catalogue_details::CatalogueRevisionKey,
+        };
+        use sha2::{Digest, Sha256};
+        let identity = SharingIdentity {
+            server_id: Uuid::new_v4(),
+            catalogue_epoch: Uuid::new_v4(),
+            created_at_ms: 1,
+        };
+        let key = CredentialKey::from_bytes([1; 32]);
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&key, identity.clone()).expect("fixture key");
+        let key = CatalogueRevisionKey::open(&key, identity.clone(), &envelope).expect("open");
+        let now = crate::state::clock_ms();
+        let resource = key
+            .issue_art(
+                &SourceArtReference {
+                    server_id: identity.server_id,
+                    catalogue_epoch: identity.catalogue_epoch,
+                    grant_id: Uuid::new_v4(),
+                    library_id: SourceId::parse("1").expect("lib"),
+                    item_id: SourceId::parse("1").expect("item"),
+                    kind: ArtKind::Poster,
+                    variant: ArtVariant::Original,
+                    expires_at_ms: artwork_expiry(now).expect("expiry"),
+                },
+                now,
+            )
+            .expect("resource");
+        for case in 0..8 {
+            let (client, server) = tokio::io::duplex(32768);
+            let server = tokio::spawn(async move {
+                let service = hyper::service::service_fn(
+                    move |request: Request<hyper::body::Incoming>| async move {
+                        assert!(request.uri().path().starts_with("/sharing/v1/art/"));
+                        assert!(request.headers().contains_key(header::AUTHORIZATION));
+                        let bytes = Bytes::from_static(b"\x89PNG\r\n\x1a\ncontent");
+                        let len = if case == 3 {
+                            plurx_core::sharing_artwork::MAX_ART_BYTES + 1
+                        } else {
+                            bytes.len()
+                        };
+                        let response = Response::builder()
+                            .status(if case == 1 {
+                                StatusCode::TEMPORARY_REDIRECT
+                            } else {
+                                StatusCode::OK
+                            })
+                            .header(header::LOCATION, "https://outside.invalid/credential-sink")
+                            .header(
+                                "x-plurx-art-bytes",
+                                if case == 7 {
+                                    format!("0{len}")
+                                } else {
+                                    len.to_string()
+                                },
+                            )
+                            .header(header::CONTENT_LENGTH, bytes.len().to_string())
+                            .header(
+                                header::CONTENT_ENCODING,
+                                if case == 4 { "gzip" } else { "identity" },
+                            )
+                            .header(
+                                header::CONTENT_TYPE,
+                                if case == 5 {
+                                    "image/svg+xml"
+                                } else {
+                                    "image/png"
+                                },
+                            )
+                            .header(
+                                "x-plurx-art-variant",
+                                if case == 6 { "w300" } else { "original" },
+                            )
+                            .header(
+                                "x-plurx-art-sha256",
+                                if case == 2 {
+                                    "a".repeat(64)
+                                } else {
+                                    hex::encode(Sha256::digest(&bytes))
+                                },
+                            )
+                            .body(Full::new(bytes))
+                            .expect("response");
+                        Ok::<_, std::convert::Infallible>(response)
+                    },
+                );
+                let _ = hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(server), service)
+                    .await;
+            });
+            let mut peer = PeerConnection::from_stream(client, "fixture.ts.net:32443".into())
+                .await
+                .expect("peer");
+            let result = peer
+                .artwork(
+                    &plurx_core::sharing::new_secret().expect("credential"),
+                    &resource,
+                )
+                .await;
+            assert_eq!(result.is_ok(), case == 0, "closed binary case {case}");
+            drop(peer);
+            server.abort();
+            let _ = server.await;
+        }
     }
     #[tokio::test]
     async fn sharing_current_scope_client_uses_closed_control_response() {
