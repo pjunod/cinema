@@ -2567,6 +2567,30 @@ closed guard and readiness refactor; a Source binding write using the opaque
 observation still needs its own actual-voter admission regression.
 
 
+**Completed-transition membership fence candidate:** the coordinated membership
+factory now includes `cluster_sharing_membership_generation`, a monotonic,
+non-replaceable singleton. Membership-intent insertion, mutation and exact
+resolution advance it, as do cluster-directory insertion, deletion and identity
+or removal-state changes. Ordinary heartbeats preserve it. A Source observation
+captures the generation in its quorum floor snapshot; its conditional write
+checks both that exact number and the complete generation table/trigger shape.
+A restored visible roster or an empty intent table cannot revive an observation
+from before a completed transition. Missing/partial factory state refuses; no
+read initializes or repairs it.
+
+Pinned feature-enabled all-target check passed (28.12 seconds). Both focused
+SQLite guarded-mutation regressions passed (zero ignored), including completed
+intent/identity transitions, missing trigger and reset/replacement/deletion
+refusals. All four actual-voter/fourth-learner membership-floor contracts passed
+(13.76 seconds, zero ignored), and denied-warning feature all-target Clippy
+passed (34.08 seconds). The actual Source binding transaction needs integration
+qualification with this newer factory. Clock freshness is enforced when the
+trusted server submits the mutation; delayed Raft execution has no independent
+wall-clock expression in deterministic SQL. Shared worker/frontdoor admission
+remains closed pending its full execution and producer-release proof. Earlier
+upgrade receipts do not qualify this newer factory or install it in production.
+
+
 **Coordinated qualification integration:** the indexed
 [daemon/rollback receipt](SHARED-LIBRARIES-COORDINATED-UPGRADE.md) records the
 actual source-only `9b99fcd0f` qualification on catalogue integration `a8bf5ce1d`:
