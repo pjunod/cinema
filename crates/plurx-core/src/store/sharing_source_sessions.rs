@@ -469,7 +469,7 @@ async fn replay<T: Backend>(
             {
                 return Err(invalid());
             }
-            let rows=backend.sharing_read("SELECT json_quote(count(*)) AS payload FROM media_sessions WHERE incarnation_id=$1 AND owner_key=$2 AND principal_kind='sharing' AND share_grant_id=$3 AND share_viewer_key=$4 AND user_id IS NULL AND playback_id=$5 AND request_fingerprint=$6 AND state='active' AND owner_node_id=$7 AND lease_expires_at_ms>$8 AND publication_ready_at_ms>0",vec![binding.incarnation_id.into(),binding.principal.owner_key().into(),row.grant.clone().into(),row.viewer.clone().into(),binding.playback_id.clone().into(),binding.request_fingerprint.clone().into(),row.request_owner.clone().unwrap_or_default().into(),now_ms()?.into()]).await?;
+            let rows=backend.sharing_read("SELECT json_quote(count(*)) AS payload FROM media_sessions WHERE incarnation_id=$1 AND owner_key=$2 AND principal_kind='sharing' AND share_grant_id=$3 AND share_viewer_key=$4 AND user_id IS NULL AND playback_id=$5 AND request_fingerprint=$6 AND state='active' AND owner_node_id=$7 AND lease_expires_at_ms>$8 AND publication_ready_at_ms=0",vec![binding.incarnation_id.into(),binding.principal.owner_key().into(),row.grant.clone().into(),row.viewer.clone().into(),binding.playback_id.clone().into(),binding.request_fingerprint.clone().into(),row.request_owner.clone().unwrap_or_default().into(),now_ms()?.into()]).await?;
             if rows.first().map(String::as_str) != Some("1") {
                 return Ok(SourceClaimOutcome::Unavailable);
             }
@@ -588,10 +588,7 @@ async fn assign_dispatch_prepared<T: Backend>(
         file_id: binding.file_id.clone(),
         file_revision: binding.file_revision.clone(),
     };
-    let intent = match backend
-        .prepare_source_session_intent(request, credential)
-        .await?
-    {
+    let intent = match prepare_intent(backend, request, credential, false).await? {
         SourceIntentRead::Ready(intent) => intent,
         SourceIntentRead::Unavailable => return Ok(DispatchPreparedRead::Unavailable),
         SourceIntentRead::Capacity => return Ok(DispatchPreparedRead::Capacity),
@@ -641,6 +638,13 @@ fn owned_route_condition(
     authority: &SourceOwnedRouteAuthority,
     now: i64,
 ) -> Result<Option<Statement>, StoreError> {
+    route_condition(authority, SourcePublicationPhase::Published, now)
+}
+fn route_condition(
+    authority: &SourceOwnedRouteAuthority,
+    phase: SourcePublicationPhase,
+    now: i64,
+) -> Result<Option<Statement>, StoreError> {
     let assignment = &authority.assignment;
     let members = &assignment.members;
     let Ok((floor, roster, cutoff, observed)) = members.write_guard(now, 1, 2, 3) else {
@@ -660,11 +664,31 @@ fn owned_route_condition(
         authority.lease_revision.into(),
     ]);
     let guard = authority_guard(&floor);
-    let exact="b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.dispatch_generation=$23 AND $23=1 AND b.start_resolved_at_ms IS NOT NULL";
-    let request="r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='resolved' AND r.claim_expires_at_ms=$19 AND r.owner_node_id=$22";
-    let route="s.incarnation_id=b.incarnation_id AND s.owner_key=b.owner_key AND s.principal_kind='sharing' AND s.user_id IS NULL AND s.share_grant_id=b.share_grant_id AND s.share_viewer_key=b.share_viewer_key AND s.playback_id=b.playback_id AND s.request_fingerprint=b.request_fingerprint AND s.session_id=$25 AND s.owner_node_id=$22 AND s.owner_epoch=1 AND s.state='active' AND s.lease_expires_at_ms=$26 AND s.lease_expires_at_ms>$3 AND s.publication_ready_at_ms=0 AND s.response_json=r.response_json AND length(CAST(s.recipe_json AS BLOB))<=32768 AND length(CAST(s.response_json AS BLOB))<=65536";
+    let mut exact=String::from("b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.dispatch_generation=$23 AND $23=1 AND b.start_resolved_at_ms IS NOT NULL");
+    let mut request=String::from("r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='resolved' AND r.claim_expires_at_ms=$19 AND r.owner_node_id=$22");
+    let mut route=String::from("s.incarnation_id=b.incarnation_id AND s.owner_key=b.owner_key AND s.principal_kind='sharing' AND s.user_id IS NULL AND s.share_grant_id=b.share_grant_id AND s.share_viewer_key=b.share_viewer_key AND s.playback_id=b.playback_id AND s.request_fingerprint=b.request_fingerprint AND s.session_id=$25 AND s.owner_node_id=$22 AND s.owner_epoch=1 AND s.state='active' AND s.lease_expires_at_ms=$26 AND s.lease_expires_at_ms>$3 AND s.publication_ready_at_ms=0 AND s.response_json=r.response_json AND length(CAST(s.recipe_json AS BLOB))<=32768 AND length(CAST(s.response_json AS BLOB))<=65536");
+    if phase == SourcePublicationPhase::Pending {
+        exact = exact.replace(
+            "b.start_resolved_at_ms IS NOT NULL",
+            "b.start_resolved_at_ms IS NULL",
+        );
+        request = request.replace(
+            "r.state='resolved'",
+            "r.state='starting' AND r.claim_expires_at_ms>$3",
+        );
+        route = route
+            .replace(
+                "s.publication_ready_at_ms=0",
+                &format!(
+                    "s.publication_ready_at_ms={}",
+                    crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                ),
+            )
+            .replace(" AND s.response_json=r.response_json", "");
+    }
+    let pointer="EXISTS(SELECT 1 FROM media_playback_pointers p WHERE p.owner_key=b.owner_key AND p.principal_kind='sharing' AND p.user_id IS NULL AND p.share_grant_id=b.share_grant_id AND p.share_viewer_key=b.share_viewer_key AND p.playback_id=b.playback_id AND p.current_incarnation_id=b.incarnation_id)";
     let lease="j.resource='session:'||b.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms AND j.revision=$27 AND j.revision>0 AND j.revision<9223372036854775807";
-    Ok(Some((format!("EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON {request} JOIN media_sessions s ON {route} JOIN job_leases j ON {lease} WHERE {exact} AND {guard} AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id=$21 AND node_id=$22 AND removed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$24) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=b.incarnation_id))"),values)))
+    Ok(Some((format!("EXISTS(SELECT 1 FROM sharing_source_session_bindings b JOIN media_session_requests r ON {request} JOIN media_sessions s ON {route} JOIN job_leases j ON {lease} WHERE {exact} AND {guard} AND {pointer} AND EXISTS(SELECT 1 FROM cluster_nodes WHERE raft_id=$21 AND node_id=$22 AND removed_at IS NULL) AND NOT EXISTS(SELECT 1 FROM settings WHERE key=$24) AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=b.incarnation_id))"),values)))
 }
 
 pub(crate) fn source_owned_renewal_guard(
@@ -696,16 +720,38 @@ async fn prepare_owned_route<T: Backend>(
     credential: &CredentialKey,
     members: &SourceAdmissionMembers,
 ) -> Result<SourceOwnedRouteAuthorityRead, StoreError> {
+    Ok(
+        match prepare_publication_route(backend, assignment, credential, members).await? {
+            SourcePublicationAuthorityRead::Ready(authority)
+                if authority.phase == SourcePublicationPhase::Published =>
+            {
+                SourceOwnedRouteAuthorityRead::Ready(Box::new(authority.owned))
+            }
+            SourcePublicationAuthorityRead::Ready(_)
+            | SourcePublicationAuthorityRead::Unavailable => {
+                SourceOwnedRouteAuthorityRead::Unavailable
+            }
+            SourcePublicationAuthorityRead::Capacity => SourceOwnedRouteAuthorityRead::Capacity,
+        },
+    )
+}
+
+async fn prepare_publication_route<T: Backend>(
+    backend: &T,
+    assignment: &SourceDispatchAssignment,
+    credential: &CredentialKey,
+    members: &SourceAdmissionMembers,
+) -> Result<SourcePublicationAuthorityRead, StoreError> {
     let now = now_ms()?;
     if assignment.binding.released
         || assignment.dispatch_generation != 1
         || !present(backend).await?
         || members.write_guard(now, 1, 2, 3).is_err()
     {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     }
     let Ok(raft) = i64::try_from(members.actual_local_raft_id()) else {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     };
     let binding = &assignment.binding;
     #[derive(Deserialize)]
@@ -715,14 +761,15 @@ async fn prepare_owned_route<T: Backend>(
         session: String,
         lease: i64,
         revision: i64,
+        pending: i64,
     }
-    let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.start_resolved_at_ms IS NOT NULL AND b.dispatch_generation=1 AND r.state='resolved' AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND s.publication_ready_at_ms=0 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
+    let rows=backend.sharing_read("SELECT json_object('hash',e.token_hash,'expires',r.claim_expires_at_ms,'session',s.session_id,'lease',s.lease_expires_at_ms,'revision',j.revision,'pending',CASE WHEN r.state='starting' AND b.start_resolved_at_ms IS NULL AND s.publication_ready_at_ms=9223372036854775807 THEN 1 WHEN r.state='resolved' AND b.start_resolved_at_ms IS NOT NULL AND s.publication_ready_at_ms=0 THEN 0 ELSE -1 END) AS payload FROM sharing_source_session_bindings b JOIN media_session_requests r ON r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.incarnation_id=b.incarnation_id JOIN media_sessions s ON s.incarnation_id=b.incarnation_id JOIN job_leases j ON j.resource='session:'||s.incarnation_id AND j.owner_node_id=s.owner_node_id AND j.fence=s.owner_epoch AND j.expires_at_ms=s.lease_expires_at_ms JOIN sharing_exports e ON e.id=b.share_grant_id JOIN cluster_nodes n ON n.raft_id=$1 AND n.node_id=s.owner_node_id AND n.removed_at IS NULL WHERE b.incarnation_id=$2 AND b.owner_key=$3 AND s.owner_node_id=$4 AND b.reservation_state='held' AND b.dispatch_generation=1 AND s.state='active' AND s.owner_epoch=1 AND s.lease_expires_at_ms>$5 AND length(s.session_id) BETWEEN 1 AND 256 AND length(e.token_hash)=64 AND j.revision>0 AND j.revision<9223372036854775807",vec![raft.into(),binding.incarnation_id.into(),binding.principal.owner_key().into(),assignment.owner_node_id.clone().into(),now.into()]).await?;
     let [row] = rows.as_slice() else {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     };
     let current: Current = serde_json::from_str(row).map_err(|_| invalid())?;
-    if !is_hash(&current.hash) {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    if !matches!(current.pending, 0 | 1) || !is_hash(&current.hash) {
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     }
     let request = SourceSessionRequest {
         principal: binding.principal.clone(),
@@ -739,11 +786,11 @@ async fn prepare_owned_route<T: Backend>(
     };
     let intent = match prepare_intent(backend, request, credential, true).await? {
         SourceIntentRead::Ready(i) => i,
-        SourceIntentRead::Unavailable => return Ok(SourceOwnedRouteAuthorityRead::Unavailable),
-        SourceIntentRead::Capacity => return Ok(SourceOwnedRouteAuthorityRead::Capacity),
+        SourceIntentRead::Unavailable => return Ok(SourcePublicationAuthorityRead::Unavailable),
+        SourceIntentRead::Capacity => return Ok(SourcePublicationAuthorityRead::Capacity),
     };
     if !agrees(binding, &intent) {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     }
     let authority = SourceOwnedRouteAuthority {
         assignment: SourceDispatchAssignment {
@@ -757,8 +804,13 @@ async fn prepare_owned_route<T: Backend>(
         lease_expires_at_ms: current.lease,
         lease_revision: current.revision,
     };
-    let Some((condition, values)) = owned_route_condition(&authority, now_ms()?)? else {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+    let phase = if current.pending == 1 {
+        SourcePublicationPhase::Pending
+    } else {
+        SourcePublicationPhase::Published
+    };
+    let Some((condition, values)) = route_condition(&authority, phase, now_ms()?)? else {
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     };
     let rows = backend
         .sharing_read(
@@ -767,13 +819,93 @@ async fn prepare_owned_route<T: Backend>(
         )
         .await?;
     if rows.first().map(String::as_str) != Some("1") {
-        return Ok(SourceOwnedRouteAuthorityRead::Unavailable);
+        return Ok(SourcePublicationAuthorityRead::Unavailable);
     }
-    Ok(SourceOwnedRouteAuthorityRead::Ready(Box::new(authority)))
+    Ok(SourcePublicationAuthorityRead::Ready(Box::new(
+        SourcePublicationAuthority {
+            owned: authority,
+            phase,
+        },
+    )))
+}
+
+async fn complete_publication<T: Backend + super::MediaSessionStore>(
+    backend: &T,
+    authority: &SourcePublicationAuthority,
+) -> Result<Option<crate::domain::MediaSessionRoute>, StoreError> {
+    let now = now_ms()?;
+    let Some((condition, values)) = route_condition(&authority.owned, authority.phase, now)? else {
+        return Ok(None);
+    };
+    let assertion=(format!("INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms) SELECT NULL,$4,$5,$6,$7,$8,$9,$11,$12,$13,$14,$15,$16,'held',NULL,0,$3 WHERE NOT ({condition})"),values);
+    let binding = &authority.owned.assignment.binding;
+    let node = &authority.owned.assignment.owner_node_id;
+    let owner = binding.principal.owner_key();
+    let mut statements = vec![assertion];
+    if authority.phase == SourcePublicationPhase::Pending {
+        let args = vec![
+            binding.incarnation_id.into(),
+            owner.clone().into(),
+            authority.owned.session_id.clone().into(),
+            node.clone().into(),
+            authority.owned.lease_expires_at_ms.into(),
+            now.into(),
+        ];
+        statements.push((format!("UPDATE media_sessions SET publication_ready_at_ms=0,updated_at_ms=$6 WHERE incarnation_id=$1 AND owner_key=$2 AND session_id=$3 AND owner_node_id=$4 AND owner_epoch=1 AND state='active' AND lease_expires_at_ms=$5 AND publication_ready_at_ms={}",crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED),args));
+        statements.push(("UPDATE media_session_requests SET state='resolved',response_json=(SELECT response_json FROM media_sessions WHERE incarnation_id=$1 AND owner_key=$2 AND session_id=$3 AND owner_node_id=$4 AND owner_epoch=1 AND state='active' AND publication_ready_at_ms=0),claim_expires_at_ms=$5,updated_at_ms=$6 WHERE incarnation_id=$1 AND owner_key=$2 AND owner_node_id=$4 AND state='starting'".into(),vec![binding.incarnation_id.into(),owner.clone().into(),authority.owned.session_id.clone().into(),node.clone().into(),authority.owned.lease_expires_at_ms.into(),now.into()]));
+        statements.push(("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$3 WHERE incarnation_id=$1 AND owner_key=$2 AND reservation_state='held' AND dispatch_generation=1 AND start_resolved_at_ms IS NULL".into(),vec![binding.incarnation_id.into(),owner.into(),now.into()]));
+    }
+    if authority.phase == SourcePublicationPhase::Pending {
+        let mut published = authority.owned.clone();
+        published.intent.request.claim_expires_at_ms = published.lease_expires_at_ms;
+        let Some((condition, values)) =
+            route_condition(&published, SourcePublicationPhase::Published, now)?
+        else {
+            return Ok(None);
+        };
+        statements.push((format!("INSERT INTO sharing_source_session_bindings(incarnation_id,owner_key,share_grant_id,share_viewer_key,request_id,request_fingerprint,playback_id,source_server_id,catalogue_epoch,library_id,item_id,file_id,file_revision,reservation_state,start_resolved_at_ms,dispatch_generation,created_at_ms) SELECT NULL,$4,$5,$6,$7,$8,$9,$11,$12,$13,$14,$15,$16,'held',NULL,0,$3 WHERE NOT ({condition})"), values));
+    }
+    let expected = if authority.phase == SourcePublicationPhase::Pending {
+        vec![0, 1, 1, 1, 0]
+    } else {
+        vec![0]
+    };
+    match backend.sharing_txn(statements).await {
+        Ok(counts) if counts == expected => {}
+        Ok(_) => return Err(invalid()),
+        Err(error) if source_write_refused(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    Ok(backend
+        .media_session_route_by_incarnation(&binding.incarnation_id.to_string())
+        .await?
+        .filter(|route| {
+            route.principal == binding.principal
+                && route.session_id == authority.owned.session_id
+                && route.playback_id == binding.playback_id
+                && route.request_fingerprint == binding.request_fingerprint
+                && route.owner_node_id == *node
+                && route.owner_epoch == 1
+                && route.state == "active"
+                && route.publication_ready_at_ms == 0
+                && route.lease_expires_at_ms == authority.owned.lease_expires_at_ms
+        }))
 }
 
 #[async_trait]
 pub trait SharingSourceSessionStore: Send + Sync {
+    async fn prepare_source_publication_authority(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourcePublicationAuthorityRead, StoreError>;
+    /// SQL permission only. The actual worker owns the registered producer
+    /// readiness barrier before invoking this coupled publication write.
+    async fn complete_source_media_session_publication(
+        &self,
+        authority: &SourcePublicationAuthority,
+    ) -> Result<Option<crate::domain::MediaSessionRoute>, StoreError>;
     async fn prepare_source_owned_route_authority(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -814,7 +946,21 @@ pub trait SharingSourceSessionStore: Send + Sync {
 }
 
 #[async_trait]
-impl<T: Backend> SharingSourceSessionStore for T {
+impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
+    async fn prepare_source_publication_authority(
+        &self,
+        assignment: &SourceDispatchAssignment,
+        credential: &CredentialKey,
+        members: &SourceAdmissionMembers,
+    ) -> Result<SourcePublicationAuthorityRead, StoreError> {
+        prepare_publication_route(self, assignment, credential, members).await
+    }
+    async fn complete_source_media_session_publication(
+        &self,
+        authority: &SourcePublicationAuthority,
+    ) -> Result<Option<crate::domain::MediaSessionRoute>, StoreError> {
+        complete_publication(self, authority).await
+    }
     async fn prepare_source_owned_route_authority(
         &self,
         assignment: &SourceDispatchAssignment,

@@ -693,17 +693,81 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
             .expect("unresolved owned refusal"),
         SourceOwnedRouteAuthorityRead::Unavailable
     ));
-    // Explicit fixture-only publication; no producer is allocated and this
-    // receipt does not qualify a production readiness transition.
-    client
-        .execute(
-            "UPDATE media_sessions SET publication_ready_at_ms=0 WHERE incarnation_id=$1",
-            hiqlite::params!(activation.incarnation_id.clone()),
-        )
+    // Actual coupled Store publication; this candidate SQL receipt does not
+    // allocate a producer or qualify physical readiness.
+    let SourcePublicationAuthorityRead::Ready(publication) = store
+        .prepare_source_publication_authority(&assignment, &credential, &observation(&client).await)
         .await
-        .expect("fixture readiness");
-    client.execute("UPDATE media_session_requests SET state='resolved',response_json='{}' WHERE incarnation_id=$1",hiqlite::params!(activation.incarnation_id.clone())).await.expect("fixture resolved start");
-    client.execute("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$1 WHERE incarnation_id=$2",hiqlite::params!(activation.now_ms,activation.incarnation_id.clone())).await.expect("fixture resolved binding");
+        .expect("actual voter publication permission")
+    else {
+        panic!("pending permission")
+    };
+    exec(
+        &client,
+        "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+    )
+    .await;
+    assert!(store
+        .complete_source_media_session_publication(&publication)
+        .await
+        .expect("same-write off refusal")
+        .is_none());
+    exec(
+        &client,
+        "UPDATE settings SET value='true' WHERE key='sharing_enabled'",
+    )
+    .await;
+    exec(&client,"CREATE TRIGGER source_publication_ignore BEFORE UPDATE OF start_resolved_at_ms ON sharing_source_session_bindings BEGIN SELECT RAISE(IGNORE); END").await;
+    assert!(store
+        .complete_source_media_session_publication(&publication)
+        .await
+        .expect("postcondition rollback")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(&activation.incarnation_id)
+            .await
+            .expect("rollback route")
+            .expect("route")
+            .publication_ready_at_ms,
+        MEDIA_SESSION_PUBLICATION_BLOCKED
+    );
+    exec(&client, "DROP TRIGGER source_publication_ignore").await;
+    let published = store
+        .complete_source_media_session_publication(&publication)
+        .await
+        .expect("coupled publication")
+        .expect("published route");
+    assert_eq!(published.publication_ready_at_ms, 0);
+    assert_eq!(published.session_id, activation.session_id);
+    assert!(matches!(
+        store
+            .claim_source_media_session(&second, &observation(&client).await)
+            .await
+            .expect("old rotated peer credential refuses"),
+        SourceClaimOutcome::Unavailable
+    ));
+    let current_replay =
+        intent_hash(&store, grant, &credential, &key, "second", "f".repeat(64)).await;
+    assert!(
+        matches!(store.claim_source_media_session(&current_replay,&observation(&client).await).await.expect("ready-zero replay before full Source cap"),SourceClaimOutcome::Resolved{binding,..} if binding.same_identity(&second_binding))
+    );
+    let SourcePublicationAuthorityRead::Ready(publication_replay) = store
+        .prepare_source_publication_authority(&assignment, &credential, &observation(&client).await)
+        .await
+        .expect("exact publication permission")
+    else {
+        panic!("published permission")
+    };
+    assert_eq!(
+        store
+            .complete_source_media_session_publication(&publication_replay)
+            .await
+            .expect("exact published replay")
+            .expect("same route")
+            .session_id,
+        published.session_id
+    );
     let SourceOwnedRouteAuthorityRead::Ready(owned) = store
         .prepare_source_owned_route_authority(&assignment, &credential, &observation(&client).await)
         .await
