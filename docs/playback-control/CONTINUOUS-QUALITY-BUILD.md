@@ -4652,3 +4652,30 @@ was retried against exact Linux build `f815cf3d6`. Apple CoreDevice failed to
 mount/read developer disk image metadata (12040/12044/12018). No lab process
 or physical playback was observed. The isolated server and proxy were cleaned
 up. Device-service diagnosis continues; production app remains untouched.
+
+
+### 10.159 Exact budget-fix build and continued qualification
+
+The normal hook passed for `d9c8acba3`: catalog lint, pinned Rust formatting,
+workspace/all-target Clippy with denied warnings, and 72 served-script syntax
+checks. The committed branch was pushed. Source-only Linux transfer and build
+verified Rust 1.97.1 and succeeded in 1m34s using the warm target. No units ran.
+The exact-build failed focused Firefox case is now rerunning: three manual
+transitions followed by five actual Auto transitions from film 990 seconds,
+with unchanged continuity thresholds and from-start producer census.
+
+CoreDevice recovered enough to report a connected phone and compatible,
+usable host iOS developer image. The `d9c8acba3` separate CQ Lab retry then
+reported Locked repeatedly and ended with CoreDevice 4000, remoteService XPC
+unavailable. No lab PID or playback was confirmed. The owned native runtime
+was verified removed before browser qualification began; the redacted blocked
+receipt is retained. The user was asked to reconnect and keep the phone awake.
+
+The previous failed Firefox run's census has 251 samples: 218 with one audio
+and one video producer, two with one audio and two video producers, and one
+with audio, video and an unclassified child. End observed one child briefly
+zombied at the first sample, then zero children at 1/3/5 seconds while the
+daemon remained alive. This is process evidence, not physical queue evidence.
+Its earlier observer could omit interim zombies; the new supervisor checks
+process comm and includes them. The retired disposable Mac Firefox profile
+was removed after checking no corresponding browser process remained.

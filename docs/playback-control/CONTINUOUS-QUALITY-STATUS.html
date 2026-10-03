@@ -10,12 +10,15 @@ continuous video plus shared audio budget. The latest Firefox case passed
 three manual and three Auto transitions without backward observations, then
 failed when a pressure stage selected 480p and reopened sessions. Its raw
 catalog understated the delivery budget. The fix preserves other routes and
-all continuity thresholds; its regression is authored, unrun.</p>
+all continuity thresholds; its regression is authored, unrun. Commit <code>d9c8acba3</code> passed the normal
+compile/lint hook and exact Linux build; its failed focused campaign is now
+rerunning with three manual and five actual Auto transitions. No units ran.</p>
 <p><strong>Physical iOS:</strong> the newly unlocked 17promax launch was retried
-against exact build <code>f815cf3d6</code>. Apple CoreDevice failed to mount/read
-its developer disk image metadata. No separate CQ Lab process or physical
-playback was observed; the isolated server and proxy were cleaned up.
-Device-service diagnosis continues. Production app remains untouched.</p>
+against exact build <code>f815cf3d6</code>. CoreDevice recovered and verified a usable developer image. The next retry
+on <code>d9c8acba3</code> repeatedly reported Locked and ended with remoteService
+XPC unavailable. No CQ Lab process or physical playback was observed; the
+isolated server and proxy were cleaned up. Reconnection and an awake phone
+were requested. Production app remains untouched.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most
 66.8 ms callback gap on all eight transitions, zero stalls or hitches, and
