@@ -2588,8 +2588,8 @@ async function performOperation(driver, testCase, start) {
   }
   if (testCase.operation === "quality-cycle") {
     const qualities = testCase.switches || [];
-    if (!Array.isArray(qualities) || qualities.length < 2) {
-      throw new Error("quality-cycle needs at least two named switches");
+    if (!Array.isArray(qualities) || qualities.length < 1) {
+      throw new Error("quality-cycle needs at least one named switch");
     }
     const changes = [];
     let before = start;

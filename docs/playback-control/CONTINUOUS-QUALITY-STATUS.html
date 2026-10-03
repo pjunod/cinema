@@ -9,7 +9,9 @@ reviews, before fast-lane tests or merge.</p>
 compile/lint and exact Linux build. Its three manual Firefox transitions
 completed in one session, but the first recorded a 100.58 ms gap against the
 unchanged 100 ms limit; Auto was not reached. The next diagnostic narrows to
-one early manual transition plus five actual Auto transitions. Android's
+one early manual transition plus five actual Auto transitions. The first
+one-transition attempt exposed a shared-runner minimum-count mismatch and
+failed before changing quality; that diagnostic admission is now corrected. Android's
 matching catalog-cost bug is also corrected, and production/regression
 sources compile. No units ran. Full campaigns and native evidence remain.</p>
 <p><strong>Physical iOS:</strong> the newly unlocked 17promax launch was retried

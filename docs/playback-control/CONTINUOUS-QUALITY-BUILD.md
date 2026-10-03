@@ -4710,3 +4710,20 @@ followed by the same five actual Auto transitions and unchanged continuity
 checks. This narrows the next run to the failed early transition and pending
 Auto evidence. It does not replace the required fifteen-manual/five-Auto full
 campaign or relabel any old failure.
+
+
+### 10.161 Single-transition diagnostic admission correction
+
+The `34f6a87d7` narrowed run failed before any requested quality change:
+`quality-cycle needs at least two named switches`. The qualification CLI
+accepted one, but the shared lab runner still rejected it. This was a harness
+mistake, not a successful transition or Auto observation. The failed receipt
+is preserved and the supervisor removed its runtime.
+
+The lab now accepts one or more explicitly named changes; it still rejects
+an empty cycle, validates every requested quality, checks every transition
+and applies the same continuity/session/frame/removal bounds. Full campaign
+counts remain unchanged. The next exact-source focused run will exercise the
+previously failed early manual transition followed by five actual Auto moves.
+No units ran. A read-only device process query returned no matching separate
+CQ Lab process after the failed phone launch.
