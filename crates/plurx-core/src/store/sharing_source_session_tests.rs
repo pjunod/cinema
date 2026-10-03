@@ -1423,3 +1423,84 @@ async fn sharing_source_publication_atomic_ready_zero_and_exact_replay() {
         assert_eq!(held, vec!["\"held\"".to_owned()]);
     }
 }
+
+#[tokio::test]
+async fn sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_of_grant() {
+    let dir = tempfile::tempdir().expect("fixture directory");
+    for store in [
+        SqliteStore::open_in_memory().expect("memory"),
+        SqliteStore::open(&dir.path().join("no-spawn.db")).expect("pooled"),
+    ] {
+        let (grant, key) = setup(&store).await;
+        let intent = intent(&store, grant, &key, "no-spawn").await;
+        let SourceClaimOutcome::Acquired(binding) = store
+            .claim_source_media_session(&intent, &proof())
+            .await
+            .expect("claim")
+        else {
+            panic!("acquired")
+        };
+        let assignment = store
+            .assign_source_dispatch(&binding, &key, &proof())
+            .await
+            .expect("assignment")
+            .expect("actual worker");
+        assert_eq!(
+            store
+                .release_source_never_dispatched(&binding)
+                .await
+                .expect("ordinary release"),
+            SourceReleaseOutcome::Refused
+        );
+        let resource = format!("session:{}", binding.incarnation_id());
+        let now = now_ms().expect("clock");
+        store.sharing_txn(vec![("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES($1,'foreign',1,1,$2,$3)".into(),vec![resource.clone().into(),(now+60000).into(),now.into()])]).await.expect("foreign physical obligation");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("fenced"),
+            SourceReleaseOutcome::Refused
+        );
+        assert_eq!(count(&store, "job_leases").await, 1);
+        store.sharing_txn(vec![("DELETE FROM job_leases WHERE resource=$1".into(),vec![resource.into()]),("UPDATE settings SET value='false' WHERE key='sharing_enabled'".into(),vec![]),("UPDATE sharing_exports SET state='revoked' WHERE id=$1".into(),vec![grant.into()]),("CREATE TRIGGER refuse_no_spawn_request BEFORE UPDATE OF state ON media_session_requests WHEN NEW.state='failed' BEGIN SELECT RAISE(IGNORE); END".into(),vec![])]).await.expect("disabled revoked accounting fault");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("atomic rollback"),
+            SourceReleaseOutcome::Refused
+        );
+        let state=store.sharing_read("SELECT reservation_state AS payload FROM sharing_source_session_bindings WHERE incarnation_id=$1",vec![binding.incarnation_id().into()]).await.expect("binding");
+        assert_eq!(state, ["held"]);
+        store
+            .sharing_txn(vec![(
+                "DROP TRIGGER refuse_no_spawn_request".into(),
+                vec![],
+            )])
+            .await
+            .expect("restore writer");
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("owned SQL settlement"),
+            SourceReleaseOutcome::Released
+        );
+        assert_eq!(
+            store
+                .settle_source_assigned_without_activation(&assignment)
+                .await
+                .expect("exact replay"),
+            SourceReleaseOutcome::ExactReplay
+        );
+        let state = store
+            .sharing_read(
+                "SELECT state AS payload FROM media_session_requests WHERE incarnation_id=$1",
+                vec![binding.incarnation_id().into()],
+            )
+            .await
+            .expect("request");
+        assert_eq!(state, ["failed"]);
+    }
+}

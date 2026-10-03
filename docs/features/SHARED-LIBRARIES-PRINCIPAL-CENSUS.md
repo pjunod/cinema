@@ -963,3 +963,41 @@ cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tes
 cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
 cargo clippy --locked -p plurxd --all-targets -- -D warnings
 ```
+
+## Assigned worker failure before activation
+
+The candidate `settle_source_assigned_without_activation` callback takes the
+closed complete dispatch assignment, not a node string or caller boolean. It
+checks the immutable generation-one binding, the exact canonical request and
+assigned node, and absence of every incarnation route, lease, pin, preparation,
+recipe and playback pointer. It atomically records failed request settlement
+and releases only that held reservation. A timestamp CAS makes an ignored
+request write fail the final assertion even when revocation had already marked
+the request failed. Exact settlement replay preserves the original receipt.
+
+This callback is SQL permission only. Its sole intended production caller is
+the private daemon actor after that actor proves it never spawned or queued a
+producer. Route absence alone is not physical proof. It deliberately works
+while Sharing is disabled or revoked. An activated route refuses this callback;
+its physical retirement requires a separate exact owned producer barrier and
+terminal route transition. Ordinary generation-zero release refuses assigned
+workers. No expiry or terminal ACK releases capacity.
+
+Based on `830e735c8`, the memory and pooled regression passed with one test and
+zero ignored tests in 0.97 seconds. It preserves an actual foreign lease,
+rolls back a suppressed request write, and settles/replays while disabled and
+revoked. The actual three-voter contract passed with one test and zero ignored
+tests in 11.53 seconds; it proves activated-route refusal, suppressed-write
+rollback, exact assigned no-spawn accounting replay, and preservation of the
+other seven held obligations. These fixtures dispatch no producer and do not
+qualify the private actor handoff.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_source_assigned_no_spawn_settlement_is_atomic_and_independent_of_grant -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+```
+
+Pinned Rust 1.97.1 daemon all-target check passed in 1 minute 21 seconds,
+Core feature all-target check in 31.00 seconds, and Core feature all-target
+Clippy with denied warnings in 35.15 seconds. Documentation index tests,
+catalogue lint and diff checks passed.

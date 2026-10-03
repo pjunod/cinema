@@ -892,8 +892,124 @@ async fn complete_publication<T: Backend + super::MediaSessionStore>(
         }))
 }
 
+/// Atomic accounting permission only. A private daemon owner must already
+/// prove that this assigned worker never spawned a producer. Route absence
+/// is a defensive fence, not physical evidence.
+async fn settle_assigned_without_activation<T: Backend>(
+    backend: &T,
+    assignment: &SourceDispatchAssignment,
+) -> Result<SourceReleaseOutcome, StoreError> {
+    if !present(backend).await? || assignment.dispatch_generation != 1 {
+        return Ok(SourceReleaseOutcome::Refused);
+    }
+    let binding = &assignment.binding;
+    let PlaybackPrincipal::Sharing {
+        grant_id,
+        viewer_key,
+    } = &binding.principal
+    else {
+        return Err(invalid());
+    };
+    let receipt = format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "sharing-source-assigned-no-spawn-v1:{}:{}:{}:{}:{}:{}",
+                binding.incarnation_id,
+                binding.principal.owner_key(),
+                binding.request_id,
+                binding.request_fingerprint,
+                assignment.owner_node_id,
+                assignment.dispatch_generation
+            )
+            .as_bytes()
+        )
+    );
+    let updates = backend.sharing_read("SELECT CAST(updated_at_ms AS TEXT) AS payload FROM media_session_requests WHERE owner_key=$1 AND request_id=$2 AND incarnation_id=$3 AND owner_node_id=$4",vec![binding.principal.owner_key().into(),binding.request_id.clone().into(),binding.incarnation_id.into(),assignment.owner_node_id.clone().into()]).await?;
+    let Some(previous_update) = updates
+        .first()
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0 && *value < i64::MAX)
+    else {
+        return Ok(SourceReleaseOutcome::Refused);
+    };
+    // A strict timestamp CAS also detects an ignored write when revocation
+    // already marked this request failed; state equality alone cannot do so.
+    let now = now_ms()?.max(previous_update + 1);
+    let values = vec![
+        binding.incarnation_id.into(),
+        binding.principal.owner_key().into(),
+        (*grant_id).into(),
+        viewer_key.as_str().to_owned().into(),
+        binding.request_id.clone().into(),
+        binding.request_fingerprint.clone().into(),
+        binding.playback_id.clone().into(),
+        binding.source_server_id.into(),
+        binding.catalogue_epoch.into(),
+        binding.library_id.as_str().to_owned().into(),
+        binding.item_id.as_str().to_owned().into(),
+        binding.file_id.as_str().to_owned().into(),
+        binding.file_revision.as_str().to_owned().into(),
+        assignment.owner_node_id.clone().into(),
+        assignment.dispatch_generation.into(),
+        now.into(),
+        receipt.clone().into(),
+        previous_update.into(),
+    ];
+    // Every backend statement carries the entire immutable settlement tuple.
+    // Backend canonicalization deliberately rejects unused values.
+    let input = format!(
+        "WITH settlement_input AS(SELECT {}) ",
+        (1..=18)
+            .map(|i| format!("${i} AS v{i}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let exact = "incarnation_id=$1 AND owner_key=$2 AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND source_server_id=$8 AND catalogue_epoch=$9 AND library_id=$10 AND item_id=$11 AND file_id=$12 AND file_revision=$13 AND dispatch_generation=$15";
+    let request = "owner_key=$2 AND principal_kind='sharing' AND user_id IS NULL AND share_grant_id=$3 AND share_viewer_key=$4 AND request_id=$5 AND request_fingerprint=$6 AND playback_id=$7 AND incarnation_id=$1 AND owner_node_id=$14";
+    let condition = format!("({}) AND EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='held' AND start_resolved_at_ms IS NULL)
+        AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state IN('starting','failed') AND updated_at_ms=$18)
+        AND NOT EXISTS(SELECT 1 FROM media_session_requests WHERE (incarnation_id=$1 OR(owner_key=$2 AND request_id=$5)) AND NOT({request} AND state IN('starting','failed')))
+        AND NOT EXISTS(SELECT 1 FROM media_sessions WHERE incarnation_id=$1)
+        AND NOT EXISTS(SELECT 1 FROM job_leases WHERE resource='session:'||$1)
+        AND NOT EXISTS(SELECT 1 FROM cache_consumer_pins WHERE consumer_kind='media_session' AND consumer_id=$1)
+        AND NOT EXISTS(SELECT 1 FROM media_session_preparations WHERE staged_incarnation_id=$1)
+        AND NOT EXISTS(SELECT 1 FROM library_channel_session_recipes WHERE incarnation_id=$1)
+        AND NOT EXISTS(SELECT 1 FROM media_playback_pointers WHERE current_incarnation_id=$1)", schema_guard());
+    let replay = format!("{input}SELECT json_quote(count(*)) AS payload FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND release_fingerprint=$17 AND $16>0 AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state='failed')");
+    let replayed = backend.sharing_read(&replay, values.clone()).await?;
+    if replayed.first().map(String::as_str) == Some("1") {
+        return Ok(SourceReleaseOutcome::ExactReplay);
+    }
+    let assertion = format!("{input}INSERT INTO sharing_source_session_bindings(incarnation_id) SELECT NULL WHERE NOT({condition})");
+    let release = format!("{input}UPDATE sharing_source_session_bindings SET reservation_state='released',start_resolved_at_ms=$16,released_at_ms=$16,release_fingerprint=$17 WHERE {exact} AND reservation_state='held' AND start_resolved_at_ms IS NULL");
+    let settle = format!("{input}UPDATE media_session_requests SET state='failed',updated_at_ms=$16 WHERE {request} AND state IN('starting','failed') AND updated_at_ms=$18");
+    let post = format!("{input}INSERT INTO sharing_source_session_bindings(incarnation_id) SELECT NULL WHERE NOT EXISTS(SELECT 1 FROM sharing_source_session_bindings WHERE {exact} AND reservation_state='released' AND release_fingerprint=$17 AND released_at_ms=$16 AND EXISTS(SELECT 1 FROM media_session_requests WHERE {request} AND state='failed' AND updated_at_ms=$16))");
+    match backend
+        .sharing_txn(vec![
+            (assertion, values.clone()),
+            (release, values.clone()),
+            (settle, values.clone()),
+            (post, values),
+        ])
+        .await
+    {
+        Ok(counts) if counts.as_slice() == [0, 1, 1, 0] => Ok(SourceReleaseOutcome::Released),
+        Ok(_) => Err(invalid()),
+        Err(error) if lost_proposal(&error) => Ok(SourceReleaseOutcome::Refused),
+        Err(error) => Err(error),
+    }
+}
+
 #[async_trait]
 pub trait SharingSourceSessionStore: Send + Sync {
+    /// SQL permission only; called exclusively by the private daemon owner
+    /// after its actual assigned worker is proven never spawned. It permits
+    /// cleanup while disabled or revoked and does not infer physical settlement.
+    async fn settle_source_assigned_without_activation(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Result<SourceReleaseOutcome, StoreError>;
     async fn prepare_source_publication_authority(
         &self,
         assignment: &SourceDispatchAssignment,
@@ -947,6 +1063,12 @@ pub trait SharingSourceSessionStore: Send + Sync {
 
 #[async_trait]
 impl<T: Backend + super::MediaSessionStore> SharingSourceSessionStore for T {
+    async fn settle_source_assigned_without_activation(
+        &self,
+        assignment: &SourceDispatchAssignment,
+    ) -> Result<SourceReleaseOutcome, StoreError> {
+        settle_assigned_without_activation(self, assignment).await
+    }
     async fn prepare_source_publication_authority(
         &self,
         assignment: &SourceDispatchAssignment,

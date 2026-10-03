@@ -414,13 +414,13 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
         "UPDATE files SET path='/private/synthetic.mkv' WHERE id=1",
     )
     .await;
-    assert!(matches!(
-        store
-            .claim_source_media_session(&third, &observation(&client).await)
-            .await
-            .expect("Source candidate fixture operation"),
-        SourceClaimOutcome::Acquired(_)
-    ));
+    let SourceClaimOutcome::Acquired(third_binding) = store
+        .claim_source_media_session(&third, &observation(&client).await)
+        .await
+        .expect("third actual claim")
+    else {
+        panic!("acquired third")
+    };
     for index in 1..=4 {
         let other = Uuid::new_v4();
         let invitation = Uuid::new_v4();
@@ -841,4 +841,46 @@ async fn sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_r
     ));
     let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("renewal retains physical obligations");
     assert_eq!(rows[0].value, "8");
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&assignment)
+            .await
+            .expect("live route cannot settle"),
+        SourceReleaseOutcome::Refused
+    );
+    let no_spawn = store
+        .assign_source_dispatch(&third_binding, &credential, &observation(&client).await)
+        .await
+        .expect("actual assigned no-spawn worker")
+        .expect("assigned");
+    exec(
+        &client,
+        "UPDATE settings SET value='false' WHERE key='sharing_enabled'",
+    )
+    .await;
+    exec(&client,"CREATE TRIGGER source_no_spawn_ignore BEFORE UPDATE OF state ON media_session_requests WHEN NEW.state='failed' BEGIN SELECT RAISE(IGNORE); END").await;
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("rollback missing request settlement"),
+        SourceReleaseOutcome::Refused
+    );
+    exec(&client, "DROP TRIGGER source_no_spawn_ignore").await;
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("owned SQL no-spawn accounting"),
+        SourceReleaseOutcome::Released
+    );
+    assert_eq!(
+        store
+            .settle_source_assigned_without_activation(&no_spawn)
+            .await
+            .expect("exact no-spawn replay"),
+        SourceReleaseOutcome::ExactReplay
+    );
+    let rows=client.query_consistent_map::<SchemaText,_>("SELECT CAST(count(*) AS TEXT) AS value FROM sharing_source_session_bindings WHERE reservation_state='held'",hiqlite::params!()).await.expect("only settled obligation released");
+    assert_eq!(rows[0].value, "7");
 }
