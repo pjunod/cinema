@@ -4,7 +4,7 @@
 Decision 1 taken on Paul's behalf and his to overturn: the shared read is
 128 KiB, and `TCP_NODELAY` is set on accepted connections, which removed the
 HLS p50 regression at a packet-count cost on HLS bodies (§5.1.2, Decision 6).
-M2 pending ·
+M2 implemented in PR #766; runtime validation pending ·
 **Executes:** §2.4, C1, F-core-1, F-stream-8, §5.1 item 3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @

@@ -238,3 +238,19 @@ carries its line.
   validation of an unsaved XMLTV draft.
 - The final current-head gate and merge result remain on PR #228; historical
   prototype observations are not evidence for this branch.
+
+### Video-quality additions, 2026-10-03
+
+The [video-quality programme](../performance/VIDEO-QUALITY-PROGRAM.md) adds two
+unfinished-feature cards in PR #766. Both switches save the requested value
+regardless of readiness. Their runtime validation still rejects a stale source,
+invalid fragment or unusable encoder result; that never changes the saved choice.
+
+| Card | Saved key | Advisory readiness | Graduation |
+|---|---|---|---|
+| Measured per-title encoding | `transcode.content_aware_encoding` | Selected encoder, explicit rate override, software quality capability and scorer availability; the current implementation measures bounded SDR software-x264 samples. | Record representative-title quality/cost evidence for supported builds; move to Playback if a permanent choice remains useful. |
+| Reordered VOD frames | `playback.vod_reorder_frames` (0 or 2) | Software x264 support and remaining compression/client presentation evidence. Other families retain their current recipes. | Record the compression and client matrix; remove the switch if this becomes the normal recipe, otherwise move it to Playback. |
+
+Next-episode metadata preparation uses the existing autoplay preference.
+HLS acknowledgement batching is part of normal delivery ownership. The plain
+VAAPI HDR graph publishes its measured capability through system diagnostics.

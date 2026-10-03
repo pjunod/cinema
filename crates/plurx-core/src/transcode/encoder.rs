@@ -543,9 +543,9 @@ impl Encoder {
                 args.extend([
                     "-profile:v".to_owned(),
                     "main10".to_owned(),
-                    "-tier".to_owned(),
+                    "-tier:v".to_owned(),
                     "high".to_owned(),
-                    "-level".to_owned(),
+                    "-level:v".to_owned(),
                     "4".to_owned(),
                     "-idr_interval".to_owned(),
                     "0".to_owned(),

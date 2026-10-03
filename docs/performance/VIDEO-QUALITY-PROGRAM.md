@@ -45,7 +45,7 @@ these symbols on the intended branch before implementing a milestone.
 | Area | Current contract and existing owner |
 |---|---|
 | Rate control | `Encoder::default_rate_mode`, `default_quality` and `encode_args_for` in [encoder.rs](../../crates/plurx-core/src/transcode/encoder.rs); [encoder defaults](../streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) owns the per-family acceptance contract. [scripts/bench](../../scripts/bench) already has deterministic SDR fixtures, VMAF scoring, provenance and benefit gates. |
-| Content analysis | [Performance II §5](PERF2-PLAN.md#5-n2--per-title-intelligence) is the broader N2 design. This programme narrows its first delivery to offline evidence; it does not claim the durable analysis or rate bias is built. `PretranscodePolicySnapshot` and `OfflineSpec` already snapshot encoding policy and must remain explicit boundaries. |
+| Content analysis | [Performance II §5](PERF2-PLAN.md#5-n2--per-title-intelligence) is the broader N2 design. The first delivery established offline evidence; C2 now implements bounded durable measurements for cached and offline production, without generic complexity bias. `PretranscodePolicySnapshot` and `OfflineSpec` already snapshot encoding policy and must remain explicit boundaries. |
 | HDR reference | [Tone-map corrections](../streaming/TONE-MAP-CHAIN-CORRECTIONS.md) still distinguishes source changes from image and fleet evidence. [Codec/GPU qualification](../streaming/CODEC-AND-GPU-QUALIFICATION.md) owns expanded graph acceptance. CPU filter construction is in [core transcode](../../crates/plurx-core/src/transcode/mod.rs); the reference boot probe is [pipeprobe.rs](../../crates/plurxd/src/pipeprobe.rs). |
 | Existing HDR work | Main already contains PR #750's resident VAAPI/Vulkan path. Open [PR #753](http://192.168.4.7:3000/noirr/plurx/pulls/753) owns codec-corpus reference associations at census time. Reuse that work after it lands; do not publish a competing HDR scorer or claim another PR's evidence as this programme's. |
 | Next episode | [autoplay-next.js](../../crates/plurxd/src/web/player/autoplay-next.js) resolves after the end; Performance II N3 already proposes pre-resolution. Inspect native continuation paths and current preparation leases before adding a new owner. |
@@ -179,6 +179,37 @@ operator policy and the separate HDR10 VBR policy.
 **Acceptance:** stale-source, retry, restart, cancellation, resource contention,
 cache separation and settings lifecycle tests; matched end-to-end encodes show
 benefit without sample-analysis cost on the interactive start path.
+
+### C2 operator and implementation notes
+
+The batch's native analyser runs as a bounded phase of the existing retained-HLS cached or
+offline producer, under its admission, source descriptor and cancellation
+ownership. It persists a source/engine/scorer/recipe-bound report in the
+existing probe document. Cached construction can use a measured winner before
+naming its artifact. Modern immutable VOD remains a separate encoding contract.
+An offline request keeps its accepted immutable recipe;
+its worker can prepare evidence for a later request. Play never waits for this
+analysis, and a missing, changed, unsupported or failed measurement retains the
+ordinary recipe.
+
+Settings → Developer → Measured per-title encoding saves
+`transcode.content_aware_encoding`; readiness is advisory. Start with tagged
+BT.709, progressive square-pixel SDR software x264 without burned subtitles.
+Three two-second windows, bounded media/scratch, a three-minute job budget and
+existing background-yield rules limit work. Every window's mean and lower-tail
+VMAF must preserve baseline quality, aggregate bytes must fall at least 10%,
+and the candidate encode-time total may not exceed baseline by more than 10%.
+These sampled results do not promise whole-title quality or hardware-family
+benefits. Explicit operator rate-control choices take precedence.
+
+The container packages a separately pinned static FFmpeg/libvmaf scorer;
+Jellyfin remains the capture/playback encoder. Both binary identities and the
+actual encoder/GOP/thread recipe are bound into the report. Scoring-only
+packaging avoids replacing the GPU driver/decoder stack to add a metric.
+Native installations use their configured FFmpeg when no packaged scorer is
+available. A missing scorer is visible in Developer and retains baseline; it
+never rejects saving the feature preference. Child cancellation waits for reap
+before releasing source, scratch or CPU ownership.
 
 ## 6. HDR-to-SDR calibration — autonomous reference and image evidence
 

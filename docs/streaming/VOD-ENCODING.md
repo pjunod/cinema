@@ -67,12 +67,14 @@ normalized request
    48 kHz sample clock. A seeked Matroska packet's millisecond timestamp
    cannot identify its exact decoded-sample ordinal: a tone/impulse join
    regression caught an eight-sample error in that attempted shortcut.
-5. **No reordered video across the boundary.** Encoded VOD requests closed
-   GOPs and disables B frames. This sacrifices some compression efficiency
-   to make random-access and decoder-time ownership explicit. A later
-   quality improvement can restore reordering only with production decode
-   tests proving that leading pictures, init identity, and every planned
-   boundary remain correct.
+5. **Prove the presentation grid.** Closed GOPs and zero B-frames remain
+   the default. The Developer setting can select two B-frames for software
+   x264, using signed version-1 composition offsets and a distinct frozen
+   rendition identity. Publication verifies decode and presentation anchors,
+   every unique frame slot, sample durations, random access, timescale and
+   absence of edit-list shifts. A leading picture cannot be hidden by a
+   matching total duration. See [the timeline contract](VOD-BFRAMES-TIMELINE-DESIGN.md)
+   for the supported recipe and remaining client/measurement evidence.
 
 ## Capacity belongs to a process, not a rendition
 

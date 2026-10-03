@@ -17,12 +17,15 @@ effort only. Whole-suite unit repair remains with the separate process.
 | Work | Current state | Cause and architectural direction |
 |---|---|---|
 | Independent workspace | Ready | `/private/tmp/plurx-video-quality-build-20261003`, cloned directly from Forgejo; no borrowed Git objects or access to Paul's checkout. |
-| Consolidated branch | Building | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`, based on `d17efeedf`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
+| Consolidated branch | Building | [PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766), `codex/video-quality-batch`; main `9416dbe89` integrated as `9c93f303f`; commit `6ef61fb1f` retains all three tool branches. PRs #760/#761/#762 are closed as superseded. |
 | Old per-task CI | Stopped | Encoder run 3936 passed; still-running C1/HDR runs 3938/3942 were cancelled after the workflow override. No additional per-task test campaigns. |
-| Content-aware runtime C2 | Implementing | Existing durable jobs/resource admission and offline/pretranscode snapshots; no analysis on Play and no generic complexity bias. |
-| Next episode | Implementing | Current web path discovers successor and builds its model only after ended; move bounded read-only resolution earlier within the existing playback lifecycle. Same-file prepared-replacement sessions are not a cross-episode owner. |
+| Content-aware runtime C2 | Integrated `8fd3bba7d`; cache-consumer integration finishing | Bounded measurements in existing durable producers, persisted source/recipe identities, offline snapshots and a packaged static scorer. Play never waits for analysis; cached output selection is being joined to the measured recipe. |
+| Next episode | Implemented `f632af81d` | Warm one successor metadata page during the final 30 seconds, cancel with the existing playback lifecycle, and retain a fresh authoritative decision at Play. Five regressions authored; hook passed. |
 | HLS acknowledgement batching | Implemented, validation deferred | Current pump allocates and schedules a separate channel acknowledgement for every 4 KiB despite 128 KiB storage reads; preserve the 4 KiB proof while reducing coordination, rather than weakening accounting. |
-| Remaining 2, 6, 3, 4 | Queued | Retain measured encoder baseline; presentation-grid B-frame work; one executable broader codec tuple; measured remaining startup critical path. |
+| Apply encoder calibration (2) | Retain baseline | QSV Q22 failed all six quality comparisons; no default change is justified. |
+| VOD B-frames (6) | Integrated `6a9599295` and Developer controls | Strict decode/presentation-grid publication, signed offsets and optional software x264 recipe; compile and hook passed, runtime/client evidence pending. |
+| Broader HDR (3) | Implemented `5a8356329` | Plain HDR10 VAAPI Main10 at 1080p with P010 upload and its own graph proof. Compile/hook passed; isolated m6 output qualification pending. |
+| Cold start (4) | Integrated `133be1706` | One sealed full source collection serves verification and decoder planning. Existing 5-second verification and 10-second refinement budgets remain separate; tests count one stream probe instead of two. PR #745 is integrated. |
 
 The agent's first pinned Rust 1.97.1 compile check in the independent clone
 passed. Package-only unused-item warnings are pre-existing; the normal
@@ -49,13 +52,17 @@ switch. Preserve delivery-proof granularity in the batching design.
 | Original checkout | Left untouched, including pre-existing uncommitted documents |
 | Production changes | None |
 
-## 2. First wave — three independently owned lanes
+## 2. Historical first wave — superseded task workflow
 
 | Lane | Owner | State | Evidence / next action |
 |---|---|---|---|
 | A: encoder calibration | `/root/encoder_calibration` | E1 implemented; [PR #762](http://192.168.4.7:3000/noirr/plurx/pulls/762) open into effort | Commit `1942cf0ca`; production-argument exporter and six-fixture QSV screen. 13 focused tests, 56 existing bench tests and tracked hook passed. QSV quality 22 fails the benefit gate; bitrate mode retained. |
 | B: content-aware encoding | `/root/content_aware` | C1 implemented; [PR #760](http://192.168.4.7:3000/noirr/plurx/pulls/760) open into effort | Initial commit `162418ab1` passed 13 local tests; Linux preflight exposed a same-timestamp source rewrite. Fix commit `d7e96b12c` requires final source rehash; 14 local tests, refreshed real smokes and the tracked hook passed. C2 durable/runtime integration remains unstarted. |
 | C: HDR-to-SDR images | `/root/hdr_calibration` | Implemented; [PR #761](http://192.168.4.7:3000/noirr/plurx/pulls/761) open into effort | Commit `f68e6cd0a`; four authored neutral PQ/HLG cases × three variants × eight frames inspected. Three focused tests and tracked hook passed. Complements existing S11 scorer. |
+
+These rows record the original lane state before consolidation. PRs #760,
+#761 and #762 are now closed with their implementation retained in #766;
+the current execution table above supersedes their gate and queue states.
 
 Coordinator owns docs, index, validation catalogue and shared integrations.
 Encoder lane reserved nynuc, but the immediate pre-run check found one active
@@ -93,9 +100,9 @@ effort or main, and no runner/action pin was changed to bypass the failure.
 | 1 | Next-episode preparation | Implemented in `f632af81d`; metadata only, fresh authoritative playback decision, regressions deferred. |
 | 2 | Apply qualified encoder policies / retain measured baseline | Retain bitrate: QSV Q22 failed every fixture quality comparison. No justified default change. |
 | 5 | HLS acknowledgement batching | Implemented in `157f31ab9`; 128 KiB coordination with unchanged 4 KiB proof. Hook passed; tests deferred. |
-| 6 | VOD B-frames | Building strict presentation-grid validation and a software reordered recipe with existing generation ownership. |
-| 3 | Broader codec/HDR output | Building plain HDR10 VAAPI Main10 at 1080p; m6 inventory confirms encoder/options, qualification remains pending. Does not extend Dolby processing or HDR subtitle burn. |
-| 4 | Remaining cold-start latency | Queued; reconcile PR #745 and descendants first |
+| 6 | VOD B-frames | Implemented `6a9599295`; Settings → Developer controls integrated. Runtime/client evidence remains pending. |
+| 3 | Broader codec/HDR output | Implemented plain HDR10 VAAPI Main10 at 1080p; m6 inventory confirms encoder/options, qualification remains pending. Does not extend Dolby processing or HDR subtitle burn. |
+| 4 | Remaining cold-start latency | Integrated `133be1706` after PR #745: one authoritative held-source collection removes the second stream FFprobe launch. Runtime validation remains deferred. |
 
 ## 4. Evidence interpretation
 

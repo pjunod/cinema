@@ -1,7 +1,7 @@
 # Encoded VOD B-frames — a timeline-contract design, not a flag
 
-**Status:** design contract complete; production remains no-reorder pending
-fleet and device evidence · **Executes:** Q2 / F-stream-2 (design item,
+**Status:** software implementation in PR #766; no-reorder remains the default
+while client and compression evidence is collected · **Executes:** Q2 / F-stream-2 (design item,
 M–L) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 §0, §3.1, §5.3 and the assessment's correction 2 · **Written:** 2026-09-20
@@ -45,9 +45,38 @@ version-1 `trun` composition offsets, the presentation-grid validator in
 §3.4 landing before any reordered recipe, and qualification per encoder
 family and client. Option B is rejected. No efficiency figure is credited
 until it is measured on this pipeline — the appendix's 10–20 % was withdrawn
-by §0 of the review as unmeasured here. Therefore the current nonzero-CTO
-refusal stays deployed while the measurement, compatibility and device rows
-in §5 remain blocked.
+by §0 of the review as unmeasured here. The video-quality batch implements Option A while retaining zero B-frames
+as the default. Operator enablement is advisory-only; every produced fragment
+still has to satisfy the strict publication contract.
+
+## Implementation continuation — 2026-10-03
+
+[PR #766](http://192.168.4.7:3000/noirr/plurx/pulls/766) implements the
+presentation-grid validator, parser-retained edit-list and raw `trun` facts,
+and an optional software x264 recipe. Settings → Developer → Reordered VOD
+frames saves `playback.vod_reorder_frames` as 0 or 2 without a readiness veto.
+The recipe freezes that value, includes it in rendition identity, and uses
+`+negative_cts_offsets` only for software H.264. Other encoder families retain
+their existing output. No watchdog or timing correction hides reordered PTS.
+
+The validator requires the planned timescale and decode anchor, absence of
+edit-list shifts, clean random access, exact frame durations/count, signed
+version-1 offsets when nonzero, and every unique presentation slot on the
+planned grid. The first random-access sample must present at the entry start:
+a complete permutation with an IDR later than its leading B pictures is still
+refused. Checked widened arithmetic precedes publication. AAC ownership and
+restart init identity remain unchanged.
+
+The common design oracle is now also consumed by parser-produced Rust tests.
+Additional cases cover raw wire shape, overflow and a falsely shifted IDR.
+An authored real-encode regression covers forward/backward restarts, identical
+init, independent segment decoding and joined audio/video continuity. Compiler
+checks and the normal hook passed at implementation; execution is deferred to
+the final batch review/fast lane. Physical-client qualification and compression
+measurements are separate evidence, not implied by compilation.
+
+Sections below retain the dated design rationale; this continuation supersedes
+statements that production source has no presentation-grid implementation.
 
 ## 2. Contract today
 
@@ -420,9 +449,9 @@ The candidate producer's box contract is:
    offset uses version 1 and the sample-composition-time-offset-present flag;
    each on-wire offset is a signed 32-bit `pts - dts`. Today's all-zero output
    may remain version 0. No `ctts` or per-generation init state is introduced.
-   This raw wire-shape rule is proved at B0 by direct box inspection. It is not
-   a runtime-validator claim while `Sample`/`Run` retain only the resolved CTO
-   and discard the raw `trun` version and presence flag.
+   The parser now retains the raw `trun` version and presence flag, so
+   publication checks the wire shape as well as the resolved CTO. Direct
+   inspection remains part of encoder qualification.
 4. `tfhd` and `trex` defaults remain legal. The validator operates on the
    parser's resolved sample durations, regardless of which box supplied each
    value. Every resolved video-sample duration must equal
@@ -430,9 +459,8 @@ The candidate producer's box contract is:
 5. `-use_editlist 0` remains. The selected video track must structurally lack
    `edts`/`elst`, so no presentation shift may repair a fragment after the
    fact. `moof`/`traf` are self-contained against the recipe's immutable
-   `moov`. Because current `Init` does not expose this fact, B2 must first add
-   parser-retained edit-list state and parser-produced positive and negative
-   tests; absence may not be inferred from argv.
+   `moov`. The parser now retains edit-list state on each track and the validator
+   refuses it; absence is not inferred from argv.
 6. All arithmetic is checked after widening to a signed type able to represent
    `u64 + u32 + i32` (an `i128` in the proposed Rust implementation). Overflow,
    a negative PTS, or a value outside the planned interval is a typed landing
