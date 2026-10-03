@@ -378,6 +378,21 @@ async fn receive_source<T>(
 
 const TABLES: &[TablePlan] = &[
     TablePlan {
+        name: "jellyfin_entity_ids",
+        columns: &[
+            "wire_id",
+            "entity_kind",
+            "native_id",
+            "incarnation",
+            "retired",
+        ],
+        order_by: "wire_id",
+        minimum_schema: 92,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "background_jobs",
         columns: &[
             "id",
