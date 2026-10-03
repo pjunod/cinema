@@ -52,7 +52,7 @@ mod qualification {
         let fixture = include_str!("../tests/fixtures/session-principal-local.sql");
         let (_, body) = fixture.split_once(';').expect("fixture's user insert");
         let future = chrono::Utc::now().timestamp_millis() + 3_600_000;
-        format!("{}\nUPDATE media_session_requests SET state='resolved',response_json='{{}}';\nUPDATE media_sessions SET state='ended',terminal_reason='operator-drain',drain_deadline_ms=NULL,lease_expires_at_ms={future};\nUPDATE media_session_preparations SET deadline_ms={future};\nUPDATE media_session_terminal_acks SET expires_at_ms={future};\nUPDATE job_leases SET expires_at_ms={future};\nUPDATE sharing_delivery_grants SET deadline_ms={future};",body.replace("'live'","'00000000-0000-4000-a000-000000000072'").replace("('ended',","('00000000-0000-4000-a000-000000000073',").replace("'staged'","'00000000-0000-4000-a000-000000000074'").replace("session:live","session:00000000-0000-4000-a000-000000000072"))
+        format!("{}\nUPDATE media_session_requests SET state='resolved',response_json='{{}}';\nUPDATE media_sessions SET state='ended',terminal_reason='admin_stop',drain_deadline_ms=NULL,lease_expires_at_ms={future};\nUPDATE media_session_preparations SET deadline_ms={future};\nUPDATE media_session_terminal_acks SET expires_at_ms={future};\nUPDATE job_leases SET expires_at_ms={future};\nUPDATE sharing_delivery_grants SET deadline_ms={future};",body.replace("'live'","'00000000-0000-4000-a000-000000000072'").replace("('ended',","('00000000-0000-4000-a000-000000000073',").replace("'staged'","'00000000-0000-4000-a000-000000000074'").replace("session:live","session:00000000-0000-4000-a000-000000000072"))
     }
 
     async fn snapshot(client: &Client) -> Result<Value> {
@@ -84,6 +84,33 @@ mod qualification {
             result.insert(table, json!({"columns":columns,"rows":rows}));
         }
         Ok(json!(result))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn terminal_retention_fixture_obeys_production_sqlite_constraints() {
+            let directory = tempfile::tempdir().expect("fixture directory");
+            let path = directory.path().join("plurx.db");
+            drop(SqliteStore::open(&path).expect("production schema"));
+            let connection = rusqlite::Connection::open(&path).expect("fixture connection");
+            connection.execute("INSERT INTO users (id, username, password_hash, is_admin, created_at) VALUES (1, 'owner', 'fixture-hash', 1, 1)", []).expect("daemon-owned user");
+            connection
+                .execute_batch(&fixture_sql())
+                .expect("retained fixture must obey real schema checks");
+            let ended: i64 = connection.query_row("SELECT COUNT(*) FROM media_sessions WHERE state='ended' AND terminal_reason='admin_stop' AND drain_deadline_ms IS NULL", [], |row| row.get(0)).expect("terminal inventory");
+            assert_eq!(ended, 2);
+            let unresolved: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM media_session_requests WHERE state != 'resolved'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("request inventory");
+            assert_eq!(unresolved, 0);
+        }
     }
 
     pub async fn run() -> Result<()> {
