@@ -78,7 +78,7 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
                 primary.number("width") != candidate.width.toLong()) throw IOException("Continuous family catalog binding")
             val hls = Net.json.decodeFromJsonElement<HlsStart>(requireNotNull(playback))
             if (hls.playlist_url != "/api/v1/hls/$session/master.m3u8" || !hls.vod) throw IOException("Continuous playback presentation")
-            return Start(hls.copy(quality_candidates = candidates), family, requireNotNull(quality.text("generation")),
+            return Start(hls.copy(quality_candidates = continuousQualityBoundCatalog(candidates, family)), family, requireNotNull(quality.text("generation")),
                 requireNotNull(quality.number("control_epoch")), schedule, requireNotNull(primary.text("rendition_id")), start)
         } catch (error: Exception) {
             if (session != null) withContext(NonCancellable) { withTimeoutOrNull(2000) {
@@ -89,4 +89,21 @@ internal class ContinuousEnrollment(origin: String, token: String) : AutoCloseab
         }
     }
     override fun close() = profile.close()
+}
+
+
+/** Costs describe the attached continuous presentation, including its shared soundtrack. */
+internal fun continuousQualityBoundCatalog(candidates: List<QualityCandidate>, family: JsonObject?): List<QualityCandidate> {
+    if (family == null) return candidates
+    val audio = family.obj("audio")?.number("peak_bps") ?: 0L
+    val costs = family.getValue("video").jsonArray.associate { value ->
+        val row = value.jsonObject
+        val video = row.number("peak_bps") ?: throw IOException("Continuous video delivery budget")
+        val peak = video + audio
+        if (video <= 0 || audio < 0 || peak !in 1..ContinuousQualityWire.MAX_SAFE_INTEGER) {
+            throw IOException("Continuous delivery budget bound")
+        }
+        requireNotNull(row.text("candidate_id")) to peak
+    }
+    return candidates.map { row -> costs[row.id]?.let { row.copy(peak_bps = it) } ?: row }
 }

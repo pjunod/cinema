@@ -3235,7 +3235,9 @@ class Controller internal constructor(
                     PlaybackQuality.Auto, target, selectionKey.third).decision
             } catch (_: Exception) { return@launch }
             if (controlObservationIsClosed || selectionKey != Triple(selectedAudio, selectedSubtitle, audioOffsetMs)) return@launch
-            if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog = fresh.quality_candidates
+            if (fresh.display_aware_auto_protocol == "route-v1") autoCatalog =
+                continuousAttachment?.takeIf { player === continuousPlayer }?.boundCatalog(fresh.quality_candidates)
+                    ?: fresh.quality_candidates
             // Only an attached-session receipt may change the active identity.
         }
     }

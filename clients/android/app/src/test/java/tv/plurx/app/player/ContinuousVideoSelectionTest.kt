@@ -121,4 +121,36 @@ class ContinuousVideoSelectionTest {
         assertSame(selected, binding.selection(definition))
     }
 
+    @Test fun continuousAutoCostsIncludeSharedAudioWithoutChangingCandidateIdentity() {
+        fun candidate(height: Int, raw: Long): tv.plurx.app.data.QualityCandidate {
+            val recipe = List(32) { height % 256 }
+            val hash = java.security.MessageDigest.getInstance("SHA-256")
+            hash.update("plurx:auto-quality-candidate:v1\u0000".toByteArray(Charsets.UTF_8))
+            val id = hash.digest(recipe.map { it.toByte() }.toByteArray()).take(16)
+                .joinToString("") { "%02x".format(it.toInt() and 255) }
+            return tv.plurx.app.data.QualityCandidate(id, recipe, "encode",
+                if (height == 720) 1280 else 1920, height, height, peak_bps = raw,
+                grade = "sdr", decoder_compatible = true, complete_cache = false, sustainable = true)
+        }
+        val raw = listOf(candidate(720, 6_160_000), candidate(1080, 12_160_000))
+        val family = buildJsonObject {
+            put("video", JsonArray(raw.mapIndexed { index, row -> buildJsonObject {
+                put("candidate_id", row.id); put("peak_bps", if (index == 0) 17_600_000 else 33_600_000)
+            } }))
+            put("audio", buildJsonObject { put("peak_bps", 199_734) })
+        }
+        val bound = continuousQualityBoundCatalog(raw, family)
+        assertEquals(17_799_734L, bound[0].peak_bps)
+        assertEquals(33_799_734L, bound[1].peak_bps)
+        assertTrue(bound.all { it.hasValidIdentity })
+        assertEquals(raw[0], bound[0].copy(peak_bps = raw[0].peak_bps))
+        assertEquals(6_160_000L, raw[0].peak_bps)
+        assertEquals(raw[0].id, autoRecoveryCandidate(raw, raw[1], emptySet(), 10_000_000.0)?.id)
+        assertNull(autoRecoveryCandidate(bound, bound[1], emptySet(), 10_000_000.0))
+        assertEquals(raw[0].id, autoRecoveryCandidate(bound, bound[1], emptySet(), 20_000_000.0)?.id)
+        assertSame(raw, continuousQualityBoundCatalog(raw, null))
+        val unrelated = candidate(144, 1_000_000)
+        assertSame(unrelated, continuousQualityBoundCatalog(listOf(unrelated), family).single())
+    }
+
 }

@@ -4679,3 +4679,34 @@ daemon remained alive. This is process evidence, not physical queue evidence.
 Its earlier observer could omit interim zombies; the new supervisor checks
 process comm and includes them. The retired disposable Mac Firefox profile
 was removed after checking no corresponding browser process remained.
+
+
+### 10.160 Android delivery budgets and the focused Firefox gap failure
+
+Android continuous enrollment had the same raw-catalog cost discrepancy.
+Enrollment and an active attachment's viewer-recipe catalog refresh now bind
+family candidates to video plus shared audio peaks. A closed attachment returns
+the raw catalog and unrelated candidates retain their original objects.
+The existing Android compiler loop was re-established before editing;
+production and test sources compiled successfully after the change in fifteen
+seconds. No unit tests executed.
+
+Authored, unrun regression:
+`clients/android/app/src/test/java/tv/plurx/app/player/ContinuousVideoSelectionTest.kt::continuousAutoCostsIncludeSharedAudioWithoutChangingCandidateIdentity`.
+It checks exact video/audio costs, unchanged valid recipe identities, raw-row
+immutability, unrelated routes, and the shipped recovery selector rejecting
+a link below the real continuous budget.
+
+The exact `d9c8acba3` Firefox rerun completed three manual transitions in one
+session, with no hitch or stall, but failed the first transition's 100.58 ms
+callback gap against the unchanged 100 ms limit. The other gaps were 83.82 ms
+and approximately 84 ms. One dropped frame was observed. Auto did not run
+because the manual-phase receipt failed, so the delivery-budget fix is not
+runtime-qualified. The failed receipt and 32 diagnostic media objects remain
+preserved; the supervisor removed its runtime.
+
+The committed helper now permits one manual transition as a focused diagnostic,
+followed by the same five actual Auto transitions and unchanged continuity
+checks. This narrows the next run to the failed early transition and pending
+Auto evidence. It does not replace the required fifteen-manual/five-Auto full
+campaign or relabel any old failure.

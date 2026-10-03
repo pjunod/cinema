@@ -135,6 +135,9 @@ internal class ContinuousAttachment(
         return registry.source(hls, selection) { periodReleaseRequested.set(true) }
     }
 
+    fun boundCatalog(candidates: List<tv.plurx.app.data.QualityCandidate>): List<tv.plurx.app.data.QualityCandidate> =
+        if (closed.get()) candidates else continuousQualityBoundCatalog(candidates, start.family)
+
     /** Call with the current buffered frontier, never the old tap position. */
     suspend fun change(row: JsonObject, positionMs: Long, automatic: Boolean, request: Long = 0): Boolean {
         if (closed.get() || row !in rows) return false
