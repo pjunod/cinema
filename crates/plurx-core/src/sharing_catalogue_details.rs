@@ -54,6 +54,22 @@ pub struct SourceFileWitness {
     projection: String,
 }
 impl SourceFileWitness {
+    /// Compare the complete Source tuple without exposing the private path,
+    /// probe or canonical revision projection.
+    pub fn matches_source_file(
+        &self,
+        server: Uuid,
+        epoch: Uuid,
+        library: &SourceId,
+        item: &SourceId,
+        file: &SourceId,
+    ) -> bool {
+        self.server == server
+            && self.epoch == epoch
+            && &self.library == library
+            && &self.item == item
+            && &self.file == file
+    }
     pub(crate) fn from_current_projection(
         server: Uuid,
         epoch: Uuid,

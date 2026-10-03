@@ -963,3 +963,34 @@ cargo check --locked -p plurx-core --all-targets --features hiqlite-contract-tes
 cargo clippy --locked -p plurx-core --all-targets --features hiqlite-contract-tests -- -D warnings
 cargo clippy --locked -p plurxd --all-targets -- -D warnings
 ```
+
+## Complete Source decision and prepared recipe
+
+The daemon now shares its actual file decision engine and recipe resolver
+between Local playback and a Source preparation adapter. Source preparation
+uses the current peer grant and viewer pseudonym as its canonical principal,
+requires the complete current file witness and catalogue revision, and rechecks
+both after planning. It supplies no Local account or LAN network prior. The
+opaque prepared result retains the actual file, full decision response, recipe,
+principal and fingerprint for the physical owner to consume.
+
+The focused preparation regression compares the complete Source response with
+the Local engine on the same file, distinguishes fingerprints for Local and two
+Shared viewers, rejects injected network priors, and refuses changed Source,
+epoch, library, revision, file metadata and private-library movement. It leaves
+media sessions empty. This proves preparation and recipe identity; the peer
+HTTP consumer, physical producer admission and B relay remain open.
+
+Pinned Rust 1.97.1 passed the preparation test (one test, zero ignored), all 62
+stream decision tests, and the three existing recipe regressions. Daemon
+all-target check and Clippy with denied warnings passed with
+`plurx-core/hiqlite-contract-tests`; the four documentation index tests passed.
+The focused commands were:
+
+```sh
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::shared_library::tests::sharing_source_preparation_uses_complete_live_file_and_real_principal_engine -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::stream::tests::
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_height_resolution_keeps_its_three_promises -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::the_intent_fingerprint_ignores_the_review -- --exact
+scripts/require-test-count cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --lib http::hls::tests::a_reviews_notes_reach_the_resolved_plan -- --exact
+```

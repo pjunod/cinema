@@ -4388,4 +4388,220 @@ mod tests {
         assert!(query(Some(&format!("cursor={}", "a".repeat(4097)))).is_err());
         assert!(query(Some("q=film&limit=60")).is_ok());
     }
+    #[tokio::test]
+    async fn sharing_source_preparation_uses_complete_live_file_and_real_principal_engine() {
+        use super::super::{
+            hls::{prepare_source_playback, CreateSession, SourcePlaybackTarget},
+            stream,
+        };
+        use plurx_core::{
+            sharing_catalogue_details::CatalogueRevisionKey,
+            store::sharing_catalogue_details::SourceDetailsRead,
+        };
+        let _serial = BODY_FIXTURES.lock().await;
+        let fixture = body_fixture().await;
+        let identity = fixture
+            .state
+            .store
+            .sharing_identity(1000)
+            .await
+            .expect("identity");
+        let envelope =
+            CatalogueRevisionKey::generate_sealed(&fixture.state.sharing.key, identity.clone())
+                .expect("fixture key");
+        let key =
+            CatalogueRevisionKey::open(&fixture.state.sharing.key, identity.clone(), &envelope)
+                .expect("open");
+        let source = fixture._directory.path().join("prepared.mp4");
+        std::fs::write(&source, b"actual source presence").expect("actual file");
+        let writer = rusqlite::Connection::open(&fixture.path).expect("writer");
+        writer
+            .execute_batch(
+                plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            )
+            .expect("fixture purpose schema");
+        writer
+            .execute(
+                "INSERT INTO sharing_catalogue_keys VALUES(1,?1,?2,?3)",
+                rusqlite::params![
+                    identity.server_id.to_string(),
+                    identity.catalogue_epoch.to_string(),
+                    envelope.as_stored()
+                ],
+            )
+            .expect("fixture purpose key");
+        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,duration_ms,container,video_codec,width,height,bit_depth,bitrate) VALUES(1,?1,?2,20,1000,60000,'mp4','h264',1920,1080,8,1000000)",rusqlite::params![fixture.item,source.to_str().expect("path")]).expect("actual Source file");
+        let hash = secret_hash(SecretDomain::Grant, &fixture.secret);
+        let SourceDetailsRead::Authorized(witness) = fixture
+            .state
+            .store
+            .source_item_file_witness(
+                &hash,
+                fixture.grant,
+                SourceId::parse(&fixture.item.to_string()).expect("valid Source fixture value"),
+                SourceId::parse("1").expect("valid Source fixture value"),
+            )
+            .await
+            .expect("witness")
+        else {
+            panic!("authorized witness")
+        };
+        let target = SourcePlaybackTarget {
+            server_id: identity.server_id,
+            catalogue_epoch: identity.catalogue_epoch,
+            library_id: SourceId::parse(&fixture.library.to_string())
+                .expect("valid Source fixture value"),
+            item_id: SourceId::parse(&fixture.item.to_string())
+                .expect("valid Source fixture value"),
+            file_id: SourceId::parse("1").expect("valid Source fixture value"),
+            revision: key.file_revision(&witness).expect("revision"),
+        };
+        let caps:plurx_core::playback::DeviceCaps=serde_json::from_value(json!({"v":2,"video":[{"codec":"h264","max_height":2160,"present":["sdr"]}],"audio":["aac"],"containers":["mp4"],"transports":["hls","progressive"]})).expect("caps");
+        let body = || {
+            serde_json::from_value::<CreateSession>(json!({"playback_id":"shared-player","request_id":"shared-request","copy":true,"height":1080,"quality_auto":false,"presentation":"vod","caps":caps})).expect("body")
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            format!("CinemaShare {}", fixture.secret.expose())
+                .parse()
+                .expect("valid Source fixture value"),
+        );
+        headers.insert(
+            "cinemashare-viewer",
+            "a".repeat(64).parse().expect("valid Source fixture value"),
+        );
+        let prepared = prepare_source_playback(&fixture.state, &headers, target.clone(), body())
+            .await
+            .expect("actual Source preparation");
+        assert_eq!(prepared.file().id, 1);
+        assert_eq!(prepared.file().path, source);
+        assert_eq!(prepared.principal().local_user_id(), None);
+        assert_eq!(prepared.decision().prior_kbps, None);
+        assert_eq!(
+            prepared.request().request_id.as_deref(),
+            Some("shared-request")
+        );
+        assert!(matches!(
+            prepared.request().kind,
+            crate::transcode::SessionKind::Copy { .. }
+        ));
+        assert_ne!(
+            prepared.fingerprint(),
+            prepared.request().durable_intent_fingerprint(
+                &plurx_core::playback_principal::PlaybackPrincipal::LocalUser { user_id: 1 }
+            )
+        );
+        let mut other_headers = headers.clone();
+        other_headers.insert(
+            "cinemashare-viewer",
+            "b".repeat(64).parse().expect("valid Source fixture value"),
+        );
+        let other = prepare_source_playback(&fixture.state, &other_headers, target.clone(), body())
+            .await
+            .expect("distinct Source viewer");
+        assert_ne!(
+            prepared.fingerprint(),
+            other.fingerprint(),
+            "equal numeric Source files and request IDs do not collapse distinct sharing viewers"
+        );
+        let prior = plurx_core::domain::NetworkPrior {
+            sustained_kbps: Some(1),
+            ..Default::default()
+        };
+        assert!(
+            super::super::hls::resolve_plan_for_principal(
+                super::super::hls::FilePlanInputs {
+                    snapshot: None,
+                    state: &fixture.state,
+                    file_id: 1,
+                    source: Some(prepared.file()),
+                    network_prior: Some(&prior)
+                },
+                prepared.principal(),
+                None,
+                body()
+            )
+            .await
+            .is_err(),
+            "Source planner refuses Local network-prior injection"
+        );
+        let user = fixture
+            .state
+            .store
+            .create_user("local-engine-fixture", "synthetic-hash", false)
+            .await
+            .expect("real local account");
+        let Json(local) = stream::decision(
+            super::super::extract::AuthUser(user),
+            State(fixture.state.clone()),
+            axum::extract::Path(1),
+            axum::extract::Query(stream::Caps {
+                caps_v2: Some(caps.clone()),
+                ..Default::default()
+            }),
+            HeaderMap::new(),
+            super::super::network::RemoteAddress(None),
+        )
+        .await
+        .expect("actual Local decision");
+        assert_eq!(serde_json::to_value(prepared.decision()).expect("valid Source fixture value"),serde_json::to_value(local).expect("valid Source fixture value"),"full actual engine decision parity, including source facts, tracks, delivery, quality candidates and ladder");
+        for changed in [
+            SourcePlaybackTarget {
+                server_id: uuid::Uuid::new_v4(),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                catalogue_epoch: uuid::Uuid::new_v4(),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                library_id: SourceId::parse(&fixture.private.to_string())
+                    .expect("valid Source fixture value"),
+                ..target.clone()
+            },
+            SourcePlaybackTarget {
+                revision: plurx_core::sharing_catalogue_details::FileRevision::parse(
+                    &"0".repeat(64),
+                )
+                .expect("valid Source fixture value"),
+                ..target.clone()
+            },
+        ] {
+            assert!(
+                prepare_source_playback(&fixture.state, &headers, changed, body())
+                    .await
+                    .is_err()
+            );
+        }
+        writer
+            .execute("UPDATE files SET mtime=2000 WHERE id=1", [])
+            .expect("real file revision changed");
+        assert!(
+            prepare_source_playback(&fixture.state, &headers, target.clone(), body())
+                .await
+                .is_err()
+        );
+        writer
+            .execute("UPDATE files SET mtime=1000 WHERE id=1", [])
+            .expect("restore snapshot");
+        writer
+            .execute(
+                "UPDATE items SET library_id=?1 WHERE id=?2",
+                rusqlite::params![fixture.private, fixture.item],
+            )
+            .expect("move outside grant");
+        assert!(
+            prepare_source_playback(&fixture.state, &headers, target, body())
+                .await
+                .is_err()
+        );
+        let sessions: i64 = writer
+            .query_row("SELECT count(*) FROM media_sessions", [], |row| row.get(0))
+            .expect("actual session rows");
+        assert_eq!(
+            sessions, 0,
+            "preparation allocates no physical or durable Source session"
+        );
+    }
 }
