@@ -68,6 +68,7 @@ pub(crate) trait Backend: Send + Sync {
     /// Optional candidate table. SQLite reads its shape and rows in one
     /// snapshot; Hiqlite currently requires coordinated schema/rewrap quiescence.
     async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError>;
+    async fn sharing_file_locator_key_rows(&self) -> Result<Vec<String>, StoreError>;
 }
 pub(super) const REVISION_KEY_COLUMNS_SQL: &str = "SELECT json_array(name,type,\"notnull\",pk) AS payload FROM pragma_table_info('sharing_catalogue_keys') ORDER BY cid";
 pub(super) const REVISION_KEY_ROWS_SQL: &str = "SELECT json_object('singleton',singleton,'server_id',substr(server_id,1,37),'catalogue_epoch',substr(catalogue_epoch,1,37),'envelope',CASE WHEN length(revision_envelope)<=4096 THEN revision_envelope ELSE NULL END,'source_matches',EXISTS(SELECT 1 FROM sharing_identity s WHERE s.singleton=1 AND s.server_id=sharing_catalogue_keys.server_id AND s.catalogue_epoch=sharing_catalogue_keys.catalogue_epoch)) AS payload FROM sharing_catalogue_keys LIMIT 2";
@@ -909,6 +910,9 @@ impl<T: Backend> SharingStore for T {
         }
         for envelope in revision_key_envelopes(self.sharing_revision_key_rows().await?)? {
             census.observe_envelopes("catalogue-revision", &[&envelope]);
+        }
+        for envelope in revision_key_envelopes(self.sharing_file_locator_key_rows().await?)? {
+            census.observe_envelopes("file-locator", &[&envelope]);
         }
         Ok(census)
     }

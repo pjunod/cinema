@@ -2764,6 +2764,22 @@ A verified locator identifies a reference; every use still needs current B
 viewer/import/assignment and Source grant/file authority, plus current B session
 delivery authority for media. No locator is exposed by current item details.
 
+**Durable key-read and census follow-up:** the optional candidate receiver key
+table now participates in the startup sealed-row census. Both backends bound
+its shape, identity and envelope reads; SQLite performs shape and data reads
+in one snapshot. Replicated activation/rewrap still requires coordinated
+quiescence, as with the existing catalogue-purpose key. These reads never
+initialize, repair or replace material. Missing material returns unavailable;
+partial tables, views, foreign identity, unsealed and oversized rows fail.
+
+Five locator regressions passed with zero ignored cases (0.60 seconds), including
+actual file-backed SQLite close/reopen, explicit master rewrap with an unchanged
+issued locator, and independent malformed-state refusals on memory and pooled
+stores. Pinned feature-enabled all-target check passed (28.16 seconds) and final
+denied-warning Clippy passed (32.37 seconds). This qualifies those SQLite reads
+and crypto only; the candidate table is uninstalled, and replicated key/restart,
+clone and complete activation qualification remain open.
+
 ### 16.7 S6 file-context integration foundation
 
 The verified parallel checkpoint `4865de285` is integrated after catalogue

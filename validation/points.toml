@@ -1159,6 +1159,8 @@ paths = [
   "crates/plurx-core/src/store/sharing_catalogue_details.rs",
   "crates/plurx-core/src/store/sharing_catalogue_schema.sql",
   "crates/plurx-core/src/store/sharing_catalogue_keys_schema.sql",
+  "crates/plurx-core/src/store/sharing_file_locators.rs",
+  "crates/plurx-core/src/store/sharing_file_locator_keys_schema.sql",
   "crates/plurx-core/src/store/item_identity_schema.sql",
   "crates/plurx-core/tests/store_contract/sharing_catalogue.rs",
   "crates/plurx-core/tests/store_contract/sharing_catalogue_source.rs",
