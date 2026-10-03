@@ -348,10 +348,6 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         Some(json!({})),
     )
     .await;
-    // Publish a new authenticated manifest revision before restarting. The
-    // recipient must recover its rotated credential to retrieve this revision;
-    // its retained active label cannot satisfy this assertion.
-    call(&client, &source, Method::PUT, "/api/v1/sharing/endpoints", Some(&source_token), Some(json!({"expected_revision":1,"endpoints":[{"ipv4":address.to_string(),"ts_fqdn":"source.fixture.ts.net","port":peer_port,"spki_sha256":source_pin}]}))).await;
     source.restart();
     recipient.restart();
     ready(&client, &mut source).await;
@@ -369,6 +365,10 @@ async fn sharing_separate_daemons_preserve_pending_pairing_and_rotation_across_r
         after["import"]["catalogue_epoch"],
         active["import"]["catalogue_epoch"]
     );
+    // Publish a new authenticated manifest revision after restarting. The
+    // recipient must recover its rotated credential to retrieve this revision;
+    // its retained active label cannot satisfy this assertion.
+    call(&client, &source, Method::PUT, "/api/v1/sharing/endpoints", Some(&source_token), Some(json!({"expected_revision":1,"endpoints":[{"ipv4":address.to_string(),"ts_fqdn":"source.fixture.ts.net","port":peer_port,"spki_sha256":source_pin}]}))).await;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let recovered = import_state(&client, &mut recipient, &recipient_token, "active").await;
