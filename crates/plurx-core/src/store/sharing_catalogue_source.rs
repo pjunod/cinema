@@ -12,6 +12,7 @@ use uuid::Uuid;
 /// Candidate only: runtime migrations remain coordinated with the session rebuild.
 pub const CANDIDATE_SCHEMA: &str = include_str!("sharing_catalogue_schema.sql");
 pub const CANDIDATE_ITEM_IDENTITY_SCHEMA: &str = include_str!("item_identity_schema.sql");
+pub const CANDIDATE_REVISION_KEY_SCHEMA: &str = include_str!("sharing_catalogue_keys_schema.sql");
 const REQUIRED_OBJECTS: &str = "'sharing_catalogue_binary_order','sharing_catalogue_children_order','sharing_catalogue_library_insert','sharing_catalogue_item_insert','sharing_catalogue_item_delete','sharing_catalogue_item_move','sharing_catalogue_item_sort','item_identity_watermark','item_identity_no_reuse','item_identity_observe'";
 const RECORD: &str = "json_object('item',json_object('item_id',cast(i.id AS TEXT),'library_id',cast(i.library_id AS TEXT),'parent_id',CASE WHEN i.parent_id IS NULL THEN NULL ELSE cast(i.parent_id AS TEXT) END,'kind',i.kind,'title',i.title,'sort_title',i.sort_title,'year',i.year,'overview',i.overview,'genres',json(i.genres),'season_number',i.season_number,'episode_number',i.episode_number),'boundary_sort_key',CASE WHEN i.parent_id IS NULL THEN i.sort_title ELSE printf('%010d:%010d:%s',coalesce(i.season_number,2147483647),coalesce(i.episode_number,2147483647),i.sort_title) END,'poster_filename',i.poster_path,'backdrop_filename',i.backdrop_path)";
 
@@ -57,7 +58,7 @@ pub trait SharingSourceCatalogueStore: Send + Sync {
         grant: Uuid,
     ) -> Result<Option<Vec<SourceLibrary>>, StoreError>;
 }
-async fn ready<T: Backend>(backend: &T) -> Result<(), StoreError> {
+pub(super) async fn ready<T: Backend>(backend: &T) -> Result<(), StoreError> {
     let rows=backend.sharing_read(&format!("SELECT json_quote(count(*)) AS payload FROM sqlite_master WHERE name IN ({REQUIRED_OBJECTS}) AND type IN ('index','trigger','table')"),vec![]).await?;
     if rows.first().map(String::as_str) != Some("10") {
         return Err(StoreError::Identity(
@@ -415,6 +416,9 @@ mod tests {
     }
     #[async_trait]
     impl Backend for ImportTransition<'_> {
+        async fn sharing_revision_key_rows(&self) -> Result<Vec<String>, StoreError> {
+            self.store.sharing_revision_key_rows().await
+        }
         async fn sharing_read(
             &self,
             sql: &str,

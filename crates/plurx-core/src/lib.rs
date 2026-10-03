@@ -43,6 +43,7 @@ pub mod secrets;
 pub mod segplan;
 pub mod sharing;
 pub mod sharing_catalogue;
+pub mod sharing_catalogue_details;
 pub mod sharing_dns;
 pub mod sharing_tls;
 pub mod store;

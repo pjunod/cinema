@@ -410,3 +410,223 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
         .record
         .is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_catalogue_revision_key_census_three_voters_refuses_partial_and_foreign_state() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("candidate client");
+    assert_eq!(
+        store
+            .sharing_sealed_census()
+            .await
+            .expect("legacy absence")
+            .sealed_rows(),
+        0
+    );
+    let identity = store.sharing_identity(1000).await.expect("source identity");
+    let key = plurx_core::secrets::CredentialKey::from_bytes([31; 32]);
+    let envelope = key
+        .seal_sharing(
+            plurx_core::secrets::SharingSecretPurpose::CatalogueRevision,
+            identity.server_id,
+            identity.catalogue_epoch,
+            "synthetic-stable-purpose-key",
+        )
+        .expect("sealed purpose key");
+    client
+        .execute(
+            plurx_core::store::sharing_catalogue_source::CANDIDATE_REVISION_KEY_SCHEMA,
+            hiqlite::params!(),
+        )
+        .await
+        .expect("candidate table only");
+    client
+        .execute(
+            "INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3)",
+            hiqlite::params!(
+                identity.server_id.to_string(),
+                identity.catalogue_epoch.to_string(),
+                envelope.as_stored()
+            ),
+        )
+        .await
+        .expect("fixture key seed");
+    assert_eq!(
+        store
+            .sharing_sealed_census()
+            .await
+            .expect("consistent purpose census")
+            .sealed_rows(),
+        1
+    );
+    client
+        .execute(
+            "UPDATE sharing_catalogue_keys SET server_id=$1",
+            hiqlite::params!(Uuid::new_v4().to_string()),
+        )
+        .await
+        .expect("foreign source corruption");
+    assert!(store.sharing_sealed_census().await.is_err());
+    client
+        .execute(
+            "UPDATE sharing_catalogue_keys SET server_id=$1,revision_envelope=$2",
+            hiqlite::params!(identity.server_id.to_string(), "x".repeat(4097)),
+        )
+        .await
+        .expect("oversized corruption");
+    assert!(store.sharing_sealed_census().await.is_err());
+    for sql in ["DROP TABLE sharing_catalogue_keys",
+        "CREATE TABLE sharing_catalogue_keys(singleton INTEGER,server_id TEXT,catalogue_epoch TEXT)"] {
+        client.execute(sql,hiqlite::params!()).await.expect("partial table fixture");
+    }
+    assert!(store.sharing_sealed_census().await.is_err());
+    for sql in ["DROP TABLE sharing_catalogue_keys",
+        "CREATE TABLE sharing_catalogue_keys(singleton INTEGER NOT NULL PRIMARY KEY,server_id TEXT NOT NULL,catalogue_epoch TEXT NOT NULL,revision_envelope TEXT NOT NULL)"] {
+        client.execute(sql,hiqlite::params!()).await.expect("excess shape fixture");
+    }
+    client
+        .execute(
+            "INSERT INTO sharing_catalogue_keys VALUES(1,$1,$2,$3),(2,$1,$2,$3)",
+            hiqlite::params!(
+                identity.server_id.to_string(),
+                identity.catalogue_epoch.to_string(),
+                envelope.as_stored()
+            ),
+        )
+        .await
+        .expect("excess row fixture");
+    assert!(store.sharing_sealed_census().await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_catalogue_file_witness_three_voters_binds_current_file_and_refuses_capacity() {
+    use plurx_core::{
+        secrets::CredentialKey,
+        sharing_catalogue_details::CatalogueRevisionKey,
+        store::{sharing_catalogue_details::SourceDetailsRead, SharingSourceDetailsStore},
+    };
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = hiqlite::Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("snapshot client");
+    let identity = store.sharing_identity(1000).await.expect("source identity");
+    let library = store
+        .create_library(&NewLibrary {
+            name: "Source files".into(),
+            kind: LibraryKind::Movies,
+            paths: vec![PathBuf::from("/synthetic")],
+            anime: false,
+        })
+        .await
+        .expect("library")
+        .id;
+    let grant = Uuid::new_v4();
+    let invitation = Uuid::new_v4();
+    store
+        .create_share_invitation(InvitationRecord {
+            id: invitation,
+            token_hash: "a".repeat(64),
+            library_ids: vec![library],
+            created_at_ms: 1000,
+            expires_at_ms: 2000,
+        })
+        .await
+        .expect("invite");
+    store
+        .claim_share(ShareClaim {
+            invitation_id: invitation,
+            invitation_hash: "a".repeat(64),
+            claim_id: Uuid::new_v4(),
+            grant_id: grant,
+            recipient_server_id: Uuid::new_v4(),
+            recipient_name: "synthetic".into(),
+            credential_hash: "b".repeat(64),
+            now_ms: 1001,
+        })
+        .await
+        .expect("claim");
+    store.approve_share(grant, 1, 1002).await.expect("approve");
+    for result in client
+        .txn(
+            candidate_statements()
+                .into_iter()
+                .chain(candidate_item_identity_statements())
+                .map(|sql| (sql, hiqlite::params!()))
+                .collect::<Vec<_>>(),
+        )
+        .await
+        .expect("candidate layout")
+    {
+        result.expect("layout statement");
+    }
+    client.execute("INSERT INTO items(id,library_id,kind,title,sort_title,added_at,updated_at) VALUES(9007199254740993,$1,'movie','Source movie','movie',1000,1000)",hiqlite::params!(library)).await.expect("durable movie");
+    client.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json,scanned_at) VALUES(9223372036854775807,9007199254740993,'/private/synthetic.mkv',20,1000,'synthetic exact probe',1000)",hiqlite::params!()).await.expect("file fixture");
+    let sealing = CredentialKey::from_bytes([17; 32]);
+    let envelope =
+        CatalogueRevisionKey::generate_sealed(&sealing, identity.clone()).expect("purpose key");
+    let key = CatalogueRevisionKey::open(&sealing, identity, &envelope).expect("purpose material");
+    let credential_hash = "b".repeat(64);
+    let read = || {
+        store.source_item_file_witness(
+            &credential_hash,
+            grant,
+            SourceId::parse("9007199254740993").expect("item"),
+            SourceId::parse("9223372036854775807").expect("file"),
+        )
+    };
+    let initial = match read().await.expect("current quorum snapshot") {
+        SourceDetailsRead::Authorized(w) => key.file_revision(&w).expect("revision"),
+        _ => panic!("authorized file expected"),
+    };
+    client
+        .execute(
+            "UPDATE files SET path='/private/changed.mkv'",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("file replacement");
+    let changed = match read().await.expect("fresh file snapshot") {
+        SourceDetailsRead::Authorized(w) => key.file_revision(&w).expect("new revision"),
+        _ => panic!("current file expected"),
+    };
+    assert_ne!(initial, changed);
+    client
+        .execute(
+            "UPDATE files SET probe_json=$1,downloaded_subtitles='malformed private JSON'",
+            hiqlite::params!("x".repeat(1048577)),
+        )
+        .await
+        .expect("oversized private snapshot");
+    assert!(matches!(
+        read().await.expect("quorum capacity short circuit"),
+        SourceDetailsRead::Capacity
+    ));
+    store
+        .share_scope(grant, 2, vec![], 1010)
+        .await
+        .expect("scope revoke");
+    assert!(matches!(
+        read().await.expect("current scope refuses"),
+        SourceDetailsRead::Unavailable
+    ));
+}

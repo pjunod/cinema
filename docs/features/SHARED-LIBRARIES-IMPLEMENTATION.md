@@ -2395,3 +2395,77 @@ no production schemas, network settings or installations are changed.
 Core/daemon all-target Clippy with `-D warnings` passed (1 minute 51 seconds,
 including compiler lock wait); docs-index tests passed. The tracked commit
 hook must also pass before this checkpoint is integrated.
+
+
+#### S4 stable file revisions and existing-key census (candidate, open)
+
+The cancellation checkpoint was integrated with the full principal-storage
+ancestry through `cac78a97e` and verified transport ancestry through
+`c99c3769e`; the resulting `139d30b` passed ten daemon catalogue/cancellation
+regressions (7.30 seconds), two actual-voter catalogue/allocator contracts
+(18.95 seconds), eight core catalogue units (3.16 seconds), all with zero
+ignored, plus feature-enabled core/daemon all-target denied-warning Clippy.
+Those results describe that frozen integration tree, not later additions.
+
+The [closed revision type](../../crates/plurx-core/src/sharing_catalogue_details.rs)
+contains a canonical 64-hex opaque file revision and a server-only file witness.
+The witness has no Serialize or Debug implementation; only a current-authorized
+Store query constructs its private canonical projection. The
+[Source witness reader](../../crates/plurx-core/src/store/sharing_catalogue_details.rs)
+correlates current grant, source/epoch, effective movie/show library,
+movie/episode item, file and import state in its actual query. It returns a
+closed authorized/unavailable/capacity outcome. Admission must regenerate the
+same persisted-column projection and compare the captured witness within its
+atomic write. A wire digest or an earlier read cannot authorize that write.
+
+The projection includes exact persisted path, size/mtime, selected media
+facts, streams, probe input, scan time, audio offset, DV and luminance values.
+Caption resource metadata participates; caption body bytes do not. S5 must
+revision the actual caption resources separately. Nested SQL CASE branches
+refuse oversized raw private fields and a serialized projection above 2 MiB
+before constructing the canonical witness; no truncation hides changes.
+These are single-file reads. The planned all-file detail query must also
+bound 64 files and aggregate private projection bytes at 8 MiB before
+materialization; that query and closed wire media facts remain open.
+
+File revisions derive an HMAC purpose from a stable random Source/epoch key.
+The [candidate key table](../../crates/plurx-core/src/store/sharing_catalogue_keys_schema.sql)
+seals that random material under the distinct CatalogueRevision context.
+Peer credential rotation does not change it, and replacing the sealing master
+rewraps the same material rather than replacing it. The cryptographic factory
+writes no database state; catalogue readers never initialize a missing key.
+Existing-key reads are bound to the requested Source and epoch and refuse
+absent, malformed or incompatible state.
+
+The startup sealed-row census includes this optional candidate table and
+refuses wrong object/column/type/nullability/primary-key shapes, excess rows,
+foreign Source/epoch bindings, malformed envelopes and oversized rows. SQLite
+reads table shape and rows in one read transaction. Hiqlite currently performs
+separate consistent reads; this is not an atomic schema/data snapshot.
+Coordinated schema creation and key rewrap must remain quiescent around its
+startup census and key selection. No runtime initializer is installed.
+
+Activation remains open: the qualified coordinator must provision the purpose
+key before publishing its marker, compose the Source capability floor and
+same-write intents, and preserve the key through backup/import. The earlier
+session coordinator receipt does not qualify this new table. File details,
+receiver caches, scoped artwork, receiver body authority and Continue Watching
+remain required S4 work; these revision primitives do not complete S4 or
+qualify Source playback admission.
+
+
+The revision checkpoint passed twelve focused core catalogue units (4.85
+seconds, zero ignored). The existing-key census and current-file witness each
+passed actual three-voter contracts (8.87 seconds each, zero ignored).
+The witness regression covers private file replacement, huge canonical IDs,
+capacity refusal before malformed caption JSON is evaluated and current scope
+removal. Memory/pooled tests also cover read-only absent-key refusal, wrong
+epoch, caption body exclusion and metadata revision changes. Feature-enabled
+core/daemon all-target Clippy with `-D warnings` passed (2 minutes 7 seconds,
+including compiler lock wait); docs-index tests passed.
+Commands: `cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--lib sharing_catalogue_`, and the same features with `--test store_contract`
+filtered to `sharing_catalogue_revision_key_census_three_voters_refuses_partial_and_foreign_state`
+and `sharing_catalogue_file_witness_three_voters_binds_current_file_and_refuses_capacity`.
+These are pinned Rust 1.97.1 results, with key provisioning confined to temporary
+fixtures. Production schemas, activation and Source advertisements remain unchanged.
