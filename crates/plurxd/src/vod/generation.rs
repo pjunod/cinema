@@ -138,8 +138,12 @@ pub(super) async fn spawn_generation(
             run_generation(shared, rendition, stdout, at, epoch),
             crate::ffmpeg::drain_diagnostics(stderr),
         );
-        if !diagnostic.trim().is_empty() {
-            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, %diagnostic, "VOD producer diagnostic");
+        let diagnostic = crate::ffmpeg::classify_diagnostic(&diagnostic);
+        if !diagnostic.informational.is_empty() {
+            tracing::debug!(target: "plurxd::vodserve", rendition = %key, generation = epoch, informational = %diagnostic.informational, "VOD producer informational output");
+        }
+        if !diagnostic.actionable.is_empty() {
+            tracing::warn!(target: "plurxd::vodserve", rendition = %key, generation = epoch, diagnostic = %diagnostic.actionable, "VOD producer diagnostic");
         }
     });
     tracing::info!(
