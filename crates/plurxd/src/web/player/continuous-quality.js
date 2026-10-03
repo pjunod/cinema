@@ -343,7 +343,11 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
       pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
     }
     if(!pin||pin.byte_length!==inspection.bytes.length||pin.timescale!==facts.timescale
-      ||pin.from_tick!==facts.from_tick||pin.through_tick!==facts.through_tick)throw new Error('Continuous fragment is not reserved');
+      ||pin.from_tick!==facts.from_tick||pin.through_tick!==facts.through_tick)throw new Error(
+        `Continuous ${found.type} fragment unreserved ${facts.from_tick}-${facts.through_tick}/${facts.timescale}`
+        +` bytes=${inspection.bytes.length}; pin=${pin?`${pin.from_tick}-${pin.through_tick}/${pin.timescale} bytes=${pin.byte_length}`:'missing'}`
+        +`; nearby=${pins().filter(row=>row.rendition_id===found.row.rendition_id).slice(-2)
+          .map(row=>`${row.from_tick}-${row.through_tick}`).join(',')}`);
     if(!current())throw new Error('Continuous media attachment ended');
     const recordKey=`${pin.rendition_id}:${artifact}`;
     let record=records.get(recordKey);

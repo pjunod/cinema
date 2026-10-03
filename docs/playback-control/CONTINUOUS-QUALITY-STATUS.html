@@ -5,16 +5,17 @@
 <p class="state"><strong>Incomplete — final adversarial review has not started.</strong>
 The human requests a stop immediately after that review for external Fable
 reviews, before fast-lane tests or merge.</p>
-<p><strong>Working now:</strong> preserving Plurx's manual quality authority
-after hls.js error recovery selected an unreserved 480p companion instead of
-the reserved 720p primary on <code>2237f12c1</code>. The controlled constructor
-now prevents the library from clearing that manual level. Bounded refusal
-history and steady-control debug logging retain the first failure. Startup
-remains unqualified pending the exact-source rerun. The Firefox 333 ms
-backward step and earlier 133.66 ms p95 failure remain open. No units have run.</p>
-<p><strong>Physical iOS:</strong> the user unlocked 17promax and a fresh isolated
-Linux-backed launch is underway for separate Plurx CQ Lab build 206. Physical
-playback remains unmeasured until its receipt exists. Production app settings
+<p><strong>Working now:</strong> tracing the first reservation mismatch. The
+<code>9ca90cf0f</code> rerun retained 720p through HLS error recovery, but still
+failed before its first frame on an unreserved fragment. Video load frontier
+advanced; no SourceBuffer was created. The refusal now distinguishes audio
+from video and names actual versus reserved tick/byte shapes. The Firefox
+333 ms backward step and earlier 133.66 ms p95 failure remain open. No units
+have run.</p>
+<p><strong>Physical iOS:</strong> the user unlocked 17promax; the fresh launch first
+failed the Apple remoteService connection, then its bounded retry ended Locked.
+No CQ Lab process launched. The isolated runtime was removed. Physical
+playback remains unmeasured for separate Plurx CQ Lab build 206. Production app settings
 and credentials were untouched.</p>
 <p><strong>Latest runtime result:</strong> the focused <code>c8484d19b</code>
 Chrome campaign passed three manual and five actual Auto changes, with at most

@@ -4478,3 +4478,28 @@ It exercises the shipped constructor configuration and the vendored error
 controller. No unit tests have run. Physical iOS launch is being retried after
 the human unlocked 17promax. Final adversarial review and the requested Fable
 stop remain ahead.
+
+
+### 10.151 Manual authority holds; first reservation mismatch remains
+
+The exact `9ca90cf0f` steady rerun retained start/load/next level 1 (720p),
+with no unreserved 480p fallback. It still failed before the first frame.
+The bounded observation history now identifies the first refusal as
+`Continuous fragment is not reserved`, preceding the later 503. Video load
+frontier advanced to film tick 23904/24; no SourceBuffer was created. The
+scheduled transaction had no append or presentation. This isolates an
+authorization mismatch instead of attributing startup to the library fallback.
+
+The refusal diagnostic now names track type, actual tick range, byte length,
+matched pin shape or absence, and two recent same-rendition pin ranges.
+Identity checks and refusal behavior remain intact. The failed JSON, JUnit,
+console, supervisor and bounded generated-media copies are retained. Its
+runtime was removed. Offline inspection of the previous control's captured
+video objects found increasing sample PTS and contiguous two-second ranges;
+those startup copies do not explain the later Firefox backward step.
+
+The fresh physical iOS launch first hit a remoteService XPC connection error;
+a bounded retry then ended Locked without confirming a CQ Lab process. Its
+server/proxy/runtime were cleaned up. The phone must remain awake through
+launch. Physical playback remains unmeasured; production was untouched.
+No units ran, and final adversarial review has not started.
