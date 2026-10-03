@@ -5,6 +5,7 @@ function clearLocalSession(expectedGeneration,notice){
   // captured bearer, never to whichever credential happens to be current now.
   if(expectedGeneration!==AUTH_GENERATION) return false;
   if(typeof sharingRetire==="function")sharingRetire();
+  if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
   stopLiveTv().catch(()=>{});
   clearLibraryChannelDraft(true);
   LIBRARY_CHANNEL_TUNE.stop();
@@ -121,6 +122,7 @@ function renderSetup(){
       if(p.value.length<8) throw new Error("Password must be at least 8 characters.");
       if(p.value!==p2.value){ p2.value=""; p2.focus(); throw new Error("Those two passwords don't match. Try again."); }
       const r=await api("/setup",{method:"POST",body:{username:u.value.trim(),password:p.value}});
+      if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
       refreshClientErrorReporterAuth(); location.hash="#/"; render();
     });
@@ -141,6 +143,7 @@ function renderLogin(){
      </details>`,
     "Sign in", async()=>{
       const r=await api("/auth/login",{method:"POST",body:{username:u.value.trim(),password:p.value,device:"Web"}});
+      if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
       refreshClientErrorReporterAuth(); location.hash="#/"; render();
     });

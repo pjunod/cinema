@@ -87,13 +87,20 @@ struct SharedLibraryClient {
         else { path = "shared/imports/\(library.importId)/libraries/\(library.libraryId)/items" }
         var query = [URLQueryItem(name: "q", value: q), URLQueryItem(name: "limit", value: "60")]
         if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
-        let page = try decode(SharedLibraryPage.self, await request(path, query: query))
-        try page.validate(in: library); return page
+        var page = try decode(SharedLibraryPage.self, await request(path, query: query))
+        try page.validate(in: library); try requireCurrent()
+        for index in page.items.indices { try page.items[index].bindArtwork(artworkSubject(page.items[index])) }; return page
     }
     func detail(_ reference: SharedPlaybackReference) async throws -> SharedLibraryDetail {
         try reference.validate()
-        let detail = try decode(SharedLibraryDetail.self, await request("shared/imports/\(reference.importId)/items/\(reference.itemId)"))
-        try detail.validate(expected: reference); return detail
+        var detail = try decode(SharedLibraryDetail.self, await request("shared/imports/\(reference.importId)/items/\(reference.itemId)"))
+        try detail.validate(expected: reference); try requireCurrent()
+        try detail.item.bindArtwork(artworkSubject(detail.item)); return detail
+    }
+    private func artworkSubject(_ item: SharedLibraryItem) throws -> SharedArtworkSubject {
+        try requireCurrent()
+        return SharedArtworkSubject(reference: item.reference, descriptors: item.art ?? [], poster: item.posterUrl,
+            backdrop: item.backdropUrl, origin: origin, token: token, generation: generation, configuration: transport.configuration)
     }
     func settings() async throws -> Bool { try decode(SharingSetting.self, await request("sharing/settings")).enabled }
     func save(enabled: Bool) async throws -> Bool {
@@ -107,4 +114,56 @@ struct SharedLibraryClient {
         return object
     }
     private struct SharingSetting: Decodable { let enabled: Bool }
+}
+
+/// Constructed only by the authenticated metadata client in this file.
+final class SharedArtworkSubject {
+    let reference: SharedPlaybackReference
+    let descriptors: [SharedArtworkDescriptor]
+    let poster: String?
+    let backdrop: String?
+    private let origin: String
+    private let token: String
+    let generation: UInt64
+    private let configuration: URLSessionConfiguration
+    fileprivate init(reference: SharedPlaybackReference, descriptors: [SharedArtworkDescriptor], poster: String?, backdrop: String?,
+                     origin: String, token: String, generation: UInt64, configuration: URLSessionConfiguration) {
+        self.reference = reference; self.descriptors = descriptors; self.poster = poster; self.backdrop = backdrop
+        self.origin = origin; self.token = token; self.generation = generation; self.configuration = configuration
+    }
+    func requireCurrent() throws {
+        let auth = Session.shared.playbackAuthorization
+        guard auth.origin == origin, auth.token == token, auth.generation == generation else { throw APIError.badURL }
+    }
+    var key: String { [origin, String(generation), reference.importId, reference.serverId, reference.catalogueEpoch, reference.libraryId, reference.itemId].joined(separator: "|") }
+    func descriptor(backdrop: Bool) throws -> SharedArtworkDescriptor? {
+        try requireCurrent()
+        let path = backdrop ? self.backdrop : poster
+        guard let path else { return nil }
+        return descriptors.first { $0.url == path && $0.kind == (backdrop ? "backdrop" : "poster") && $0.variant == (backdrop ? "w780" : "w300") }
+    }
+    func read(_ descriptor: SharedArtworkDescriptor) async throws -> SharedArtworkBytes {
+        try Task.checkCancellation(); try requireCurrent(); try descriptor.validate(reference: reference)
+        guard descriptors.contains(descriptor) else { throw APIError.badURL }
+        let admission = try SharedArtworkBudget.compressed.acquire(SharedArtworkBudget.assetLimit)
+        guard let url = URL(string: origin + descriptor.url) else { throw APIError.badURL }
+        var request = URLRequest(url: url); request.timeoutInterval = 30
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let plan = SharedArtworkRequest(request: request, configuration: configuration, admission: admission, current: { [self] in try requireCurrent() })
+        let reader = SharedArtworkReadOperation(plan: plan)
+        let result = try await reader.read()
+        try Task.checkCancellation(); try requireCurrent(); return SharedArtworkBytes(data: result.0, mime: result.1, admission: admission)
+    }
+}
+
+/// No caller can construct an arbitrary URL request plan outside this
+/// authenticated subject factory file.
+struct SharedArtworkRequest {
+    let request: URLRequest
+    let configuration: URLSessionConfiguration
+    let admission: SharedArtworkBudget.Lease
+    let current: () throws -> Void
+    fileprivate init(request: URLRequest, configuration: URLSessionConfiguration, admission: SharedArtworkBudget.Lease, current: @escaping () throws -> Void) {
+        self.request = request; self.configuration = configuration; self.admission = admission; self.current = current
+    }
 }

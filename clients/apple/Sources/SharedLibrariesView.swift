@@ -94,10 +94,13 @@ struct SharedLibraryItemsView: View {
                 if let error { Text(error).foregroundStyle(.secondary) }
                 ForEach(browse.items) { item in
                     NavigationLink { SharedLibraryDetailView(reference: item.reference, library: library) } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(item.title).font(.headline)
-                            Text([item.kind, item.year.map(String.init), library.sourceName].compactMap { $0 }.joined(separator: " · "))
-                                .font(.caption).foregroundStyle(.secondary)
+                        HStack(alignment: .top, spacing: 12) {
+                            SharedArtworkImage(subject: item.artworkSubject).frame(width: 72, height: 108).clipShape(RoundedRectangle(cornerRadius: 8))
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.title).font(.headline)
+                                Text([item.kind, item.year.map(String.init), library.sourceName].compactMap { $0 }.joined(separator: " · "))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     }
                 }
@@ -138,6 +141,7 @@ struct SharedLibraryDetailView: View {
                 if loading { ProgressView() }
                 if let error { Text(error).foregroundStyle(.secondary) }
                 if let detail {
+                    if detail.item.backdropUrl != nil { SharedArtworkImage(subject: detail.item.artworkSubject, backdrop: true).frame(maxWidth: 780).frame(height: 240) }
                     Text(detail.item.title).font(.title.bold())
                     Text([detail.item.kind, detail.item.year.map(String.init)].compactMap { $0 }.joined(separator: " · "))
                     if let overview = detail.item.overview { Text(overview) }
