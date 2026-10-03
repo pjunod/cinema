@@ -125,6 +125,7 @@
  * Quality ladder and adaptive bitrate
  * @property {any[]} [ladder]              the quality rungs on offer
  * @property {any[]|null} [qualityCandidates] source- and decoder-specific server catalog; null uses legacy rungs
+ * @property {{generation:string,control_epoch:number,schedule_url:string,family_url:string,family:any,primary_candidate_id:string,selection:any}|null} [continuousQualityBootstrap] attachment-owned continuous family enrollment
  * @property {string|null} [qualityCandidateId] the server-confirmed active route
  * @property {any} [continuousQuality] the reservation-bound continuous attachment
  * @property {any} [qualityRetainedSelection] the retained incumbent selection while a requested change waits
