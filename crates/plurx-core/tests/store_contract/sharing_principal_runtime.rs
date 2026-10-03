@@ -119,6 +119,39 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
             .await
             .expect("production desired replay");
         assert_eq!(unchanged_desired, changed_desired);
+        let recovery = recovery_request("runtime-epoch");
+        let reserved = store
+            .reserve_producer_recovery(&recovery, 100)
+            .await
+            .expect("production recovery reservation")
+            .expect("first recovery budget");
+        assert_eq!(reserved.principal, local);
+        assert_eq!(
+            store
+                .reserve_producer_recovery(&recovery, 110)
+                .await
+                .expect("recovery replay")
+                .expect("replayed budget"),
+            reserved
+        );
+        let settled = store
+            .settle_producer_recovery(
+                &local,
+                &recovery.playback_id,
+                &recovery.recovery_epoch,
+                &recovery.failed_incarnation_id,
+                plurx_core::domain::ProducerRecoveryState::Installed,
+                120,
+            )
+            .await
+            .expect("production recovery settlement")
+            .expect("settled recovery");
+        assert_eq!(settled.principal, local);
+        assert!(store
+            .reserve_producer_recovery(&recovery, 130)
+            .await
+            .expect("spent budget refusal")
+            .is_none());
         let fingerprint = "c".repeat(64);
         let claim = store
             .claim_media_session_request(
@@ -189,6 +222,39 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 &"a".repeat(64),
             )
             .expect("sharing principal");
+            client.execute("INSERT INTO media_session_producer_recovery(owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,playback_id,recovery_epoch,failed_incarnation_id,failed_producer_attempt,decision_sequence,failed_plan_digest,alternate_plan_digest,decode_restriction,state,created_at_ms,updated_at_ms) SELECT owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,playback_id,'shared-epoch',incarnation_id,1,1,$1,$2,NULL,'reserved',100,100 FROM media_sessions WHERE principal_kind='sharing'", hiqlite::params!("b".repeat(64), "c".repeat(64))).await.expect("two independent shared recovery fixture rows");
+            for grant_id in 1..=2 {
+                let grant = format!("00000000-0000-4000-a000-{grant_id:012}");
+                let principal = PlaybackPrincipal::sharing(
+                    uuid::Uuid::parse_str(&grant).expect("grant UUID"),
+                    &"a".repeat(64),
+                )
+                .expect("principal");
+                let ledger = store
+                    .producer_recovery_for_epoch(&principal, "playback", "shared-epoch")
+                    .await
+                    .expect("complete shared recovery reader")
+                    .expect("shared ledger");
+                assert_eq!(ledger.principal, principal);
+                assert_eq!(ledger.failed_incarnation_id, grant);
+                let mut refused = recovery.clone();
+                refused.principal = principal.clone();
+                assert!(store
+                    .reserve_producer_recovery(&refused, 160)
+                    .await
+                    .is_err());
+                assert!(store
+                    .settle_producer_recovery(
+                        &principal,
+                        "playback",
+                        "shared-epoch",
+                        &grant,
+                        plurx_core::domain::ProducerRecoveryState::Installed,
+                        160
+                    )
+                    .await
+                    .is_err());
+            }
             assert!(
                 store
                     .claim_media_session_request(
@@ -233,6 +299,13 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 )
                 .await
                 .is_err());
+            let mut absent_recovery = recovery_request("absent-epoch");
+            absent_recovery.principal = missing.clone();
+            assert!(store
+                .reserve_producer_recovery(&absent_recovery, 180)
+                .await
+                .expect("absent recovery owner refusal")
+                .is_none());
             let missing_claim = store
                 .claim_media_session_request(
                     &missing,
@@ -270,6 +343,11 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 .desired_selection(&local, "runtime-playback")
                 .await
                 .expect("deleted desired inventory")
+                .is_none());
+            assert!(store
+                .reserve_producer_recovery(&recovery_request("deleted-epoch"), 190)
+                .await
+                .expect("deleted recovery owner refusal")
                 .is_none());
             let deleted = store
                 .claim_media_session_request(

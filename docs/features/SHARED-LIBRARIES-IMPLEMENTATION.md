@@ -2014,3 +2014,18 @@ trigger restoration after forward migration. Production migrations are
 unchanged. Earlier v5/v27 checks also passed on the agent's exact committed
 fixture. This resolves the stale migration-filter failure above; the new
 schema is still uninstalled and Shared writer admission remains unfinished.
+
+The next integrated checkpoint adds the closed catalogue/session floor
+variants and replicated recovery reads and Local reservation/settlement
+writes. Complete recovery principals survive decoding; rebuilt writes use
+canonical owner keys and check the current Local user within their admission
+transaction. Shared reservation and settlement remain refused.
+
+On that combined tree, pinned all-target compilation passed (31.25 seconds),
+both actual-voter floor contracts passed (13.70 seconds), the rebuilt Local
+runtime contract passed (18.14 seconds), and all five producer-recovery
+contracts, including the repaired historical v32 fixture, passed
+(45.76 seconds). All tests had zero ignored cases. Feature Clippy with denied
+warnings passed (36.74 seconds); documentation indexing and catalog lint
+also passed. These checks do not qualify schema installation or Shared
+writer admission.

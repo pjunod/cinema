@@ -50,6 +50,27 @@ errors for incomplete or wrongly typed rows. Preparation replay additionally
 checks that the returned route belongs to the Local principal whose pointer
 was read; a corrupted pointer cannot disclose another principal's route.
 
+## Recovery budgets keep the complete principal
+
+Rebuilt Local recovery reservations explicitly provide the full principal
+projection, conflict on canonical owner/playback/epoch and require the current
+Local user inside the reservation write. Settlement addresses the same
+canonical budget and preserves the failed-incarnation and terminal-state
+fences. Original layouts retain the numeric key.
+
+Recovery reads accept valid typed principals, bound playback and epoch keys,
+select the complete stored projection, and compare it with the requested
+principal. Two grants using the same viewer/playback/epoch remain independent.
+Malformed ownership, metadata types and restriction bytes return errors. The
+common converter from `5f58ce919` now accepts the decoded principal rather
+than manufacturing a Local owner. Shared reservation and settlement still
+refuse before a write.
+
+The recovery contract filter passed 5/5 with zero ignored in 45.75 seconds,
+including the historical-v32 migration fixture corrected by `1af1a26e4`. The
+four runtime contracts cover single budget admission, racing identities,
+settlement fences and corrupt restriction refusal.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -65,7 +86,7 @@ literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
 This checkpoint addresses the request family; it is not a complete census
 closure or qualification of all seven ownership tables. Preparation,
-activation, commit/abort, recovery and their remaining
+activation, commit/abort and their remaining
 write predicates still need conversion and qualification.
 
 ## Exercise production behavior on three voters
@@ -91,7 +112,7 @@ cargo clippy --locked -p plurx-core --features hiqlite-contract-tests \
 ```
 
 **How to read it:** the focused voter regression passed 1/1 with zero ignored
-in 18.20 seconds using Rust 1.97.1. The two request decoder regressions and the incomplete
+in 18.14 seconds using Rust 1.97.1. The two request decoder regressions and the incomplete
 inventory/staged/desired decoder regression passed with zero ignored. All 28 existing local/replicated lifecycle contracts passed
 with zero ignored in 257.54 seconds. Denied-warning Clippy with
 `hiqlite-contract-tests` passed. These tests do not enable shared worker ingress, install

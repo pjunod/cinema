@@ -4701,14 +4701,19 @@ impl MediaSessionStore for HiqliteAuthStore {
         // violations, so a row the schema rejected would read back as absent
         // and this method would report a spent budget for a write that never
         // happened.
-        let sql = "INSERT INTO media_session_producer_recovery (
+        let layout = LocalSessionSql::load(self).await?;
+        let extra_columns = layout.insert_columns();
+        let extra_values = layout.insert_values(1);
+        let owner_column = layout.column();
+        let owner_exists = layout.existing_user(1);
+        let sql = format!("INSERT INTO media_session_producer_recovery (
                        user_id, playback_id, recovery_epoch, failed_incarnation_id,
                        failed_producer_attempt, decision_sequence, failed_plan_digest,
                        alternate_plan_digest, decode_restriction, state,
-                       created_at_ms, updated_at_ms)
-                   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $10)
-                   ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING";
-        validate_sql(sql)?;
+                       created_at_ms, updated_at_ms{extra_columns})
+                   SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', $10, $10{extra_values} WHERE 1 = 1{owner_exists}
+                   ON CONFLICT ({owner_column}, playback_id, recovery_epoch) DO NOTHING");
+        validate_sql(&sql)?;
         // One conditional insert, then a linearizable read. The affected-row
         // count cannot be the answer here: a Hiqlite proposal that reports
         // zero rows may have lost to a competing identity *or* be this
@@ -4742,7 +4747,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .map_err(database_error)?;
         let Some(existing) = recovery_row(
             self,
-            crate::store::local_media_principal_id(&request.principal)?,
+            &request.principal,
             &request.playback_id,
             &request.recovery_epoch,
         )
@@ -4804,12 +4809,16 @@ impl MediaSessionStore for HiqliteAuthStore {
         // knows the three key fields can spend somebody else's live
         // reservation, and the owner's own settle would then read back a
         // terminal state it did not write.
-        let sql = "UPDATE media_session_producer_recovery
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_predicate = layout.equals(3);
+        let sql = format!(
+            "UPDATE media_session_producer_recovery
                       SET state = $1, updated_at_ms = $2
-                    WHERE user_id = $3 AND playback_id = $4 AND recovery_epoch = $5
+                    WHERE {owner_predicate} AND playback_id = $4 AND recovery_epoch = $5
                       AND failed_incarnation_id = $6
-                      AND state = 'reserved'";
-        validate_sql(sql)?;
+                      AND state = 'reserved'"
+        );
+        validate_sql(&sql)?;
         self.client()
             .execute(
                 sql,
@@ -4824,7 +4833,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await
             .map_err(database_error)?;
-        Ok(recovery_row(self, user_id, playback_id, recovery_epoch)
+        Ok(recovery_row(self, principal, playback_id, recovery_epoch)
             .await?
             .filter(|row| row.state == state && row.failed_incarnation_id == failed_incarnation_id))
     }
@@ -4835,9 +4844,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
-        recovery_row(self, user_id, playback_id, recovery_epoch).await
+        if !principal.valid_admission_shape()
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || recovery_epoch.is_empty()
+            || recovery_epoch.len() > 128
+        {
+            return Err(StoreError::Task(
+                "invalid recovery principal or epoch key".into(),
+            ));
+        }
+        recovery_row(self, principal, playback_id, recovery_epoch).await
     }
 
     async fn validation_corrupt_recovery_restriction(
@@ -4848,10 +4865,14 @@ impl MediaSessionStore for HiqliteAuthStore {
         stored: &str,
     ) -> Result<bool, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
-        let sql = "UPDATE media_session_producer_recovery
+        let layout = LocalSessionSql::load(self).await?;
+        let owner_predicate = layout.equals(2);
+        let sql = format!(
+            "UPDATE media_session_producer_recovery
                       SET decode_restriction = $1
-                    WHERE user_id = $2 AND playback_id = $3 AND recovery_epoch = $4";
-        validate_sql(sql)?;
+                    WHERE {owner_predicate} AND playback_id = $3 AND recovery_epoch = $4"
+        );
+        validate_sql(&sql)?;
         let changed = self
             .client()
             .execute(
@@ -4870,9 +4891,10 @@ impl MediaSessionStore for HiqliteAuthStore {
 }
 
 /// The ledger row as it is stored. Read into this first and validated after,
-/// because a row mapper cannot fail — and a `decode_restriction` that will not
-/// parse has to be a refusal rather than a `None`.
-struct RecoveryRow {
+/// with a fallible mapped result. A malformed ownership projection or a
+/// `decode_restriction` that will not parse is a refusal rather than a `None`.
+struct RecoveryState {
+    principal: crate::playback_principal::PlaybackPrincipal,
     failed_incarnation_id: String,
     failed_producer_attempt: i64,
     decision_sequence: i64,
@@ -4884,19 +4906,30 @@ struct RecoveryRow {
     updated_at_ms: i64,
 }
 
+struct RecoveryRow(Result<RecoveryState, StoreError>);
+
 impl From<&mut Row<'_>> for RecoveryRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            failed_incarnation_id: row.get("failed_incarnation_id"),
-            failed_producer_attempt: row.get("failed_producer_attempt"),
-            decision_sequence: row.get("decision_sequence"),
-            failed_plan_digest: row.get("failed_plan_digest"),
-            alternate_plan_digest: row.get("alternate_plan_digest"),
-            decode_restriction: row.get("decode_restriction"),
-            state: row.get("state"),
-            created_at_ms: row.get("created_at_ms"),
-            updated_at_ms: row.get("updated_at_ms"),
-        }
+        Self((|| {
+            Ok(RecoveryState {
+                principal: decode_session_principal(row)?,
+                failed_incarnation_id: row
+                    .try_get("failed_incarnation_id")
+                    .map_err(database_error)?,
+                failed_producer_attempt: row
+                    .try_get("failed_producer_attempt")
+                    .map_err(database_error)?,
+                decision_sequence: row.try_get("decision_sequence").map_err(database_error)?,
+                failed_plan_digest: row.try_get("failed_plan_digest").map_err(database_error)?,
+                alternate_plan_digest: row
+                    .try_get("alternate_plan_digest")
+                    .map_err(database_error)?,
+                decode_restriction: row.try_get("decode_restriction").map_err(database_error)?,
+                state: row.try_get("state").map_err(database_error)?,
+                created_at_ms: row.try_get("created_at_ms").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
@@ -4906,31 +4939,50 @@ const RECOVERY_COLS: &str = "failed_incarnation_id, failed_producer_attempt, dec
 
 async fn recovery_row(
     store: &HiqliteAuthStore,
-    user_id: i64,
+    principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
 ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
+    let owner_column = layout.column();
+    let principal_columns = layout.projection();
+    let bindings = if layout.rebuilt {
+        params!(
+            principal.owner_key(),
+            playback_id.to_owned(),
+            recovery_epoch.to_owned()
+        )
+    } else {
+        params!(
+            crate::store::local_media_principal_id(principal)?,
+            playback_id.to_owned(),
+            recovery_epoch.to_owned()
+        )
+    };
     let sql = format!(
-        "SELECT {RECOVERY_COLS} FROM media_session_producer_recovery
-          WHERE user_id = $1 AND playback_id = $2 AND recovery_epoch = $3"
+        "SELECT {principal_columns}, {RECOVERY_COLS} FROM media_session_producer_recovery
+          WHERE {owner_column} = $1 AND playback_id = $2 AND recovery_epoch = $3"
     );
     validate_sql(&sql)?;
     let Some(row) = store
         .client()
-        .query_consistent_map::<RecoveryRow, _>(
-            sql,
-            params!(user_id, playback_id.to_owned(), recovery_epoch.to_owned()),
-        )
+        .query_consistent_map::<RecoveryRow, _>(sql, bindings)
         .await?
         .into_iter()
         .next()
     else {
         return Ok(None);
     };
+    let row = row.0?;
+    if &row.principal != principal {
+        return Err(StoreError::Task(
+            "recovery owner does not match requested principal".into(),
+        ));
+    }
     // Converted through the shared reader, so that identical stored bytes
     // produce an identical typed answer on both backends.
     crate::store::recovery_reservation_from_row(
-        crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        row.principal,
         playback_id,
         recovery_epoch,
         row.failed_incarnation_id,
@@ -5439,6 +5491,7 @@ mod sharing_route_decoder_tests {
             assert!(OwnedLeaseRow::from(&mut make_row()).0.is_err());
             assert!(StagedRow::from(&mut make_row()).0.is_err());
             assert!(PrincipalDesiredRow::from(&mut make_row()).0.is_err());
+            assert!(RecoveryRow::from(&mut make_row()).0.is_err());
         }
     }
 }
