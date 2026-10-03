@@ -1,6 +1,6 @@
 # Video quality programme — measured improvements and their build order
 
-**Status:** approved scope; documentation merge and first three lanes pending
+**Status:** plan merged as PR #758; first three implementation lanes active
 · **Written:** 2026-10-02 · **Source census:** `4fa50b79e`
 
 Companion to [the execution ledger](VIDEO-QUALITY-STATUS.md), which records
