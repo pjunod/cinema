@@ -4099,3 +4099,39 @@ at 900 s without an element seek, and no restart for a fenced owner. The
 transport regression checks the destination is recorded before demand is
 reported. Production and test-source JavaScript syntax checks passed. No
 unit tests executed; exact committed-source runtime qualification is open.
+
+
+### 10.137 Current transport stages pass; initial callback gap remains failed
+
+Committed source `a5476334f` passed the normal hook (26.15 s) and the
+source-only Linux build (3m04s). Its targeted runtime receipt retained the
+failed steady precondition rather than turning recovery into a green result:
+initial frame-callback gap 500 ms against the 250 ms bound. Diagnostic
+continuation then completed rapid choices across pause/resume and the pending
+1080p cold seek to 900 s with empty stage error lists. Both stages retained
+session `c767311b-fadf-40d9-a681-d7c5a9a03e22` and player generation 3; the seek
+presented at its destination in approximately 3.134 s. This qualifies those
+measured transport operations only, not the complete case or physical output.
+
+End census verified the same owned daemon executable before and after End.
+Two children before End became zero at the immediate, one-, three- and
+five-second samples. This is FFmpeg process retirement evidence, not device
+queue, display or audible-output retirement. The Activity attestation was
+explicitly warmed before playback (767 ms). No unit tests executed.
+
+Native Safari's four-minute generated autonomous fixture now supplies an
+actual pressure downgrade: initial 720p, then 1080p, then 720p at film time
+42 s. The trace ended at 240.004 s with 5,760 frame callbacks, a 100 ms maximum
+callback gap, one video track, one audio track and no media error. Waiting
+occurred only at startup; the network stalled event followed end of playback.
+The low link was 2,289,996 bit/s, derived from the actual fixture envelopes.
+All media requests finished before the planned restoration at 220 s, so no
+restorative upgrade was measured. This remains fixture mechanics evidence;
+production native Auto enrollment and physical display/audio are unqualified.
+The Mac was unlocked and native input succeeded.
+
+The native experiment tab triggered the user's Live TV page's existing
+background-stop behavior. Both owned tabs and the fixture server were closed.
+An attempted restoration stopped when a fresh UI observation showed the user
+had navigated to their TV library; further automation must not override that
+navigation. Future native experiments require a separate owned window.
