@@ -1974,3 +1974,21 @@ which failed during its synthetic downgrade because a newer background
 projection trigger referenced a column being dropped. That fixture needs
 repair; this is not a passing full filter or migration qualification. Shared
 recovery SQL, schema installation and admission remain open.
+
+
+**SQLite recovery ownership checkpoint:** rebuilt recovery reservations use
+canonical owner keys and persist the complete Local projection. Reservation
+checks real user existence in its transaction. Replay returns the same budget;
+another failed incarnation receives none, and settling the budget prevents
+reuse. Recovery reads decode complete persisted principals and isolate two
+grants sharing the same playback/epoch; another viewer receives no row. Shared
+reservation writes remain refused while authority admission is unfinished.
+The focused rebuilt regression passed in memory and pooled SQLite (one test,
+zero ignored, 0.73 seconds); the four existing recovery behavior regressions
+passed on SQLite and actual three voters (zero ignored, 37.88 seconds). The
+older-schema migration fixture remains separately under repair.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_recovery_rebuilt_keys_preserve_grants_and_one_local_budget -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract producer_recovery_ -- --skip replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open --nocapture
+```

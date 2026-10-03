@@ -3912,6 +3912,26 @@ impl MediaSessionStore for SqliteStore {
         let decision_sequence = crate::store::checked_recovery_counter(request.decision_sequence)?;
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let rebuilt = route_projection(&tx)? == PRINCIPAL_ROUTE_COLS;
+            let user_id = crate::store::local_media_principal_id(&request.principal)?;
+            if rebuilt
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM users WHERE id=?1)",
+                    [user_id],
+                    |row| row.get::<_, bool>(0),
+                )?
+            {
+                return Ok(None);
+            }
+            let (owner_columns, owner_values, conflict) = if rebuilt {
+                (
+                    "owner_key, principal_kind, share_grant_id, share_viewer_key,",
+                    "('local:' || ?1), 'local', NULL, NULL,",
+                    "owner_key, playback_id, recovery_epoch",
+                )
+            } else {
+                ("", "", "user_id, playback_id, recovery_epoch")
+            };
             // One conditional insert. A read followed by an insert is the race
             // that grants two nodes the same budget, and it looks correct in
             // every single-threaded test.
@@ -3922,13 +3942,15 @@ impl MediaSessionStore for SqliteStore {
             // this method would report a spent budget for a write that never
             // happened. Only the primary-key collision is meant to be silent.
             tx.execute(
-                "INSERT INTO media_session_producer_recovery (
-                     user_id, playback_id, recovery_epoch, failed_incarnation_id,
+                &format!(
+                    "INSERT INTO media_session_producer_recovery (
+                     {owner_columns} user_id, playback_id, recovery_epoch, failed_incarnation_id,
                      failed_producer_attempt, decision_sequence, failed_plan_digest,
                      alternate_plan_digest, decode_restriction, state,
                      created_at_ms, updated_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'reserved', ?10, ?10)
-                 ON CONFLICT (user_id, playback_id, recovery_epoch) DO NOTHING",
+                 VALUES ({owner_values} ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'reserved', ?10, ?10)
+                 ON CONFLICT ({conflict}) DO NOTHING"
+                ),
                 params![
                     crate::store::local_media_principal_id(&request.principal)?,
                     request.playback_id,
@@ -3948,7 +3970,7 @@ impl MediaSessionStore for SqliteStore {
             // somebody else's decision.
             let existing = read_recovery_row(
                 &tx,
-                crate::store::local_media_principal_id(&request.principal)?,
+                &request.principal,
                 &request.playback_id,
                 &request.recovery_epoch,
             )?;
@@ -4005,6 +4027,7 @@ impl MediaSessionStore for SqliteStore {
         }
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            let owner = local_owner_predicate(route_projection(&tx)? == PRINCIPAL_ROUTE_COLS, 3);
             tx.execute(
                 // Numbered in text order to match the replicated twin exactly.
                 // Hiqlite refuses a statement whose placeholders first appear
@@ -4014,11 +4037,13 @@ impl MediaSessionStore for SqliteStore {
                 // The incarnation predicate is the fence: without it, anything
                 // that knows the three key fields can spend somebody else's
                 // live reservation.
-                "UPDATE media_session_producer_recovery
+                &format!(
+                    "UPDATE media_session_producer_recovery
                     SET state = ?1, updated_at_ms = ?2
-                  WHERE user_id = ?3 AND playback_id = ?4 AND recovery_epoch = ?5
+                  WHERE {owner} AND playback_id = ?4 AND recovery_epoch = ?5
                     AND failed_incarnation_id = ?6
-                    AND state = 'reserved'",
+                    AND state = 'reserved'"
+                ),
                 params![
                     state.as_str(),
                     now_ms,
@@ -4028,7 +4053,12 @@ impl MediaSessionStore for SqliteStore {
                     failed_incarnation_id
                 ],
             )?;
-            let settled = read_recovery_row(&tx, user_id, &playback_id, &recovery_epoch)?;
+            let settled = read_recovery_row(
+                &tx,
+                &crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+                &playback_id,
+                &recovery_epoch,
+            )?;
             tx.commit()?;
             Ok(settled.filter(|row| {
                 row.state == state && row.failed_incarnation_id == failed_incarnation_id
@@ -4043,13 +4073,21 @@ impl MediaSessionStore for SqliteStore {
         playback_id: &str,
         recovery_epoch: &str,
     ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
-        let user_id = crate::store::local_media_principal_id(principal)?;
-        let (user_id, playback_id, recovery_epoch) =
-            crate::store::validated_epoch_key(user_id, playback_id, recovery_epoch)?;
+        if !principal.valid_admission_shape()
+            || playback_id.is_empty()
+            || playback_id.len() > 128
+            || recovery_epoch.is_empty()
+            || recovery_epoch.len() > 128
+        {
+            return Err(StoreError::Task(
+                "invalid producer recovery identity".to_owned(),
+            ));
+        }
+        let principal = principal.clone();
+        let playback_id = playback_id.to_owned();
+        let recovery_epoch = recovery_epoch.to_owned();
         self.with_conn(move |conn| {
-            // A read, so no transaction: the connection mutex already
-            // serializes this against every write in the store.
-            read_recovery_row(conn, user_id, &playback_id, &recovery_epoch)
+            read_recovery_row(conn, &principal, &playback_id, &recovery_epoch)
         })
         .await
     }
@@ -4068,10 +4106,13 @@ impl MediaSessionStore for SqliteStore {
             stored.to_owned(),
         );
         self.with_conn(move |conn| {
+            let owner = local_owner_predicate(route_projection(conn)? == PRINCIPAL_ROUTE_COLS, 2);
             let changed = conn.execute(
-                "UPDATE media_session_producer_recovery
+                &format!(
+                    "UPDATE media_session_producer_recovery
                     SET decode_restriction = ?1
-                  WHERE user_id = ?2 AND playback_id = ?3 AND recovery_epoch = ?4",
+                  WHERE {owner} AND playback_id = ?3 AND recovery_epoch = ?4"
+                ),
                 params![stored, user_id, playback_id, recovery_epoch],
             )?;
             Ok(changed > 0)
@@ -4082,27 +4123,61 @@ impl MediaSessionStore for SqliteStore {
 
 /// One ledger row, or nothing.
 ///
-/// The row mapper is deliberately infallible: it reads the columns into their
-/// stored types and nothing else. Validation happens afterwards, through the
-/// converter both backends share, so that a `decode_restriction` this build
+/// The row mapper validates the complete stored principal before returning
+/// a ledger row. Payload validation happens afterwards through the converter
+/// both backends share, so that a `decode_restriction` this build
 /// cannot parse produces the *same* typed refusal here as it does on the
 /// replicated store rather than a `rusqlite` conversion failure that reaches
 /// the caller as a database error.
 fn read_recovery_row(
     conn: &rusqlite::Connection,
-    user_id: i64,
+    principal: &crate::playback_principal::PlaybackPrincipal,
     playback_id: &str,
     recovery_epoch: &str,
 ) -> Result<Option<crate::domain::ProducerRecoveryReservation>, StoreError> {
+    let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+    let (projection, owner, identity) = if rebuilt {
+        (
+            "owner_key, principal_kind, user_id, share_grant_id, share_viewer_key",
+            "owner_key",
+            rusqlite::types::Value::Text(principal.owner_key()),
+        )
+    } else {
+        (
+            "('local:' || user_id), 'local', user_id, NULL, NULL",
+            "user_id",
+            rusqlite::types::Value::Integer(crate::store::local_media_principal_id(principal)?),
+        )
+    };
     let row = conn
         .query_row(
-            "SELECT failed_incarnation_id, failed_producer_attempt, decision_sequence,
+            &format!(
+                "SELECT failed_incarnation_id, failed_producer_attempt, decision_sequence,
                     failed_plan_digest, alternate_plan_digest, decode_restriction, state,
-                    created_at_ms, updated_at_ms
+                    created_at_ms, updated_at_ms, {projection}
                FROM media_session_producer_recovery
-              WHERE user_id = ?1 AND playback_id = ?2 AND recovery_epoch = ?3",
-            params![user_id, playback_id, recovery_epoch],
+              WHERE {owner} = ?1 AND playback_id = ?2 AND recovery_epoch = ?3"
+            ),
+            params![identity, playback_id, recovery_epoch],
             |row| {
+                let owner_key: String = row.get(9)?;
+                let kind: String = row.get(10)?;
+                let grant: Option<String> = row.get(12)?;
+                let viewer: Option<String> = row.get(13)?;
+                let decoded = crate::playback_principal::PlaybackPrincipal::from_projection(
+                    &kind,
+                    row.get(11)?,
+                    grant.as_deref(),
+                    viewer.as_deref(),
+                    &owner_key,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        9,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
@@ -4113,6 +4188,7 @@ fn read_recovery_row(
                     row.get::<_, String>(6)?,
                     row.get::<_, i64>(7)?,
                     row.get::<_, i64>(8)?,
+                    decoded,
                 ))
             },
         )
@@ -4127,12 +4203,16 @@ fn read_recovery_row(
         state,
         created_at_ms,
         updated_at_ms,
+        decoded,
     )) = row
     else {
         return Ok(None);
     };
+    if decoded != *principal {
+        return Ok(None);
+    }
     crate::store::recovery_reservation_from_row(
-        crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
+        decoded,
         playback_id,
         recovery_epoch,
         failed_incarnation_id,
@@ -4334,6 +4414,149 @@ mod sharing_route_decoder_tests {
                 .desired_selection(&first, "playback")
                 .await
                 .expect("sharing selection survives local deletion")
+                .is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn sharing_recovery_rebuilt_keys_preserve_grants_and_one_local_budget() {
+        use crate::domain::{ProducerRecoveryRequest, ProducerRecoveryState};
+        use crate::playback_principal::PlaybackPrincipal;
+        let directory = tempfile::tempdir().expect("recovery directory");
+        for store in [
+            SqliteStore::open_in_memory().expect("memory recovery"),
+            SqliteStore::open(&directory.path().join("recovery.db")).expect("pooled recovery"),
+        ] {
+            store.with_conn(|conn| {
+                conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-local.sql"))?;
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                conn.execute_batch(crate::store::MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA)?;
+                conn.execute_batch("COMMIT")?;
+                conn.execute_batch(include_str!("../../../tests/fixtures/session-principal-sharing.sql"))?;
+                conn.execute("INSERT INTO media_session_producer_recovery
+                    (owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,
+                    playback_id,recovery_epoch,failed_incarnation_id,failed_producer_attempt,
+                    decision_sequence,failed_plan_digest,alternate_plan_digest,state,created_at_ms,updated_at_ms)
+                    SELECT owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,
+                    playback_id,recovery_epoch,incarnation_id,owner_epoch,1,?1,?2,'reserved',10,10
+                    FROM media_sessions WHERE principal_kind='sharing'", params!["a".repeat(64), "b".repeat(64)])?;
+                Ok(())
+            }).await.expect("recovery candidate fixture");
+            let first = PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001").expect("first grant"),
+                &"a".repeat(64),
+            )
+            .expect("first viewer");
+            let second = PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000002")
+                    .expect("second grant"),
+                &"a".repeat(64),
+            )
+            .expect("second viewer");
+            let one = store
+                .producer_recovery_for_epoch(&first, "playback", "epoch")
+                .await
+                .expect("first recovery read")
+                .expect("first recovery");
+            let two = store
+                .producer_recovery_for_epoch(&second, "playback", "epoch")
+                .await
+                .expect("second recovery read")
+                .expect("second recovery");
+            assert_eq!(one.principal, first);
+            assert_eq!(two.principal, second);
+            assert_ne!(one.failed_incarnation_id, two.failed_incarnation_id);
+            let outsider = PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str("00000000-0000-4000-a000-000000000001")
+                    .expect("outsider grant"),
+                &"b".repeat(64),
+            )
+            .expect("outsider viewer");
+            assert!(store
+                .producer_recovery_for_epoch(&outsider, "playback", "epoch")
+                .await
+                .expect("outsider recovery")
+                .is_none());
+            let mut request = ProducerRecoveryRequest {
+                principal: PlaybackPrincipal::LocalUser { user_id: 1 },
+                playback_id: "new-recovery".to_owned(),
+                recovery_epoch: "new-epoch".to_owned(),
+                failed_incarnation_id: uuid::Uuid::new_v4().to_string(),
+                failed_producer_attempt: 1,
+                decision_sequence: 1,
+                failed_plan_digest: "c".repeat(64),
+                alternate_plan_digest: "d".repeat(64),
+                decode_restriction: None,
+            };
+            let reserved = store
+                .reserve_producer_recovery(&request, 1000)
+                .await
+                .expect("reserve local")
+                .expect("local budget");
+            assert_eq!(reserved.principal, request.principal);
+            assert_eq!(
+                store
+                    .reserve_producer_recovery(&request, 1001)
+                    .await
+                    .expect("replay local"),
+                Some(reserved)
+            );
+            request.failed_incarnation_id = uuid::Uuid::new_v4().to_string();
+            assert!(store
+                .reserve_producer_recovery(&request, 1002)
+                .await
+                .expect("different failure")
+                .is_none());
+            let current = store
+                .producer_recovery_for_epoch(
+                    &request.principal,
+                    &request.playback_id,
+                    &request.recovery_epoch,
+                )
+                .await
+                .expect("local recovery")
+                .expect("local reservation");
+            assert!(store
+                .settle_producer_recovery(
+                    &request.principal,
+                    &request.playback_id,
+                    &request.recovery_epoch,
+                    &current.failed_incarnation_id,
+                    ProducerRecoveryState::Installed,
+                    1003
+                )
+                .await
+                .expect("settle local")
+                .is_some());
+            request.failed_incarnation_id = current.failed_incarnation_id;
+            assert!(store
+                .reserve_producer_recovery(&request, 1004)
+                .await
+                .expect("spent local budget")
+                .is_none());
+            let mut shared = request.clone();
+            shared.principal = first.clone();
+            assert!(store
+                .reserve_producer_recovery(&shared, 1005)
+                .await
+                .is_err());
+            store
+                .with_conn(|conn| {
+                    conn.execute("DELETE FROM users WHERE id=1", [])?;
+                    Ok(())
+                })
+                .await
+                .expect("delete local owner");
+            request.recovery_epoch = "after-delete".to_owned();
+            assert!(store
+                .reserve_producer_recovery(&request, 1006)
+                .await
+                .expect("deleted owner refusal")
+                .is_none());
+            assert!(store
+                .producer_recovery_for_epoch(&first, "playback", "epoch")
+                .await
+                .expect("retained shared budget")
                 .is_some());
         }
     }
