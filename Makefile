@@ -1513,6 +1513,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# The split shell is sixty-five plain scripts in one scope: the order they
 	# are served in is a load order. One reads them, one runs them.
 	@node --test tests/web/file-context.test.js
+	@node --test tests/web/shared-decision.test.js
 	@node --test tests/web/shared-libraries.test.js
 	@node --test tests/web/shared-artwork.test.js
 	@node --test tests/web/sharing-management.test.js

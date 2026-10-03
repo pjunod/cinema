@@ -6,6 +6,7 @@ function clearLocalSession(expectedGeneration,notice){
   if(expectedGeneration!==AUTH_GENERATION) return false;
   if(typeof sharingRetire==="function")sharingRetire();
   if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+  if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
   stopLiveTv().catch(()=>{});
   clearLibraryChannelDraft(true);
   LIBRARY_CHANNEL_TUNE.stop();
@@ -123,6 +124,7 @@ function renderSetup(){
       if(p.value!==p2.value){ p2.value=""; p2.focus(); throw new Error("Those two passwords don't match. Try again."); }
       const r=await api("/setup",{method:"POST",body:{username:u.value.trim(),password:p.value}});
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+      if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
       refreshClientErrorReporterAuth(); location.hash="#/"; render();
     });
@@ -144,6 +146,7 @@ function renderLogin(){
     "Sign in", async()=>{
       const r=await api("/auth/login",{method:"POST",body:{username:u.value.trim(),password:p.value,device:"Web"}});
       if(typeof sharedArtworkRetire==="function")sharedArtworkRetire();
+      if(typeof sharedDecisionRetire==="function")sharedDecisionRetire();
       TOKEN=r.token; AUTH_GENERATION++; AUTH_NOTICE=""; localStorage.setItem("plurx_token",TOKEN); ME=r.user;
       refreshClientErrorReporterAuth(); location.hash="#/"; render();
     });
