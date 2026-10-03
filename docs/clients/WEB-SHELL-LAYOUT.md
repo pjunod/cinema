@@ -1,4 +1,4 @@
-# Web shell layout — where the app's sixty-six files are, and what each one holds
+# Web shell layout — where the app's sixty-seven files are, and what each one holds
 
 **Status:** live · **Describes:** `crates/plurxd/src/web/` as served ·
 **Split:** 2026-09-19, executing

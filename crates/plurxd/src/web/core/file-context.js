@@ -34,12 +34,16 @@ function sharedPlaybackFileContextFromDetail(reference,file){
   const base=file.file_base;
   if(typeof base!=="string"||!base.startsWith(prefix)
     ||! /^[A-Za-z0-9_-]{1,2048}$/.test(base.slice(prefix.length))) playbackFileReject();
-  return registerPlaybackFileContext({source_ref:Object.freeze({...reference}),file_base:base,session_id:null});
+  const source_file_id=playbackFileDecimal(file.id);
+  return registerPlaybackFileContext({source_ref:Object.freeze({...reference}),
+    source_file_id,auth_generation:AUTH_GENERATION,file_base:base,session_id:null});
 }
 function playbackFileContext(value){
   if(value&&typeof value==="object"){
-    if(PLAYBACK_FILE_CONTEXTS.has(value)) return value;
-    if(value.fileContext) return playbackFileContext(value.fileContext);
+    if(PLAYBACK_FILE_CONTEXTS.has(value)){
+      if(value.source_ref.kind!=="local"&&value.auth_generation!==AUTH_GENERATION) playbackFileReject();
+      return value;
+    }
     if(value.source_ref||value.file_base) playbackFileReject();
   }
   return localPlaybackFileContext(value);
@@ -51,7 +55,7 @@ function withPlaybackFileSession(value,id){
 }
 function playbackFileKey(value){
   const c=playbackFileContext(value), r=c.source_ref;
-  return r.kind==="local"?r.file_id:JSON.stringify([r.import_id,r.server_id,
+  return r.kind==="local"?r.file_id:JSON.stringify([c.auth_generation,r.import_id,r.server_id,
     r.catalogue_epoch,r.library_id,r.item_id,c.file_base]);
 }
 function playbackFileSuffix(suffix){
@@ -76,7 +80,11 @@ function playbackFileQuery(suffix,query){
     if(["hdr","dv","hdr10t"].includes(key)){
       if(!/^[01]$/.test(text)) playbackFileReject();
     }else if(["vcodec","acodec","container","dvprofile"].includes(key)){
-      if(!/^[a-zA-Z0-9_,.-]{0,256}$/.test(text)) playbackFileReject();
+      const values={vcodec:["h264","hevc","hevc10","av1","vp9","vp8"],
+        acodec:["aac","mp3","opus","flac","ac3","eac3"],
+        container:["mp4","webm","mov","m4a","m4b","mp3","aac","flac","ogg","opus","wav"],
+        dvprofile:["5","8"]};
+      if(text.length>256||text!==""&&text.split(",").some(v=>!values[key].includes(v))) playbackFileReject();
     }else if(key==="force"){
       if(!/^(auto|original|direct|remux|transcode|[1-9][0-9]{0,4})$/.test(text)) playbackFileReject();
     }else if(key==="stream"){
@@ -84,7 +92,7 @@ function playbackFileQuery(suffix,query){
     }else if(key==="start"){
       if(!/^(0|[1-9][0-9]{0,12})(\.[0-9]{1,3})?$/.test(text)||!Number.isFinite(Number(text))) playbackFileReject();
     }else if(key==="v"){
-      if(!/^(0|[1-9][0-9]{0,19})$/.test(text)) playbackFileReject();
+      if(!/^-?(0|[1-9][0-9]{0,19})$/.test(text)) playbackFileReject();
     }else{
       const n=Number(value);
       const min=key==="subtitle"?-1:key==="audio_offset_ms"?-15000:0;
@@ -103,4 +111,70 @@ function playbackFileUrl(value,suffix,query={}){
 }
 function playbackFileApiPath(value,suffix,query={}){
   return playbackFileUrl(value,suffix,query).slice("/api/v1".length);
+}
+
+function playbackFileContextForPlayer(player){
+  if(!player) playbackFileReject();
+  if(player.fileContext!=null){
+    if(!PLAYBACK_FILE_CONTEXTS.has(player.fileContext)) playbackFileReject();
+    return playbackFileContext(player.fileContext);
+  }
+  if(player.source_ref||player.file_base) playbackFileReject();
+  return localPlaybackFileContext(player.fileId);
+}
+function playbackFileContextForFile(file){
+  if(!file) playbackFileReject();
+  if(file.fileContext!=null){
+    if(!PLAYBACK_FILE_CONTEXTS.has(file.fileContext)) playbackFileReject();
+    const c=playbackFileContext(file.fileContext);
+    if(file.file_base&&file.file_base!==c.file_base) playbackFileReject();
+    if((file.source_ref||file.file_base)&&c.source_ref.kind==="local") playbackFileReject();
+    if(file.source_ref&&(Object.keys(file.source_ref).length!==Object.keys(c.source_ref).length
+      ||Object.keys(c.source_ref).some(k=>file.source_ref[k]!==c.source_ref[k]))) playbackFileReject();
+    return c;
+  }
+  if(file.source_ref||file.file_base) playbackFileReject();
+  return localPlaybackFileContext(file.id_text!=null?file.id_text:file.id);
+}
+function samePlaybackFile(player,fileId,meta){
+  return !!player&&playbackFileKey(playbackFileContextForPlayer(player))
+    ===playbackFileKey(meta&&meta.fileContext||fileId);
+}
+// Legacy capability strings originate in buildPlayCaps. Decode them into the
+// same closed typed vocabulary before they can join any file resource URL.
+function playbackFileQueryFromLegacy(text){
+  if(typeof text!=="string"||text.length>2048) playbackFileReject();
+  const query={};
+  if(!text) return query;
+  for(const entry of text.split("&")){
+    const at=entry.indexOf("="); if(at<1) playbackFileReject();
+    const key=entry.slice(0,at),value=decodeURIComponent(entry.slice(at+1));
+    if(Object.hasOwn(query,key)) playbackFileReject();
+    query[key]=value;
+  }
+  return query;
+}
+function playbackFileDecisionMediaUrl(context,url){
+  const c=playbackFileContext(context);
+  if(c.source_ref.kind==="local") return url;
+  if(typeof url!=="string") playbackFileReject();
+  for(const suffix of ["direct","stream.mp4"]){
+    const base=c.file_base+"/"+suffix;
+    if(url!==base&&!url.startsWith(base+"?")) continue;
+    const query=playbackFileQueryFromLegacy(url===base?"":url.slice(base.length+1));
+    if(Object.hasOwn(query,"session")){
+      if(!c.session_id||query.session!==c.session_id) playbackFileReject();
+      delete query.session;
+    }
+    return playbackFileUrl(c,suffix,query);
+  }
+  playbackFileReject();
+}
+
+function playbackFileContextForPlay(fileId,meta){
+  if(meta&&meta.fileContext!=null&&!PLAYBACK_FILE_CONTEXTS.has(meta.fileContext)) playbackFileReject();
+  const c=playbackFileContext(meta&&meta.fileContext||fileId);
+  if(c.source_ref.kind==="local") return localPlaybackFileContext(fileId);
+  if(typeof fileId!=="string"||playbackFileDecimal(fileId)!==c.source_file_id) playbackFileReject();
+  return c;
 }
