@@ -584,6 +584,39 @@ impl VodServe {
         }
     }
 
+    /// Source-only response boundary: the current no-follow path must still
+    /// identify the exact held producer input, even if scanning has not updated
+    /// the stored file facts. This cannot queue or rebuild a fragment index.
+    #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
+    pub(crate) async fn source_response_physical_fence(
+        &self,
+        owner: &ResponseOwner,
+    ) -> Result<crate::fragment_index_cluster::SourceFence, String> {
+        let rendition = owner
+            .rendition
+            .as_ref()
+            .ok_or_else(|| "Source rendition is absent".to_owned())?;
+        if !rendition.key.starts_with("source-") {
+            return Err("Source response has no Source rendition".into());
+        }
+        let held = rendition
+            .source
+            .as_ref()
+            .ok_or_else(|| "Source held input is absent".to_owned())?;
+        if !held.unchanged() {
+            return Err("Source held input changed".into());
+        }
+        let current = crate::fragment_index_cluster::open_source_playback_fence(
+            &rendition.recipe.file,
+            Some(held.object_version()),
+        )
+        .await?;
+        if !held.unchanged() {
+            return Err("Source held input changed during response admission".into());
+        }
+        Ok(current)
+    }
+
     fn source_changed(&self, rendition: &Rendition) -> bool {
         rendition
             .source

@@ -485,6 +485,7 @@ mod hls_codecs;
 use hls_codecs::*;
 // split: end hls-codecs
 
+#[allow(dead_code)] // Finite owned actor API; ordinary Shared ingress remains closed.
 #[path = "transcode/source_actor.rs"]
 pub(crate) mod source_actor;
 
@@ -531,6 +532,8 @@ pub use rate_control::*;
 // split: end rate-control
 
 pub struct TranscodeManager {
+    #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
+    source_workers: source_actor::SourceWorkerRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
     /// The VOD presentation's serving runtime (plan §2). Sessions created
