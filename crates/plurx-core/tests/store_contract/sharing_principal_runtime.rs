@@ -66,24 +66,61 @@ async fn sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_pr
                 .owned_media_sessions("node", 100)
                 .await
                 .expect("shared owned inventory");
-            assert_eq!(owned.len(), 2);
-            for (index, lease) in owned.iter().enumerate() {
-                let grant = format!("00000000-0000-4000-a000-{:012}", index + 1);
-                let expected = PlaybackPrincipal::sharing(
-                    uuid::Uuid::parse_str(&grant).expect("grant UUID"),
-                    &"a".repeat(64),
-                )
-                .expect("shared principal");
-                assert_eq!(lease.principal, expected);
-            }
+            assert!(
+                owned.is_empty(),
+                "Shared actors are outside the Local lease loop"
+            );
             let expired = store
                 .expired_media_sessions(9001, None, 10)
                 .await
                 .expect("shared takeover inventory");
             assert_eq!(expired.len(), 2);
-            assert_eq!(expired[0].principal, owned[0].principal);
-            assert_eq!(expired[1].principal, owned[1].principal);
+            for lease in &expired {
+                assert!(matches!(lease.principal, PlaybackPrincipal::Sharing { .. }));
+            }
         }
+        client
+            .execute(
+                "DELETE FROM media_session_preparations WHERE staged_incarnation_id='staged'",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("release Local staged fixture");
+        client
+            .execute(
+                "UPDATE media_session_requests SET state='resolved' WHERE request_id='request'",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("resolve Local fixture");
+        let owned = store
+            .owned_media_sessions("node", 100)
+            .await
+            .expect("Local inventory");
+        assert_eq!(owned.len(), 1);
+        assert_eq!(
+            owned[0].principal,
+            PlaybackPrincipal::LocalUser { user_id: 1 }
+        );
+        client
+            .execute(
+                "UPDATE media_sessions SET recipe_json=$1 WHERE incarnation_id='live'",
+                hiqlite::params!("{\"kind\":\"remote_source\"}"),
+            )
+            .await
+            .expect("typed B fixture");
+        assert!(store
+            .owned_media_sessions("node", 100)
+            .await
+            .expect("actors excluded")
+            .is_empty());
+        client
+            .execute(
+                "UPDATE media_sessions SET recipe_json='{}' WHERE incarnation_id='live'",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("restore Local recipe");
         let local = PlaybackPrincipal::LocalUser { user_id: 1 };
         let first_desired = store
             .record_desired_selection(

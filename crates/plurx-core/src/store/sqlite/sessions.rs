@@ -4161,6 +4161,7 @@ impl MediaSessionStore for SqliteStore {
         let owner_node_id = owner_node_id.to_owned();
         self.with_read(move |conn| {
             let rebuilt = route_projection(conn)? == PRINCIPAL_ROUTE_COLS;
+            let local_inventory = live_local_session_predicate(rebuilt, "media_sessions");
             let owner_column = if rebuilt { "owner_key" } else { "user_id" };
             let principal_columns = if rebuilt {
                 "owner_key, principal_kind, share_grant_id, share_viewer_key"
@@ -4171,7 +4172,7 @@ impl MediaSessionStore for SqliteStore {
                 "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
                         drain_deadline_ms, user_id, {principal_columns}
                    FROM media_sessions
-                  WHERE owner_node_id = ?1 AND state = 'active'
+                  WHERE owner_node_id = ?1 AND state = 'active' AND ({local_inventory})
                     AND lease_expires_at_ms > ?2
                     AND (publication_ready_at_ms != ?4 OR EXISTS (
                       SELECT 1 FROM media_playback_pointers pointer
@@ -5907,7 +5908,7 @@ mod sharing_route_decoder_tests {
                     ))?;
                     // Both grants have the same viewer/playback. Their preparations
                     // must still occupy independent slots. Use distinct staged IDs
-                    // so the serving routes remain in the worker inventory.
+                    // so the serving routes remain available to their dedicated actor.
                     conn.execute(
                         "INSERT INTO media_session_preparations
                     (owner_key,principal_kind,user_id,share_grant_id,share_viewer_key,
@@ -5969,14 +5970,36 @@ mod sharing_route_decoder_tests {
                 .owned_media_sessions("node", 20)
                 .await
                 .expect("owned inventory");
-            assert_eq!(owned.len(), 1);
-            assert_eq!(owned[0].principal, owners[1]);
+            assert!(
+                owned.is_empty(),
+                "Shared actors are outside the Local lease loop"
+            );
             let expired = store
                 .expired_media_sessions(9000, None, 64)
                 .await
                 .expect("expired inventory");
             assert_eq!(expired.len(), 1);
             assert_eq!(expired[0].principal, owners[1]);
+            store.with_conn(|conn| {
+                conn.execute("DELETE FROM media_session_preparations WHERE staged_incarnation_id='staged'",[])?;
+                conn.execute("UPDATE media_session_requests SET state='resolved' WHERE request_id='request'",[])?;
+                Ok(())
+            }).await.expect("release genuine Local fixture from preparation");
+            let local = store
+                .owned_media_sessions("node", 20)
+                .await
+                .expect("Local inventory");
+            assert_eq!(local.len(), 1);
+            assert_eq!(
+                local[0].principal,
+                PlaybackPrincipal::LocalUser { user_id: 1 }
+            );
+            store.with_conn(|conn| { conn.execute("UPDATE media_sessions SET recipe_json='{\"kind\":\"remote_source\"}' WHERE incarnation_id='live'",[])?; Ok(()) }).await.expect("typed Remote B fixture");
+            assert!(store
+                .owned_media_sessions("node", 20)
+                .await
+                .expect("actor inventory")
+                .is_empty());
         }
     }
 
