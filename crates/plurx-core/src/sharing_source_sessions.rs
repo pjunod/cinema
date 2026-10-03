@@ -1,4 +1,31 @@
 //! Server-only Source identity and capacity handles. None is wire authority.
+// Source admission always requires the actual replicated member observation.
+// Bare Core preserves its SQLite/type surface, but cannot construct a proof.
+#[cfg(feature = "hiqlite-store")]
+pub use crate::cluster::membership::{
+    MembershipError as SourceAdmissionError, SourceAdmissionMembers,
+};
+#[cfg(not(feature = "hiqlite-store"))]
+pub type SourceAdmissionError = crate::error::StoreError;
+#[cfg(not(feature = "hiqlite-store"))]
+#[derive(Clone)]
+pub enum SourceAdmissionMembers {}
+#[cfg(not(feature = "hiqlite-store"))]
+impl SourceAdmissionMembers {
+    pub fn write_guard(
+        &self,
+        _now_ms: i64,
+        _members_parameter: usize,
+        _cutoff_parameter: usize,
+        _observed_at_parameter: usize,
+    ) -> Result<(String, String, i64, i64), SourceAdmissionError> {
+        match *self {}
+    }
+    pub(crate) fn actual_local_raft_id(&self) -> u64 {
+        match *self {}
+    }
+}
+
 use crate::{
     error::StoreError,
     playback_principal::PlaybackPrincipal,
@@ -199,7 +226,7 @@ pub struct SourceDispatchAssignment {
     pub(crate) binding: SourceBindingHandle,
     pub(crate) owner_node_id: String,
     pub(crate) dispatch_generation: i64,
-    pub(crate) members: crate::cluster::membership::SourceAdmissionMembers,
+    pub(crate) members: SourceAdmissionMembers,
 }
 impl SourceDispatchAssignment {
     pub fn binding(&self) -> &SourceBindingHandle {
@@ -220,10 +247,7 @@ impl SourceDispatchAssignment {
     }
     /// Check the original observation's clock before actual queue admission.
     /// Success is not a current grant/floor proof or a physical worker permit.
-    pub fn validate_observation_freshness(
-        &self,
-        now_ms: i64,
-    ) -> Result<(), crate::cluster::membership::MembershipError> {
+    pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.members.write_guard(now_ms, 1, 2, 3).map(|_| ())
     }
 }
@@ -241,10 +265,7 @@ impl SourceSessionWriteAuthority {
     }
     /// Required again after commit and before actual queue admission. This
     /// checks the original snapshot clock, not current grant or physical work.
-    pub fn validate_observation_freshness(
-        &self,
-        now_ms: i64,
-    ) -> Result<(), crate::cluster::membership::MembershipError> {
+    pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.assignment.validate_observation_freshness(now_ms)
     }
 }
@@ -266,10 +287,7 @@ pub struct SourceOwnedRouteAuthority {
     pub(crate) lease_revision: i64,
 }
 impl SourceOwnedRouteAuthority {
-    pub fn validate_observation_freshness(
-        &self,
-        now_ms: i64,
-    ) -> Result<(), crate::cluster::membership::MembershipError> {
+    pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.assignment.validate_observation_freshness(now_ms)
     }
 }
@@ -279,7 +297,7 @@ pub enum SourceOwnedRouteAuthorityRead {
     Capacity,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 mod association_tests {
     use super::*;
 
@@ -377,10 +395,7 @@ impl SourcePublicationAuthority {
     pub fn session_id(&self) -> &str {
         &self.owned.session_id
     }
-    pub fn validate_observation_freshness(
-        &self,
-        now_ms: i64,
-    ) -> Result<(), crate::cluster::membership::MembershipError> {
+    pub fn validate_observation_freshness(&self, now_ms: i64) -> Result<(), SourceAdmissionError> {
         self.owned.validate_observation_freshness(now_ms)
     }
 }

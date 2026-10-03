@@ -5,7 +5,6 @@ use super::{
     SharingSourceDetailsStore,
 };
 use crate::{
-    cluster::membership::SourceAdmissionMembers,
     error::StoreError,
     playback_principal::PlaybackPrincipal,
     secrets::CredentialKey,
@@ -32,6 +31,19 @@ pub fn candidate_statements() -> Vec<String> {
             part.trim().trim_end_matches(';').to_owned()
         })
         .collect()
+}
+
+fn source_owner_removal_key(members: &SourceAdmissionMembers, node: &str) -> String {
+    #[cfg(feature = "hiqlite-store")]
+    {
+        let _ = members;
+        crate::cluster::coordination::removed_job_owner_key(node)
+    }
+    #[cfg(not(feature = "hiqlite-store"))]
+    {
+        let _ = node;
+        match *members {}
+    }
 }
 
 fn now_ms() -> Result<i64, StoreError> {
@@ -424,8 +436,7 @@ pub(crate) fn source_activation_guard(
         raft_id.into(),
         authority.assignment.owner_node_id.clone().into(),
         authority.assignment.dispatch_generation.into(),
-        crate::cluster::coordination::removed_job_owner_key(&authority.assignment.owner_node_id)
-            .into(),
+        source_owner_removal_key(members, &authority.assignment.owner_node_id).into(),
         activation.session_id.clone().into(),
     ]);
     let guard = authority_guard(&floor);
@@ -605,7 +616,7 @@ async fn assign_dispatch_prepared<T: Backend>(
         raft_id.into(),
         current.node.clone().into(),
         row.dispatch.into(),
-        crate::cluster::coordination::removed_job_owner_key(&current.node).into(),
+        source_owner_removal_key(members, &current.node).into(),
     ]);
     let exact = "b.incarnation_id=$10 AND b.owner_key=$4 AND b.share_grant_id=$5 AND b.share_viewer_key=$6 AND b.request_id=$7 AND b.request_fingerprint=$8 AND b.playback_id=$9 AND b.source_server_id=$11 AND b.catalogue_epoch=$12 AND b.library_id=$13 AND b.item_id=$14 AND b.file_id=$15 AND b.file_revision=$16 AND b.reservation_state='held' AND b.start_resolved_at_ms IS NULL";
     let request_exact = "r.incarnation_id=b.incarnation_id AND r.owner_key=b.owner_key AND r.request_id=b.request_id AND r.request_fingerprint=b.request_fingerprint AND r.playback_id=b.playback_id AND r.principal_kind='sharing' AND r.user_id IS NULL AND r.share_grant_id=b.share_grant_id AND r.share_viewer_key=b.share_viewer_key AND r.state='starting' AND r.claim_expires_at_ms=$19 AND r.claim_expires_at_ms>$3";
@@ -658,7 +669,7 @@ fn route_condition(
         raft.into(),
         assignment.owner_node_id.clone().into(),
         assignment.dispatch_generation.into(),
-        crate::cluster::coordination::removed_job_owner_key(&assignment.owner_node_id).into(),
+        source_owner_removal_key(members, &assignment.owner_node_id).into(),
         authority.session_id.clone().into(),
         authority.lease_expires_at_ms.into(),
         authority.lease_revision.into(),
@@ -792,6 +803,9 @@ async fn prepare_publication_route<T: Backend>(
     if !agrees(binding, &intent) {
         return Ok(SourcePublicationAuthorityRead::Unavailable);
     }
+    // Bare Core has an uninhabited observation; this construction cannot
+    // complete there, even though the shared source body remains type-checked.
+    #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_variables))]
     let authority = SourceOwnedRouteAuthority {
         assignment: SourceDispatchAssignment {
             binding: binding.clone(),
@@ -856,6 +870,7 @@ async fn complete_publication<T: Backend + super::MediaSessionStore>(
         statements.push(("UPDATE sharing_source_session_bindings SET start_resolved_at_ms=$3 WHERE incarnation_id=$1 AND owner_key=$2 AND reservation_state='held' AND dispatch_generation=1 AND start_resolved_at_ms IS NULL".into(),vec![binding.incarnation_id.into(),owner.into(),now.into()]));
     }
     if authority.phase == SourcePublicationPhase::Pending {
+        #[cfg_attr(not(feature = "hiqlite-store"), allow(unused_mut, unused_variables))]
         let mut published = authority.owned.clone();
         published.intent.request.claim_expires_at_ms = published.lease_expires_at_ms;
         let Some((condition, values)) =
@@ -1484,6 +1499,6 @@ async fn prepare_intent<T: Backend>(
     })))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hiqlite-store"))]
 #[path = "sharing_source_session_tests.rs"]
 mod tests;

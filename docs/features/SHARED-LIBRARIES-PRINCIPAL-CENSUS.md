@@ -1092,3 +1092,40 @@ no media session, resource admission permit or producer. The focused preparation
 regression now also exercises the peer decision adapter and compares every
 engine field, refusing a changed Source identity and empty capabilities. The
 B file-decision consumer and live Source starts remain separate open work.
+
+## Supported bare Core proof surface
+
+Source admission uses the actual replicated membership observation whenever
+`hiqlite-store` is present. Bare Core exposes an uninhabited opaque observation
+with no constructor; SQLite and the public domain types remain compilable,
+while that build cannot mint Source admission authority. It supplies no
+synthetic roster, node identity, cached readiness flag or alternate runtime.
+The real single-server daemon uses its activated one-voter replicated store;
+SQLite recovery remains unavailable for Source admission.
+
+Against the merged `fb7368c3c` preparation base, pinned Rust 1.97.1 passed bare
+Core all-target compilation in 16.09 seconds, replicated Core all-target
+compilation, all 13 Source Store unit regressions in 29.37 seconds with zero
+ignored tests, and replicated Core all-target Clippy with denied warnings in
+34.09 seconds. Bare Core retains its existing unrelated warning baseline;
+this receipt claims successful compilation, not warning-free bare lint.
+
+```sh
+cargo check --locked -p plurx-core --no-default-features --all-targets
+cargo check --locked -p plurx-core --features hiqlite-contract-tests --all-targets
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store::sharing_source_sessions -- --nocapture
+cargo clippy --locked -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
+```
+
+The same tree also passed the actual three-voter Source reservation, activation,
+renewal, publication and terminal-accounting contract in 11.36 seconds (one
+test, zero ignored), daemon feature all-target compilation in 1 minute
+48 seconds, and daemon feature Clippy with denied warnings in 1 minute
+31 seconds. Documentation index tests (four), catalogue lint and diff checks
+passed. These fixtures do not dispatch the future physical Source actor.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_source_reservations_three_voters_atomic_claim_caps_replay_and_release -- --nocapture
+cargo check --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets
+cargo clippy --locked -p plurxd --features plurx-core/hiqlite-contract-tests --all-targets -- -D warnings
+```
