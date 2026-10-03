@@ -4,7 +4,9 @@ use crate::state::{clock_ms, AppState};
 use axum::{
     body::{to_bytes, Body},
     extract::{Path, RawQuery, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Request, StatusCode},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -16,13 +18,14 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-pub(crate) fn peer_router() -> Router<AppState> {
+pub(crate) fn peer_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/sharing/v1/libraries", get(libraries))
         .route("/sharing/v1/libraries/{id}/items", get(items))
         .route("/sharing/v1/items/{id}", get(item))
         .route("/sharing/v1/items/{id}/children", get(children))
         .route("/sharing/v1/items:batch", post(batch))
+        .route_layer(middleware::from_fn_with_state(state, source_content_guard))
 }
 fn fail(status: StatusCode, code: &'static str) -> ApiError {
     ApiError::typed(status, code, code.replace('_', " "))
@@ -141,7 +144,7 @@ fn query(raw: Option<&str>) -> Result<BrowseQuery, ApiError> {
 async fn libraries(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
     let libraries = state
         .store
@@ -149,16 +152,25 @@ async fn libraries(
         .await
         .map_err(unavailable)?
         .ok_or_else(missing)?;
-    Ok(Json(
-        json!({"libraries":libraries.into_iter().map(|l|json!({"library_id":l.library_id,"name":l.name,"kind":l.kind,"anime":l.anime})).collect::<Vec<_>>()}),
-    ))
+    let visible = libraries
+        .iter()
+        .map(|library| library.library_id.clone())
+        .collect();
+    source_json(
+        &state,
+        grant,
+        json!({"libraries":libraries}),
+        visible,
+        Vec::new(),
+    )
+    .await
 }
 async fn items(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     browse(
         &state,
         &headers,
@@ -173,7 +185,7 @@ async fn children(
     headers: HeaderMap,
     Path(id): Path<String>,
     RawQuery(raw): RawQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let parent = source_id(&id)?;
     let (hash, grant) = authority(&state, &headers).await?;
     let record = state
@@ -205,7 +217,7 @@ async fn browse(
     library_id: SourceId,
     parent_id: Option<SourceId>,
     query: BrowseQuery,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let (hash, grant) = authority(state, headers).await?;
     let identity = state
         .store
@@ -238,7 +250,7 @@ async fn browse(
         .source_catalogue_page(CataloguePageRequest {
             credential_hash: hash,
             grant_id: grant,
-            library_id,
+            library_id: library_id.clone(),
             parent_id,
             query: search,
             boundary,
@@ -266,15 +278,18 @@ async fn browse(
     } else {
         None
     };
-    Ok(Json(
-        json!({"items":page.records.into_iter().map(|r|r.item).collect::<Vec<_>>(),"next_cursor":next_cursor,"catalogue_revision":page.counters.library_revision,"scope_generation":page.counters.scope_generation,"catalogue_generation":page.counters.catalogue_generation}),
-    ))
+    let visible = page
+        .records
+        .iter()
+        .map(|record| (record.item.library_id.clone(), record.item.item_id.clone()))
+        .collect();
+    source_json(state,grant,json!({"items":page.records.into_iter().map(|r|r.item).collect::<Vec<_>>(),"next_cursor":next_cursor,"catalogue_revision":page.counters.library_revision,"scope_generation":page.counters.scope_generation,"catalogue_generation":page.counters.catalogue_generation}),vec![library_id],visible).await
 }
 async fn item(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
     let record = state
         .store
@@ -290,15 +305,21 @@ async fn item(
         .and_then(|mut v| v.pop())
         .and_then(|v| v.record)
         .ok_or_else(missing)?;
-    Ok(Json(
+    let visible = vec![(record.item.library_id.clone(), record.item.item_id.clone())];
+    source_json(
+        &state,
+        grant,
         serde_json::to_value(record.item).map_err(|_| invalid())?,
-    ))
+        Vec::new(),
+        visible,
+    )
+    .await
 }
 async fn batch(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     let (hash, grant) = authority(&state, &headers).await?;
     let bytes = to_bytes(body, 16 * 1024).await.map_err(|_| invalid())?;
     let request: MetadataBatch = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
@@ -308,9 +329,158 @@ async fn batch(
         .await
         .map_err(unavailable)?
         .ok_or_else(missing)?;
-    Ok(Json(
-        json!({"items":entries.into_iter().map(|e|json!({"item_id":e.item_id,"item":e.record.map(|r|r.item)})).collect::<Vec<_>>()}),
-    ))
+    let visible = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .record
+                .as_ref()
+                .map(|record| (record.item.library_id.clone(), record.item.item_id.clone()))
+        })
+        .collect();
+    source_json(&state,grant,json!({"items":entries.into_iter().map(|e|json!({"item_id":e.item_id,"item":e.record.map(|r|r.item)})).collect::<Vec<_>>()}),Vec::new(),visible).await
+}
+
+#[derive(Clone)]
+struct SourceContentAuthority {
+    grant: uuid::Uuid,
+    server: uuid::Uuid,
+    epoch: uuid::Uuid,
+    libraries: Vec<SourceId>,
+    items: Vec<(SourceId, SourceId)>,
+}
+static CONTENT_MONITORS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(64)));
+async fn source_json(
+    state: &AppState,
+    grant: uuid::Uuid,
+    value: Value,
+    libraries: Vec<SourceId>,
+    items: Vec<(SourceId, SourceId)>,
+) -> Result<Response, ApiError> {
+    let identity = state
+        .store
+        .sharing_identity(clock_ms())
+        .await
+        .map_err(unavailable)?;
+    let bytes = serde_json::to_vec(&value).map_err(|_| invalid())?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_catalogue_response_unavailable",
+        ));
+    }
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response.extensions_mut().insert(SourceContentAuthority {
+        grant,
+        server: identity.server_id,
+        epoch: identity.catalogue_epoch,
+        libraries,
+        items,
+    });
+    Ok(response)
+}
+async fn source_content_current(state: &AppState, authority: &SourceContentAuthority) -> bool {
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        if !crate::sharing::enabled(state.store.as_ref()).await.ok()? {
+            return Some(false);
+        }
+        if state.membership.is_replicated()
+            && !state
+                .membership
+                .sharing_member_floor_ready(
+                    plurx_core::cluster::membership::SharingMemberFloor::CatalogueItemIdentity,
+                )
+                .await
+                .ok()?
+        {
+            return Some(false);
+        }
+        state
+            .store
+            .source_content_authorized(
+                authority.grant,
+                authority.server,
+                authority.epoch,
+                &authority.libraries,
+                &authority.items,
+            )
+            .await
+            .ok()
+    })
+    .await
+        == Ok(Some(true))
+}
+async fn source_content_guard(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    let connection = request
+        .extensions()
+        .get::<crate::SharingConnectionCancellation>()
+        .cloned();
+    let response = next.run(request).await;
+    if !response.status().is_success() {
+        return response;
+    }
+    let Some(authority) = response
+        .extensions()
+        .get::<SourceContentAuthority>()
+        .cloned()
+    else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+        .into_response();
+    };
+    let Some(connection) = connection else {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_transport_authority_unavailable",
+        )
+        .into_response();
+    };
+    let Ok(permit) = CONTENT_MONITORS.clone().try_acquire_owned() else {
+        return fail(StatusCode::TOO_MANY_REQUESTS, "sharing_body_capacity").into_response();
+    };
+    if !source_content_current(&state, &authority).await {
+        return fail(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "sharing_body_authority_unavailable",
+        )
+        .into_response();
+    }
+    let cancel = connection.0.clone();
+    let monitored=connection.monitor(async move {
+        let _permit=permit;
+        let mut interval=tokio::time::interval(std::time::Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                ()=cancel.cancelled()=>return,
+                _=interval.tick()=>{},
+            }
+            tokio::select! {
+                ()=cancel.cancelled()=>return,
+                current=source_content_current(&state,&authority)=> {if !current {cancel.cancel();return;}},
+            }
+        }
+    });
+    if monitored.is_err() {
+        connection.0.cancel();
+        return fail(
+            StatusCode::TOO_MANY_REQUESTS,
+            "sharing_connection_authority_capacity",
+        )
+        .into_response();
+    }
+    response
 }
 
 pub(crate) fn viewer_router() -> Router<AppState> {
@@ -580,6 +750,632 @@ mod tests {
         sharing::*,
     };
     use tower::ServiceExt;
+
+    static BODY_FIXTURES: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use bytes::Bytes;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    struct PayloadOwner {
+        bytes: Vec<u8>,
+        dropped: Arc<AtomicBool>,
+    }
+    impl AsRef<[u8]> for PayloadOwner {
+        fn as_ref(&self) -> &[u8] {
+            &self.bytes
+        }
+    }
+    impl Drop for PayloadOwner {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+    struct TrackedBody {
+        inner: Body,
+        body_dropped: Arc<AtomicBool>,
+        data_dropped: Arc<AtomicBool>,
+    }
+    impl Drop for TrackedBody {
+        fn drop(&mut self) {
+            self.body_dropped.store(true, Ordering::SeqCst);
+        }
+    }
+    impl http_body::Body for TrackedBody {
+        type Data = Bytes;
+        type Error = axum::Error;
+        fn poll_frame(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+            let flag = self.data_dropped.clone();
+            std::pin::Pin::new(&mut self.inner)
+                .poll_frame(cx)
+                .map(|frame| {
+                    frame.map(|frame| {
+                        frame.map(|frame| {
+                            frame.map_data(|data| {
+                                Bytes::from_owner(PayloadOwner {
+                                    bytes: data.to_vec(),
+                                    dropped: flag,
+                                })
+                            })
+                        })
+                    })
+                })
+        }
+        fn is_end_stream(&self) -> bool {
+            self.inner.is_end_stream()
+        }
+        fn size_hint(&self) -> http_body::SizeHint {
+            self.inner.size_hint()
+        }
+    }
+    struct BodyFixture {
+        _directory: tempfile::TempDir,
+        state: AppState,
+        secret: plurx_core::secrets::Secret,
+        grant: uuid::Uuid,
+        library: i64,
+        private: i64,
+        item: i64,
+        path: std::path::PathBuf,
+    }
+    async fn body_fixture() -> BodyFixture {
+        use plurx_core::{
+            domain::{ItemKind, MetadataPatch, NewItem},
+            store::SqliteStore,
+        };
+        let directory = tempfile::tempdir().expect("source fixture directory");
+        let path = directory.path().join("source.sqlite");
+        let store = SqliteStore::open(&path).expect("source fixture store");
+        let (_, mut state) = super::super::tests::test_app_with_state();
+        state.store = Arc::new(store);
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SHARING_ENABLED, "true")
+            .await
+            .expect("enable source fixture");
+        state
+            .store
+            .sharing_identity(1000)
+            .await
+            .expect("source identity");
+        let mut libraries = Vec::new();
+        for name in ["Shared", "Private"] {
+            libraries.push(
+                state
+                    .store
+                    .create_library(&NewLibrary {
+                        name: name.into(),
+                        kind: LibraryKind::Movies,
+                        paths: vec![directory.path().join(name)],
+                        anime: false,
+                    })
+                    .await
+                    .expect("source library")
+                    .id,
+            );
+        }
+        let connection = rusqlite::Connection::open(&path).expect("candidate fixture writer");
+        connection
+            .execute_batch(
+                plurx_core::store::sharing_catalogue_source::CANDIDATE_ITEM_IDENTITY_SCHEMA,
+            )
+            .expect("candidate item identity");
+        connection
+            .execute_batch(plurx_core::store::sharing_catalogue_source::CANDIDATE_SCHEMA)
+            .expect("candidate catalogue");
+        drop(connection);
+        let mut first = 0;
+        for index in 0..200 {
+            let item = state
+                .store
+                .insert_item(&NewItem {
+                    library_id: libraries[0],
+                    kind: ItemKind::Movie,
+                    parent_id: None,
+                    title: format!("Fixture {index:03}"),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("source item");
+            state
+                .store
+                .apply_metadata(
+                    item,
+                    &MetadataPatch {
+                        overview: Some("x".repeat(8000)),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("bounded large metadata");
+            if index == 0 {
+                first = item;
+            }
+        }
+        let invitation = uuid::Uuid::new_v4();
+        let grant = uuid::Uuid::new_v4();
+        let secret = new_secret().expect("synthetic grant secret");
+        state
+            .store
+            .create_share_invitation(InvitationRecord {
+                id: invitation,
+                token_hash: "a".repeat(64),
+                library_ids: vec![libraries[0]],
+                created_at_ms: 1000,
+                expires_at_ms: 2000,
+            })
+            .await
+            .expect("invitation");
+        state
+            .store
+            .claim_share(ShareClaim {
+                invitation_id: invitation,
+                invitation_hash: "a".repeat(64),
+                claim_id: uuid::Uuid::new_v4(),
+                grant_id: grant,
+                recipient_server_id: uuid::Uuid::new_v4(),
+                recipient_name: "Synthetic recipient".into(),
+                credential_hash: secret_hash(SecretDomain::Grant, &secret),
+                now_ms: 1001,
+            })
+            .await
+            .expect("grant");
+        state
+            .store
+            .approve_share(grant, 1, 1002)
+            .await
+            .expect("approval");
+        BodyFixture {
+            _directory: directory,
+            state,
+            secret,
+            grant,
+            library: libraries[0],
+            private: libraries[1],
+            item: first,
+            path,
+        }
+    }
+    async fn body_server(
+        fixture: &BodyFixture,
+        body_dropped: Arc<AtomicBool>,
+        data_dropped: Arc<AtomicBool>,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Receiver<crate::SharingConnectionCancellation>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let socket = tokio::net::TcpSocket::new_v4().expect("fixture socket");
+        socket
+            .set_send_buffer_size(4096)
+            .expect("bounded send buffer");
+        socket
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("bind");
+        let listener = socket.listen(8).expect("listen");
+        let address = listener.local_addr().expect("address");
+        let (accepted, captured) = tokio::sync::oneshot::channel();
+        let accepted = Arc::new(Mutex::new(Some(accepted)));
+        let app = sharing::peer_router(fixture.state.clone())
+            .route(
+                "/ordinary/pending",
+                get(|| async {
+                    Response::new(Body::from_stream(futures_util::stream::pending::<
+                        Result<Bytes, std::convert::Infallible>,
+                    >()))
+                }),
+            )
+            .layer(middleware::from_fn(
+                move |request: Request<Body>, next: Next| {
+                    let accepted = accepted.clone();
+                    let body_dropped = body_dropped.clone();
+                    let data_dropped = data_dropped.clone();
+                    async move {
+                        if let Some(sender) = accepted.lock().expect("capture owner").take() {
+                            sender
+                                .send(
+                                    request
+                                        .extensions()
+                                        .get::<crate::SharingConnectionCancellation>()
+                                        .expect("accepted connection seam")
+                                        .clone(),
+                                )
+                                .ok();
+                        }
+                        let tracked = request.uri().path().ends_with("/items");
+                        let response = next.run(request).await;
+                        if tracked {
+                            let (parts, body) = response.into_parts();
+                            Response::from_parts(
+                                parts,
+                                Body::new(TrackedBody {
+                                    inner: body,
+                                    body_dropped,
+                                    data_dropped,
+                                }),
+                            )
+                        } else {
+                            response
+                        }
+                    }
+                },
+            ));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let served = tokio::spawn(crate::serve_http(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            crate::HTTP_TIMEOUTS,
+        ));
+        (address, captured, stop, served)
+    }
+    async fn await_flag(flag: &AtomicBool, expected: bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while flag.load(Ordering::SeqCst) != expected {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("bounded fixture observation");
+    }
+
+    struct ActiveMonitor(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for ActiveMonitor {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_connection_monitor_registry_is_bounded_and_owned() {
+        let connection = crate::SharingConnectionCancellation::new();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for _ in 0..32 {
+            let active = active.clone();
+            connection
+                .monitor(async move {
+                    active.fetch_add(1, Ordering::SeqCst);
+                    let _owner = ActiveMonitor(active);
+                    std::future::pending::<()>().await;
+                })
+                .expect("bounded registry slot");
+        }
+        assert!(connection.monitor(std::future::pending::<()>()).is_err());
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while active.load(Ordering::SeqCst) != 32 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all monitors started");
+        drop(connection);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while active.load(Ordering::SeqCst) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection owner aborts and releases every monitor");
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_idle_connection_retains_bounded_authority_until_close() {
+        let _serial = BODY_FIXTURES.lock().await;
+        let fixture = body_fixture().await;
+        let baseline = CONTENT_MONITORS.available_permits();
+        let (address, captured, stop, served) = body_server(
+            &fixture,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+        let client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("client");
+        let (mut sender, driver) =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
+                .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+                .await
+                .expect("HTTP2 handshake");
+        let driver = tokio::spawn(driver);
+        let request = || {
+            Request::builder()
+                .uri("http://fixture/sharing/v1/libraries")
+                .header(
+                    "authorization",
+                    format!("CinemaShare {}", fixture.secret.expose()),
+                )
+                .body(Body::empty())
+                .expect("request")
+        };
+        // The actual handler refuses before registering work when all global
+        // monitor slots are occupied. It never waits in an admission queue.
+        let occupied = CONTENT_MONITORS
+            .clone()
+            .try_acquire_many_owned(baseline as u32)
+            .expect("occupy global bounded registry");
+        let refused = sender
+            .send_request(request())
+            .await
+            .expect("capacity response");
+        assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+        refused
+            .into_body()
+            .collect()
+            .await
+            .expect("closed refusal body");
+        drop(occupied);
+        let connection = captured.await.expect("accepted connection");
+        for count in 1..=32 {
+            let response = sender
+                .send_request(request())
+                .await
+                .expect("allowed metadata");
+            assert_eq!(response.status(), StatusCode::OK);
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("fully consumed response");
+            assert_eq!(CONTENT_MONITORS.available_permits(), baseline - count);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!connection.0.is_cancelled());
+        assert_eq!(
+            CONTENT_MONITORS.available_permits(),
+            baseline - 32,
+            "idle completed responses retain bounded authority until connection end"
+        );
+        // A 33rd request cannot create a monitor on this accepted connection.
+        // Cancellation may close the transport before its 429 reaches the client.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            sender.send_request(request()),
+        )
+        .await
+        .expect("capacity refusal deadline");
+        if let Ok(response) = result {
+            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+            .await
+            .expect("full connection registry closes");
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while CONTENT_MONITORS.available_permits() != baseline {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("all idle monitor permits released");
+        drop(sender);
+        let _ = driver.await;
+        stop.send(()).expect("fixture stop");
+        served.await.expect("server task").expect("server result");
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_blocked_http1_closes_on_grant_scope_and_item_revocation() {
+        let _serial = BODY_FIXTURES.lock().await;
+        for change in 0..3 {
+            let fixture = body_fixture().await;
+            let body_dropped = Arc::new(AtomicBool::new(false));
+            let data_dropped = Arc::new(AtomicBool::new(false));
+            let baseline = CONTENT_MONITORS.available_permits();
+            let (address, captured, stop, served) =
+                body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
+            let socket = tokio::net::TcpSocket::new_v4().expect("client socket");
+            socket
+                .set_recv_buffer_size(4096)
+                .expect("small receive buffer");
+            let mut client = socket.connect(address).await.expect("client connection");
+            client.write_all(format!("GET /sharing/v1/libraries/{}/items?limit=200 HTTP/1.1\r\nHost: fixture\r\nAuthorization: CinemaShare {}\r\n\r\n",fixture.library,fixture.secret.expose()).as_bytes()).await.expect("catalogue request");
+            let mut head = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while !head.ends_with(b"\r\n\r\n") {
+                    head.push(client.read_u8().await.expect("response head"));
+                }
+            })
+            .await
+            .expect("response head deadline");
+            assert!(
+                head.starts_with(b"HTTP/1.1 200"),
+                "{}",
+                String::from_utf8_lossy(&head)
+            );
+            let connection = captured.await.expect("captured connection");
+            assert_eq!(CONTENT_MONITORS.available_permits(), baseline - 1);
+            await_flag(&body_dropped, true).await;
+            assert!(
+                !data_dropped.load(Ordering::SeqCst),
+                "writer must retain data behind blocked socket"
+            );
+            match change {
+                0 => fixture
+                    .state
+                    .store
+                    .revoke_share(fixture.grant, 2000)
+                    .await
+                    .expect("grant revocation"),
+                1 => {
+                    let status = fixture
+                        .state
+                        .store
+                        .sharing_grant_status(&secret_hash(SecretDomain::Grant, &fixture.secret))
+                        .await
+                        .expect("grant")
+                        .expect("active");
+                    fixture
+                        .state
+                        .store
+                        .share_scope(
+                            fixture.grant,
+                            status.grant.mutation_generation,
+                            vec![fixture.private],
+                            2000,
+                        )
+                        .await
+                        .expect("scope revocation");
+                }
+                _ => {
+                    rusqlite::Connection::open(&fixture.path)
+                        .expect("item writer")
+                        .execute(
+                            "UPDATE items SET library_id=?1 WHERE id=?2",
+                            rusqlite::params![fixture.private, fixture.item],
+                        )
+                        .expect("item move removes effective scope");
+                }
+            }
+            tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+                .await
+                .expect("revoked blocked writer closes within grant bound");
+            await_flag(&data_dropped, true).await;
+            await_flag(&body_dropped, true).await;
+            tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                while CONTENT_MONITORS.available_permits() != baseline {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("monitor permit released");
+            drop(client);
+            stop.send(()).expect("fixture stop");
+            served.await.expect("server task").expect("server result");
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_http2_retains_authority_after_body_drop_and_other_stream_flush() {
+        let _serial = BODY_FIXTURES.lock().await;
+        let fixture = body_fixture().await;
+        let body_dropped = Arc::new(AtomicBool::new(false));
+        let data_dropped = Arc::new(AtomicBool::new(false));
+        let baseline = CONTENT_MONITORS.available_permits();
+        let (address, captured, stop, served) =
+            body_server(&fixture, body_dropped.clone(), data_dropped.clone()).await;
+        let client = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("client connection");
+        let mut builder =
+            hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new());
+        builder.initial_stream_window_size(1024);
+        let (mut sender, driver) = builder
+            .handshake::<_, Body>(hyper_util::rt::TokioIo::new(client))
+            .await
+            .expect("HTTP2 handshake");
+        let driver = tokio::spawn(driver);
+        let response = sender
+            .send_request(
+                Request::builder()
+                    .uri(format!(
+                        "http://fixture/sharing/v1/libraries/{}/items?limit=200",
+                        fixture.library
+                    ))
+                    .header(
+                        "authorization",
+                        format!("CinemaShare {}", fixture.secret.expose()),
+                    )
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("metadata response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let connection = captured.await.expect("connection scope");
+        await_flag(&body_dropped, true).await;
+        assert!(
+            !data_dropped.load(Ordering::SeqCst),
+            "body ended while HTTP2 data still awaits window capacity"
+        );
+        assert_eq!(CONTENT_MONITORS.available_permits(), baseline - 1);
+        let other = sender
+            .send_request(
+                Request::builder()
+                    .uri("http://fixture/sharing/v1/identity")
+                    .body(Body::empty())
+                    .expect("other request"),
+            )
+            .await
+            .expect("other stream response");
+        assert_eq!(other.status(), StatusCode::OK);
+        other
+            .into_body()
+            .collect()
+            .await
+            .expect("other stream flush");
+        assert!(
+            !data_dropped.load(Ordering::SeqCst),
+            "other stream flush cannot retire blocked metadata"
+        );
+        let ordinary = sender
+            .send_request(
+                Request::builder()
+                    .uri("http://fixture/ordinary/pending")
+                    .body(Body::empty())
+                    .expect("ordinary request"),
+            )
+            .await
+            .expect("ordinary response");
+        let replacement = new_secret().expect("rotation fixture");
+        assert_eq!(
+            fixture
+                .state
+                .store
+                .rotate_share(
+                    fixture.grant,
+                    uuid::Uuid::new_v4(),
+                    &secret_hash(SecretDomain::Grant, &fixture.secret),
+                    &secret_hash(SecretDomain::Grant, &replacement),
+                    2000
+                )
+                .await
+                .expect("credential rotation"),
+            MutationOutcome::Applied
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(
+            !connection.0.is_cancelled(),
+            "credential rotation alone must preserve accepted content authority"
+        );
+        rusqlite::Connection::open(&fixture.path)
+            .expect("item writer")
+            .execute(
+                "UPDATE items SET library_id=?1 WHERE id=?2",
+                rusqlite::params![fixture.private, fixture.item],
+            )
+            .expect("effective item revocation");
+        tokio::time::timeout(std::time::Duration::from_secs(3), connection.0.cancelled())
+            .await
+            .expect("blocked HTTP2 connection closes within grant bound");
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                ordinary.into_body().collect()
+            )
+            .await
+            .expect("multiplex cancellation deadline")
+            .is_err(),
+            "connection cancellation also retires unrelated multiplexed streams"
+        );
+        await_flag(&data_dropped, true).await;
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while CONTENT_MONITORS.available_permits() != baseline {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("monitor released");
+        drop(response);
+        drop(sender);
+        let _ = driver.await;
+        stop.send(()).expect("fixture stop");
+        served.await.expect("server task").expect("server result");
+    }
     #[tokio::test]
     async fn sharing_catalogue_viewer_routes_require_login_and_fail_closed_without_import() {
         let (app, state) = super::super::tests::test_app_with_state();

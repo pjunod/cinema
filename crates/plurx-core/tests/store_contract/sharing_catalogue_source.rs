@@ -164,7 +164,7 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
                 .id,
         );
     }
-    store.sharing_identity(1000).await.expect("source identity");
+    let identity = store.sharing_identity(1000).await.expect("source identity");
     for result in client
         .txn(
             candidate_statements()
@@ -226,6 +226,81 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
     {
         result.expect("fixture insert");
     }
+    let library_id = SourceId::parse(&libraries[0].to_string()).expect("ID");
+    let item_id = SourceId::parse(&first.to_string()).expect("ID");
+    let authority = || {
+        store.source_content_authorized(
+            grant,
+            identity.server_id,
+            identity.catalogue_epoch,
+            std::slice::from_ref(&library_id),
+            &[],
+        )
+    };
+    assert!(authority().await.expect("current library authority"));
+    assert!(!store
+        .source_content_authorized(
+            grant,
+            Uuid::new_v4(),
+            identity.catalogue_epoch,
+            std::slice::from_ref(&library_id),
+            &[]
+        )
+        .await
+        .expect("source identity mismatch"));
+    let items = [(library_id.clone(), item_id)];
+    assert!(store
+        .source_content_authorized(
+            grant,
+            identity.server_id,
+            identity.catalogue_epoch,
+            &[],
+            &items
+        )
+        .await
+        .expect("current item authority"));
+    client
+        .execute(
+            "UPDATE items SET library_id=$1 WHERE id=$2",
+            hiqlite::params!(libraries[1], first),
+        )
+        .await
+        .expect("move out of effective scope");
+    assert!(!store
+        .source_content_authorized(
+            grant,
+            identity.server_id,
+            identity.catalogue_epoch,
+            &[],
+            &items
+        )
+        .await
+        .expect("current item move refuses"));
+    client
+        .execute(
+            "UPDATE items SET library_id=$1 WHERE id=$2",
+            hiqlite::params!(libraries[0], first),
+        )
+        .await
+        .expect("restore fixture item");
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=1 WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("internal import fixture");
+    assert!(
+        authority().await.is_err(),
+        "accepted content refuses import mode"
+    );
+    client
+        .execute(
+            "UPDATE item_identity_watermark SET importing=0 WHERE singleton=1",
+            hiqlite::params!(),
+        )
+        .await
+        .expect("restore qualified layout");
     let mut request = CataloguePageRequest {
         credential_hash: "b".repeat(64),
         grant_id: grant,
@@ -305,6 +380,17 @@ async fn sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve
         .share_scope(grant, 2, vec![], 1010)
         .await
         .expect("commit scope removal");
+    assert!(!authority().await.expect("accepted library revoked"));
+    assert!(!store
+        .source_content_authorized(
+            grant,
+            identity.server_id,
+            identity.catalogue_epoch,
+            &[],
+            &items
+        )
+        .await
+        .expect("accepted item revoked"));
     assert!(store
         .source_catalogue_page(request)
         .await

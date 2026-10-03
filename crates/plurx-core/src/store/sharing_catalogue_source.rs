@@ -30,6 +30,17 @@ pub struct SourceBatchEntry {
 }
 #[async_trait]
 pub trait SharingSourceCatalogueStore: Send + Sync {
+    /// Current authority for an already authenticated content body. Credential
+    /// rotation does not revoke a grant; effective item/library revocation does.
+    async fn source_content_authorized(
+        &self,
+        grant: Uuid,
+        server: Uuid,
+        epoch: Uuid,
+        libraries: &[SourceId],
+        items: &[(SourceId, SourceId)],
+    ) -> Result<bool, StoreError>;
+
     async fn source_catalogue_page(
         &self,
         request: CataloguePageRequest,
@@ -89,6 +100,40 @@ fn json<T: serde::Serialize>(value: &T) -> Result<String, StoreError> {
 }
 #[async_trait]
 impl<T: Backend> SharingSourceCatalogueStore for T {
+    async fn source_content_authorized(
+        &self,
+        grant: Uuid,
+        server: Uuid,
+        epoch: Uuid,
+        libraries: &[SourceId],
+        items: &[(SourceId, SourceId)],
+    ) -> Result<bool, StoreError> {
+        if libraries.len() > crate::sharing::MAX_LIBRARIES || items.len() > MAX_PAGE_SIZE {
+            return Err(invalid());
+        }
+        ready(self).await?;
+        let libraries = serde_json::to_string(libraries).map_err(|_| invalid())?;
+        let items = serde_json::to_string(items).map_err(|_| invalid())?;
+        let sql="SELECT json_quote(CASE WHEN EXISTS(SELECT 1 FROM sharing_exports e JOIN sharing_identity s ON s.singleton=1 WHERE e.id=$1 AND e.state='active' AND s.server_id=$2 AND s.catalogue_epoch=$3 AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0) AND NOT EXISTS(SELECT 1 FROM json_each($4) requested WHERE NOT EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=e.id AND l.id=CAST(requested.value AS INTEGER) AND l.kind IN ('movies','shows'))) AND NOT EXISTS(SELECT 1 FROM json_each($5) requested WHERE NOT EXISTS(SELECT 1 FROM items i JOIN libraries l ON l.id=i.library_id JOIN sharing_export_libraries x ON x.library_id=l.id WHERE x.grant_id=e.id AND i.library_id=CAST(json_extract(requested.value,'$[0]') AS INTEGER) AND i.id=CAST(json_extract(requested.value,'$[1]') AS INTEGER) AND i.kind IN ('movie','show','season','episode') AND l.kind IN ('movies','shows')))) THEN 1 ELSE 0 END) AS payload";
+        let rows = self
+            .sharing_read(
+                sql,
+                vec![
+                    grant.into(),
+                    server.into(),
+                    epoch.into(),
+                    libraries.into(),
+                    items.into(),
+                ],
+            )
+            .await?;
+        match rows.first().map(String::as_str) {
+            Some("1") => Ok(true),
+            Some("0") => Ok(false),
+            _ => Err(invalid()),
+        }
+    }
+
     async fn source_catalogue_page(
         &self,
         r: CataloguePageRequest,
@@ -130,7 +175,7 @@ impl<T: Backend> SharingSourceCatalogueStore for T {
         } else {
             format!("({sort_key} COLLATE BINARY,i.id) > (json_extract($5,'$.sort_key') COLLATE BINARY,cast(json_extract($5,'$.item_id') AS INTEGER))")
         };
-        let sql=format!("WITH allowed AS (SELECT e.scope_generation,e.catalogue_generation,c.order_revision FROM sharing_exports e JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN sharing_catalogue_revisions c ON c.library_id=l.id WHERE e.token_hash=$1 AND e.id=$2 AND e.state='active' AND l.id=$3 AND l.kind IN ('movies','shows') AND (json_type($6,'$')='null' OR EXISTS(SELECT 1 FROM items p WHERE p.id=cast(json_extract($6,'$') AS INTEGER) AND p.library_id=l.id AND p.kind IN ('show','season')))), page AS (SELECT {RECORD} AS record FROM items i INDEXED BY {index} WHERE i.library_id=$3 AND EXISTS(SELECT 1 FROM allowed) AND i.kind IN ('movie','show','season','episode') AND {parent} AND i.title LIKE '%'||$4||'%' ESCAPE '\\' AND {seek} ORDER BY {sort_key} COLLATE BINARY,i.id LIMIT $7) SELECT json_object('scope_generation',a.scope_generation,'catalogue_generation',a.catalogue_generation,'library_revision',a.order_revision,'records',json(coalesce((SELECT json_group_array(json(record)) FROM page),'[]'))) AS payload FROM allowed a");
+        let sql=format!("WITH allowed AS (SELECT e.scope_generation,e.catalogue_generation,c.order_revision FROM sharing_exports e JOIN sharing_export_libraries x ON x.grant_id=e.id JOIN libraries l ON l.id=x.library_id JOIN sharing_catalogue_revisions c ON c.library_id=l.id WHERE e.token_hash=$1 AND e.id=$2 AND e.state='active' AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0) AND l.id=$3 AND l.kind IN ('movies','shows') AND (json_type($6,'$')='null' OR EXISTS(SELECT 1 FROM items p WHERE p.id=cast(json_extract($6,'$') AS INTEGER) AND p.library_id=l.id AND p.kind IN ('show','season')))), page AS (SELECT {RECORD} AS record FROM items i INDEXED BY {index} WHERE i.library_id=$3 AND EXISTS(SELECT 1 FROM allowed) AND i.kind IN ('movie','show','season','episode') AND {parent} AND i.title LIKE '%'||$4||'%' ESCAPE '\\' AND {seek} ORDER BY {sort_key} COLLATE BINARY,i.id LIMIT $7) SELECT json_object('scope_generation',a.scope_generation,'catalogue_generation',a.catalogue_generation,'library_revision',a.order_revision,'records',json(coalesce((SELECT json_group_array(json(record)) FROM page),'[]'))) AS payload FROM allowed a");
         let rows = self
             .sharing_read(
                 &sql,
@@ -192,7 +237,7 @@ impl<T: Backend> SharingSourceCatalogueStore for T {
         }
         batch.validate().map_err(|_| invalid())?;
         ready(self).await?;
-        let sql=format!("WITH allowed AS (SELECT id FROM sharing_exports WHERE token_hash=$1 AND id=$2 AND state='active'), requested AS (SELECT cast(key AS INTEGER) AS ordinal,value AS item_id FROM json_each($3)), results AS (SELECT json_object('item_id',r.item_id,'record',CASE WHEN i.id IS NULL THEN NULL ELSE {RECORD} END) AS result FROM requested r LEFT JOIN items i ON i.id=cast(r.item_id AS INTEGER) AND i.kind IN ('movie','show','season','episode') AND EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=$2 AND x.library_id=i.library_id AND l.kind IN ('movies','shows')) ORDER BY r.ordinal) SELECT json_object('records',json(coalesce((SELECT json_group_array(json(result)) FROM results),'[]'))) AS payload FROM allowed");
+        let sql=format!("WITH allowed AS (SELECT id FROM sharing_exports WHERE token_hash=$1 AND id=$2 AND state='active' AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)), requested AS (SELECT cast(key AS INTEGER) AS ordinal,value AS item_id FROM json_each($3)), results AS (SELECT json_object('item_id',r.item_id,'record',CASE WHEN i.id IS NULL THEN NULL ELSE {RECORD} END) AS result FROM requested r LEFT JOIN items i ON i.id=cast(r.item_id AS INTEGER) AND i.kind IN ('movie','show','season','episode') AND EXISTS(SELECT 1 FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=$2 AND x.library_id=i.library_id AND l.kind IN ('movies','shows')) ORDER BY r.ordinal) SELECT json_object('records',json(coalesce((SELECT json_group_array(json(result)) FROM results),'[]'))) AS payload FROM allowed");
         let rows = self
             .sharing_read(
                 &sql,
@@ -249,7 +294,7 @@ impl<T: Backend> SharingSourceCatalogueStore for T {
             return Err(invalid());
         }
         ready(self).await?;
-        let sql="SELECT json_object('libraries',json(coalesce((SELECT json_group_array(json_object('library_id',cast(l.id AS TEXT),'name',l.name,'kind',l.kind,'anime',json(CASE WHEN l.anime=1 THEN 'true' ELSE 'false' END))) FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=e.id AND l.kind IN ('movies','shows')),'[]'))) AS payload FROM sharing_exports e WHERE e.token_hash=$1 AND e.id=$2 AND e.state='active'";
+        let sql="SELECT json_object('libraries',json(coalesce((SELECT json_group_array(json_object('library_id',cast(l.id AS TEXT),'name',l.name,'kind',l.kind,'anime',json(CASE WHEN l.anime=1 THEN 'true' ELSE 'false' END))) FROM sharing_export_libraries x JOIN libraries l ON l.id=x.library_id WHERE x.grant_id=e.id AND l.kind IN ('movies','shows')),'[]'))) AS payload FROM sharing_exports e WHERE e.token_hash=$1 AND e.id=$2 AND e.state='active' AND EXISTS(SELECT 1 FROM item_identity_watermark WHERE singleton=1 AND importing=0)";
         let rows = self
             .sharing_read(sql, vec![hash.to_owned().into(), grant.into()])
             .await?;
@@ -362,6 +407,108 @@ mod tests {
         .expect("claim");
         s.approve_share(grant, 1, 1002).await.expect("approve");
         (ids[0], ids[1], grant)
+    }
+
+    struct ImportTransition<'a> {
+        store: &'a SqliteStore,
+        armed: AtomicBool,
+    }
+    #[async_trait]
+    impl Backend for ImportTransition<'_> {
+        async fn sharing_read(
+            &self,
+            sql: &str,
+            values: Vec<super::super::sharing::Value>,
+        ) -> Result<Vec<String>, StoreError> {
+            if (sql.starts_with("WITH allowed AS")
+                || sql.starts_with("SELECT json_object('libraries'"))
+                && self.armed.swap(false, Ordering::SeqCst)
+            {
+                self.store
+                    .sharing_txn(vec![(
+                        "UPDATE item_identity_watermark SET importing=1 WHERE singleton=1".into(),
+                        vec![],
+                    )])
+                    .await?;
+            }
+            self.store.sharing_read(sql, values).await
+        }
+        async fn sharing_txn(
+            &self,
+            statements: Vec<super::super::sharing::Statement>,
+        ) -> Result<Vec<usize>, StoreError> {
+            self.store.sharing_txn(statements).await
+        }
+    }
+    #[tokio::test]
+    async fn sharing_catalogue_actual_query_refuses_import_started_after_readiness() {
+        let store = SqliteStore::open_in_memory().expect("source fixture");
+        let (library, _, grant) = setup(&store).await;
+        install(&store).await;
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Scoped item".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("source item");
+        for operation in 0..3 {
+            store
+                .sharing_txn(vec![(
+                    "UPDATE item_identity_watermark SET importing=0 WHERE singleton=1".into(),
+                    vec![],
+                )])
+                .await
+                .expect("ready layout");
+            let racing = ImportTransition {
+                store: &store,
+                armed: AtomicBool::new(true),
+            };
+            let refused = match operation {
+                0 => racing
+                    .source_catalogue_page(CataloguePageRequest {
+                        credential_hash: "b".repeat(64),
+                        grant_id: grant,
+                        library_id: SourceId::parse(&library.to_string()).expect("library ID"),
+                        parent_id: None,
+                        query: String::new(),
+                        boundary: None,
+                        limit: 60,
+                    })
+                    .await
+                    .expect("page")
+                    .is_none(),
+                1 => racing
+                    .source_catalogue_batch(
+                        &"b".repeat(64),
+                        grant,
+                        MetadataBatch {
+                            item_ids: vec![SourceId::parse(&item.to_string()).expect("item ID")],
+                        },
+                    )
+                    .await
+                    .expect("batch")
+                    .is_none(),
+                _ => racing
+                    .source_catalogue_libraries(&"b".repeat(64), grant)
+                    .await
+                    .expect("libraries")
+                    .is_none(),
+            };
+            assert!(
+                refused,
+                "operation {operation} exposed importing catalogue after readiness"
+            );
+            assert!(
+                !racing.armed.load(Ordering::SeqCst),
+                "fixture must interpose before actual query"
+            );
+        }
     }
     #[tokio::test]
     async fn sharing_catalogue_item_identity_does_not_recycle_after_deletion() {

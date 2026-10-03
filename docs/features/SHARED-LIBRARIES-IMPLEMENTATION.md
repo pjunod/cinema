@@ -2132,3 +2132,62 @@ Commands: `cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogu
 and `cargo clippy --locked --offline -p plurxd -p plurx-core --all-targets
 --features plurx-core/hiqlite-contract-tests -- -D warnings`, with the pinned
 1.97.1 compiler and the isolated S4 target directory.
+
+
+#### S4 accepted content transport checkpoint (candidate, open)
+
+Source catalogue responses now retain captured grant, source/epoch, library
+and item authority through accepted-connection completion. The Store check
+uses one consistent current query; credential rotation alone preserves an
+already accepted response, while removed grants, narrowed library scope,
+item moves/deletion, unavailable qualified layout and import mode refuse.
+The actual catalogue query also checks import mode after its earlier readiness
+read, closing a transition between those reads. Replicated serving continues
+to require the real catalogue member-floor read check. This does not authorize
+writes or activate the candidate schemas.
+
+A sharing handler registers its authority monitor on the accepted transport.
+Each monitor checks current authority every second with a one-second deadline
+and cancels that connection on refusal or unavailable authority. The
+connection task selects that cancellation while Hyper is writing and owns the
+monitor tasks. This closes blocked transports within the three-second grant
+bound, including after Hyper has consumed the entire application body.
+Hyper 1.10.1 / h2 0.4.16 may still own queued DATA after Body Drop; a flush from
+another stream does not establish that the protected stream has drained.
+Therefore no Body Drop, global flush counter or timer retires these monitors.
+
+The registries are finite: 64 content monitors process-wide and 32 per accepted
+connection, with immediate refusal rather than a waiting queue. Completed
+responses on an idle connection retain those slots until connection completion.
+A request exceeding the connection bound cancels that connection; global
+exhaustion returns a closed 429. On HTTP/2, authority cancellation closes all
+multiplexed streams on that connection, including unrelated ordinary responses.
+Ordinary handlers do not register monitors or cancel the sharing token.
+
+This checkpoint covers source catalogue JSON. Scoped artwork, receiver login
+and assignment body monitors, full file details, caches and Continue Watching
+remain open; these results do not qualify S4 or S5. The transport seam is
+available to subsequent scoped artwork/relay handlers, which must retain their
+own captured authority and bounded monitor admission through the same lifetime.
+
+
+Ten daemon catalogue regressions passed on this checkpoint (6.40 seconds,
+zero ignored), including actual HTTP/1 blocked transport revocation for grant,
+scope and item mutations, delayed HTTP/2 stream windows after Body Drop and
+another stream flush, credential rotation, collateral multiplex cancellation,
+global admission refusal, 32 idle response monitors and owned registry cleanup.
+The source Store contract passed on actual three-voter storage (8.93 seconds,
+zero ignored), checking source identity, current item moves, import mode and
+scope removal. The interposed SQLite query test also passed: import activation
+after readiness refuses each actual catalogue query (0.16 seconds, zero ignored).
+Commands: `cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_`,
+`cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--test store_contract sharing_catalogue_source_three_voters_refuse_removed_scope_and_preserve_live_boundaries`
+and `cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests
+--lib sharing_catalogue_actual_query_refuses_import_started_after_readiness`.
+The socket/voter tests use local loopback fixtures and the pinned 1.97.1 compiler;
+no production schemas, network settings or installations are changed.
+
+Core/daemon all-target Clippy with `-D warnings` passed (1 minute 51 seconds,
+including compiler lock wait); docs-index tests passed. The tracked commit
+hook must also pass before this checkpoint is integrated.

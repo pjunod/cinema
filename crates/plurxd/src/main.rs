@@ -3113,6 +3113,43 @@ fn disable_nagle(stream: &tokio::net::TcpStream, remote: SocketAddr) {
     }
 }
 
+/// Sharing content monitors may close this accepted transport even when Hyper
+/// is blocked writing a body. HTTP/2 cancellation closes all multiplexed streams
+/// on that connection; ordinary handlers never cancel this token.
+#[derive(Clone)]
+pub(crate) struct SharingConnectionCancellation(
+    pub(crate) tokio_util::sync::CancellationToken,
+    std::sync::Arc<SharingConnectionMonitors>,
+);
+struct SharingConnectionMonitors(std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>);
+impl Drop for SharingConnectionMonitors {
+    fn drop(&mut self) {
+        for monitor in self.0.get_mut().expect("sharing monitor owner").drain(..) {
+            monitor.abort();
+        }
+    }
+}
+impl SharingConnectionCancellation {
+    fn new() -> Self {
+        Self(
+            tokio_util::sync::CancellationToken::new(),
+            std::sync::Arc::new(SharingConnectionMonitors(std::sync::Mutex::new(Vec::new()))),
+        )
+    }
+    pub(crate) fn monitor(
+        &self,
+        future: impl std::future::Future<Output = ()> + Send + 'static,
+    ) -> Result<(), ()> {
+        let mut monitors = self.1 .0.lock().expect("sharing monitor owner");
+        monitors.retain(|monitor| !monitor.is_finished());
+        if monitors.len() >= 32 || self.0.is_cancelled() {
+            return Err(());
+        }
+        monitors.push(tokio::spawn(future));
+        Ok(())
+    }
+}
+
 async fn serve_http<A: HttpAcceptor>(
     listener: A,
     app: axum::Router,
@@ -3161,9 +3198,12 @@ async fn serve_http<A: HttpAcceptor>(
         // `http::network`, which extract the peer address. The lower-level
         // hyper loop has to insert it explicitly because axum's IncomingStream
         // is private to `axum::serve`.
+        let connection_cancel = SharingConnectionCancellation::new();
+        let request_cancel = connection_cancel.clone();
         let service = tower::ServiceBuilder::new()
             .map_request(move |mut request: Request<Incoming>| {
                 request.extensions_mut().insert(ConnectInfo(remote));
+                request.extensions_mut().insert(request_cancel.clone());
                 request.map(axum::body::Body::new)
             })
             .service(app.clone());
@@ -3172,8 +3212,10 @@ async fn serve_http<A: HttpAcceptor>(
             .into_owned();
         let connection = graceful.watch(connection);
         tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::debug!(%error, %remote, "HTTP connection closed with an error");
+            let _cancel_on_close = connection_cancel.0.clone().drop_guard();
+            tokio::select! {
+                ()=connection_cancel.0.cancelled()=>{},
+                result=connection=> {if let Err(error)=result {tracing::debug!(%error,%remote,"HTTP connection closed with an error");}},
             }
         });
     }

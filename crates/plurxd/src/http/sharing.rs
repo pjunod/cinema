@@ -116,7 +116,7 @@ pub(crate) fn peer_router(state: AppState) -> Router {
         .route("/sharing/v1/endpoints", get(peer_manifest))
         .route("/sharing/v1/grant/rotation", post(rotate))
         .route("/sharing/v1/grant/rotation/{id}", get(rotation_status))
-        .merge(super::shared_library::peer_router())
+        .merge(super::shared_library::peer_router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             peer_guard,
