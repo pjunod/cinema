@@ -3615,6 +3615,13 @@ assert.equal(context.ACT_TIMER, null);
                     expected = general
                 elif path == ".github/workflows/coverage.yml" and name == "coverage":
                     expected = high_cpu
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "windows_compile"
+                ):
+                    # The high-cpu pool also includes 8 GiB Incus guests;
+                    # Windows cross-linking needs the larger bare-metal hosts.
+                    expected = local("Linux", "X64", "lab", "general", "baremetal")
                 elif path == ".github/workflows/ci.yml" and name == "package_smoke":
                     expected = "    runs-on: ${{ fromJSON(matrix.runs_on) }}"
                 elif path == ".github/workflows/ci.yml" and name == "publish_main":
