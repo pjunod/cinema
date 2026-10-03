@@ -14,6 +14,14 @@ const {shellSource} = require("../web/shell-source.js");
 // The app's body rows, joined in served order.
 const SHIPPED_SHELL = shellSource();
 const SHIPPED_UI = SHIPPED_SHELL.bodyScript;
+// Function-only harnesses load the same context helper as the served shell.
+// Keep its validation real: diagnostic files below use canonical local IDs.
+const FILE_CONTEXT_SOURCE=fs.readFileSync(path.join(__dirname,
+  "../../crates/plurxd/src/web/core/file-context.js"),"utf8");
+function PlaybackContextFunction(...args){
+  args[args.length-1]=FILE_CONTEXT_SOURCE+"\n"+args[args.length-1];
+  return new Function(...args);
+}
 // The player's own DOM is in the shell's markup and its treatments are in
 // app.css; neither is in a body row.
 const SHIPPED_MARKUP = SHIPPED_SHELL.html;
@@ -200,7 +208,7 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
   // paints them as a state pill, a Server ahead meter against its target, and
   // a Lease/Demand/Policy row set behind the disclosure — the run-on sentence
   // is gone, the facts are not.
-  const helpers = new Function(
+  const helpers = new PlaybackContextFunction(
     `${shippedSource("esc")}\n${shippedSource("clockFromSec")}\n${shippedSource("fmtBytes")}\n${shippedSource("fmtMbps")}\n` +
       `${shippedSource("activityMethodLabel")}\n${shippedSource("activityObservedVodSession")}\n${shippedSource("activityStreamState")}\n${shippedSource("activityStreamMeters")}\n` +
       `${shippedSource("activityStreamDetails")}\n${shippedSource("activityStreamCell")}\n` +
@@ -236,7 +244,7 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
 });
 
 test("playback info explicitly separates playback mode from delivery method", () => {
-  const modes = new Function(
+  const modes = new PlaybackContextFunction(
     `${shippedSource("playbackModeName")}\n${shippedSource("playbackModeDetail")}\nreturn {playbackModeName,playbackModeDetail};`,
   )();
   assert.equal(modes.playbackModeName({ vod: true }), "VOD HLS");
@@ -250,7 +258,7 @@ test("playback info explicitly separates playback mode from delivery method", ()
 });
 
 test("playback info keeps readiness unknown distinct from measured zero", () => {
-  const telemetry = new Function(
+  const telemetry = new PlaybackContextFunction(
     `${shippedSource("statsServerReady")}\n${shippedSource("statsHttpWait")}\n${shippedSource("playbackWaitCopy")}\nreturn {statsServerReady,statsHttpWait,playbackWaitCopy};`,
   )();
   assert.deepEqual(telemetry.statsServerReady(null), {
@@ -295,7 +303,7 @@ test("playback info keeps readiness unknown distinct from measured zero", () => 
 // always read "0.0 s client loaded" for the whole wait. The sampling tick now
 // recomputes it, and only for the player that owns the attached element.
 test("the wait detail is sampled live and only for the owning player", () => {
-  const live = new Function(
+  const live = new PlaybackContextFunction(
     "bufferRunway", "playbackOwnsAttachedMedia", "performance",
     `let PLAYER=null;\n${shippedSource("playbackWaitCopy")}\n` +
       `${shippedBinding("const", "PLAYBACK_WAIT_HEALTH_MAX_AGE_MS")}\n${shippedSource("playbackWaitLiveDetail")}\n` +
@@ -315,7 +323,7 @@ test("the wait detail is sampled live and only for the owning player", () => {
 test("the sampling tick resamples the wait sentence before the presenter paints", () => {
   const order = [];
   const render = function renderPlaybackSurface() {};
-  const tick = new Function(
+  const tick = new PlaybackContextFunction(
     "renderPlaybackSurface", "playbackWaitLiveDetail", "playbackProgressTick",
     // The same half-second tick carries the MediaSession position (F-web-13);
     // the plan forbids a second timer for it, so it has to be visible here.
@@ -336,7 +344,7 @@ test("the sampling tick resamples the wait sentence before the presenter paints"
   // prepared handoff's adoption of the successor element.
   const intervals = [];
   let installedMediaSession = 0;
-  const arm = new Function(
+  const arm = new PlaybackContextFunction(
     "setInterval", "clearInterval", "playbackSamplingTick", "PlaybackPolicy",
     // Arming the timers is also where the attached stream claims the OS
     // transport, so a re-arm after a stall recovery re-installs it.
@@ -368,7 +376,7 @@ test("the health poll runs for a live media wait as well as for the panel", asyn
     const calls = [];
     // The slice carries the module's own 2 s `setInterval` beside the
     // function; a real timer there would keep this process alive forever.
-    const poll = new Function(
+    const poll = new PlaybackContextFunction(
       "PLAYER", "playbackOwnsAttachedMedia", "document", "playbackWaitSurfaceLive", "api",
       "updateStats", "performance", "setInterval",
       `${shippedSource("pollSessionHealth")}\nreturn pollSessionHealth;`,
@@ -451,7 +459,7 @@ function buildOpenSession(overrides) {
     },
     overrides || {},
   );
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "api",
     "newRequestId",
     "vodClientContract",
@@ -556,7 +564,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
   // Vision from the one request that explicitly asked for the original.
   const requests = [];
   const api = async (url, options) => { requests.push({ url, options }); return {}; };
-  const shipped = new Function(
+  const shipped = new PlaybackContextFunction(
     "api",
     "newRequestId",
     "vodClientContract",
@@ -610,7 +618,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
   // put an `override force=auto` note on every ordinary create and move the
   // `overridden` counter for nothing.
   requests.length = 0;
-  const auto = new Function(
+  const auto = new PlaybackContextFunction(
     "api", "newRequestId", "vodClientContract", "PLAYER",
     "capsDocument", "PLAY_CAPS", "decodeLimits", "qualityForce",
     [
@@ -633,7 +641,7 @@ asyncTest("the decision and the create it acts on ask one question", async () =>
 
 test("a stream rejection reports what the server handed over, not just that it failed", () => {
   const build = (PLAYER, PLAY_CAPS) =>
-    new Function(
+    new PlaybackContextFunction(
       "PLAYER",
       "PLAY_CAPS",
       [
@@ -748,7 +756,7 @@ test("the rejection report carries the join, whatever the path built it", () => 
   // which passed against a build whose `clientLog(...)` had been replaced by
   // `void (...)` — the report never sent at all — and failed on a reformat
   // that added a space after a colon. Both were checked.
-  const report = new Function(
+  const report = new PlaybackContextFunction(
     "playbackContext",
     `${shippedSource("streamRejectionReport")}\nreturn streamRejectionReport;`,
   )(() => ({ session: "s-abc", height: 2160, encoder: "copy", runway: 4.5 }));
@@ -812,7 +820,7 @@ asyncTest("a create never sends an empty capabilities document", async () => {
   // told the server which codecs it decodes, and that document is worth
   // re-deriving from. (This is also what fails when the predicate's `||`
   // becomes `&&`, which every other case here survives.)
-  const usable = new Function(
+  const usable = new PlaybackContextFunction(
     shippedSource("capsDocumentIsUsable") + "\nreturn capsDocumentIsUsable;",
   )();
   assert.equal(usable({ v: 2, video: [{ codec: "hevc" }], audio: [], containers: [] }), true);
@@ -830,7 +838,7 @@ test("the document this browser actually builds is one the server can read", () 
   // at which point the guard stops being decoration and starts being load
   // bearing, and either way somebody finds out here rather than from a
   // `plan_derivation.unusable_caps` counter climbing on the fleet.
-  const built = new Function(
+  const built = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     "document",
@@ -872,7 +880,7 @@ test("the caps document stays bounded now that every create carries it", () => {
   // at most 256 learned limits and clips each label to 160, so anything past
   // that is bytes nobody reads — and the route's 64 KiB body limit is what
   // they would eventually run into.
-  const capsDocument = new Function(
+  const capsDocument = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     `${shippedSource("capsDocument")}\nreturn capsDocument;`,
@@ -897,7 +905,7 @@ test("the caps document stays bounded now that every create carries it", () => {
 });
 
 test("the VOD fetch contract stays below hls.js and beyond the producer watchdog", () => {
-  const contract = new Function(
+  const contract = new PlaybackContextFunction(
     `${shippedSource("vodClientContract")}\nreturn vodClientContract();`,
   )();
   assert.equal(contract.session.presentation, "vod");
@@ -946,7 +954,7 @@ test("an initial VOD refusal stays visible instead of closing the player", () =>
 });
 
 test("VOD diagnostics describe materialization instead of claiming a cache hit", () => {
-  const status = new Function(
+  const status = new PlaybackContextFunction(
     "health",
     `${shippedSource("vodServerState")}\nreturn vodServerState(health);`,
   );
@@ -1002,12 +1010,12 @@ test("analysis controls are first-class settings separate from playback mode con
 });
 
 test("analysis settings render the numeric retry policy returned by the API", () => {
-  const esc = new Function(`${shippedSource("esc")}\nreturn esc;`)();
-  const presetOpts = new Function(
+  const esc = new PlaybackContextFunction(`${shippedSource("esc")}\nreturn esc;`)();
+  const presetOpts = new PlaybackContextFunction(
     "esc",
     `${shippedSource("presetOpts")}\nreturn presetOpts;`,
   )(esc);
-  const render = new Function(
+  const render = new PlaybackContextFunction(
     "analysisSummaryCard",
     "presetOpts",
     "esc",
@@ -1050,7 +1058,7 @@ test("estimated skip markers are hedged without rebuilding each tick", () => {
     },
   };
   const player = { autoskip: false, _markerOffers: new Set() };
-  const renderSkip = new Function(
+  const renderSkip = new PlaybackContextFunction(
     "document",
     "esc",
     "PLAYER",
@@ -1117,13 +1125,13 @@ return renderSkip;`,
 });
 
 test("auto-skip only seeks exact marker provenance", () => {
-  const markerAutoSkipEligible = new Function(
+  const markerAutoSkipEligible = new PlaybackContextFunction(
     `${shippedSource("markerAutoSkipEligible")}
 return markerAutoSkipEligible;`,
   )();
   const skipped = [];
   const player = { autoskip: true, markers: [] };
-  const checkMarkers = new Function(
+  const checkMarkers = new PlaybackContextFunction(
     "PLAYER",
     "markerNowMs",
     "renderSkip",
@@ -1171,7 +1179,7 @@ test("a preview is offered but never auto-skipped", () => {
   // surface that offers it. A preview is the one kind that is new footage each
   // week, so auto-skipping it would silently widen an opt-in the viewer made
   // about repeated material. The button still appears — that is the point.
-  const eligible = new Function(
+  const eligible = new PlaybackContextFunction(
     `${shippedSource("markerAutoSkipEligible")}
 return markerAutoSkipEligible;`,
   )();
@@ -1194,7 +1202,7 @@ test("only a tail kind that runs to the end finishes playback", () => {
   // next one is not a thing to do on a kind we cannot name.
   const finished = [];
   const sought = [];
-  const skipMarker = new Function(
+  const skipMarker = new PlaybackContextFunction(
     "PLAYER",
     "document",
     "clientLog",
@@ -1298,7 +1306,7 @@ test("required_hls_never_falls_back_to_progressive", () => {
   }
   assert.match(
     shippedSource("startCopyHls"),
-    /indexPendingFallback[\s\S]*?stream\.mp4[\s\S]*?copyHls=false/,
+    /indexPendingFallback[\s\S]*?copyHls=false[\s\S]*?playbackFileUrl\(context,"stream\.mp4"\)/,
     "the shipped session-open path must attach the progressive response",
   );
 });
@@ -1967,7 +1975,7 @@ test("two long supply-stall episodes do not satisfy the three-stall rescue", () 
 
 test("the shipped counter records one event per pause reported at both edges", () => {
   let nowMs = 0;
-  const noteAutoStall = new Function(
+  const noteAutoStall = new PlaybackContextFunction(
     "PlaybackPolicy",
     "performance",
     `${shippedSource("noteAutoStall")}\nreturn noteAutoStall;`,
@@ -2062,7 +2070,7 @@ function autoRescueHarness(player, autoAbr = true) {
   }
 
   const noop = () => {};
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "document",
@@ -2183,7 +2191,7 @@ async function autoRungTick(autoAbr) {
       failedHeights: new Set(),
     },
   };
-  const tick = new Function(
+  const tick = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "document",
@@ -2237,7 +2245,7 @@ asyncTest("the Auto switch gates an automatic rung change", async () => {
 });
 
 test("the disabled Auto controller leaves every manual ladder rung available", () => {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "SERVER",
     "PlaybackPolicy",
@@ -2383,7 +2391,7 @@ function autoRungHarness(attaches) {
   const raises = [];
   const player = { abr: { switching: false }, autoFallbackInFlight: false, started: true };
   const asked = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "raisePlaybackSurface",
     "positionForPlaybackIntent", "beginPlaybackControlSeek", "requestPlaybackMediaChange",
     "requestQualityChange", "video",
@@ -2711,7 +2719,7 @@ test("completed main fragments give a bounded delivery window without burst opti
 
 test("native element transfer errors never spend a compatibility transcode", () => {
   for (const code of [0, 1, 2, 3, 4]) {
-    const run = new Function("PlaybackPolicy", "code", [
+    const run = new PlaybackContextFunction("PlaybackPolicy", "code", [
       "const callbacks={}, rescues=[]; let stopped=0;",
       "const PLAYER={method:'remux',triedFallback:false};",
       "const document={getElementById(){return {};}};",
@@ -2960,7 +2968,7 @@ test("a bitmap default is never auto-applied, whatever the server sent", () => {
     /s\.text\s*===\s*false/,
     "the client's burn test reads the wire's `text` flag",
   );
-  const subNeedsBurn = new Function(
+  const subNeedsBurn = new PlaybackContextFunction(
     [source, "return subNeedsBurn;"].join("\n"),
   )();
 
@@ -3052,7 +3060,7 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   const setTimeoutStub = (fn) => { pending = fn; return 1; };
   const clearTimeoutStub = () => { pending = null; };
   let surface = "desktop";
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE", "isFullscreenAnywhere", "toggleFullscreen",
     "toggleStats", "cycleSub", "playerActivity", "pbTotalSec", "pbPosSec",
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
@@ -3233,7 +3241,7 @@ function buildShippedSurfaceRender() {
     pindicator: node(), pindText: node(),
   };
   const document = { getElementById: (id) => elements[id] || null };
-  const render = new Function(
+  const render = new PlaybackContextFunction(
     "document",
     [
       shippedSource("esc"),
@@ -3341,7 +3349,7 @@ test("the shipped presenter step is the only thing that renders, and it renders 
 // this fails, because a full-screen `preparing` keeps today's routing.
 test("surface kind x class x input is a fixed cross-product", () => {
   const { render, elements } = buildShippedSurfaceRender();
-  const inputState = new Function(
+  const inputState = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE",
     [
       shippedSource("playerSeekPending"),
@@ -3403,7 +3411,7 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
   const fed = [];
   // Everything the listener could reach for, so a mutation that feeds evidence
   // fails on what it fed rather than on an undefined name.
-  new Function(
+  new PlaybackContextFunction(
     "playbackSurfaceStep", "PLAYER", "playbackSurfaceGeneration", "playbackWaitNeedsProgress",
     match[1],
   )((event) => fed.push(event), { started: true, attemptId: "g1" }, () => "g1", () => false);
@@ -3436,7 +3444,7 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
 function keepWaitingHarness() {
   const calls = [];
   const player = { method: "remux", recoveringStall: { at: 1, action: "reconnect" } };
-  const act = new Function(
+  const act = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
     "startTranscodeFallback", "logout", "armStall", "pbPosSec",
     [
@@ -3487,7 +3495,7 @@ test("exhausted and stopped prompts offer executable recovery actions", () => {
   // deliberately not on it: nothing is attached there, so `armStall` would arm
   // a watchdog `stallDiagnose` returns from on its first line, and the button
   // would clear the prompt and do nothing. Ruled 2026-09-13.
-  const shared = new Function(
+  const shared = new PlaybackContextFunction(
     "PLAYER",
     [
       shippedSource("playbackStallActions"),
@@ -3502,7 +3510,7 @@ test("exhausted and stopped prompts offer executable recovery actions", () => {
     "Force transcode is still not offered on a session that already is one");
   // …and a `stopped` terminal keeps the list it had: there is nothing left to
   // wait for when the server has ended the recipe.
-  const stall = new Function("PLAYER",
+  const stall = new PlaybackContextFunction("PLAYER",
     [shippedSource("playbackStallActions"), "return playbackStallActions;"].join("\n"));
   assert.deepEqual(stall({})({ method: "remux" }), ["retry", "force_transcode", "close"]);
   // The create-exhaustion owner names the actions inline, so read them back.
@@ -3527,7 +3535,7 @@ test("the stall-recovery prompt stops the player before it raises", () => {
   const order = [];
   const beacons = [];
   let raised = null;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers",
     "retireHlsTerminalAttempt", "raisePlaybackSurface", "clientLog",
     [
@@ -3615,7 +3623,7 @@ function buildShippedSurfaceGlue(player) {
   const document = { getElementById: (id) => elements[id] || null };
   const clock = { now: 0 };
   const logged = [];
-  const api = new Function(
+  const api = new PlaybackContextFunction(
     "document", "PLAYER", "PlaybackPolicy", "performance", "recordPlaybackSurfaceLog",
     [
       shippedSource("esc"),
@@ -3706,7 +3714,7 @@ test("a refusal no source row claims still reaches the surface as the server's s
   const raised = [];
   const toasts = [];
   const stops = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "STREAM_FAILURE", "currentStreamFailureOverlay",
     "playbackSurfaceContext", "playbackSurfaceIntent", "playbackSurfaceClassOf",
     "playbackSurfaceClassBlocks", "stopPlayerForExhaustion", "raisePlaybackSurface",
@@ -3841,7 +3849,7 @@ test("every blocking raise in the page takes the owner's stop first", () => {
 // and this fails — evidence is the clock AND the frames, not the tick running.
 test("the shipped progress tick reports the advance it measured, not that it ran", () => {
   const fed = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
@@ -3891,7 +3899,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
 // the presenter's only evidence.
 test("a stream that starts again after the owner stopped it gets its sampler back", () => {
   const armed = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
     "armPlaybackSampling", "configureHlsStartupDeadline", "PlaybackPolicy",
     [shippedSource("armStall"), "return armStall;"].join("\n"),
@@ -3912,7 +3920,7 @@ test("a stream that starts again after the owner stopped it gets its sampler bac
 // what bounds a fault's life; without it a refusal outlives the attempt.
 test("attachment and retirement are what the presenter is told about identity", () => {
   const fed = [];
-  const attach = new Function(
+  const attach = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration",
     [shippedSource("beginPlaybackMediaAttachment"), "return beginPlaybackMediaAttachment;"].join("\n"),
   )(null, (event) => fed.push(event), (p) => (p && p.attemptId) || null);
@@ -3921,7 +3929,7 @@ test("attachment and retirement are what the presenter is told about identity", 
     "every attach on every route runs through here, so every one must say so");
 
   fed.length = 0;
-  const retire = new Function(
+  const retire = new PlaybackContextFunction(
     "PLAYER", "playbackSurfaceStep", "playbackSurfaceGeneration", "stopPlayerTimers",
     "teardownHls", "releaseSession",
     [shippedSource("retirePlaybackPredecessor"), "return retirePlaybackPredecessor;"].join("\n"),
@@ -3939,7 +3947,7 @@ test("the waiting listener raises one fault per wait, not one per boundary", () 
   assert.ok(match, "index.html no longer wires waiting through the presenter");
   const raised = [];
   const live = [];
-  const handler = new Function(
+  const handler = new PlaybackContextFunction(
     "PLAYER", "PlaybackPolicy", "playbackOwnsAttachedMedia", "playbackSurfacePromptUp",
     "beginWait", "bufferRunway", "playbackWaitCopy", "raisePlaybackSurface",
     "notifyPlaybackControl", "v",
@@ -3974,7 +3982,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
   const runs = [];
   const order = [];
   // stallDiagnose's terminal verdict.
-  const diagnose = new Function(
+  const diagnose = new PlaybackContextFunction(
     "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
@@ -3998,7 +4006,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
 });
 
 test("playback-info row builders follow the shared web field list in fixture order", () => {
-  const rows = new Function(
+  const rows = new PlaybackContextFunction(
     [
       shippedBinding("const", "PLAYBACK_INFO_FIELDS"),
       shippedBinding("const", "STATS_ROWS"),
@@ -4020,7 +4028,7 @@ test("playback-info row builders follow the shared web field list in fixture ord
 });
 
 test("playback info labels tone-map peak provenance without calling policy source truth", () => {
-  const summarize = new Function(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
+  const summarize = new PlaybackContextFunction(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
   assert.equal(
     summarize({tone_map_peak_nits: 4000, tone_map_peak_source: "cll"}),
     "Tone-map peak 4,000 nits · source MaxCLL",
@@ -4037,7 +4045,7 @@ test("playback info labels tone-map peak provenance without calling policy sourc
 // attributability (§5), and it had to be added to a hand-written column list
 // to appear at all.
 test("every available diagnostic field is rendered in a named disclosure", () => {
-  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoHelp")}\n${shippedSource("playbackInfoMarkup")}\nreturn playbackInfoMarkup;`)();
+  const render = new PlaybackContextFunction(`${shippedSource("esc")}\n${shippedSource("playbackInfoHelp")}\n${shippedSource("playbackInfoMarkup")}\nreturn playbackInfoMarkup;`)();
   const fields = require("./playback-info-fields.json").fields;
   const rows = fields.map(field => ({...field, value: "observed", note: "sample"}));
   const markup = render("debug", rows, "", "");
@@ -4049,7 +4057,7 @@ test("every available diagnostic field is rendered in a named disclosure", () =>
 });
 
 test("missing stream frame stays explicit beside source and player facts", () => {
-  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
+  const render = new PlaybackContextFunction(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
   const markup = render({decode_resolution: "Unavailable", source_resolution: "3840×2160", stream_frame: "Unavailable", player_state: "Playing", method: "Transcode · cached"});
   assert.match(markup, /pi-picture[^]*?Source frame[^]*?<strong>3840×2160<\/strong>/);
   assert.match(markup, /Stream frame[^]*?<strong>Unavailable<\/strong>/);
@@ -4299,7 +4307,7 @@ test("a refusal only explains a failure it is contemporary with", () => {
 test("a successful playlist retry immediately clears its 503 explanation", () => {
   const player = { hls: {} };
   let now = 1_000_000;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PlaybackPolicy",
     "PLAYER",
     "Date",
@@ -4377,7 +4385,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     burnedSub: null,
   };
   const video = { currentTime: 12 };
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PlaybackPolicy",
     "fetch",
     "document",
@@ -4536,7 +4544,7 @@ function shippedBinding(keyword, name) {
 // stubbed, everything that decides what a viewer READS is shipped code.
 function detailHarness({ decisions = {}, admin = false } = {}) {
   const requested = [];
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document",
     "PlaybackPolicy",
     "qualityForce",
@@ -4602,7 +4610,7 @@ function detailHarness({ decisions = {}, admin = false } = {}) {
 }
 
 function bookMetadataHarness() {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "grid",
     [
       shippedSource("esc"),
@@ -5041,7 +5049,7 @@ function carryHarness(player) {
     load() {},
   });
   const cleared = { count: 0 };
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "document",
     "PLAYER",
     "exitPresentationModes",
@@ -5202,7 +5210,7 @@ function hevcHarness({
   } else if (mediaCapabilities !== null) {
     nav.mediaCapabilities = mediaCapabilities;
   }
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "window",
     "document",
     "MediaSource",
@@ -5526,7 +5534,7 @@ test("a converted Dolby Vision stream names the profile it is playing as", () =>
   // Neither half dims. The base layer is copied byte for byte and nothing is
   // re-encoded, so the source capability is active; dimming it would say the
   // opposite of what happened.
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "RANGE_SHORT",
     "RANGE_LONG",
     [
@@ -5605,7 +5613,7 @@ test("every surface paints the badge from the same four answers", () => {
   // correct-looking chip for the wrong delivery, on one surface out of four.
   // `playerRangeBadge` is the single reader, so there is one place to get it
   // wrong and this is the test of that place.
-  const built = new Function(
+  const built = new PlaybackContextFunction(
     "PLAYER",
     "RANGE_SHORT",
     "RANGE_LONG",
@@ -5654,7 +5662,7 @@ test("a session that lands on a different range repaints the badge", () => {
   // session open, before the route was chosen. attachSession is the one site
   // every session passes through, so it owns the repaint.
   let repaints = 0;
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "renderPlayerInfo",
     "attachHls",
@@ -5723,7 +5731,7 @@ test("a session that lands on a different range repaints the badge", () => {
 });
 
 test("every web transcode reopen preserves the decision's HDR10 request", () => {
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "PLAYER",
     "transcodeHeight",
     "qualityForce",
@@ -5863,7 +5871,7 @@ test("the caps document says the two things the flat query could not", () => {
   // The flat query has one `maxheight` slot, so a browser whose 8-bit ceiling
   // is 2160 and whose Main10 ceiling is 1080 had to send 1080 — transcoding
   // every 4K 8-bit title it would have direct-played. The document says both.
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     // The newline matters: `shippedSource` can end on a `//` comment, and
@@ -5943,7 +5951,7 @@ test("a learned limit reaches the server with the identity it was keyed by", () 
   // every limit is anonymous — and an anonymous limit matches nothing on the
   // server, silently. The whole feature would look like it simply did not
   // work.
-  const build = new Function(
+  const build = new PlaybackContextFunction(
     "SERVER",
     "navigator",
     `${shippedSource("capsDocument")}\n; return capsDocument;`,
@@ -5974,7 +5982,7 @@ test("a learned limit reaches the server with the identity it was keyed by", () 
 asyncTest("new_caps_failure_does_not_retry_legacy_decision", async () => {
   async function callsFor(caps, failure) {
     const calls = [];
-    const ask = new Function(
+    const ask = new PlaybackContextFunction(
       "api",
       "currentCapsDocument",
       "decisionUrl",
@@ -6109,7 +6117,7 @@ test("the create-retry ladder is one set of numbers on all three clients", () =>
   );
   assert.match(
     SHIPPED_UI,
-    /openSessionRetryingNotYet\(fileId,options,signal,/,
+    /openSessionRetryingNotYet\(attempt\.fileContext\|\|fileId,options,signal,/,
     "the web's create must go through the retry sequence",
   );
 
@@ -6770,7 +6778,7 @@ test("unknown source peak requires distinct completed successor segment margins"
   assert.equal(policy.qualityOriginalTrialMargin([first,{...second,elapsed_ms:3000}]),false);
 });
 test("viewer recipe edits do not send an incumbent candidate under new tracks or offset",()=>{
-  const shipped=new Function("selectedAudioIndex",[
+  const shipped=new PlaybackContextFunction("selectedAudioIndex",[
     "const SERVER={playback_display_aware_auto:true,display_aware_auto_protocol:'route-v1'};",
     "function playQuality(){return 'auto';}",
     shippedSource("qualityCatalogSelectionKey"),
@@ -6787,7 +6795,7 @@ test("viewer recipe edits do not send an incumbent candidate under new tracks or
   assert.equal(shipped.selection({...p,qualityProtocol:'route-v1'},true).quality.candidate_id,f.middle.id);
   for(const change of [{audioIndex:1},{aoffset:250},{curSub:2,burnedSub:2}])
     assert.equal(shipped.selection({...p,...change}).quality.candidate_id,undefined);
-  const query=new Function(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
+  const query=new PlaybackContextFunction(`${shippedSource("prePlaySelectionQuery")}\nreturn prePlaySelectionQuery;`)();
   assert.equal(query({audio:1,audio_offset_ms:250}),"&audio=1&audio_offset_ms=250");
   assert.equal(query({audio_offset_ms:50000}),"&audio_offset_ms=15000");
   assert.equal(query({audio_offset_ms:0}),"");
@@ -6867,7 +6875,7 @@ test("recovery allowance rearms only after continuous observed health",()=>{
 });
 
 test("VOD activity distinguishes actual zero, missing control, stale control and producer hold",()=>{
-  const api=new Function([shippedSource("fmtBytes"),shippedSource("activityObservedVodSession"),shippedSource("activityStreamState"),shippedSource("activityStreamDetails"),"return {fmtBytes,activityStreamState,activityStreamDetails};"].join("\n"))();
+  const api=new PlaybackContextFunction([shippedSource("fmtBytes"),shippedSource("activityObservedVodSession"),shippedSource("activityStreamState"),shippedSource("activityStreamDetails"),"return {fmtBytes,activityStreamState,activityStreamDetails};"].join("\n"))();
   assert.equal(api.fmtBytes(0),'0 B');assert.equal(api.fmtBytes(null),'');
   const session={presentation:'vod',live_bytes:0,advertised_bytes:0,vod_observation:{control_demand:'active',render_state:'rendering',control_age_ms:100,producer_state:'held',producer_hold:'ahead'}};
   assert.equal(api.activityStreamState(session).label,'Holding');
@@ -6879,7 +6887,7 @@ test("VOD activity distinguishes actual zero, missing control, stale control and
 });
 
 test("watch delivery follows attachment rather than catalogue status",()=>{
-  const make=new Function('PLAYER','WATCH','playbackOwnsAttachedMedia','esc',shippedSource('watchDeliveryRow')+';return watchDeliveryRow;');
+  const make=new PlaybackContextFunction('PLAYER','WATCH','playbackOwnsAttachedMedia','esc',shippedSource('watchDeliveryRow')+';return watchDeliveryRow;');
   const p={fileId:7,sessionId:'vod-session',vod:true,method:'remux'};
   const row=make(p,{accepted:true},()=>true,value=>value);
   assert.match(row({id:7,vod_index_status:'pending'}),/>VOD HLS</);
@@ -6890,7 +6898,7 @@ test("watch delivery follows attachment rather than catalogue status",()=>{
 
 
 test("peer VOD Activity cell preserves measured control and producer facts",()=>{
-  const cell=new Function("clockFromSec","fmtBytes","fmtMbps","esc",[
+  const cell=new PlaybackContextFunction("clockFromSec","fmtBytes","fmtMbps","esc",[
     shippedSource("activityObservedVodSession"),shippedSource("activityMethodLabel"),
     shippedSource("activityStreamState"),shippedSource("activityStreamMeters"),
     shippedSource("activityStreamDetails"),shippedSource("activityStreamCell"),
@@ -6907,7 +6915,7 @@ test("peer VOD Activity cell preserves measured control and producer facts",()=>
 
 test("fenced retirement followed by native error 3 reopens once without codec blame", () => {
   for (const reason of ['serving_fenced','authority_fenced']) {
-    const build=new Function('PlaybackPolicy','reason',[
+    const build=new PlaybackContextFunction('PlaybackPolicy','reason',[
       "let PLAYER={method:'remux',sessionId:'retired',mediaAttachment:{},wantsPlayback:true,stallRecoveries:0}; const callbacks={},reopens=[],rescues=[];",
       "PLAYER.sessionTerminal={sessionId:PLAYER.sessionId,attachment:PLAYER.mediaAttachment,reason};",
       "const document={getElementById:()=>({})},console={warn(){}},performance={now:()=>1};",
@@ -6925,7 +6933,7 @@ test("fenced retirement followed by native error 3 reopens once without codec bl
 });
 
 test("fenced recovery cannot inherit a predecessor attachment or session", () => {
-  const build=new Function([
+  const build=new PlaybackContextFunction([
     "const attachment={},PLAYER={sessionId:'new',mediaAttachment:attachment};",
     "function playbackOwnsAttachedMedia(){return true;}",shippedSource('recoverServingFencedAttachment'),
     "return p=>recoverServingFencedAttachment({},p);",

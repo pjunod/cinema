@@ -13,6 +13,8 @@
 // the witness is scoped to the CURRENT attachment — a retry or a quality reopen
 // reuses the player object while resetting both the element and `offset`.
 const {test}=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm');
+const fs=require('node:fs'),path=require('node:path');
+const fileContextSource=fs.readFileSync(path.join(__dirname,'../../crates/plurxd/src/web/core/file-context.js'),'utf8');
 const {shellSource}=require('./shell-source.js');
 const html=shellSource().bodyScript;
 function source(name){let at=html.indexOf(`async function ${name}(`);if(at<0)at=html.indexOf(`function ${name}(`);assert.ok(at>=0,`no ${name} in the served shell`);return html.slice(at,html.indexOf('\n}',at)+2);}
@@ -35,6 +37,7 @@ function harness(video,player,options={}){
     performance:{now:()=>clock.ms},
     Math,
   });
+  vm.runInContext(fileContextSource,c);
   vm.runInContext(shippedConst('PAUSED_BEAT_FLOOR_MS'),c);
   vm.runInContext(source('reportProgress'),c);
   // A `const` run in a context is lexical, not a property of it, so the value

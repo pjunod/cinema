@@ -418,7 +418,7 @@ function cinemaSharingCard(settings,readiness){
     ${devReq(readiness,"cinema_sharing","tls","Node certificate and pin","Keep the node key and verify the invitation pin through your trusted channel.")}
     ${devReq(readiness,"cinema_sharing","network","Tailscale reachability and access policy","Both homes need qualified private transport and explicit recipient access.")}
     ${devReq(readiness,"cinema_sharing","qualification","Catalogue and client qualification","Shared playback and device qualification are still in progress.")}
-    ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Libraries as permanent settings.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
+    ${devGraduation("S3–S8 shared catalogue, playback, private history and device qualification are complete.","sharing controls move to Settings → Sharing after S8 evidence and promotion.")}<div class="err" id="cinema-sharing-error" role="alert"></div>${setCardFoot("saveCinemaSharing")}`,{id:"cinema-sharing-settings"});
 }
 async function saveCinemaSharing(btn){
   const err=document.getElementById("cinema-sharing-error");if(err)err.textContent="";btn.disabled=true;

@@ -250,7 +250,7 @@ function watchChapters(){
   return file?.chapters||[];
 }
 function watchChapterThumbUrl(file,i){
-  return tok(`/api/v1/files/${encodeURIComponent(file.id)}/chapters/${i}/thumb?v=${encodeURIComponent(String(file.mtime||file.size||0))}`);
+  return tok(playbackFileUrl(playbackFileContextForFile(file),`chapters/${i}/thumb`,{v:String(file.mtime||file.size||0)}));
 }
 function watchRulerHtml(chapters,totalMs,cls){
   if(!chapters.length||!totalMs)return "";

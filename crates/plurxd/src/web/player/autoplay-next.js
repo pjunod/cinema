@@ -12,7 +12,8 @@ function togglePlayerAutonext(){ setAutoNext(!autoNextOn()); toast(autoNextOn()?
 // so the page behind the player follows along. Returns true if it started one.
 async function playNextEpisode(){
   const current=playbackContinuation(PLAYER);
-  const itemId=ITEM_FOR_FILE[PLAYER&&PLAYER.fileId]; if(!itemId) return false;
+  if(!PLAYER||playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return false;
+  const itemId=ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(PLAYER))]; if(!itemId) return false;
   const preparation=beginPlaybackPreparation(current);
   const read=path=>preparation.run(signal=>api(path,{signal}));
   try{
@@ -61,6 +62,7 @@ function playbackContinuation(p){
 }
 async function playNextAudiobookPart(){
   if(!PLAYER||!PLAYER.bookParts||PLAYER.bookParts.length<2) return false;
+  if(playbackFileContextForPlayer(PLAYER).source_ref.kind!=="local")return false;
   const i=PLAYER.bookParts.findIndex(p=>p.id===PLAYER.fileId), next=PLAYER.bookParts[i+1];
   if(i<0||!next) return false;
   const m=Object.assign({},PLAYER.meta||{},{part_offset_ms:next.part_offset_ms||0});

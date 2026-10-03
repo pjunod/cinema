@@ -549,6 +549,9 @@ async function reportProgress(fileId, ended, attachedOwner){
   const p=attachedOwner||PLAYER;
   if(!p||p.fileId!==fileId||(!attachedOwner&&!playbackOwnsAttachedMedia(p)))return;
   if(p.libraryChannel)return;
+  // Shared history requires S5's authenticated active-session proof adapter.
+  // Never send a source item number to the local progress endpoint.
+  if(playbackFileContextForPlayer(p).source_ref.kind!=="local")return;
   const video=document.getElementById("video");
   const posMs=Math.round((p.bookOffset||0)+((p.offset||0)+ (video.currentTime||0))*1000);
   // A zero beat needs a witness; a beat with a position in it does not.
@@ -580,7 +583,7 @@ async function reportProgress(fileId, ended, attachedOwner){
   const durMs = p.bookDuration || p.knownDur
     || ((p.method==='direct_play' && video.duration && isFinite(video.duration))
         ? Math.round(video.duration*1000) : null);
-  if(!ITEM_FOR_FILE[fileId]) return;
+  if(!ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))]) return;
   // F-web-12. A paused player beats every five seconds for as long as it is
   // left open, repeating one position nobody has moved. What is dropped here is
   // the REPEAT, not the beat, because three readers of this route care about
@@ -612,7 +615,7 @@ async function reportProgress(fileId, ended, attachedOwner){
   p.lastBeatMs=posMs; p.lastBeatAt=beatAt; p.lastBeatAttachment=attachment;
   // `method` labels the server's watched-seconds denominator (C-08 M5); the
   // server takes only the playback vocabulary and stores none of it.
-  try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
+  try{ await api(`/items/${ITEM_FOR_FILE[playbackFileKey(playbackFileContextForPlayer(p))]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs,method:p.method}}); }
   catch(e){ p.lastBeatMs=null; p.lastBeatAt=null; }
 }
 function closePlayer(options={}){
