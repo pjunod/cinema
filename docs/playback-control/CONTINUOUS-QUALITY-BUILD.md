@@ -4020,3 +4020,27 @@ backward seeks, invalid input and caller fences. The paired transport test
 the actual seek-intent and supersession functions. JavaScript and test-source
 syntax checks passed; no unit tests executed. Runtime qualification remains
 open, alongside the measured initial callback gap.
+
+
+### 10.134 Optimize development hashing without reducing verification
+
+The pending-quality seek repair committed as `136ed5db2`; its normal hook
+passed pinned all-target Clippy, formatting, catalog lint and served-script
+syntax. Its authored unit regressions have not executed.
+
+The measured decoder-planning delay occurs in an unoptimized development
+executable. Each lookup validates the held probe, its sealed execution
+snapshot and the current path, including content digests before any cached
+fact is reused. Those checks remain intact. The development profile now
+optimizes only the `sha2` dependency, matching the existing Argon2/Blake2
+profile treatment while retaining workspace assertions and debug behavior.
+Release already optimizes this dependency. This is a development-build cost
+repair, not permission to publish stale identities or enlarge deadlines.
+
+The existing regressions `a_replaced_probe_cannot_reuse_cached_facts`,
+`transient_path_swap_cannot_change_the_executable_object` and
+`snapshot_path_swap_cannot_change_the_executable_object` remain required in
+the final lane. New runtime phase measurements must establish the effect;
+no startup improvement is claimed yet, and no unit tests executed.
+
+Pinned workspace/all-target compilation with optimized SHA-256 passed in 1m46s.

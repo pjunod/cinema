@@ -123,6 +123,14 @@ opt-level = 3
 [profile.dev.package.blake2]
 opt-level = 3
 
+# Descriptor-bound decoder planning rehashes the held parser, sealed snapshot
+# and current path even on cache hits. The unoptimized qualification build
+# spent about nine seconds here across a continuous family's five lookups.
+# Keep every verification and bound; optimize its SHA-256 implementation while
+# workspace code retains normal development assertions and debuggability.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Test executables are replicated in every isolated swarm worker cache. Rust
 # debug info made each plurxd test binary hundreds of megabytes even though the
 # harness never attaches a debugger to them. Keep normal development builds
