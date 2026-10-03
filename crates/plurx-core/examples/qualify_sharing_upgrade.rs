@@ -111,6 +111,27 @@ mod qualification {
                 )
                 .expect("request inventory");
             assert_eq!(unresolved, 0);
+            let observed = chrono::Utc::now().timestamp_millis();
+            for (table, column) in [
+                ("media_session_requests", "updated_at_ms"),
+                ("media_sessions", "updated_at_ms"),
+                ("media_session_preparations", "created_at_ms"),
+                ("media_playback_desired", "updated_at_ms"),
+                ("media_playback_pointers", "updated_at_ms"),
+                ("media_session_producer_recovery", "created_at_ms"),
+                ("library_channel_session_recipes", "created_at_ms"),
+                ("media_session_terminal_acks", "updated_at_ms"),
+            ] {
+                let oldest: i64 = connection
+                    .query_row(&format!("SELECT MIN({column}) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("seeded retention clock");
+                assert!(
+                    (observed - 10_000..=observed).contains(&oldest),
+                    "stale fixture clock {table}.{column}"
+                );
+            }
         }
     }
 
