@@ -56,6 +56,8 @@ pub(crate) mod sharing;
 mod sharing_decision_decode;
 #[allow(dead_code)]
 mod sharing_playback_wire;
+#[allow(dead_code)]
+mod sharing_start_decode;
 pub(crate) mod stream;
 pub(crate) mod subtitle_downloads;
 pub(crate) mod system;
