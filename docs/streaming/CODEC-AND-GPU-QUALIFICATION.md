@@ -976,6 +976,30 @@ The original public-route/media1/real-film/physical/native/GPU/fidelity bars
 and whole-S11 qualification remain open: 16 internal /4 synthetic /0 original
 fully-qualified public cells, with old measured fb436 provenance unchanged.
 
+**2026-10-02 retained-header continuation — sixteen contexts, original bars open:**
+the [additive ledger](../reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md)
+retains three Grain successes and adds thirteen Linux x86_64 header passes,
+each35 complete objects/1,680 AUs/actual360–1080 geometry/35 first IDRs and
+exact3,750-tick presentation spacing. Only Grain720 has TWO extras, unchanged;
+all other15 have35 total IDRs. Old decimal key flags match within the unchanged
+one-tick tolerance (Linux maximum0.03tick), not post-hoc exact equality.
+Actual per-process limits, raw-private exported hashes and successful exact
+independent leaf/PID absence are separate from historical Docker/cgroup facts.
+All original #737 evidence remains unchanged.
+
+An earlier namespace-route predicate failure and local/prelaunch refusals
+remain failed. H264360 and PQ4K360 each refused actual fresh pressure BEFORE
+staging/census; no sample category/value or independent absence inventory is
+invented. Later separately authorized admission ran still-unmeasured contexts,
+not passing replays or cap/threshold relaxation. Header coverage is16/16;
+counts stay16 internal acquisitions /4 synthetic inputs /0 original fully
+qualified public cells. New raw/source snapshots remain private under root
+retention with direct local reviewer access, not portable raw evidence.
+Additional private capsule is optional; review/gate remain separate.
+No decoder/producer/probe/old control/
+unit replay, real-film/public/closed-GOP/device/physical/HDR-fidelity/current
+runtime or whole-S11 qualification; evidence-only documentation continuation.
+
 Measurement first, code only if it does. Run the §3.7 Q8a census on media1
 across the corpus at 360/480/720/1080, plus two real library titles (a
 grain-heavy film and a fast-cut one, named by hash not title).
@@ -1215,6 +1239,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
+| 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained-header coverage16/16, original acceptance open | evidence-only continuation | [Additive ledger](../reviews/S11-RETAINED-NAL-CONTINUATION-20261002.md): three retained Grain contexts plus thirteen new Linux headers,35 first IDRs/1680AUs/actual rung geometry/exact3750ticks, old decimal keys≤1tick; Grain720's TWO extras retained. Actual per-process/export/independent cleanup hashes distinct from old Docker; route/local/H264-PQ pressure refusals preserved, no invented absence/sample. Privately retained raw/local reviewer access is not portable raw evidence; review/gate separate and original qualification open. No successful census/control/unit replay or gate waiver. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 retained Grain720 header evidence, original qualification open | evidence-only continuation | [NAL ledger](../reviews/S11-GRAIN720-NAL-EVIDENCE-20261002.md): one old fb436 context,35 first IDRs/1680 actual AUs/37 total IDRs including TWO extras, matched to retained probes. Nine new syntax controls and one offline corpus success retained once; no media or test replay. Historical review snapshots, sanitized-not-raw provenance, durable private bytes and exact cleanup bounds recorded;15 other NAL contexts and original public/film/native/GPU/fidelity acceptance remain open. |
 | 2026-10-02 | gpt-6.1-sol | agent:/root/s11_next_cell_sol61 | M3 internal acquisition/census evidence, original acceptance incomplete | evidence-only continuation | [Sixteen-cell sanitized ledger](S11-INTERNAL-ROLLING-CELLS-2026-10-02.md): four synthetic inputs,16 distinct internal once-successful cells at measured fb436 source/cc943750 tree/656e binary/b7bc runtime;35 objects/1680 packets/60+s real1× each,35 first keys/no drift. Grain720 has two internal extra keyflags, unchanged. Actual source-FD/PUT owner and four-way byte equality/exact cleanup retained privately; failures remain failed. No current-effort/public/NAL/physical/native/HDR-fidelity/GPU/full-M3 qualification or production GOP change. Independent review/current-head effort gate remain separate. |
 | 2026-10-02 | gpt-6.1-sol | codex://threads/01a0c165-d718-73a1-93e9-e81380017705 | M3 acquisition reporting cadence; incomplete | [#710](http://192.168.4.7:3000/noirr/plurx/pulls/710) | Wait500ms after each accepted response before another frame report; existing bridge450ms floor, refusal and real-frame guards unchanged. One NEW actual-page synthetic control passed once0.127s; normal hook79442 passed; sole independent review60 approved with controller/PAGE hash-label correction. Ten already-landed #690 local receipts are retired only after byte-identical private preservation and complete923-pass journal1539 coverage; immutable history retained, no cap change or unit replay. Current composition/gate and real browser/corpus/matrix qualification remain owed. |
