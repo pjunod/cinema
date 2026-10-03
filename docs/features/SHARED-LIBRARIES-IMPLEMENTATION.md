@@ -3628,3 +3628,30 @@ persisted annotation evidence are preserved, and that Local fallback still
 enters its original seam. The existing complete Source preparation/principal
 engine regression passed on the same source. This marker policy grants no
 producer or playback authority.
+
+### S6/S7 decision clients — playback remains unavailable
+
+The native clients and web shell now consume the authenticated receiver file
+alias and captured lifecycle/full reference when requesting the actual shared
+decision. They retain runtime v2 capabilities and complete existing engine
+fields, refuse foreign or stale identity, and cancel work when their captured
+account/context is retired. Responses are bounded to four MiB, redirects and
+implicit retries are refused, and Source media identities stay lossless strings.
+These adapters do not invoke Local start APIs or enable Shared playback.
+
+The native checkpoint passed forty affected tests each on iOS, tvOS and Android,
+plus Android lint. The integrated receiver tree's 399 client files are byte-equal
+to the tested native archive. The web checkpoint passed twenty focused tests,
+the complete web gate and four documentation-index tests; the current combined
+receiver/client tree passed that web gate and index suite again. The known
+TypeScript diagnostic baseline is unchanged. Both agent checkpoints used the
+normal hook and exact source-only archives for their compiler evidence.
+
+The exact committed receiver alias checkpoint `f5d4fecef` separately passed the
+actual disposable CGNAT HTTP/1 and HTTP/2 alias-consuming decision fixture
+(one test, zero ignored, 2.10s) on pinned Rust 1.97.1. A daemon-only compiler
+wrapper reduced debug bookkeeping and serialized the backend after measured
+memory-limit failures; the successful fresh compilation recorded zero OOM
+kills. This proves the pinned Source/B HTTP path and advertised alias, not an
+actual Tailscale, DERP, hardware-decoder or live playback scenario. Later
+combined candidates still require their own affected qualification before push.

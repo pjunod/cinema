@@ -23,6 +23,7 @@
     "core/app.js",
     "core/api.js",
     "core/file-context.js",
+    "core/shared-decision.js",
     "player/measurements.js",
     "core/auth.js",
     "core/keyboard-reach.js",
