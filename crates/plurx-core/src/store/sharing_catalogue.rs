@@ -97,6 +97,15 @@ pub trait SharingCatalogueStore: Send + Sync {
         scopes: &[ReceiverCatalogueScope],
         now_s: i64,
     ) -> Result<bool, StoreError>;
+    /// Current administrator token and import scope, independent of viewer assignments.
+    /// The caller must separately prove current Source scope for every response.
+    async fn receiver_admin_catalogue_authorized(
+        &self,
+        token_hash: &str,
+        user: i64,
+        scope: &ReceiverCatalogueScope,
+        now_s: i64,
+    ) -> Result<bool, StoreError>;
     /// Recent unfinished B-owned history and current effective imports/assignments
     /// in one bounded read. More than 200 eligible rows or 32 groups refuses;
     /// a requested smaller limit selects that many newest rows after the census.
@@ -135,71 +144,24 @@ impl<T: Backend> SharingCatalogueStore for T {
         scopes: &[ReceiverCatalogueScope],
         now_s: i64,
     ) -> Result<bool, StoreError> {
-        if !crate::sharing::is_hash(hash)
-            || user <= 0
-            || !(0..=MAX_SAFE).contains(&now_s)
-            || scopes.len() > 64
-            || scopes.iter().any(|s| {
-                s.lifecycle_generation <= 0
-                    || s.assignment_generation <= 0
-                    || s.endpoint_generation <= 0
-                    || s.libraries.len() > 64
-                    || s.libraries.is_empty()
-            })
-        {
-            return Err(invalid());
-        }
-        let scopes = serde_json::to_string(scopes).map_err(|_| invalid())?;
-        // Benign assignment additions and endpoint refreshes advance generations
-        // without invalidating captured, still-effective library tuples. A
-        // rewind, lifecycle replacement or lost assignment refuses the proof.
-        // Settings are bounded before JSON construction. Oversized policy state
-        // refuses proof instead of being silently treated as expiry disabled.
-        let policy = |key: &str| {
-            format!("(SELECT CASE WHEN length(CAST(value AS BLOB))<=64 THEN value ELSE NULL END FROM settings WHERE key={key})")
-        };
-        let enabled = policy("$4");
-        let days = policy("$5");
-        let since = policy("$6");
-        let sql=format!("SELECT json_object('last_seen',t.last_seen_at,'enabled',{enabled},'days',{days},'since',{since},'bad_policy',EXISTS(SELECT 1 FROM settings WHERE key IN ($4,$5,$6) AND length(CAST(value AS BLOB))>64)) AS payload FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=$1 AND u.id=$2 AND NOT EXISTS(SELECT 1 FROM json_each($3) q WHERE NOT EXISTS(SELECT 1 FROM sharing_imports i JOIN sharing_viewers v ON v.user_id=u.id WHERE i.id=json_extract(q.value,'$.import_id') AND i.source_server_id=json_extract(q.value,'$.source_server_id') AND i.catalogue_epoch=json_extract(q.value,'$.catalogue_epoch') AND i.lifecycle_generation=json_extract(q.value,'$.lifecycle_generation') AND i.assignment_generation>=json_extract(q.value,'$.assignment_generation') AND i.endpoint_generation>=json_extract(q.value,'$.endpoint_generation') AND i.claim_id=json_extract(q.value,'$.claim_id') AND i.remote_grant_id=json_extract(q.value,'$.remote_grant_id') AND i.state='active' AND NOT EXISTS(SELECT 1 FROM json_each(q.value,'$.libraries') l WHERE NOT EXISTS(SELECT 1 FROM sharing_assignments a WHERE a.import_id=i.id AND a.user_id=u.id AND a.enabled=1 AND a.remote_library_id=l.value))))");
-        let rows = self
-            .sharing_read(
-                &sql,
-                vec![
-                    hash.to_owned().into(),
-                    user.into(),
-                    scopes.into(),
-                    super::keys::AUTH_TOKEN_EXPIRY_ENABLED.to_owned().into(),
-                    super::keys::AUTH_TOKEN_IDLE_DAYS.to_owned().into(),
-                    super::keys::AUTH_TOKEN_EXPIRY_SINCE.to_owned().into(),
-                ],
-            )
-            .await?;
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct Row {
-            last_seen: i64,
-            enabled: Option<String>,
-            days: Option<String>,
-            since: Option<String>,
-            bad_policy: i64,
-        }
-        if rows.len() > 1 {
-            return Err(invalid());
-        }
-        let Some(row) = rows.first() else {
-            return Ok(false);
-        };
-        let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
-        if row.bad_policy != 0 {
-            return Err(invalid());
-        }
-        Ok(!crate::auth::TokenIdlePolicy::from_settings(
-            row.enabled.as_deref(),
-            row.days.as_deref(),
-            row.since.as_deref(),
+        receiver_authorized(self, hash, user, scopes, now_s, CatalogueAccess::Viewer).await
+    }
+    async fn receiver_admin_catalogue_authorized(
+        &self,
+        hash: &str,
+        user: i64,
+        scope: &ReceiverCatalogueScope,
+        now_s: i64,
+    ) -> Result<bool, StoreError> {
+        receiver_authorized(
+            self,
+            hash,
+            user,
+            std::slice::from_ref(scope),
+            now_s,
+            CatalogueAccess::Administrator,
         )
-        .is_some_and(|p| p.is_expired(row.last_seen, now_s)))
+        .await
     }
 
     async fn remote_continue_watch_groups(
@@ -571,4 +533,88 @@ mod tests {
         .is_err());
         assert!(decode_watch(r#"{"position_ms":1,"duration_ms":null,"watched":false,"sequence":1,"updated_at_ms":1000,"path":"/media"}"#).is_err());
     }
+}
+
+#[derive(Clone, Copy)]
+enum CatalogueAccess {
+    Viewer,
+    Administrator,
+}
+async fn receiver_authorized<T: Backend + ?Sized>(
+    backend: &T,
+    hash: &str,
+    user: i64,
+    scopes: &[ReceiverCatalogueScope],
+    now_s: i64,
+    access: CatalogueAccess,
+) -> Result<bool, StoreError> {
+    if !crate::sharing::is_hash(hash)
+        || user <= 0
+        || !(0..=MAX_SAFE).contains(&now_s)
+        || scopes.len() > 64
+        || scopes.iter().any(|s| {
+            s.lifecycle_generation <= 0
+                || s.assignment_generation <= 0
+                || s.endpoint_generation <= 0
+                || s.libraries.len() > 64
+                || (matches!(access, CatalogueAccess::Viewer) && s.libraries.is_empty())
+        })
+    {
+        return Err(invalid());
+    }
+    let scopes = serde_json::to_string(scopes).map_err(|_| invalid())?;
+    // Benign assignment additions and endpoint refreshes advance generations
+    // without invalidating captured, still-effective library tuples. A
+    // rewind, lifecycle replacement or lost assignment refuses the proof.
+    // Settings are bounded before JSON construction. Oversized policy state
+    // refuses proof instead of being silently treated as expiry disabled.
+    let policy = |key: &str| {
+        format!("(SELECT CASE WHEN length(CAST(value AS BLOB))<=64 THEN value ELSE NULL END FROM settings WHERE key={key})")
+    };
+    let enabled = policy("$4");
+    let days = policy("$5");
+    let since = policy("$6");
+    let (admin, viewer, assignments) = match access {
+            CatalogueAccess::Viewer => ("", "JOIN sharing_viewers v ON v.user_id=u.id", "AND NOT EXISTS(SELECT 1 FROM json_each(q.value,'$.libraries') l WHERE NOT EXISTS(SELECT 1 FROM sharing_assignments a WHERE a.import_id=i.id AND a.user_id=u.id AND a.enabled=1 AND a.remote_library_id=l.value))"),
+            CatalogueAccess::Administrator => ("AND u.is_admin=1", "", ""),
+        };
+    let sql=format!("SELECT json_object('last_seen',t.last_seen_at,'enabled',{enabled},'days',{days},'since',{since},'bad_policy',EXISTS(SELECT 1 FROM settings WHERE key IN ($4,$5,$6) AND length(CAST(value AS BLOB))>64)) AS payload FROM tokens t JOIN users u ON u.id=t.user_id WHERE t.token_hash=$1 AND u.id=$2 {admin} AND NOT EXISTS(SELECT 1 FROM json_each($3) q WHERE NOT EXISTS(SELECT 1 FROM sharing_imports i {viewer} WHERE i.id=json_extract(q.value,'$.import_id') AND i.source_server_id=json_extract(q.value,'$.source_server_id') AND i.catalogue_epoch=json_extract(q.value,'$.catalogue_epoch') AND i.lifecycle_generation=json_extract(q.value,'$.lifecycle_generation') AND i.assignment_generation>=json_extract(q.value,'$.assignment_generation') AND i.endpoint_generation>=json_extract(q.value,'$.endpoint_generation') AND i.claim_id=json_extract(q.value,'$.claim_id') AND i.remote_grant_id=json_extract(q.value,'$.remote_grant_id') AND i.state='active' {assignments}))");
+    let rows = backend
+        .sharing_read(
+            &sql,
+            vec![
+                hash.to_owned().into(),
+                user.into(),
+                scopes.into(),
+                super::keys::AUTH_TOKEN_EXPIRY_ENABLED.to_owned().into(),
+                super::keys::AUTH_TOKEN_IDLE_DAYS.to_owned().into(),
+                super::keys::AUTH_TOKEN_EXPIRY_SINCE.to_owned().into(),
+            ],
+        )
+        .await?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        last_seen: i64,
+        enabled: Option<String>,
+        days: Option<String>,
+        since: Option<String>,
+        bad_policy: i64,
+    }
+    if rows.len() > 1 {
+        return Err(invalid());
+    }
+    let Some(row) = rows.first() else {
+        return Ok(false);
+    };
+    let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
+    if row.bad_policy != 0 {
+        return Err(invalid());
+    }
+    Ok(!crate::auth::TokenIdlePolicy::from_settings(
+        row.enabled.as_deref(),
+        row.days.as_deref(),
+        row.since.as_deref(),
+    )
+    .is_some_and(|p| p.is_expired(row.last_seen, now_s)))
 }

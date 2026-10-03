@@ -1232,6 +1232,94 @@ impl SharingManager {
         .await
         .is_ok_and(|result| matches!(result, Ok(true)))
     }
+    pub async fn read_admin_libraries(
+        &self,
+        state: &AppState,
+        import_id: uuid::Uuid,
+        user: i64,
+        hash: &str,
+    ) -> Result<
+        (
+            plurx_core::sharing::ImportSummary,
+            Vec<plurx_core::store::sharing_catalogue_source::SourceLibrary>,
+        ),
+        crate::sharing_client::PeerError,
+    > {
+        use crate::sharing_client::{PeerConnection, PeerError};
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let _permit = self.catalogue_admission.acquire(import_id)?;
+            let import = tokio::time::timeout(
+                Duration::from_secs(1),
+                state.store.sharing_import(import_id),
+            )
+            .await
+            .map_err(|_| PeerError::Unavailable)?
+            .map_err(|_| PeerError::Unavailable)?
+            .ok_or(PeerError::Unavailable)?;
+            let summary = &import.summary;
+            let scope = plurx_core::store::sharing_catalogue::ReceiverCatalogueScope {
+                import_id,
+                source_server_id: summary.source_server_id,
+                catalogue_epoch: summary.catalogue_epoch,
+                lifecycle_generation: summary.lifecycle_generation,
+                assignment_generation: summary.assignment_generation,
+                endpoint_generation: summary.endpoint_generation,
+                claim_id: summary.claim_id,
+                remote_grant_id: summary.remote_grant_id.ok_or(PeerError::Unavailable)?,
+                libraries: vec![],
+            };
+            self.ensure_current(state, summary).await?;
+            if !state
+                .store
+                .receiver_admin_catalogue_authorized(hash, user, &scope, clock_ms() / 1000)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                return Err(PeerError::Authentication);
+            }
+            let local = state
+                .store
+                .sharing_identity(clock_ms())
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
+            let credentials = ImportCredential::open(self, local.server_id, &import)
+                .map_err(|_| PeerError::Unavailable)?;
+            let expected = plurx_core::sharing::SharingIdentity {
+                server_id: summary.source_server_id,
+                catalogue_epoch: summary.catalogue_epoch,
+                created_at_ms: 0,
+            };
+            let (mut peer, _) =
+                PeerConnection::verified(self, &summary.endpoints, &expected).await?;
+            self.ensure_current(state, summary).await?;
+            let libraries = peer
+                .catalogue_libraries(&credentials.credential)
+                .await?
+                .libraries;
+            if libraries
+                .iter()
+                .map(|l| &l.library_id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != libraries.len()
+            {
+                return Err(PeerError::InvalidResponse);
+            }
+            self.ensure_current(state, summary).await?;
+            if !state
+                .store
+                .receiver_admin_catalogue_authorized(hash, user, &scope, clock_ms() / 1000)
+                .await
+                .map_err(|_| PeerError::Unavailable)?
+            {
+                return Err(PeerError::Authentication);
+            }
+            Ok((import.summary, libraries))
+        })
+        .await
+        .map_err(|_| PeerError::Unavailable)?
+    }
+
     pub async fn read_catalogue(
         &self,
         state: &AppState,
