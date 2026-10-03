@@ -26,7 +26,9 @@ pub use sharing_catalogue_source::SharingSourceCatalogueStore;
 pub mod sharing_catalogue_details;
 pub use sharing_catalogue_details::SharingSourceDetailsStore;
 pub mod sharing_file_locators;
+pub mod sharing_purpose_keys;
 pub use sharing_file_locators::SharingFileLocatorStore;
+pub use sharing_purpose_keys::SharingPurposeKeyStore;
 pub mod sharing_source_sessions;
 pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
@@ -5354,6 +5356,7 @@ pub trait Store:
     + SharingStore
     + SharingCatalogueStore
     + SharingFileLocatorStore
+    + SharingPurposeKeyStore
     + SharingSourceArtworkStore
     + SharingSourceCatalogueStore
     + SharingSourceDetailsStore
@@ -5398,6 +5401,7 @@ impl<T> Store for T where
         + SharingStore
         + SharingCatalogueStore
         + SharingFileLocatorStore
+        + SharingPurposeKeyStore
         + SharingSourceArtworkStore
         + SharingSourceCatalogueStore
         + SharingSourceDetailsStore

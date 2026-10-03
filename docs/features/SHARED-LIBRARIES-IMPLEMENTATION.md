@@ -3325,3 +3325,46 @@ reader regression (1 passed, zero ignored, 9.00 seconds). Documentation index
 checks passed (4 tests). The merge retains the current admin authority seam,
 Continue Watching tracker and unique Linux fixture paths. Linux artwork cases
 remain open until the archive of this committed integrated candidate runs.
+
+Artwork's integrated Linux qualification completed on Root candidate
+`5b64da576d15eace7ad28390b77f9d0e89691c39`, from a credential-free `git archive`
+with SHA-256 `7d9c986370db07e52cf54c1122408104212370c14796fcfc56b61b66a3631077`.
+Pinned Rust 1.97.1 compilation passed (5 minutes 33 seconds); the opt-in CGNAT
+fixture passed all 32 H1/H2 scope/artwork cases (one test, zero ignored,
+55.40 seconds), the independent admin fixture passed its ten transport cases
+(one test, 7.46 seconds), and claim/rotation restart passed (one test,
+0.37 seconds). This proves the actual pinned transport and accepted-body cleanup
+in the isolated fixture; actual Tailscale, two-NAT and physical-device claims
+remain open.
+
+### S4 purpose factory and restore foundation — coordinator remains open
+
+The candidate purpose factory uses a separate `sharing_purpose_keys_v1` floor
+and an opaque observation of the current Raft roster, membership generation,
+and each member's heartbeat-coupled selected sealing-key ID. Its actual write
+checks that proof again, both active rows are empty, import mode is absent or
+closed, and no census intent exists. It installs the Source catalogue revision
+key and B file locator key together with a singleton installation marker.
+Reopening verifies existing material and preserves the winning ciphertext;
+partial, empty, malformed, foreign-identity, and mixed-master states refuse.
+This foundation does not advertise the capability or run an installer at
+startup. The distributed startup census claim/release, exact removal cleanup,
+standalone factory, replicated restart, and daemon coordinator remain open.
+
+The existing offline restore fencing transaction now moves the complete old
+purpose pair into a sealed archive before deleting active keys and the old
+sharing identity, retaining the old purpose/Source/epoch AAD. Archive capacity
+is 128 retired epochs (256 rows); overflow refuses rather than deleting keys.
+The explicit `restore_pending` marker permits a later guarded factory for the
+new identity. Normal empty active tables have no such disposition. Backup
+verification includes this bounded strict active/archive census and opens all
+purpose material with the supplied sealing key. Complete purpose rewrap
+checks the captured active/archive ciphertexts in one guarded write and keeps
+the clear signing bytes and original AAD identities. This is purpose-material
+rewrap within the existing convention; a global runtime master-file replacement
+operation is not implemented.
+
+Focused evidence uses pinned Rust 1.97.1: the actual three-voter factory/rewrap
+contract passed with zero ignored tests, and the single/pooled SQLite offline
+restore regression passed with foreign keys enabled. These are foundation
+receipts, not startup installation or full shared-library qualification.
