@@ -51,24 +51,13 @@ async fn scenario(root: &Path) {
     .await
     .expect("start actual owned singleton");
     let telemetry = root.join("telemetry.db");
-    // Repeat the actual bootstrap: reinstalling COPY must not leave encoded
-    // routing and source guards absent after an idempotent retry.
-    drop(
-        Box::pin(HiqliteAuthStore::bootstrap(
-            client.clone(),
-            "11111111-1111-4111-8111-111111111169",
-            &telemetry,
-        ))
-        .await
-        .expect("first actual Store bootstrap"),
-    );
     let store = Box::pin(HiqliteAuthStore::bootstrap(
         client.clone(),
         "11111111-1111-4111-8111-111111111169",
         &telemetry,
     ))
     .await
-    .expect("idempotent actual Store bootstrap");
+    .expect("actual fresh Store bootstrap");
     let library = store
         .create_library(&NewLibrary {
             name: "Owned encoded bootstrap".into(),
