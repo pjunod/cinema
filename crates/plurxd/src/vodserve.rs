@@ -65,6 +65,7 @@ use crate::titlestore::{Budgets, Manifest, ReaderWindow, SegState};
 use crate::transcode::{session_log_id, SessionKind, SessionRequest};
 use crate::vodgen::{self, Failure, Generation, Outcome};
 use crate::waitpool::{VodProducerKind, VodProducerTermination, WaitKey, WaitOutcome, WaitPool};
+pub(crate) use source_lifetime::SourceProducerAssociationsSettled;
 use source_lifetime::SourceRenditionOwners;
 
 /// Sliding idle TTL for a session (plan §2.5's dormant reap, scoped to this
@@ -945,6 +946,9 @@ mod vod_serve_construct;
 mod vod_serve_control;
 #[path = "vod/serve/create.rs"]
 mod vod_serve_create;
+#[cfg(test)]
+pub(crate) use vod_serve_create::AdmittedSourceCopyRendition;
+pub(crate) use vod_serve_create::ReservedSourceCopyRendition;
 #[path = "vod/serve/delivery.rs"]
 mod vod_serve_delivery;
 #[path = "vod/serve/end.rs"]

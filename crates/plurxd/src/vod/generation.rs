@@ -23,6 +23,18 @@ pub(super) async fn spawn_generation(
             return;
         }
     };
+    let source_authority = match source_dispatch.authorize_before_spawn().await {
+        Ok(authority) => authority,
+        Err(cause) => {
+            record_failure(
+                shared,
+                rendition,
+                crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                cause,
+            );
+            return;
+        }
+    };
     if !recipe_engine_is_current(&rendition.recipe).await {
         record_failure(
             shared,
@@ -127,6 +139,17 @@ pub(super) async fn spawn_generation(
         let descriptors = crate::producer_spawn::Descriptors::default();
         let program = recipe_program(recipe);
         let env = recipe_child_env(recipe);
+        if let Some(authority) = &source_authority {
+            if let Err(cause) = authority.validate_before_spawn() {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::ProducerLaunchFailed,
+                    cause,
+                );
+                return;
+            }
+        }
         let spawned = match crate::producer_spawn::spawn(
             &program,
             &args,

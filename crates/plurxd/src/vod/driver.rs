@@ -572,6 +572,36 @@ pub(super) async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>
                 // seek/cancellation/publication may have changed it while waiting.
                 // Re-read producer belief and current admitted/accepted demand.
                 continue;
+            } else if rendition.key.starts_with("source-") {
+                // The actual Source actor reserves first-start capacity before
+                // activation. Later generations reacquire the same real pool;
+                // the spawn path separately obtains fresh Source authority.
+                drop(manifest);
+                if matches!(step, Step::Restart { .. }) {
+                    rendition.gen_epoch.fetch_add(1, Relaxed);
+                    clear_marker_prewarm_dispatch(rendition);
+                    if perform_driver_step(shared, rendition, step).await.is_err() {
+                        return;
+                    }
+                }
+                prepared_permit = rendition.source_owners.take_initial_permit();
+                if prepared_permit.is_none() {
+                    let Some(admissions) = rendition.source_owners.copy_admissions() else {
+                        return;
+                    };
+                    if let crate::vodencode::SourceCopyPermitRead::Admitted(permit) =
+                        crate::vodencode::EncodePermit::try_source_copy(
+                            &admissions,
+                            shared.store.as_ref(),
+                        )
+                        .await
+                    {
+                        prepared_permit = Some(permit);
+                    } else {
+                        return;
+                    }
+                }
+                continue;
             }
         }
         if fence_marker_prewarm_before_room(rendition, belief, step) {

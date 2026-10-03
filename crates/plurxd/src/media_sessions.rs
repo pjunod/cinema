@@ -1358,8 +1358,26 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
         && request.presentation == crate::transcode::Presentation::Vod
 }
 
+/// Source catalogue IDs are canonical nonnegative IDs. This validates only
+/// request shape; a complete current Source witness must authorize admission.
+pub(crate) fn source_session_request_is_valid(
+    request: &SessionRequest,
+    principal: &plurx_core::playback_principal::PlaybackPrincipal,
+) -> bool {
+    matches!(
+        principal,
+        plurx_core::playback_principal::PlaybackPrincipal::Sharing { .. }
+    ) && principal.valid_admission_shape()
+        && session_request_fields_are_valid(request, true)
+        && request.presentation == crate::transcode::Presentation::Vod
+}
+
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    request.file_id > 0
+    session_request_fields_are_valid(request, false)
+}
+
+fn session_request_fields_are_valid(request: &SessionRequest, source_ids: bool) -> bool {
+    (request.file_id > 0 || (source_ids && request.file_id == 0))
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
         && !request
