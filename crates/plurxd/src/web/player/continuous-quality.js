@@ -324,7 +324,9 @@ function continuousQualityAdapter(player,video,attachment,bootstrap,exchange=con
     let pin=pins().find(row=>row.artifact_id===artifact&&row.rendition_id===found.row.rendition_id);
     if(!pin){
       if(found.type==='video'){
-        if(found.row.rendition_id!==wanted.rendition_id)throw new Error('Unreserved superseded video load');
+        if(found.row.rendition_id!==wanted.rendition_id)throw new Error(
+          `Unreserved superseded video load: ${found.row.height}p instead of retained ${wanted.height}p`
+          +` at ${facts.from_tick}/${facts.timescale}; HLS start=${hls?.startLevel},load=${hls?.loadLevel},current=${hls?.currentLevel}`);
         await reserveWindow(facts.from_tick);
       }else{
         // Select the entry containing this AAC interval's actual start.

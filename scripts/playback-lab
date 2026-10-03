@@ -2225,6 +2225,12 @@ function playerSnapshotExpression() {
       continuous:(${continuousTransportSnapshot.toString()})(p,v,labPlayers),
       file_id:p.fileId||null, started:!!p.started, decided_method:p.decidedMethod||null,
       method:p.method||null, copy_hls:!!p.copyHls, tried_fallback:!!p.triedFallback,
+      controlled_hls:p.continuousQuality&&p.hls?{
+        start_level:p.hls.startLevel??null,load_level:p.hls.loadLevel??null,
+        current_level:p.hls.currentLevel??null,next_load_level:p.hls.nextLoadLevel??null,
+        levels:(p.hls.levels||[]).slice(0,32).map((level,index)=>({index,
+          width:level.width??null,height:level.height??null,bitrate:level.bitrate??null})),
+        primary_candidate:p.continuousQualityBootstrap?.primary_candidate_id??null}:null,
       encoder:p.encoder||null, vod:!!p.vod, attempt_id:p.attemptId||null,
       attempt_reason:p.attemptReason||null, player_generation:playerGeneration,
       session_id:p.sessionId||null, keeper_fires:p._keeperFires||0,

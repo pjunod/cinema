@@ -4435,3 +4435,21 @@ Authored, unrun regressions in `tests/web/continuous-adapter.test.js`:
 
 JavaScript syntax checks pass; no units executed. Final adversarial review
 and the human-requested Fable stop remain ahead.
+
+
+### 10.149 Preserve the failed retained-level rerun and identify its loaded rendition
+
+The exact `56538a7ab` rerun still failed before its first frame on
+`Unreserved superseded video load`. Pinning both HLS levels removes the stale
+seed hazard, but has not resolved this observed startup failure. The failed
+JSON, JUnit, console and supervisor receipts are retained. End retired both
+children by one second, and the runtime was removed. No steady-playback or
+media-timestamp result is claimed.
+
+The refusal now reports bounded loaded/retained heights, fragment film tick
+and the current HLS level indices. Lab snapshots record the controlled HLS
+start/load/current/next indices and at most thirty-two level geometries, without
+resource URLs or credentials. This identifies a wrongly selected level versus
+a mismatched advertised rendition while retaining the original refusal. The
+independent backward-step failure remains open. Syntax checks pass; no units
+executed.
