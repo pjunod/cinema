@@ -1252,6 +1252,11 @@ impl MediaSessionStore for SqliteStore {
                 tx.rollback()?;
                 return Ok(None);
             }
+            tx.execute(
+                crate::store::jellyfin_play::SUPERSEDE_AT_NATIVE_POINTER,
+                params![activation.user_id, activation.playback_id, activation.incarnation_id,
+                    activation.now_ms.saturating_add(crate::store::jellyfin_play::JELLYFIN_TERMINAL_PLAY_TTL_MS)],
+            )?;
             // Re-read inside the transaction instead of fabricating a
             // superseded result. Another first-writer terminal cause may have
             // won before activation; callers must project that durable cause

@@ -3240,6 +3240,13 @@ mint. Media resource cleanup belongs to the later playback adapter.
 | POST | `/jellyfin/Sessions/Playing/Stopped` | Forced durable final when supplied; no-position stop does not write zero; exact resource release and retry on storage failure |
 | POST, DELETE | `/jellyfin/Users/{user_id}/PlayedItems/{item_id}` | Own user and supported item; shared cascading watched/unwatched marks with trusted login origin |
 
+Player identity is stable within the authenticated user/device/client family,
+including login replacement. Negotiation leaves an active play running.
+Activating a replacement fences earlier bindings atomically; a delayed old
+Stop cannot update watch progress or remove the replacement's direct presence.
+Each direct presence/release key remains specific to its play UUID. Native
+VOD negotiation and HLS aliases are not advertised by this slice.
+
 Disabled requests, including unsupported mutations, answer JSON 404. Enabled
 unsupported methods answer JSON 405; unknown paths answer JSON 404. The
 native root still serves its app shell. Connection/catalog handlers use the

@@ -190,20 +190,52 @@ CREATE UNIQUE INDEX IF NOT EXISTS jellyfin_plays_direct_reference ON jellyfin_pl
 "#;
 pub(crate) const CLEANUP: &str =
     "DELETE FROM jellyfin_plays WHERE state IN ('pending','ended') AND expires_at_ms <= $1";
+// The transaction assigns private ordering metadata; equal wall-clock times
+// cannot make a later pending ask look older. Legacy rows precede new asks.
 pub(crate) const CREATE: &str = r#"
 INSERT INTO jellyfin_plays(play_id,user_id,token_digest,device_digest,client_family,playback_id,item_id,file_id,payload,expires_at_ms,item_wire_id,file_wire_id,state,manual_revision)
-SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'pending',COALESCE((SELECT manual_revision FROM watch_state WHERE user_id=$2 AND item_id=$7),0)
+SELECT $1,$2,$3,$4,$5,$6,$7,$8,json_set($9,'$.negotiation_order',(SELECT COALESCE(MAX(json_extract(payload,'$.negotiation_order')),0)+1 FROM jellyfin_plays WHERE user_id=$2 AND playback_id=$6)),$10,$11,$12,'pending',COALESCE((SELECT manual_revision FROM watch_state WHERE user_id=$2 AND item_id=$7),0)
 FROM files f JOIN jellyfin_login_tokens l ON l.user_id=$2 AND l.token_hash=$3 AND l.device_digest=$4 AND l.client_family=$5
 JOIN jellyfin_entity_ids i ON i.wire_id=$11 AND i.entity_kind='item' AND i.native_id=$7 AND i.retired=0
 JOIN jellyfin_entity_ids s ON s.wire_id=$12 AND s.entity_kind='file' AND s.native_id=$8 AND s.retired=0
 WHERE f.id=$8 AND f.item_id=$7
+AND COALESCE((SELECT MAX(json_extract(payload,'$.negotiation_order')) FROM jellyfin_plays WHERE user_id=$2 AND playback_id=$6),0)<9223372036854775807
 AND (SELECT COUNT(*) FROM jellyfin_plays WHERE state='pending' AND user_id=$2 AND token_digest=$3 AND device_digest=$4 AND client_family=$5)<64
 AND (SELECT COUNT(*) FROM jellyfin_plays WHERE state='pending')<4096
 ON CONFLICT(play_id) DO NOTHING
 "#;
 pub(crate) const READ: &str = "SELECT payload,state,expires_at_ms,manual_revision,native_incarnation_id,direct_grant_id FROM jellyfin_plays WHERE play_id=$1 AND user_id=$2 AND token_digest=$3 AND device_digest=$4 AND client_family=$5";
+/// The native pointer transaction fences prior compatibility events before
+/// its replacement becomes observable. A negotiation alone never runs this.
+/// Pending asks newer than the selected ask are retained.
+pub(crate) const SUPERSEDE_AT_NATIVE_POINTER: &str = r#"
+WITH args AS (SELECT $1,$2,$3,$4)
+UPDATE jellyfin_plays SET state='ended',expires_at_ms=$4
+WHERE user_id=$1 AND playback_id=$2 AND state IN ('pending','active')
+AND EXISTS(SELECT 1 FROM media_playback_pointers p JOIN media_sessions m ON m.incarnation_id=p.current_incarnation_id
+ WHERE p.user_id=$1 AND p.playback_id=$2 AND p.current_incarnation_id=$3 AND m.state='active'
+ AND (SELECT COUNT(*) FROM jellyfin_plays candidate WHERE candidate.user_id=$1 AND candidate.playback_id=$2 AND candidate.state='pending' AND json_extract(candidate.payload,'$.native_request_fingerprint')=m.request_fingerprint)=1
+ AND EXISTS(SELECT 1 FROM jellyfin_plays chosen WHERE chosen.user_id=$1 AND chosen.playback_id=$2
+  AND chosen.state='pending' AND json_extract(chosen.payload,'$.native_request_fingerprint')=m.request_fingerprint
+  AND chosen.play_id!=jellyfin_plays.play_id
+  AND (jellyfin_plays.state='active' OR COALESCE(json_extract(jellyfin_plays.payload,'$.negotiation_order'),0)<COALESCE(json_extract(chosen.payload,'$.negotiation_order'),0))))
+"#;
+
+/// Direct and media binding activation share the same player supersession
+/// boundary. Ended old bindings cannot re-enter this predicate on replay.
+pub(crate) const SUPERSEDE_AFTER_BINDING_ACTIVATION: &str = r#"
+WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7)
+UPDATE jellyfin_plays SET state='ended',expires_at_ms=$6
+WHERE state IN ('pending','active') AND play_id!=$1
+AND EXISTS(SELECT 1 FROM jellyfin_plays chosen WHERE chosen.play_id=$1
+ AND chosen.user_id=$2 AND chosen.token_digest=$3 AND chosen.device_digest=$4 AND chosen.client_family=$5 AND chosen.state='active' AND json_extract(chosen.payload,'$.activation_nonce')=$7
+ AND jellyfin_plays.user_id=chosen.user_id AND jellyfin_plays.playback_id=chosen.playback_id
+ AND (jellyfin_plays.state='active' OR COALESCE(json_extract(jellyfin_plays.payload,'$.negotiation_order'),0)<COALESCE(json_extract(chosen.payload,'$.negotiation_order'),0)))
+"#;
+
 pub(crate) const ACTIVATE_MEDIA: &str = r#"
-UPDATE jellyfin_plays SET native_incarnation_id=$1,state='active',expires_at_ms=$2
+WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9)
+UPDATE jellyfin_plays SET native_incarnation_id=$1,state='active',expires_at_ms=$2,payload=json_set(payload,'$.activation_nonce',$9)
 WHERE play_id=$3 AND user_id=$4 AND token_digest=$5 AND device_digest=$6 AND client_family=$7 AND state='pending' AND expires_at_ms>$8
 AND EXISTS(SELECT 1 FROM tokens WHERE token_hash=$5 AND user_id=$4)
 AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
@@ -211,7 +243,8 @@ AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.file_w
 AND EXISTS(SELECT 1 FROM media_sessions m WHERE m.incarnation_id=$1 AND m.user_id=$4 AND m.playback_id=jellyfin_plays.playback_id AND m.state='active' AND m.publication_ready_at_ms=0 AND m.request_fingerprint=json_extract(jellyfin_plays.payload,'$.native_request_fingerprint') AND m.media_origin_ms=json_extract(jellyfin_plays.payload,'$.source_origin_ms'))
 "#;
 pub(crate) const ACTIVATE_DIRECT: &str = r#"
-UPDATE jellyfin_plays SET direct_grant_id=$1,state='active',expires_at_ms=$2
+WITH args AS (SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9)
+UPDATE jellyfin_plays SET direct_grant_id=$1,state='active',expires_at_ms=$2,payload=json_set(payload,'$.activation_nonce',$9)
 WHERE play_id=$3 AND user_id=$4 AND token_digest=$5 AND device_digest=$6 AND client_family=$7 AND state='pending' AND expires_at_ms>$8
 AND EXISTS(SELECT 1 FROM tokens WHERE token_hash=$5 AND user_id=$4)
 AND EXISTS(SELECT 1 FROM jellyfin_entity_ids WHERE wire_id=jellyfin_plays.item_wire_id AND retired=0)
