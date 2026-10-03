@@ -5376,3 +5376,29 @@ inspection also still reported locked. The human is away from home, so
 physical-device retries are suspended while independent work continues.
 Foreground reservation pressure and broader owner/source/platform evidence
 remain open. Final review has not started; the Fable pause remains.
+
+
+### 10.185 · Two foreground viewers exhaust capacity and Retry retains ownership
+
+Source `75c9c7ba3` PASSED the scoped two-viewer capacity probe, receipt
+`continuous-chrome-75c9c7ba3-targeted-foreground-pressure1`. Two isolated
+Chrome profiles presented the generated fixture at 1080p and 480p. The
+worker reported nine software credits occupied with a 32-credit limit.
+Only the isolated lab limit was then set to the measured occupied count,
+nine. The optional 720p request retained the first viewer's 1080p stream
+and saved `720` preference; occupied capacity remained nine of nine.
+After restoring the 32-credit limit, explicit Retry presented 720p on the
+same session/player. Its maximum callback gap was 66.7 ms, with no new
+stalls/hitches/drops. The second viewer retained its 480p session and
+advanced normally, maximum gap 94.6 ms. Its one startup dropped frame
+predated pressure and remained one; zero lifetime drops are not claimed.
+Both viewers' End counts were 0/0/0/0.
+
+The raw census includes three playback-or-unclassified children and one
+separately identified caption probe. This proves a bounded occupied-pool
+refusal/retry with two actual foreground viewers; lowering the lab budget
+is an explicit experimental intervention, not evidence for all real-load
+or physical-resource-pressure scenarios. Autonomous native entitlements,
+source-reader contention and multi-node takeover remain unmeasured.
+Owned browser profiles, daemon and runtime were cleaned up. No units or
+final review ran. Multi-owner/source/platform qualification remains open.
