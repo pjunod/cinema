@@ -101,3 +101,28 @@ The inventory counts exercise old session inventories and request admission
 paths, rather than a census of every server metrics/count endpoint. Shared
 rows, complete daemon startup, mixed-member running clusters and in-place
 old-binary rollback are outside this receipt.
+
+
+## Positive-local-owner candidate requalification
+
+The exact integrated candidate `46e924454258f8925da91eed37be2f02f7c227b9`
+was requalified after all seven Local owner constraints were tightened to
+require a positive user ID. Its rebuild SHA256 is
+`e849c479d3a138c8485f7ffc76b7842d61ed613e7e085412d338e4b1e820a3a6`.
+The unchanged historical production source remains
+`971265536a259dea38b0f7a9a8752a5a74e8c025`. Rust 1.97.1 executed the SQLite
+probe in both connection modes (one test, zero ignored, 1.89 seconds) and
+the actual three-voter probe (one test, zero ignored, 18.20 seconds).
+The compatibility matrix above was unchanged: baseline writers passed,
+and rebuilt-schema request/desired writers had the same observed refusals.
+
+```sh
+python3 scripts/qualify-sharing-old-store.py \
+  --source-dir /private/tmp/plurx-sharing-old-store-positive-46e924 \
+  --target-dir /private/tmp/plurx-sharing-upgrade-target
+```
+
+The source directory must be new when reproducing this command. The log
+`/private/tmp/sharing-upgrade-positive-exact.log` records candidate, archive,
+runner, fixture, harness and DDL hashes. This qualification does not change
+the outstanding deployment and mixed-member boundaries above.

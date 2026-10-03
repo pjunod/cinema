@@ -1961,3 +1961,16 @@ cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_request
 cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_principal_rebuild -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract session_principals -- --nocapture
 ```
+
+
+**Recovery decoder checkpoint:** the shared recovery-row converter now
+receives and preserves a complete validated principal; each legacy caller
+explicitly supplies its real Local owner. It refuses invalid Local IDs rather
+than manufacturing a valid owner from zero. The focused converter regression
+passed (one test, zero ignored), and the four existing recovery behavior
+regressions passed through SQLite and actual three-voter stores. The broader
+`producer_recovery_` filter also selected an older-schema migration fixture,
+which failed during its synthetic downgrade because a newer background
+projection trigger referenced a column being dropped. That fixture needs
+repair; this is not a passing full filter or migration qualification. Shared
+recovery SQL, schema installation and admission remain open.

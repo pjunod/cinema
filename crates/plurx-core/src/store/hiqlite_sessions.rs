@@ -4794,7 +4794,7 @@ async fn recovery_row(
     // Converted through the shared reader, so that identical stored bytes
     // produce an identical typed answer on both backends.
     crate::store::recovery_reservation_from_row(
-        user_id,
+        crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id,
         recovery_epoch,
         row.failed_incarnation_id,

@@ -4132,7 +4132,7 @@ fn read_recovery_row(
         return Ok(None);
     };
     crate::store::recovery_reservation_from_row(
-        user_id,
+        crate::playback_principal::PlaybackPrincipal::LocalUser { user_id },
         playback_id,
         recovery_epoch,
         failed_incarnation_id,
