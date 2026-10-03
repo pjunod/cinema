@@ -335,6 +335,25 @@ pub struct Assignment {
     pub user_id: i64,
 }
 
+/// Complete administrator assignment read; no credentials or foreign account IDs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportAssignmentSnapshot {
+    pub import_id: Uuid,
+    pub server_id: Uuid,
+    pub catalogue_epoch: Uuid,
+    pub lifecycle_generation: i64,
+    pub expected_assignment_generation: i64,
+    pub state: String,
+    pub assignments: Vec<ImportAssignmentGroup>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportAssignmentGroup {
+    pub library_id: SourceId,
+    pub user_ids: Vec<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportSummary {
     pub grant: ExportGrant,

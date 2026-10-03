@@ -1,7 +1,7 @@
 "use strict";
 // Shared catalogue routes never enter the local numeric item/library router.
 function sharedCatalogueId(value){
-  if(typeof value!=="string"||! /^[1-9][0-9]{0,18}$/.test(value)
+  if(typeof value!=="string"||! /^(?:0|[1-9][0-9]{0,18})$/.test(value)
     ||value.length===19&&value>"9223372036854775807") throw new TypeError("Invalid shared identity");
   return value;
 }

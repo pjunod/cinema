@@ -2688,7 +2688,7 @@ mod tests {
                         .expect("fixture purpose key");
                     let probe=json!({"chapters":(0..1024).map(|n|json!({"start_time":n.to_string(),"end_time":(n+1).to_string(),"tags":{"title":"x".repeat(512)}})).collect::<Vec<_>>()}).to_string();
                     for file in 1..=3 {
-                        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(?1,?2,'/private/fixture.mkv',20,1000,?3)",rusqlite::params![file,source.item,probe]).expect("bounded details file");
+                        writer.execute("INSERT INTO files(id,item_id,path,size,mtime,probe_json) VALUES(?1,?2,?4,20,1000,?3)",rusqlite::params![file,source.item,probe,format!("/private/fixture-{file}.mkv")]).expect("bounded details file");
                     }
                 }
                 let app = super::super::router(receiver.clone()).route(
