@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import copy
 import hashlib
 import io
@@ -322,6 +323,151 @@ def zero_unit_prepare_recovery(api, scope, prior, jobs):
             'Prepare refusal unexpectedly has start/final/run artifacts')
     print(f"Recovered failed prepare run {proof['run']}/job {proof['job']}: zero units, no successes imported")
     return True
+
+
+def lost_journal_case():
+    """One immutable archival witness, not caller-selected enrollment."""
+    path = Path('validation/python-unit-lost-journals742.json')
+    require(path.is_file() and not path.is_symlink(), 'Lost journal witness unavailable')
+    with path.open('rb') as stream:
+        raw = stream.read(MAX_BYTES + 1)
+    digest = hashlib.sha256(raw).hexdigest()
+    require(len(raw) <= MAX_BYTES and digest ==
+            '31ef59fb7a45a480df9129499d34772fcfe071c03a284a2967caa4e8bd96ed31',
+            'Unknown or corrupt lost journal witness')
+    return bounded_json(raw), digest
+
+
+def authenticate_lost_journal(api, scope, digest):
+    expected = {'repository': scope['repository'], 'pr': scope['pr'], 'sha256': digest}
+    matches = []
+    for comment in api.pages(f"/issues/{scope['pr']}/comments"):
+        for line in comment['body'].splitlines():
+            if line.startswith('Python-Journal-Recovery: '):
+                claim = bounded_json(line.removeprefix('Python-Journal-Recovery: ').encode())
+                if claim == expected:
+                    verify_attestor(api, scope, comment['user'])
+                    matches.append(positive(comment['id']))
+    require(matches, 'Lost journal awaits authenticated PR hash attestation')
+
+
+def recovery_metadata(api, scope, prior, jobs, proof, status):
+    require(prior['commit_sha'] == proof['commit'], 'Lost journal prior source mismatch')
+    actual = api.get(f"/actions/runs/{proof['run']}")
+    require(actual['id'] == proof['run'] and actual['repository']['id'] == scope['repository']
+            and actual['commit_sha'] == proof['commit'] and actual['prettyref'] == scope['branch']
+            and actual['workflow_id'] == 'effort-ci.yml' and actual['status'] == 'failure',
+            'Lost journal run metadata mismatch')
+    matching = [job for job in jobs if job['name'] == job_name(scope)]
+    require(len(matching) == 1 and matching[0]['id'] == proof['job']
+            and matching[0]['run_id'] == proof['run'] and matching[0]['repo_id'] == scope['repository']
+            and matching[0]['attempt'] == 1 and matching[0]['status'] == status,
+            'Lost journal Python job metadata mismatch')
+    require(set(proof['source_hashes']) == {
+        '.github/workflows/effort-ci.yml', 'validation/python_unit_receipts.py'},
+        'Lost journal source-order proof incomplete')
+    for path, expected in proof['source_hashes'].items():
+        require(hashlib.sha256(api.bytes('/raw/' + path, {'ref': proof['commit']})).hexdigest()
+                == expected, 'Lost journal original source mismatch')
+    raw = api.bytes(f"/actions/jobs/{proof['job']}/logs")
+    require(hashlib.sha256(raw).hexdigest() == proof['log_sha256'], 'Lost journal original log mismatch')
+    require(proof['commit'] in raw.decode(), 'Lost journal checkout source absent')
+    return [re.sub(r'^\d{4}-\d\d-\d\dT[0-9:.]+Z ', '', line)
+            for line in raw.decode().splitlines()]
+
+
+def recovery_absence(api, scope, run):
+    require(not any(artifact['run_id'] == run for artifact in
+                    api.pages('/actions/artifacts', {'name': key(scope)}))
+            and not api.pages('/actions/artifacts', {'name': key(scope) + f'-start-{run}'})
+            and api.get(f'/actions/runs/{run}/artifacts') == [],
+            'Lost journal unexpectedly has live start/final/run artifacts')
+
+
+def recover_lost_pr742(api, scope, prior, jobs):
+    """Return (handled, journal); a zero-unit refusal never imports a journal."""
+    # Avoid imposing this exceptional record or authority on unrelated PRs.
+    if scope != {'repository': 1, 'pr': 742, 'branch': 'opus/client-evidence',
+                 'base': 'effort/architecture-review-2026-09-20'} or prior['id'] not in (3915, 3930):
+        return False, None
+    proof, digest = lost_journal_case()
+    require(proof['version'] == 1 and proof['scope'] == scope
+            and proof['journal']['run'] == 3915 and proof['journal']['job'] == 40909
+            and proof['journal']['commit'] == '5fa478987bf464ef6ab9b50bf49dea842acef018'
+            and proof['refusal']['run'] == 3930 and proof['refusal']['job'] == 41018
+            and proof['refusal']['commit'] == '2a299d44b38e67c029b66087f69edc4d5315222e',
+            'Lost journal exact-case identity mismatch')
+    authenticate_lost_journal(api, scope, digest)
+    zero = prior['id'] == proof['refusal']['run']
+    case = proof['refusal'] if zero else proof['journal']
+    lines = recovery_metadata(api, scope, prior, jobs, case, 'failure' if zero else 'success')
+    recovery_absence(api, scope, case['run'])
+    if zero:
+        refusal = 'Python receipt refusal: ReceiptError: Missing final receipt for run 3915; do not rerun possibly passed tests'
+        start = "skipping post step for 'Publish Python attempt-start marker'; main step was skipped"
+        final = "skipping post step for 'Preserve Python success journal even on unit failure'; main step was skipped"
+        require(lines.count(refusal) == lines.count(start) == lines.count(final) == 1
+                and lines.index(refusal) < min(lines.index(start), lines.index(final))
+                and not any(marker in '\n'.join(lines) for marker in (
+                    'discovered=', 'historical-passes=', 'pending=', 'Ran ', 'Unit discovery failed',
+                    'fixture_errors', '... ok', '... FAIL', '... ERROR')),
+                'Lost journal refusal contradicts zero-unit phase evidence')
+        print(f"Recovered failed prepare run {case['run']}/job {case['job']}: zero units, no successes imported")
+        return True, None
+    archives, uploads = {}, {}
+    for label in ('start', 'final'):
+        artifact = case['artifacts'][label]
+        require(isinstance(artifact['zip_base64'], str) and len(artifact['zip_base64']) <= MAX_BYTES,
+                'Lost journal encoded archive exceeds bound')
+        try:
+            raw = base64.b64decode(artifact['zip_base64'], validate=True)
+        except ValueError:
+            raise ReceiptError('Lost journal archive encoding invalid') from None
+        require(len(raw) == artifact['size'] <= MAX_BYTES
+                and hashlib.sha256(raw).hexdigest() == artifact['sha256'],
+                'Lost journal archive witness mismatch')
+        upload = (f"Artifact {key(scope)}" + (f"-start-{case['run']}" if label == 'start' else '')
+                  + f" has been successfully uploaded! Final size is {artifact['size']} bytes. Artifact ID is {artifact['id']}")
+        require(lines.count(upload) == 1, 'Lost journal upload metadata mismatch')
+        uploads[label] = lines.index(upload)
+        archives[label] = artifact_json(raw)
+    start, journal = archives['start'], archives['final']
+    validate_journal(start, scope, case['run'], case['commit'], completed=False)
+    validate_journal(journal, scope, case['run'], case['commit'])
+    require(start['complete'] is False and len(start['passes']) == case['baseline_count']
+            and all(source == {'run': case['baseline_run'], 'commit': case['baseline_commit']}
+                    and journal['passes'].get(test_key) == source
+                    for test_key, source in start['passes'].items()),
+            'Lost journal inherited baseline changed')
+    fresh = {test_key: source for test_key, source in journal['passes'].items()
+             if test_key not in start['passes']}
+    require(all(source == {'run': case['run'], 'commit': case['commit']} for source in fresh.values())
+            and {suite: sum(test_key.startswith(suite + ':') for test_key in fresh)
+                 for suite in SUITES} == case['fresh_counts'], 'Lost journal fresh attribution mismatch')
+    headers = [(i, re.match(r'^test\w+ \((test_[A-Za-z0-9_.]+)\)', line))
+               for i, line in enumerate(lines)]
+    headers = [(i, match.group(1)) for i, match in headers if match]
+    require(len(headers) == len(fresh) and len({name for _, name in headers}) == len(fresh),
+            'Lost journal individual events ambiguous')
+    require(headers and uploads['start'] < headers[0][0]
+            and headers[-1][0] < uploads['final'], 'Lost journal publication ordering mismatch')
+    seen = set()
+    for position, (i, name) in enumerate(headers):
+        end = headers[position + 1][0] if position + 1 < len(headers) else len(lines)
+        outcomes = [line for line in lines[i:end] if line == 'ok' or line.endswith(' ... ok')]
+        candidates = [test_key for test_key in fresh if test_key.endswith(':' + name)]
+        require(len(outcomes) == len(candidates) == 1, 'Lost journal lacks one positive event per fresh ID')
+        seen.add(candidates[0])
+    require(seen == set(fresh) and lines.count('OK') == 2
+            and sum(bool(re.fullmatch(r'Ran 2 tests in [0-9.]+s', line)) for line in lines) == 1
+            and sum(bool(re.fullmatch(r'Ran 7 tests in [0-9.]+s', line)) for line in lines) == 1
+            and lines.count('validation: discovered=283, historical-passes=281, pending=2') == 1
+            and lines.count('operations: discovered=652, historical-passes=645, pending=7') == 1
+            and lines.index('validation: discovered=283, historical-passes=281, pending=2') < uploads['final']
+            and lines.index('operations: discovered=652, historical-passes=645, pending=7') < uploads['final'],
+            'Lost journal completed phase/count evidence mismatch')
+    print(f"Recovered original {len(journal['passes'])} passes from run {case['run']}/job {case['job']}; no units replayed")
+    return True, journal
 
 
 def validate_journal(journal, scope, run, commit, completed=True):
@@ -731,8 +877,15 @@ def restore(api, scope, run, applicability=None):
                 f"Run {rid} was re-run; ambiguous receipt attempt, dispatch fresh runs only")
         if matching[0]["status"] == "skipped":
             continue
-        if rid not in indexed and zero_unit_prepare_recovery(api, scope, prior, jobs):
-            continue
+        if rid not in indexed:
+            handled, recovered_journal = recover_lost_pr742(api, scope, prior, jobs)
+            if handled:
+                if recovered_journal is not None:
+                    trusted_sources.add((rid, prior['commit_sha']))
+                    journals.append(recovered_journal)
+                continue
+            if zero_unit_prepare_recovery(api, scope, prior, jobs):
+                continue
         require(rid in indexed, f"Missing final receipt for run {rid}; do not rerun possibly passed tests")
         markers = api.pages("/actions/artifacts", {"name": key(scope) + f"-start-{rid}"})
         require(len(markers) == 1 and markers[0]["run_id"] == rid

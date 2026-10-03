@@ -2616,7 +2616,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # sentinel still sees it, which is the point: the one thing this module may not
 # do is start a rolling owner nobody joins.
 # 47 -> 48 (measured) with L-03 M3: one test-only `command.spawn()` in
-# `live_tv::caption_audit_tests::run_live_graph`, which runs the production
+# `live_tv::caption_probe::run_live_graph`, which runs the production
 # live FFmpeg argv on a generated caption fixture. The child is
 # `kill_on_drop`, its stdin is written and closed in the same `join!` that
 # awaits `wait_with_output` under a 180 s timeout, so it cannot outlive the
@@ -3268,7 +3268,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # inside `mod tests`, it is bounded, and it owns no producer, no process, no
 # child and no recovery decision.
 # 878 -> 880 (measured) with L-03 M3: two test-only `tokio::time::timeout`
-# calls in `live_tv::caption_audit_tests` (`media_command` and
+# calls in `live_tv::caption_probe` (`media_command` and
 # `run_live_graph`), each bounding one awaited FFmpeg/ffprobe child to
 # 180 s. Neither is a timer anything else observes.
 # 880 -> 889 (measured) with L-03 M1. Production +1: the viewer pump
@@ -3933,7 +3933,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # `plurxd/src/panics.rs`, each reviewed above. Disjoint files; the merge
 # itself added no occurrence.
 # 155 -> 160 (measured) with L-03 M3: five test-only commands in
-# `live_tv::caption_audit_tests` -- the fixture's MPEG-2 generation and
+# `live_tv::caption_probe` -- the fixture's MPEG-2 generation and
 # mux, the ffprobe that exports `cc_data`, the H.264 copy-route source,
 # and the production live argv rebuilt in `run_live_graph` (same program,
 # arguments and cleared environment as `live_ffmpeg_command_for_input`).
@@ -4428,7 +4428,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # response status and starts no process. No new rolling-producer owner.
 # 387 -> 381 with P-02 M3, the one child launcher (measured). -7: the
 # `.spawn()` / `.output()` calls that started children outside the launcher
-# (scan/probe.rs 1, decode_facts.rs 1, live_tv/caption_audit_tests.rs 2,
+# (scan/probe.rs 1, decode_facts.rs 1, live_tv/caption_probe.rs 2,
 # media_pool.rs 1, subtitle_ride_along.rs 2) now go through
 # `spawn_job_owned` / `output_job_owned` / `output_job_owned_blocking`.
 # +1: the blocking launcher's own `.spawn()` in process/mod.rs (see
@@ -4917,7 +4917,7 @@ pattern = "kill_on_drop\\s*\\("
 # which now also carries the ride-along's tee, was already `kill_on_drop` and
 # is unchanged.
 # 82 -> 84 (measured) with L-03 M3: `media_command` and `run_live_graph` in
-# `live_tv::caption_audit_tests`, so an FFmpeg child whose 180 s timeout
+# `live_tv::caption_probe`, so an FFmpeg child whose 180 s timeout
 # fires, or whose test panics, is killed rather than left holding a
 # hardware encoder the next audit run needs.
 # +1 for `transcode/tests/chunk_05.rs`'s `placeholder_source`, test-only:
