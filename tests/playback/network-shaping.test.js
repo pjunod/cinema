@@ -49,6 +49,24 @@ function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
 
+test("quality baseline requires an advancing outgoing frame rather than preload", () => {
+  const snapshot = {frame_probe: {supported: true, sequence: 1,
+    last_frame_at_ms: 2400, last_frame: {media_time: 0}},
+    video: {paused: false, seeking: false}};
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 0), false);
+  snapshot.frame_probe.last_frame.media_time = 0.041667;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.frame_probe.sequence = 2;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), true);
+  snapshot.video.paused = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  snapshot.video.paused = false;
+  snapshot.video.seeking = true;
+  assert.equal(lab.advancingOutgoingFrame(snapshot, 1), false);
+  assert.ok(Math.abs(lab.frameGapSince(2900, 3416.6) - 516.6) < 1e-6,
+    "a real outgoing-frame blackout is still measured in full");
+});
+
 test("steady frame window excludes preload time but preserves later and switch gaps", () => {
   assert.ok(Math.abs(lab.frameGapSince(4921.2, 5421.2, 5300) - 121.2) < 1e-6);
   assert.equal(lab.frameGapSince(5421.2, 5921.2, 5300), 500,

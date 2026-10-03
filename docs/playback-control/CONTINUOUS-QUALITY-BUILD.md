@@ -4186,8 +4186,8 @@ Authoritative main advanced from `15e36f7f4` to `2abd65f47`. Its GPU-resident
 VA-API/Vulkan tone-map path, telemetry writer registrations bound to Store
 lifetimes, native web startup handover timing and associated regressions merged
 without conflicts. Current manual/Auto runtime still identifies `9b1dd149b`;
-it cannot qualify this newer integrated tree. Pinned compilation and the normal
-hook must pass before this integration is committed. No unit tests executed.
+it cannot qualify this newer integrated tree. Pinned workspace/all-target compilation and the normal
+hook passed before this integration was committed. No unit tests executed.
 
 Three bounded diagnostic starts used daemon `331dc37cb` with the corrected
 steady harness. All passed, with no waits, stalls or hitches; the first measured
@@ -4203,3 +4203,25 @@ retaining Plurx policy/prepared handoffs and delegating only the admitted
 compatible two-rung attachment to the native engine. Pending that choice,
 the existing policy and prepared path remain; the Safari fixture results do
 not silently change production policy or claim native enrollment complete.
+
+
+### 10.141 Require advancing playback before a quality campaign
+
+The `9b1dd149b` campaign completed fifteen manual changes in one attachment,
+with zero waits, reopens, stalls, hitches or dropped frames. Its first change
+failed the callback bound at 516.6 ms; the other fourteen measured at most
+66.8 ms. The campaign stopped before Auto and remains failed. Its first
+request began at film time 0.017 s, while the harness accepted a saved preload
+callback at film time zero as the outgoing frame. The quality baseline now
+requires a fresh callback with positive media time while playing and not
+seeking before issuing the request. The complete interval from that callback
+remains measured; no switch gap is clipped and no threshold changes. Authored
+`quality baseline requires an advancing outgoing frame rather than preload`
+covers the preload, stale callback, paused and seeking cases. Syntax checks
+only; no unit tests executed.
+
+The integrated `58bc56035` candidate is building on the approved isolated Linux
+node after the older daemon and producer monitor ended. The old receipt does
+not qualify this integrated tree. Producer census is preserved in the ignored
+owned report directory. Final adversarial review and the Fable stop remain
+pending.

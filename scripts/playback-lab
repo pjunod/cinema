@@ -2292,6 +2292,16 @@ function frameGapSince(lastFrameAtMs, nowMs, windowStartMs = null) {
   return Math.max(0, nowMs - from);
 }
 
+function advancingOutgoingFrame(snapshot, baselineSequence) {
+  const probe = snapshot.frame_probe;
+  if (probe?.supported !== true) return true;
+  const frame = probe.last_frame;
+  return Number.isFinite(probe.last_frame_at_ms)
+    && Number(probe.sequence) > baselineSequence
+    && Number(frame?.media_time) > 0
+    && !snapshot.video.paused && !snapshot.video.seeking;
+}
+
 async function setCasePreferences(driver, quality, frameDiagnostics = false) {
   await driver.exec(`
     try{closePlayer()}catch(e){}
@@ -2563,12 +2573,13 @@ async function performOperation(driver, testCase, start) {
       // An API-present but silent rVFC implementation is not an oracle. Wait
       // for a real outgoing frame before resetting the per-transition maxima,
       // so a callback stream that begins only on the successor cannot erase
-      // the outgoing-to-target blank interval.
+      // the outgoing-to-target blank interval. A paused preload frame at
+      // film time zero is not advancing playback: require a fresh callback
+      // before issuing the request, then preserve its entire gap below.
+      const baselineSequence = Number(before.frame_probe?.sequence || 0);
       before = await waitFor(async () => {
         const state = await driver.eval(playerSnapshotExpression());
-        if (state.frame_probe?.supported !== true) return state;
-        return state.frame_probe.last_frame_at_ms != null
-          && Number.isFinite(Number(state.frame_probe.last_frame_at_ms)) ? state : null;
+        return advancingOutgoingFrame(state, baselineSequence) ? state : null;
       }, Number(testCase.frame_baseline_timeout_seconds || 2) * 1_000,
       `outgoing frame before quality switch to ${quality}`, 50);
       await driver.exec(`
@@ -5100,6 +5111,7 @@ module.exports = {
   timeToSustained,
   transitionMetrics,
   frameGapSince,
+  advancingOutgoingFrame,
   waitForDeviceAcceptance,
   writePreparationReport,
   writeFatalRunReport,
