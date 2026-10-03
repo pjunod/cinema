@@ -3835,12 +3835,14 @@ mod tests {
             assert!(comparison.same, "{outcome}: {:?}", comparison.differences);
             assert!(!comparison.admitted_on_reporter_drift);
 
-            stored["streams"][0]["refs"] = serde_json::json!(99);
+            // Use a fact present in both probes. The current reporter omits
+            // `refs`, and optional field omission is not source replacement.
+            stored["streams"][0]["width"] = serde_json::json!(1920);
             let changed = super::compare_probe_documents(&stored.to_string(), &held.to_string())
                 .expect("compare changed stream with content metadata");
             assert!(!changed.same, "{outcome}: real stream changes must refuse");
             assert!(!changed.admitted_on_reporter_drift);
-            assert!(changed.rendered_differences().contains("/streams/0/refs"));
+            assert!(changed.rendered_differences().contains("/streams/0/width"));
         }
     }
 
