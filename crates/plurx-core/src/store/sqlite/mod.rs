@@ -20,6 +20,7 @@ mod fragindex;
 mod fragment_index_cluster;
 mod housekeeping;
 mod jellyfin_identity;
+mod jellyfin_login;
 mod library;
 mod library_channels;
 mod live_tv_resource;
@@ -1194,6 +1195,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::PLAYBACK_INPUT_SCHEMA,
     // v92: permanent Jellyfin wire identities and deterministic retirement.
     super::jellyfin_identity::JELLYFIN_IDENTITY_SCHEMA,
+    // v93: compatibility-only login scope and transactional replacement.
+    super::jellyfin_login::JELLYFIN_LOGIN_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

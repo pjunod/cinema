@@ -32,6 +32,10 @@ mod fragment_prune_tests;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_classification;
 mod jellyfin_identity;
+mod jellyfin_login;
+pub use jellyfin_login::{JellyfinClientFamily, JellyfinLoginStore, JellyfinLoginWrite};
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_jellyfin_login;
 mod renditionplan;
 pub use jellyfin_identity::{JellyfinEntityId, JellyfinEntityKind, JellyfinIdentityStore};
 #[cfg(feature = "hiqlite-store")]
@@ -5296,6 +5300,7 @@ pub trait Store:
     crate::live_tv_resource::LiveTvResourceStore
     + SettingsStore
     + JellyfinIdentityStore
+    + JellyfinLoginStore
     + BackgroundJobStore
     + DvConversionStore
     + MetricsStore
@@ -5334,6 +5339,7 @@ impl<T> Store for T where
     T: crate::live_tv_resource::LiveTvResourceStore
         + SettingsStore
         + JellyfinIdentityStore
+        + JellyfinLoginStore
         + BackgroundJobStore
         + DvConversionStore
         + MetricsStore

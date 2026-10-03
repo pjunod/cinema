@@ -561,6 +561,15 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "jellyfin_login_tokens",
+        columns: &["token_hash", "user_id", "device_digest", "client_family"],
+        order_by: "token_hash",
+        minimum_schema: 93,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "api_keys",
         columns: &[
             "id",
@@ -3444,7 +3453,9 @@ mod tests {
         assert!(names.contains(&"live_tv_resource_records"));
         // The revision/nonce is reconstructed above the greatest restored epoch.
         assert!(!names.contains(&"live_tv_resource_revision"));
-        assert_eq!(names.len(), 70, "review every imported durable table");
+        assert!(names.contains(&"jellyfin_login_tokens"));
+        assert!(names.contains(&"jellyfin_entity_ids"));
+        assert_eq!(names.len(), 72, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

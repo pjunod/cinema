@@ -12,7 +12,9 @@ use crate::store::{
     TokenAuthentication, TokenSummary, UserStore, MAX_DEVICE_LABEL_BYTES, TOKEN_SUMMARY_MAX,
 };
 
-fn require_standalone_claim(claim: Option<&CacheAdminMutationClaim>) -> Result<(), StoreError> {
+pub(super) fn require_standalone_claim(
+    claim: Option<&CacheAdminMutationClaim>,
+) -> Result<(), StoreError> {
     if claim.is_some() {
         return Err(StoreError::Database(
             "cluster cache-admin mutation claim cannot be used by standalone SQLite".to_owned(),

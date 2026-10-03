@@ -8801,6 +8801,86 @@ mod tests {
             .is_some());
     }
 
+    #[tokio::test]
+    async fn compatibility_login_replaces_only_its_scope_after_password_verification() {
+        let (app, state) = test_app_with_state();
+        let native = setup_admin(&app).await;
+        let headers = axum::http::HeaderMap::new();
+        let request = || auth::LoginRequest {
+            username: "paul".into(),
+            password: "supersecret".into(),
+            device: Some("living room".into()),
+        };
+        let family = plurx_core::store::JellyfinClientFamily::Infuse;
+        let first =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("initial compatibility login");
+        let other =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-two", family)
+                .await
+                .expect("other device login");
+        let android = auth::login_jellyfin_user(
+            &state,
+            None,
+            &headers,
+            request(),
+            "device-one",
+            plurx_core::store::JellyfinClientFamily::AndroidTv,
+        )
+        .await
+        .expect("other family login");
+        let mut bad = request();
+        bad.password = "wrong".into();
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, bad, "device-one", family).await,
+            Err(super::error::ApiError::Unauthorized)
+        ));
+        extract::authenticate_user_token(&state, &first.token)
+            .await
+            .expect("failed password preserves old login");
+        let next =
+            auth::login_jellyfin_user(&state, None, &headers, request(), "device-one", family)
+                .await
+                .expect("replacement login");
+        assert!(extract::authenticate_user_token(&state, &first.token)
+            .await
+            .is_err());
+        for token in [&native, &other.token, &android.token, &next.token] {
+            assert_eq!(
+                extract::authenticate_user_token(&state, token)
+                    .await
+                    .expect("unrelated or fresh token")
+                    .id,
+                first.user.id
+            );
+        }
+        let tokens = state
+            .store
+            .list_tokens_for_user(first.user.id)
+            .await
+            .expect("token inventory");
+        assert_eq!(
+            tokens.len(),
+            4,
+            "replacement creates no orphan native tokens"
+        );
+        let mut oversized = request();
+        oversized.password = "x".repeat(auth::MAX_PASSWORD_BYTES + 1);
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, oversized, "device-one", family)
+                .await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        assert!(matches!(
+            auth::login_jellyfin_user(&state, None, &headers, request(), "", family).await,
+            Err(super::error::ApiError::BadRequest(_))
+        ));
+        extract::authenticate_user_token(&state, &next.token)
+            .await
+            .expect("validation refusals preserve current login");
+    }
+
     async fn login_device(app: &Router, device: &str) -> String {
         let (status, body) = call(
             app,

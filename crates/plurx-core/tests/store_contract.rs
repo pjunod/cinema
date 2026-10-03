@@ -22,6 +22,8 @@ use queue_fixture::QueueFixture;
 mod background_jobs;
 #[path = "store_contract/jellyfin_identity.rs"]
 mod jellyfin_identity;
+#[path = "store_contract/jellyfin_login.rs"]
+mod jellyfin_login;
 
 #[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;

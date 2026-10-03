@@ -994,6 +994,10 @@ contract = "The Jellyfin protocol layer preserves checked time and opaque identi
 paths = [
   "crates/plurx-compat-jellyfin/**",
   "crates/plurx-core/src/store/jellyfin_identity.rs",
+  "crates/plurx-core/src/store/jellyfin_login.rs",
+  "crates/plurx-core/src/store/hiqlite_jellyfin_login.rs",
+  "crates/plurx-core/src/store/sqlite/jellyfin_login.rs",
+  "crates/plurx-core/tests/store_contract/jellyfin_login.rs",
   "crates/plurx-core/src/store/hiqlite_jellyfin_identity.rs",
   "crates/plurx-core/src/store/sqlite/jellyfin_identity.rs",
   "crates/plurx-core/tests/store_contract/jellyfin_identity.rs",

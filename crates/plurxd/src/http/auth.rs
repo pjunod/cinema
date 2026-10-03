@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 
 use super::dto::UserDto;
 use super::error::ApiError;
-use super::extract::{AuthUser, RawToken};
+use super::extract::{AuthUser, CacheOnlyAdminAuthenticationTicket, RawToken};
 use super::internal_auth_revocation::ClusterCacheRevocation;
 use crate::state::AppState;
 
@@ -329,12 +329,22 @@ pub(crate) struct AuthenticatedLogin {
     pub(crate) user: plurx_core::domain::User,
 }
 
-pub(crate) async fn login_user(
+/// Successful password verification is still subject to the Store's password
+/// CAS when minting. It carries no user token and cannot authorize requests.
+struct VerifiedPasswordLogin {
+    user: plurx_core::domain::User,
+    username: String,
+    address: IpAddr,
+    device: Option<String>,
+    proof_ticket: Option<CacheOnlyAdminAuthenticationTicket>,
+}
+
+async fn verify_login_password(
     state: &AppState,
     peer: Option<SocketAddr>,
     headers: &HeaderMap,
     req: LoginRequest,
-) -> Result<AuthenticatedLogin, ApiError> {
+) -> Result<VerifiedPasswordLogin, ApiError> {
     validate_password_size(&req.password)?;
     validate_device_label(req.device.as_deref())?;
     let address = client_ip(headers, peer, &state.trusted_proxies);
@@ -353,7 +363,7 @@ pub(crate) async fn login_user(
     let proof_ticket = state.cache_only_admin_proofs.authentication_ticket();
     let user = state.store.get_user_by_username(&req.username).await?;
     // Verify even on unknown user to keep timing uniform.
-    let password = req.password;
+    let password = req.password.clone();
     let (ok, user) = run_password_work(&state.password_capacity, move || match user {
         Some(u) => {
             let ok = auth::verify_password(&password, &u.password_hash);
@@ -374,29 +384,112 @@ pub(crate) async fn login_user(
         }
     };
 
+    Ok(VerifiedPasswordLogin {
+        user,
+        username: req.username,
+        address,
+        device: req.device,
+        proof_ticket,
+    })
+}
+
+fn record_login_failure(state: &AppState, verified: &VerifiedPasswordLogin) -> ApiError {
+    state
+        .login_throttle
+        .record_failure(&verified.username, verified.address);
+    LOGIN_BAD_CREDENTIALS.fetch_add(1, Ordering::Relaxed);
+    ApiError::Unauthorized
+}
+
+fn record_login_success(state: &AppState, verified: &VerifiedPasswordLogin) {
+    state
+        .login_throttle
+        .record_success(&verified.username, verified.address);
+    LOGIN_OK.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) async fn login_user(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    req: LoginRequest,
+) -> Result<AuthenticatedLogin, ApiError> {
+    let verified = verify_login_password(state, peer, headers, req).await?;
     let token = auth::generate_token().map_err(|e| ApiError::Internal(e.to_string()))?;
     let hash = auth::hash_token(&token);
     state
         .store
         .create_token_if_password_matches(
             &hash,
-            user.id,
-            req.device.as_deref(),
-            &user.password_hash,
+            verified.user.id,
+            verified.device.as_deref(),
+            &verified.user.password_hash,
         )
         .await?
         .then_some(())
-        .ok_or_else(|| {
-            state.login_throttle.record_failure(&req.username, address);
-            LOGIN_BAD_CREDENTIALS.fetch_add(1, Ordering::Relaxed);
-            ApiError::Unauthorized
-        })?;
-    state.login_throttle.record_success(&req.username, address);
-    LOGIN_OK.fetch_add(1, Ordering::Relaxed);
+        .ok_or_else(|| record_login_failure(state, &verified))?;
+    record_login_success(state, &verified);
+    let VerifiedPasswordLogin {
+        user, proof_ticket, ..
+    } = verified;
     state
         .cache_only_admin_proofs
         .record_authenticated(proof_ticket, hash, &user);
+    Ok(AuthenticatedLogin { token, user })
+}
 
+/// Compatibility minting never creates a native token as an intermediate step.
+/// Device metadata selects replacement scope only after password verification;
+/// the user exclusion invalidates proofs without deleting unrelated tokens.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "J1 service seam; public facade mounts in J2")
+)]
+pub(crate) async fn login_jellyfin_user(
+    state: &AppState,
+    peer: Option<SocketAddr>,
+    headers: &HeaderMap,
+    req: LoginRequest,
+    device_id: &str,
+    client_family: plurx_core::store::JellyfinClientFamily,
+) -> Result<AuthenticatedLogin, ApiError> {
+    if device_id.is_empty() || device_id.len() > 256 || device_id.chars().any(char::is_control) {
+        return Err(ApiError::BadRequest(
+            "device ID must contain 1 to 256 bytes without control characters".into(),
+        ));
+    }
+    let verified = verify_login_password(state, peer, headers, req).await?;
+    let token = auth::generate_token().map_err(|e| ApiError::Internal(e.to_string()))?;
+    let hash = auth::hash_token(&token);
+    let proof_revocation = ClusterCacheRevocation::begin_user(state, verified.user.id).await?;
+    let replaced = state
+        .store
+        .replace_jellyfin_login(
+            plurx_core::store::JellyfinLoginWrite {
+                token_hash: hash,
+                user_id: verified.user.id,
+                device_digest: auth::hash_token(device_id),
+                client_family,
+                device_label: verified.device.clone(),
+                expected_password_hash: verified.user.password_hash.clone(),
+                created_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs() as i64,
+            },
+            proof_revocation.mutation_claim(),
+        )
+        .await?;
+    // Complete the fence on a definitive CAS refusal too. This clears the
+    // exclusion without turning a stale password into fresh authority.
+    proof_revocation.finish(state).await?;
+    if !replaced {
+        return Err(record_login_failure(state, &verified));
+    }
+    // The pre-Begin ticket is invalidated. Authenticate under a fresh ticket
+    // after End rather than publishing a stale proof across the exclusion.
+    let user = super::extract::authenticate_user_token(state, &token).await?;
+    record_login_success(state, &verified);
     Ok(AuthenticatedLogin { token, user })
 }
 
