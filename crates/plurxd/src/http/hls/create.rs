@@ -34,7 +34,7 @@ fn candidate_refusal_reason(
 /// is a trap: GET is idempotent by definition, so anything entitled to replay
 /// one — a retry, a prefetch, an intermediary — could spawn a second encoder
 /// and orphan the first.
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct CreateSession {
     /// Stable for one player instance. Supersession is keyed by it, so two
     /// devices on one account no longer kill each other's streams.

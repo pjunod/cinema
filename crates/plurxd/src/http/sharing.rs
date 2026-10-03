@@ -122,6 +122,7 @@ pub(crate) fn peer_router(state: AppState) -> Router {
         .route("/sharing/v1/grant/rotation/{id}", get(rotation_status))
         .merge(super::shared_library::peer_router(state.clone()))
         .merge(super::shared_playback::peer_router(state.clone()))
+        .merge(super::shared_source_playback::peer_router(state.clone()))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             peer_guard,
@@ -160,6 +161,9 @@ async fn peer_guard(
     if let Some(value) = request.headers_mut().get_mut(header::AUTHORIZATION) {
         value.set_sensitive(true);
     }
+    if let Some(value) = request.headers_mut().get_mut("cinemashare-viewer") {
+        value.set_sensitive(true);
+    }
     let _permit = match PEER_REQUESTS.try_acquire() {
         Ok(permit) => permit,
         Err(_) => {
@@ -179,6 +183,7 @@ async fn peer_guard(
         .map(|path| path.as_str())
     {
         Some("/sharing/v1/items/{item}/files/{file}/decision") => Duration::from_secs(10),
+        Some("/sharing/v1/items/{item}/files/{file}/sessions") => Duration::from_secs(310),
         _ => Duration::from_secs(3),
     };
     match tokio::time::timeout(deadline, next.run(request)).await {

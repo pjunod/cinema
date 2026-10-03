@@ -534,6 +534,7 @@ pub use rate_control::*;
 pub struct TranscodeManager {
     #[allow(dead_code)] // The private Source HTTP actor consumer is being integrated.
     source_workers: source_actor::SourceWorkerRegistry,
+    pub(crate) source_http_starts: crate::http::shared_source_playback::SourceStartRegistry,
     store: Arc<dyn Store>,
     work_dir: PathBuf,
     /// The VOD presentation's serving runtime (plan §2). Sessions created

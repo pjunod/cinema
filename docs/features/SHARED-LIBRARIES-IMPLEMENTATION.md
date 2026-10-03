@@ -3921,3 +3921,31 @@ registry tests and complete Source-dispatch recipe test also passed with zero
 ignored. Documentation index checks passed all four tests. These are focused
 integration receipts; the unregistered B candidate still requires the live
 HTTP, relay, delivery and cleanup qualification listed above.
+
+### Source HTTP Start on the combined receiver tree
+
+The private file-scoped Source Start route now owns an eight-entry registry on
+the actual transcode manager. It retains the full canonical ordinary request,
+stable grant, pseudonymous viewer and complete Source reference before
+preparation, claim, assignment or physical admission. A disconnected HTTP
+waiter leaves the detached owner intact. Exact retries join that owner through
+fresh grant/file checks and the actual published actor; stored response JSON
+or a missing process-local actor cannot establish readiness.
+
+The reusable real fixture selects a one-voter daemon Store, saves the explicit
+sharing choice and runs the actual pre-serving Source schema factory. It uses
+real scanned file facts, FFmpeg, fragment index and catalogue revision key.
+On the combined startup-fixed tree, all seven Source HTTP tests passed with
+zero ignored in 12.24 seconds. The actual TCP-disconnect regression verifies
+exact replay, changed-recipe refusal, stable-grant credential rotation,
+restart-style registry absence refusal, held response Body retirement and
+revocation followed by actual producer/body/SQL settlement.
+
+This checkpoint does not cover bytes already queued by Hyper after Body EOF.
+The accepted-connection writer completion barrier remains an explicit next
+qualification, along with Source resource/status/End routes, B live Start,
+relay, delivery grants and control. No viewer playback is enabled here.
+
+```sh
+cargo test -p plurxd --bin plurxd http::shared_source_playback::
+```
