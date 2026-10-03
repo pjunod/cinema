@@ -179,6 +179,13 @@ impl PeerConnection {
                         .unwrap_or_else(Body::empty),
                 )
                 .map_err(|_| PeerError::InvalidResponse)?;
+            // Consuming a response body does not itself make Hyper's HTTP/1
+            // dispatch channel ready for the next request. Wait within the
+            // same deadline before reusing the pinned connection.
+            self.sender
+                .ready()
+                .await
+                .map_err(|_| PeerError::Unavailable)?;
             let response = self
                 .sender
                 .send_request(request)
