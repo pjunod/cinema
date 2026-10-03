@@ -179,6 +179,61 @@ pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> Stri
     String::from_utf8_lossy(&tail).into_owned()
 }
 
+/// A producer's drained stderr tail, split into the lines an operator should
+/// see and the informational lines a library prints on every start.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct ProducerDiagnostic {
+    /// Everything not known to be informational, in order. A warning's worth.
+    pub(crate) actionable: String,
+    /// Known informational lines, in order. Debug detail only.
+    pub(crate) informational: String,
+}
+
+/// Line prefixes that are never a producer diagnostic. libva writes its own
+/// `libva info:` lines (the VA-API version, the driver it tries to open, the
+/// init function it found, `va_openDriver() returns 0`) straight to stderr,
+/// whatever FFmpeg's `-loglevel` says, once for every VA-API or QSV device a
+/// child opens; a healthy QSV generation therefore always had a "diagnostic".
+/// `libva error:` is not on this list and stays actionable.
+const INFORMATIONAL_DIAGNOSTIC_PREFIXES: &[&str] = &["libva info:"];
+
+/// Whether one stderr line is informational output rather than a diagnostic:
+/// it starts, after leading whitespace, with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`]. The one rule every ffmpeg stderr
+/// consumer uses, line by line ([`classify_diagnostic`], the rolling
+/// transcode's stderr log, the Live TV readiness error).
+pub(crate) fn is_informational_diagnostic(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    INFORMATIONAL_DIAGNOSTIC_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+}
+
+/// Classify a [`drain_diagnostics`] tail line by line. Blank lines are
+/// dropped; a line is informational only when it starts with one of
+/// [`INFORMATIONAL_DIAGNOSTIC_PREFIXES`], so anything unrecognised stays
+/// actionable.
+pub(crate) fn classify_diagnostic(tail: &str) -> ProducerDiagnostic {
+    let mut actionable = Vec::new();
+    let mut informational = Vec::new();
+    for line in tail.lines() {
+        let line = line.trim_end_matches('\r');
+        let trimmed = line.trim_start();
+        if trimmed.trim_end().is_empty() {
+            continue;
+        }
+        if is_informational_diagnostic(trimmed) {
+            informational.push(line);
+        } else {
+            actionable.push(line);
+        }
+    }
+    ProducerDiagnostic {
+        actionable: actionable.join("\n"),
+        informational: informational.join("\n"),
+    }
+}
+
 /// A file-producing child with no captured stdout and one bounded stderr
 /// reader. Cancellation transfers the exact child to a reap owner, never a
 /// detached diagnostic reader. Used by whole-track burn extraction.
@@ -5028,6 +5083,39 @@ mod tests {
                 "{pointer}"
             );
         }
+    }
+
+    /// Owned-lab receipt 2026-10-02, defect 3: every QSV VOD generation logged
+    /// `WARN VOD producer diagnostic ... libva info: VA-API version 1.24.0`.
+    /// libva's start-up lines are informational; FFmpeg's own diagnostics and
+    /// `libva error:` lines stay actionable, in order.
+    #[test]
+    fn libva_info_lines_are_informational_not_producer_diagnostics() {
+        let qsv_start = "libva info: VA-API version 1.24.0\n\
+                         libva info: Trying to open /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so\n\
+                         libva info: Found init function __vaDriverInit_1_24\n\
+                         libva info: va_openDriver() returns 0\n";
+        let healthy = classify_diagnostic(qsv_start);
+        assert_eq!(healthy.actionable, "");
+        assert_eq!(healthy.informational.lines().count(), 4);
+        assert!(healthy
+            .informational
+            .starts_with("libva info: VA-API version 1.24.0"));
+
+        let decoder = "[h264 @ 0x5f5b2ef0c780] number of reference frames (0+5) exceeds max (4; probably corrupt input), discarding one";
+        let driver = "libva error: /usr/lib/jellyfin-ffmpeg/lib/dri/iHD_drv_video.so init failed";
+        let mixed = classify_diagnostic(&format!("{qsv_start}{decoder}\r\n\n{driver}\n"));
+        assert_eq!(mixed.actionable, format!("{decoder}\n{driver}"));
+        assert_eq!(mixed.informational, healthy.informational);
+
+        // A recognised prefix later in a line is not the line's start.
+        assert!(is_informational_diagnostic(
+            "  libva info: VA-API version 1.24.0"
+        ));
+        assert!(!is_informational_diagnostic(driver));
+        let quoted = "[mov @ 0x1] could not open 'libva info: x.mkv'";
+        assert_eq!(classify_diagnostic(quoted).actionable, quoted);
+        assert_eq!(classify_diagnostic(" \n\n"), ProducerDiagnostic::default());
     }
 
     #[tokio::test]
