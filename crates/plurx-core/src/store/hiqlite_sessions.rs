@@ -369,7 +369,9 @@ impl From<&mut Row<'_>> for RouteRow {
     }
 }
 
-fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+fn decode_session_principal(
+    row: &mut Row<'_>,
+) -> Result<crate::playback_principal::PlaybackPrincipal, StoreError> {
     let kind: String = row.try_get("principal_kind").map_err(database_error)?;
     let user_id: Option<i64> = row.try_get("user_id").map_err(database_error)?;
     let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
@@ -383,6 +385,11 @@ fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
         &owner_key,
     )
     .map_err(|_| StoreError::Task("invalid media-session owner projection".to_owned()))?;
+    Ok(principal)
+}
+
+fn decode_route(row: &mut Row<'_>) -> Result<MediaSessionRoute, StoreError> {
+    let principal = decode_session_principal(row)?;
     Ok(MediaSessionRoute {
         incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
         session_id: row.try_get("session_id").map_err(database_error)?,
@@ -449,40 +456,11 @@ impl From<&mut Row<'_>> for PointerRevisionRow {
     }
 }
 
-struct DesiredRow(crate::domain::DesiredOwnership);
-
-impl From<&mut Row<'_>> for DesiredRow {
-    fn from(row: &mut Row<'_>) -> Self {
-        Self(crate::domain::DesiredOwnership {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            playback_id: row.get("playback_id"),
-            revision: row.get("revision"),
-            digest: row.get("digest"),
-            canonical_form: row.get("canonical_form"),
-            updated_at_ms: row.get("updated_at_ms"),
-        })
-    }
-}
-
 struct PrincipalDesiredRow(Result<crate::domain::DesiredOwnership, StoreError>);
 impl From<&mut Row<'_>> for PrincipalDesiredRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self((|| {
-            let kind: String = row.try_get("principal_kind").map_err(database_error)?;
-            let user: Option<i64> = row.try_get("user_id").map_err(database_error)?;
-            let grant: Option<String> = row.try_get("share_grant_id").map_err(database_error)?;
-            let viewer: Option<String> = row.try_get("share_viewer_key").map_err(database_error)?;
-            let key: String = row.try_get("owner_key").map_err(database_error)?;
-            let principal = crate::playback_principal::PlaybackPrincipal::from_projection(
-                &kind,
-                user,
-                grant.as_deref(),
-                viewer.as_deref(),
-                &key,
-            )
-            .map_err(|_| StoreError::Task("invalid desired-selection owner projection".into()))?;
+            let principal = decode_session_principal(row)?;
             Ok(crate::domain::DesiredOwnership {
                 principal,
                 playback_id: row.try_get("playback_id").map_err(database_error)?,
@@ -524,38 +502,47 @@ async fn desired_row(
     user_id: i64,
     playback_id: &str,
 ) -> Result<Option<crate::domain::DesiredOwnership>, StoreError> {
-    let sql = "SELECT user_id, playback_id, revision, digest, canonical_form, updated_at_ms
-          FROM media_playback_desired
-         WHERE user_id = $1 AND playback_id = $2";
-    validate_sql(sql)?;
-    Ok(store
+    let layout = LocalSessionSql::load(store).await?;
+    let sql = format!(
+        "SELECT {}, playback_id, revision, digest, canonical_form, updated_at_ms
+          FROM media_playback_desired WHERE {} AND playback_id = $2",
+        layout.projection(),
+        layout.equals(1)
+    );
+    validate_sql(&sql)?;
+    store
         .client()
-        .query_consistent_map::<DesiredRow, _>(sql, params!(user_id, playback_id))
+        .query_consistent_map::<PrincipalDesiredRow, _>(sql, params!(user_id, playback_id))
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()
 }
 
-struct StagedRow(crate::domain::MediaSessionStagedGeneration);
+struct StagedRow(Result<crate::domain::MediaSessionStagedGeneration, StoreError>);
 
 impl From<&mut Row<'_>> for StagedRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(crate::domain::MediaSessionStagedGeneration {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            playback_id: row.get("playback_id"),
-            staged_incarnation_id: row.get("staged_incarnation_id"),
-            expected_predecessor_incarnation_id: row.get("expected_predecessor_incarnation_id"),
-            deadline_ms: row.get("deadline_ms"),
-            created_at_ms: row.get("created_at_ms"),
-            updated_at_ms: row.get("updated_at_ms"),
-        })
+        Self((|| {
+            Ok(crate::domain::MediaSessionStagedGeneration {
+                principal: decode_session_principal(row)?,
+                playback_id: row.try_get("playback_id").map_err(database_error)?,
+                staged_incarnation_id: row
+                    .try_get("staged_incarnation_id")
+                    .map_err(database_error)?,
+                expected_predecessor_incarnation_id: row
+                    .try_get("expected_predecessor_incarnation_id")
+                    .map_err(database_error)?,
+                deadline_ms: row.try_get("deadline_ms").map_err(database_error)?,
+                created_at_ms: row.try_get("created_at_ms").map_err(database_error)?,
+                updated_at_ms: row.try_get("updated_at_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
-const STAGED_COLS: &str = "user_id, playback_id, staged_incarnation_id,
+const STAGED_COLS: &str = "playback_id, staged_incarnation_id,
     expected_predecessor_incarnation_id, deadline_ms, created_at_ms, updated_at_ms";
 
 /// Is this commit an exact replay?
@@ -571,11 +558,15 @@ async fn commit_replay(
     staged_incarnation_id: &str,
     expected_receipt: Option<&MediaSessionTerminalAck>,
 ) -> Result<Option<crate::domain::MediaSessionPreparationCommit>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
     let pointer = store
         .client()
         .query_consistent_map::<PointerRow, _>(
-            "SELECT current_incarnation_id FROM media_playback_pointers
-              WHERE user_id = $1 AND playback_id = $2",
+            format!(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+              WHERE {} AND playback_id = $2",
+                layout.equals(1)
+            ),
             params!(user_id, playback_id),
         )
         .await?
@@ -608,6 +599,9 @@ async fn commit_replay(
     };
     Ok(route_by(store, "incarnation_id", staged_incarnation_id)
         .await?
+        .filter(|route| {
+            route.principal == crate::playback_principal::PlaybackPrincipal::LocalUser { user_id }
+        })
         .map(|route| crate::domain::MediaSessionPreparationCommit {
             route,
             predecessor: None,
@@ -659,18 +653,22 @@ async fn staged_row(
     user_id: i64,
     playback_id: &str,
 ) -> Result<Option<crate::domain::MediaSessionStagedGeneration>, StoreError> {
+    let layout = LocalSessionSql::load(store).await?;
     let sql = format!(
-        "SELECT {STAGED_COLS} FROM media_session_preparations
-          WHERE user_id = $1 AND playback_id = $2"
+        "SELECT {}, {STAGED_COLS} FROM media_session_preparations
+          WHERE {} AND playback_id = $2",
+        layout.projection(),
+        layout.equals(1)
     );
     validate_sql(&sql)?;
-    Ok(store
+    store
         .client()
         .query_consistent_map::<StagedRow, _>(sql, params!(user_id, playback_id))
         .await?
         .into_iter()
         .next()
-        .map(|row| row.0))
+        .map(|row| row.0)
+        .transpose()
 }
 
 /// Classify an expected rejected or empty rejoin attempt from durable state.
@@ -1020,24 +1018,25 @@ impl From<&mut Row<'_>> for PendingMaintenanceRow {
     }
 }
 
-struct OwnedLeaseRow(OwnedMediaSessionLease);
+struct OwnedLeaseRow(Result<OwnedMediaSessionLease, StoreError>);
 
 impl From<&mut Row<'_>> for OwnedLeaseRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self(OwnedMediaSessionLease {
-            principal: crate::playback_principal::PlaybackPrincipal::LocalUser {
-                user_id: row.get("user_id"),
-            },
-            incarnation_id: row.get("incarnation_id"),
-            session_id: row.get("session_id"),
-            owner_epoch: row.get("owner_epoch"),
-            lease_expires_at_ms: row.get("lease_expires_at_ms"),
-            drain_deadline_ms: row.get("drain_deadline_ms"),
-        })
+        Self((|| {
+            Ok(OwnedMediaSessionLease {
+                principal: decode_session_principal(row)?,
+                incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+                session_id: row.try_get("session_id").map_err(database_error)?,
+                owner_epoch: row.try_get("owner_epoch").map_err(database_error)?,
+                lease_expires_at_ms: row.try_get("lease_expires_at_ms").map_err(database_error)?,
+                drain_deadline_ms: row.try_get("drain_deadline_ms").map_err(database_error)?,
+            })
+        })())
     }
 }
 
-struct RequestRow {
+struct RequestState {
+    principal: crate::playback_principal::PlaybackPrincipal,
     request_fingerprint: String,
     playback_id: String,
     state: String,
@@ -1046,15 +1045,86 @@ struct RequestRow {
     claim_expires_at_ms: i64,
 }
 
+struct RequestRow(Result<RequestState, StoreError>);
+
 impl From<&mut Row<'_>> for RequestRow {
     fn from(row: &mut Row<'_>) -> Self {
-        Self {
-            request_fingerprint: row.get("request_fingerprint"),
-            playback_id: row.get("playback_id"),
-            state: row.get("state"),
-            incarnation_id: row.get("incarnation_id"),
-            owner_node_id: row.get("owner_node_id"),
-            claim_expires_at_ms: row.get("claim_expires_at_ms"),
+        Self(decode_request(row))
+    }
+}
+
+fn decode_request(row: &mut Row<'_>) -> Result<RequestState, StoreError> {
+    Ok(RequestState {
+        principal: decode_session_principal(row)?,
+        request_fingerprint: row.try_get("request_fingerprint").map_err(database_error)?,
+        playback_id: row.try_get("playback_id").map_err(database_error)?,
+        state: row.try_get("state").map_err(database_error)?,
+        incarnation_id: row.try_get("incarnation_id").map_err(database_error)?,
+        owner_node_id: row.try_get("owner_node_id").map_err(database_error)?,
+        claim_expires_at_ms: row.try_get("claim_expires_at_ms").map_err(database_error)?,
+    })
+}
+
+/// These SQL fragments are only for validated, real local users. Sharing
+/// remains refused at mutation ingress until its transaction admission proof
+/// is implemented. A schema shape is not grant or member-floor authority.
+#[derive(Clone, Copy)]
+struct LocalSessionSql {
+    rebuilt: bool,
+}
+
+impl LocalSessionSql {
+    async fn load(store: &HiqliteAuthStore) -> Result<Self, StoreError> {
+        Ok(Self {
+            rebuilt: route_projection(store).await? == PRINCIPAL_ROUTE_COLS,
+        })
+    }
+
+    fn column(self) -> &'static str {
+        if self.rebuilt {
+            "owner_key"
+        } else {
+            "user_id"
+        }
+    }
+
+    fn equals(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!("owner_key = ('local:' || ${parameter})")
+        } else {
+            format!("user_id = ${parameter}")
+        }
+    }
+
+    fn insert_columns(self) -> &'static str {
+        if self.rebuilt {
+            ", owner_key, principal_kind, share_grant_id, share_viewer_key"
+        } else {
+            ""
+        }
+    }
+
+    fn insert_values(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!(", ('local:' || ${parameter}), 'local', NULL, NULL")
+        } else {
+            String::new()
+        }
+    }
+
+    fn existing_user(self, parameter: usize) -> String {
+        if self.rebuilt {
+            format!(" AND EXISTS (SELECT 1 FROM users WHERE id = ${parameter})")
+        } else {
+            String::new()
+        }
+    }
+
+    fn projection(self) -> &'static str {
+        if self.rebuilt {
+            "user_id, owner_key, principal_kind, share_grant_id, share_viewer_key"
+        } else {
+            "user_id, ('local:' || user_id) AS owner_key, 'local' AS principal_kind, NULL AS share_grant_id, NULL AS share_viewer_key"
         }
     }
 }
@@ -1275,23 +1345,37 @@ async fn request_row(
     store: &HiqliteAuthStore,
     user_id: i64,
     request_id: &str,
-) -> Result<Option<RequestRow>, StoreError> {
-    Ok(store
+) -> Result<Option<RequestState>, StoreError> {
+    let ownership = LocalSessionSql::load(store).await?;
+    let owner = ownership.equals(1);
+    let projection = ownership.projection();
+    let result = store
         .client()
         .query_consistent_map::<RequestRow, _>(
-            "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
-                    claim_expires_at_ms
-               FROM media_session_requests WHERE user_id = $1 AND request_id = $2",
+            format!(
+                "SELECT request_fingerprint, playback_id, state, incarnation_id, owner_node_id,
+                    claim_expires_at_ms, {projection}
+               FROM media_session_requests WHERE {owner} AND request_id = $2"
+            ),
             params!(user_id, request_id),
         )
         .await?
         .into_iter()
-        .next())
+        .next()
+        .map(|row| row.0)
+        .transpose()?;
+    let expected = crate::playback_principal::PlaybackPrincipal::LocalUser { user_id };
+    if result.as_ref().is_some_and(|row| row.principal != expected) {
+        return Err(StoreError::Task(
+            "mismatched media-session request principal".into(),
+        ));
+    }
+    Ok(result)
 }
 
 async fn claim_from_row(
     store: &HiqliteAuthStore,
-    row: RequestRow,
+    row: RequestState,
     fingerprint: &str,
     playback_id: &str,
 ) -> Result<MediaSessionRequestClaim, StoreError> {
@@ -1300,6 +1384,9 @@ async fn claim_from_row(
     }
     if row.state == "resolved" {
         if let Some(route) = route_by(store, "incarnation_id", &row.incarnation_id).await? {
+            if route.principal != row.principal {
+                return Ok(MediaSessionRequestClaim::Conflict);
+            }
             return Ok(MediaSessionRequestClaim::Resolved(Box::new(route)));
         }
     }
@@ -1316,7 +1403,7 @@ async fn claim_from_row(
 #[allow(clippy::too_many_arguments)]
 async fn claim_existing_or_reacquire(
     store: &HiqliteAuthStore,
-    row: RequestRow,
+    row: RequestState,
     user_id: i64,
     request_id: &str,
     fingerprint: &str,
@@ -1329,28 +1416,33 @@ async fn claim_existing_or_reacquire(
         return Ok(MediaSessionRequestClaim::Conflict);
     }
     if row.state == "failed" || (row.state == "starting" && row.claim_expires_at_ms <= now_ms) {
+        let ownership = LocalSessionSql::load(store).await?;
+        let owner = ownership.equals(4);
+        let existing_user = ownership.existing_user(4);
         let reacquired = store
             .client()
             .execute(
-                "UPDATE media_session_requests
+                format!(
+                    "UPDATE media_session_requests
                     SET state = 'starting', claim_expires_at_ms = $1,
                         incarnation_id = $2, owner_node_id = NULL,
                         response_json = NULL, updated_at_ms = $3
-                  WHERE user_id = $4 AND request_id = $5
+                  WHERE {owner} AND request_id = $5
                     AND (state = 'failed'
                       OR (state = 'starting' AND claim_expires_at_ms <= $3))
-                    AND request_fingerprint = $6 AND playback_id = $7
+                    AND request_fingerprint = $6 AND playback_id = $7{existing_user}
                     AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $4 AND state = 'starting'
+                          WHERE {owner} AND state = 'starting'
                             AND claim_expires_at_ms > $3) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $4 AND state IN ('starting', 'active')
+                          WHERE {owner} AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $3
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $4 AND playback_id = $7), '')) < $9
+                               WHERE {owner} AND playback_id = $7), '')) < $9
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $4) < $10",
+                          WHERE {owner}) < $10"
+                ),
                 params!(
                     claim_expires_at_ms,
                     incarnation_id,
@@ -1425,28 +1517,37 @@ impl MediaSessionStore for HiqliteAuthStore {
             )
             .await;
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(1);
+        let owner_column = ownership.column();
+        let principal_columns = ownership.insert_columns();
+        let principal_values = ownership.insert_values(1);
+        let existing_user = ownership.existing_user(1);
         let inserted = self
             .client()
             .execute(
-                "INSERT INTO media_session_requests
+                format!(
+                    "INSERT INTO media_session_requests
                     (user_id, request_id, request_fingerprint, playback_id, state,
                      claim_expires_at_ms, incarnation_id, owner_node_id, response_json,
-                     updated_at_ms)
-                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7
+                     updated_at_ms{principal_columns})
+                 SELECT $1, $2, $3, $4, 'starting', $5, $6, NULL, NULL, $7{principal_values}
                   WHERE (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $1 AND state = 'starting'
+                          WHERE {owner} AND state = 'starting'
                             AND claim_expires_at_ms > $7) < $8
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $1 AND state IN ('starting', 'active')
+                          WHERE {owner} AND state IN ('starting', 'active')
                             AND lease_expires_at_ms > $7
                             AND incarnation_id != COALESCE((
                               SELECT current_incarnation_id FROM media_playback_pointers
-                               WHERE user_id = $1 AND playback_id = $4), '')) < $9
+                               WHERE {owner} AND playback_id = $4), '')) < $9
                     AND (SELECT COUNT(*) FROM media_session_requests
-                          WHERE user_id = $1) < $10
+                          WHERE {owner}) < $10
                     AND (SELECT COUNT(*) FROM media_sessions
-                          WHERE user_id = $1) < $11
-                 ON CONFLICT(user_id, request_id) DO NOTHING",
+                          WHERE {owner}) < $11
+                 {existing_user}
+                 ON CONFLICT({owner_column}, request_id) DO NOTHING"
+                ),
                 params!(
                     user_id,
                     request_id,
@@ -1504,20 +1605,27 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid Library-channel session recipe".to_owned(),
             ));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(1);
+        let owner_column = ownership.column();
+        let principal_columns = ownership.insert_columns();
+        let principal_values = ownership.insert_values(1);
+        let existing_user = ownership.existing_user(1);
         Ok(self
             .client()
             .execute(
-                "INSERT INTO library_channel_session_recipes
-                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms)
-                 SELECT $1, $2, $3, $4, $5
+                format!("INSERT INTO library_channel_session_recipes
+                    (user_id, request_id, incarnation_id, recipe_json, created_at_ms{principal_columns})
+                 SELECT $1, $2, $3, $4, $5{principal_values}
                   WHERE EXISTS (SELECT 1 FROM media_session_requests
-                    WHERE user_id = $1 AND request_id = $2 AND incarnation_id = $3
+                    WHERE {owner} AND request_id = $2 AND incarnation_id = $3
                       AND state = 'starting' AND claim_expires_at_ms > $5)
-                 ON CONFLICT(user_id, request_id) DO UPDATE SET
+                 {existing_user}
+                 ON CONFLICT({owner_column}, request_id) DO UPDATE SET
                     incarnation_id = excluded.incarnation_id,
                     recipe_json = excluded.recipe_json,
                     created_at_ms = excluded.created_at_ms
-                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id",
+                 WHERE library_channel_session_recipes.incarnation_id = excluded.incarnation_id"),
                 params!(user_id, request_id, incarnation_id, recipe_json, now_ms),
             )
             .await?
@@ -1544,13 +1652,18 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session owner assignment".to_owned(),
             ));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(3);
+        let existing_user = ownership.existing_user(3);
         Ok(self
             .client()
             .execute(
-                "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
-                  WHERE user_id = $3 AND request_id = $4 AND incarnation_id = $5
+                format!(
+                    "UPDATE media_session_requests SET owner_node_id = $1, updated_at_ms = $2
+                  WHERE {owner} AND request_id = $4 AND incarnation_id = $5
                     AND state = 'starting' AND claim_expires_at_ms > $2
-                    AND (owner_node_id IS NULL OR owner_node_id = $1)",
+                    AND (owner_node_id IS NULL OR owner_node_id = $1){existing_user}"
+                ),
                 params!(owner_node_id, now_ms, user_id, request_id, incarnation_id),
             )
             .await?
@@ -2083,10 +2196,15 @@ impl MediaSessionStore for HiqliteAuthStore {
         // monotone revision into a number two different asks share — and this
         // is a replicated store, so the two exchanges need not even be on the
         // same node.
-        let sql = "INSERT INTO media_playback_desired
-                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms)
-             VALUES ($1, $2, 1, $3, $4, $5)
-             ON CONFLICT(user_id, playback_id) DO UPDATE SET
+        let layout = LocalSessionSql::load(self).await?;
+        let extra_columns = layout.insert_columns();
+        let extra_values = layout.insert_values(1);
+        let owner_column = layout.column();
+        let owner_exists = layout.existing_user(1);
+        let sql = format!("INSERT INTO media_playback_desired
+                 (user_id, playback_id, revision, digest, canonical_form, updated_at_ms{extra_columns})
+             SELECT $1, $2, 1, $3, $4, $5{extra_values} WHERE 1 = 1{owner_exists}
+             ON CONFLICT({owner_column}, playback_id) DO UPDATE SET
                  revision = CASE
                      WHEN media_playback_desired.digest = excluded.digest
                          THEN media_playback_desired.revision
@@ -2098,13 +2216,18 @@ impl MediaSessionStore for HiqliteAuthStore {
                      WHEN media_playback_desired.digest = excluded.digest
                          THEN media_playback_desired.updated_at_ms
                      ELSE excluded.updated_at_ms
-                 END";
-        validate_sql(sql)?;
-        timeout_store(self.client().execute(
+                 END");
+        validate_sql(&sql)?;
+        let changed = timeout_store(self.client().execute(
             sql,
             params!(user_id, playback_id, digest, canonical_form, now_ms),
         ))
         .await?;
+        if changed == 0 {
+            return Err(StoreError::Task(
+                "desired-selection principal is unavailable".into(),
+            ));
+        }
         desired_row(self, user_id, playback_id)
             .await?
             .ok_or_else(|| StoreError::Database("desired selection vanished".to_owned()))
@@ -2116,9 +2239,13 @@ impl MediaSessionStore for HiqliteAuthStore {
         playback_id: &str,
     ) -> Result<Option<i64>, StoreError> {
         let user_id = crate::store::local_media_principal_id(principal)?;
+        let layout = LocalSessionSql::load(self).await?;
         let rows: Vec<PointerRevisionRow> = timeout_store(self.client().query_consistent_map(
-            "SELECT desired_revision FROM media_playback_pointers
-              WHERE user_id = $1 AND playback_id = $2",
+            format!(
+                "SELECT desired_revision FROM media_playback_pointers
+              WHERE {} AND playback_id = $2",
+                layout.equals(1)
+            ),
             params!(user_id, playback_id),
         ))
         .await?;
@@ -3441,13 +3568,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             return Err(StoreError::Task("invalid media-session failure".to_owned()));
         }
+        let ownership = LocalSessionSql::load(self).await?;
+        let owner = ownership.equals(2);
         Ok(self
             .client()
             .execute(
-                "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = $1,
+                format!(
+                    "UPDATE media_session_requests SET state = 'failed', claim_expires_at_ms = $1,
                         updated_at_ms = $1
-                  WHERE user_id = $2 AND request_id = $3 AND incarnation_id = $4
-                    AND state = 'starting'",
+                  WHERE {owner} AND request_id = $3 AND incarnation_id = $4
+                    AND state = 'starting'"
+                ),
                 params!(now_ms, user_id, request_id, incarnation_id),
             )
             .await?
@@ -3866,6 +3997,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             None => (0_i64, 0_i64, String::new()),
         };
         let route_cols = route_projection(self).await?;
+        let owner_column = LocalSessionSql::load(self).await?.column();
         let sql = format!(
             "SELECT {route_cols} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
@@ -3874,7 +4006,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 -- ends it. See the SQLite twin.
                 AND drain_deadline_ms IS NULL
                 AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                  WHERE request.user_id = media_sessions.user_id
+                  WHERE request.{owner_column} = media_sessions.{owner_column}
                     AND request.incarnation_id = media_sessions.incarnation_id
                     AND request.state = 'starting'
                     AND media_sessions.publication_ready_at_ms = 0
@@ -4516,27 +4648,31 @@ impl MediaSessionStore for HiqliteAuthStore {
         if owner_node_id.is_empty() || owner_node_id.len() > 256 {
             return Err(StoreError::Task("invalid media-session owner".to_owned()));
         }
-        Ok(self
-            .client()
+        let layout = LocalSessionSql::load(self).await?;
+        let principal_cols = layout.projection();
+        let owner_column = layout.column();
+        self.client()
             .query_consistent_map::<OwnedLeaseRow, _>(
-                "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
-                        drain_deadline_ms, user_id
+                format!(
+                    "SELECT incarnation_id, session_id, owner_epoch, lease_expires_at_ms,
+                        drain_deadline_ms, {principal_cols}
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2
                     AND (publication_ready_at_ms != $3 OR EXISTS (
                       SELECT 1 FROM media_playback_pointers pointer
-                       WHERE pointer.user_id = media_sessions.user_id
+                       WHERE pointer.{owner_column} = media_sessions.{owner_column}
                          AND pointer.playback_id = media_sessions.playback_id
                          AND pointer.current_incarnation_id = media_sessions.incarnation_id))
                     AND NOT EXISTS (SELECT 1 FROM media_session_preparations staged
                       WHERE staged.staged_incarnation_id = media_sessions.incarnation_id)
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
-                      WHERE request.user_id = media_sessions.user_id
+                      WHERE request.{owner_column} = media_sessions.{owner_column}
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                  ORDER BY updated_at_ms, incarnation_id LIMIT $4",
+                  ORDER BY updated_at_ms, incarnation_id LIMIT $4"
+                ),
                 params!(
                     owner_node_id,
                     now_ms,
@@ -4547,7 +4683,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             .await?
             .into_iter()
             .map(|row| row.0)
-            .collect())
+            .collect()
     }
 
     async fn reserve_producer_recovery(
@@ -5224,5 +5360,85 @@ mod sharing_route_decoder_tests {
             .expect("owned row"),
         );
         assert!(decode_route(&mut wrong).is_err());
+    }
+
+    #[test]
+    fn sharing_request_decoder_preserves_complete_principal_and_refuses_mixed_ownership() {
+        let conn = rusqlite::Connection::open_in_memory().expect("fixture connection");
+        let grant = "00000000-0000-4000-a000-000000000001";
+        let viewer = "a".repeat(64);
+        let key = format!("share:{grant}:{viewer}");
+        let decode = |kind: &str,
+                      user: Option<i64>,
+                      grant: Option<&str>,
+                      viewer: Option<&str>,
+                      key: &str| {
+            conn.query_row("SELECT 'fingerprint' AS request_fingerprint, 'playback' AS playback_id, 'starting' AS state, 'incarnation' AS incarnation_id, NULL AS owner_node_id, 1000 AS claim_expires_at_ms, ?1 AS principal_kind, ?2 AS user_id, ?3 AS share_grant_id, ?4 AS share_viewer_key, ?5 AS owner_key", rusqlite::params![kind, user, grant, viewer, key], |row| Ok(decode_request(&mut Row::Borrowed(row)))).expect("SQL request projection")
+        };
+        assert_eq!(
+            decode("local", Some(7), None, None, "local:7")
+                .expect("local")
+                .principal
+                .local_user_id(),
+            Some(7)
+        );
+        let shared = decode("sharing", None, Some(grant), Some(&viewer), &key).expect("sharing");
+        assert_eq!(
+            shared.principal,
+            crate::playback_principal::PlaybackPrincipal::sharing(
+                uuid::Uuid::parse_str(grant).expect("grant UUID"),
+                &viewer
+            )
+            .expect("principal")
+        );
+        assert!(decode("sharing", Some(7), Some(grant), Some(&viewer), &key).is_err());
+        assert!(decode("sharing", None, Some(grant), None, &key).is_err());
+        assert!(decode("sharing", None, Some(grant), Some(&viewer), "local:7").is_err());
+        assert!(decode("local", Some(0), None, None, "local:0").is_err());
+        assert!(decode("local", Some(7), None, None, "local:07").is_err());
+    }
+
+    #[test]
+    fn sharing_request_owned_decoder_returns_errors_for_incomplete_and_wrong_type_rows() {
+        for columns in [
+            serde_json::json!([]),
+            serde_json::json!([{"name":"principal_kind","value":{"Integer":1}}]),
+            serde_json::json!([
+                {"name":"principal_kind","value":{"Text":"local"}},
+                {"name":"user_id","value":{"Integer":7}},
+                {"name":"owner_key","value":{"Text":"local:7"}},
+                {"name":"share_grant_id","value":"Null"},
+                {"name":"share_viewer_key","value":"Null"}
+            ]),
+        ] {
+            let mut row = Row::Owned(
+                serde_json::from_value(serde_json::json!({"columns":columns})).expect("owned row"),
+            );
+            assert!(decode_request(&mut row).is_err());
+        }
+    }
+    #[test]
+    fn sharing_inventory_and_staged_decoders_refuse_incomplete_owned_rows() {
+        for columns in [
+            serde_json::json!([]),
+            serde_json::json!([{"name":"principal_kind","value":{"Integer":1}}]),
+            serde_json::json!([
+                {"name":"principal_kind","value":{"Text":"local"}},
+                {"name":"user_id","value":{"Integer":7}},
+                {"name":"owner_key","value":{"Text":"local:7"}},
+                {"name":"share_grant_id","value":"Null"},
+                {"name":"share_viewer_key","value":"Null"}
+            ]),
+        ] {
+            let make_row = || {
+                Row::Owned(
+                    serde_json::from_value(serde_json::json!({"columns":columns}))
+                        .expect("owned row"),
+                )
+            };
+            assert!(OwnedLeaseRow::from(&mut make_row()).0.is_err());
+            assert!(StagedRow::from(&mut make_row()).0.is_err());
+            assert!(PrincipalDesiredRow::from(&mut make_row()).0.is_err());
+        }
     }
 }

@@ -1992,3 +1992,25 @@ older-schema migration fixture remains separately under repair.
 cargo test --locked -p plurx-core --features hiqlite-store --lib sharing_recovery_rebuilt_keys_preserve_grants_and_one_local_budget -- --nocapture
 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract producer_recovery_ -- --skip replicated_v32_store_migrates_the_producer_recovery_ledger_on_daemon_open --nocapture
 ```
+
+
+**Parallel integration checkpoint:** the integrated branch includes the
+replicated Local request/desired writers, complete staged/owned principal
+decoders, canonical inventory joins, member-floor checker and atomic SQL
+predicate. The capability remains unadvertised. The checker covers the
+committed bounded voter/learner roster, fresh coupled heartbeats, join/removal
+fences and quorum failure; its read result alone grants no write authority.
+The dedicated three-voter test covers actual quorum loss and a heartbeat
+change within the admission transaction. Learner cases use projected SQL
+state, so a live fourth learner and promotion still need qualification.
+
+Pinned all-target compilation passed on the integrated tree. Five floor unit
+regressions passed (zero ignored, 0.01 seconds), all 11 sharing contracts
+passed through their SQLite/actual-voter fixtures (zero ignored,
+100.76 seconds), and the repaired v32 migration passed (zero ignored,
+9.99 seconds). The fixture now removes later background/sharing schema
+objects before setting its historical marker and verifies full background
+trigger restoration after forward migration. Production migrations are
+unchanged. Earlier v5/v27 checks also passed on the agent's exact committed
+fixture. This resolves the stale migration-filter failure above; the new
+schema is still uninstalled and Shared writer admission remains unfinished.

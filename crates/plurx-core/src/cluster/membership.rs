@@ -139,6 +139,11 @@ const LEGACY_CACHE_ADMIN_REVOCATION_V2_CAPABILITY: &str = "cache_admin_revocatio
 /// proves the running process understands the v1 owner/snapshot protocol;
 /// runtime enablement remains off until every active node proves it.
 pub const LIVE_TV_CAPABILITY: &str = "live_tv_v1";
+/// Proof that a running member implements the rebuilt, complete-principal
+/// media-session family. This declaration does not advertise support: the
+/// heartbeat must publish it only after every reader/writer and migration is
+/// implemented. Sharing admission also needs the installed schema marker.
+pub const SHARING_SESSION_PRINCIPAL_CAPABILITY: &str = "sharing_session_principal_v1";
 /// Minimum unreserved capacity required before a learner may be promoted.
 /// This is deliberately independent of media-cache headroom: a voter must
 /// always retain room for Raft WAL growth, a received snapshot, and SQLite's
@@ -2138,6 +2143,97 @@ fn capability_ready_predicate(capability: &str) -> String {
        WHERE {})",
         capability_unready_node_predicate(capability)
     )
+}
+
+/// Replicated precondition for admitting a sharing principal. Parameters are
+/// SQL binding indexes for the bounded committed Raft-id JSON, oldest accepted
+/// heartbeat, and observation time, respectively. Embed this in the admission
+/// transaction; a successful read-only preflight cannot close a heartbeat or
+/// join race on its own. This never reads or changes the saved Developer choice.
+#[must_use]
+pub fn sharing_session_principal_guard_predicate(
+    members_parameter: usize,
+    cutoff_parameter: usize,
+    observed_at_parameter: usize,
+) -> String {
+    let committed = format!("${members_parameter}");
+    let cutoff = format!("${cutoff_parameter}");
+    let observed_at = format!("${observed_at_parameter}");
+    format!(
+        "EXISTS (SELECT 1 FROM json_each({committed})) \
+         AND NOT EXISTS (SELECT 1 FROM json_each({committed}) AS committed \
+           WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS member \
+             WHERE member.raft_id = CAST(committed.value AS INTEGER) \
+               AND member.removed_at IS NULL)) \
+         AND {} AND {} \
+         AND NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
+           WHERE present.removed_at IS NULL \
+             AND (present.last_seen_at < {cutoff} \
+               OR present.last_seen_at > {observed_at})) \
+         AND {}",
+        capability_ready_predicate(SHARING_SESSION_PRINCIPAL_CAPABILITY),
+        no_join_in_flight_predicate(),
+        no_removal_in_flight_predicates(),
+    )
+}
+
+/// Quorum observation used by the membership manager. `local_raft_id` must
+/// identify the serving member; identities outside the committed roster refuse.
+/// This is advisory evidence only; admission must still embed the SQL guard.
+pub async fn sharing_session_principal_floor_ready(
+    client: &Client,
+    local_raft_id: u64,
+) -> Result<bool, MembershipError> {
+    let before = client.metrics_db().await?;
+    let members = before
+        .membership_config
+        .nodes()
+        .map(|(id, _)| *id)
+        .collect::<BTreeSet<_>>();
+    if before.current_leader.is_none() || !members.contains(&local_raft_id) {
+        return Ok(false);
+    }
+    let members_json = bounded_committed_raft_ids_json(&members)?;
+    let now = unix_ms()?;
+    let cutoff = now.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+    let rows = client
+        .query_consistent_map::<SharingPrincipalFloorRow, _>(
+            format!(
+                "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS ready, \
+                 MIN(node.last_seen_at) AS oldest_heartbeat \
+                 FROM cluster_nodes AS node WHERE node.removed_at IS NULL",
+                sharing_session_principal_guard_predicate(1, 2, 3),
+            ),
+            params!(members_json, cutoff, now),
+        )
+        .await?;
+    let after = client.metrics_db().await?;
+    if after.current_leader.is_none()
+        || before.membership_config.log_id() != after.membership_config.log_id()
+        || members
+            != after
+                .membership_config
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect::<BTreeSet<_>>()
+    {
+        return Ok(false);
+    }
+    let [row] = rows.as_slice() else {
+        return Ok(false);
+    };
+    Ok(sharing_principal_floor_observation_ready(row, unix_ms()?))
+}
+
+fn sharing_principal_floor_observation_ready(
+    row: &SharingPrincipalFloorRow,
+    observed_at: i64,
+) -> bool {
+    row.ready == 1
+        && row.oldest_heartbeat.is_some_and(|heartbeat| {
+            heartbeat >= observed_at.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS)
+                && heartbeat <= observed_at
+        })
 }
 
 /// Exact replicated precondition for enabling Live TV. Parameter 4 is the
@@ -8440,6 +8536,16 @@ impl MembershipManager {
         self.unready_nodes(capability, Read::Quorum).await
     }
 
+    /// Quorum-confirm the complete-principal binary floor for every committed
+    /// voter and learner, plus joining members. Missing SQL identities, stale
+    /// proofs, in-flight membership changes and unavailable quorum all refuse.
+    /// No member capability is published by this method. The schema marker and
+    /// the same guard in the Store admission write remain required separately.
+    pub async fn sharing_session_principal_floor_ready(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        sharing_session_principal_floor_ready(&inner.client, inner.identity.raft_id).await
+    }
+
     /// Active nodes that cannot currently prove the always-compiled live-TV
     /// v1 owner/snapshot protocol. A matching capability row from a process
     /// that has since gone silent is not proof: activation must wait for a
@@ -10293,6 +10399,20 @@ impl From<&mut Row<'_>> for ProtocolRangeRow {
     }
 }
 
+struct SharingPrincipalFloorRow {
+    ready: i64,
+    oldest_heartbeat: Option<i64>,
+}
+
+impl From<&mut Row<'_>> for SharingPrincipalFloorRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            ready: row.get("ready"),
+            oldest_heartbeat: row.get("oldest_heartbeat"),
+        }
+    }
+}
+
 struct NodeIdRow {
     node_id: String,
 }
@@ -10768,6 +10888,199 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sharing_principal_floor_fixture() -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("floor fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+               last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT); \
+             CREATE TABLE cluster_node_capabilities (node_id TEXT NOT NULL, \
+               capability TEXT NOT NULL, last_seen_at INTEGER NOT NULL, \
+               PRIMARY KEY(node_id, capability)); \
+             CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+             CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+             CREATE TABLE cluster_node_removal_attempts (node_id TEXT NOT NULL, attempt_id TEXT); \
+             INSERT INTO cluster_nodes VALUES \
+               ('voter', 1, 1000000, NULL, NULL), \
+               ('learner', 2, 1000000, NULL, 'learner');",
+            )
+            .expect("floor schema and members");
+        connection.execute(
+            "INSERT INTO cluster_node_capabilities SELECT node_id, ?1, last_seen_at FROM cluster_nodes",
+            [SHARING_SESSION_PRINCIPAL_CAPABILITY],
+        ).expect("current binary proofs");
+        connection
+    }
+
+    fn sharing_principal_floor_allows(connection: &rusqlite::Connection, members: &str) -> bool {
+        connection
+            .query_row(
+                &format!(
+                    "SELECT {}",
+                    sharing_session_principal_guard_predicate(1, 2, 3)
+                ),
+                rusqlite::params![members, 880000_i64, 1000000_i64],
+                |row| row.get(0),
+            )
+            .expect("execute production floor predicate")
+    }
+
+    #[test]
+    fn sharing_principal_floor_requires_every_current_voter_and_learner() {
+        let connection = sharing_principal_floor_fixture();
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        assert!(!sharing_principal_floor_allows(&connection, "[]"));
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2,3]"));
+        connection
+            .execute(
+                "DELETE FROM cluster_node_capabilities WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities VALUES ('learner', ?1, 999999)",
+                [SHARING_SESSION_PRINCIPAL_CAPABILITY],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 1000000",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        // The next heartbeat from an older rejoined binary must invalidate its
+        // former capability, even while all timestamps remain fresh.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999999 WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+    }
+
+    #[test]
+    fn sharing_principal_floor_refuses_stale_future_join_and_orphan_removal() {
+        for heartbeat in [879999_i64, 1000001] {
+            let connection = sharing_principal_floor_fixture();
+            connection
+                .execute(
+                    "UPDATE cluster_nodes SET last_seen_at = ?1 WHERE node_id = 'learner'",
+                    [heartbeat],
+                )
+                .expect("floor fixture mutation");
+            connection.execute("UPDATE cluster_node_capabilities SET last_seen_at = ?1 WHERE node_id = 'learner'", [heartbeat]).expect("floor fixture mutation");
+            assert!(!sharing_principal_floor_allows(&connection, "[1,2]"));
+        }
+        for mutation in [
+            "INSERT INTO cluster_node_join_staging VALUES ('learner')",
+            "INSERT INTO cluster_node_join_staging VALUES ('unknown-rejoin')",
+            "INSERT INTO cluster_node_removals VALUES ('learner')",
+            "INSERT INTO cluster_node_removals VALUES ('unknown-removed')",
+            "INSERT INTO cluster_node_removal_attempts VALUES ('unknown-removed', 'attempt')",
+        ] {
+            let connection = sharing_principal_floor_fixture();
+            connection
+                .execute(mutation, [])
+                .expect("floor fixture mutation");
+            assert!(
+                !sharing_principal_floor_allows(&connection, "[1,2]"),
+                "{mutation}"
+            );
+        }
+        let connection = sharing_principal_floor_fixture();
+        connection.execute_batch("UPDATE cluster_nodes SET removed_at = 1000000 WHERE node_id = 'learner'; INSERT INTO cluster_node_removals VALUES ('learner'); INSERT INTO cluster_node_removal_attempts VALUES ('learner', 'done'); INSERT INTO cluster_node_join_staging VALUES ('learner');").expect("floor fixture mutation");
+        assert!(
+            !sharing_principal_floor_allows(&connection, "[1,2]"),
+            "still a committed member"
+        );
+        assert!(
+            sharing_principal_floor_allows(&connection, "[1]"),
+            "completed removal is not permanent debt"
+        );
+    }
+
+    #[test]
+    fn sharing_principal_floor_guard_rechecks_the_write_after_a_legacy_heartbeat() {
+        let connection = sharing_principal_floor_fixture();
+        connection
+            .execute(
+                "CREATE TABLE sharing_admission_receipts (id INTEGER PRIMARY KEY)",
+                [],
+            )
+            .expect("floor fixture mutation");
+        assert!(sharing_principal_floor_allows(&connection, "[1,2]"));
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999999 WHERE node_id = 'learner'",
+                [],
+            )
+            .expect("floor fixture mutation");
+        let changed = connection
+            .execute(
+                &format!(
+                    "INSERT INTO sharing_admission_receipts SELECT 1 WHERE {}",
+                    sharing_session_principal_guard_predicate(1, 2, 3)
+                ),
+                rusqlite::params!["[1,2]", 880000_i64, 1000000_i64],
+            )
+            .expect("conditional admission");
+        assert_eq!(
+            changed, 0,
+            "a successful earlier preflight is not admission authority"
+        );
+        connection.execute("UPDATE cluster_node_capabilities SET last_seen_at = 999999 WHERE node_id = 'learner'", []).expect("floor fixture mutation");
+        assert_eq!(
+            connection
+                .execute(
+                    &format!(
+                        "INSERT INTO sharing_admission_receipts SELECT 1 WHERE {}",
+                        sharing_session_principal_guard_predicate(1, 2, 3)
+                    ),
+                    rusqlite::params!["[1,2]", 880000_i64, 1000000_i64],
+                )
+                .expect("floor fixture mutation"),
+            1
+        );
+    }
+
+    #[test]
+    fn sharing_principal_floor_observation_cannot_outlive_its_heartbeat() {
+        let row = SharingPrincipalFloorRow {
+            ready: 1,
+            oldest_heartbeat: Some(1000000),
+        };
+        assert!(sharing_principal_floor_observation_ready(&row, 1120000));
+        assert!(!sharing_principal_floor_observation_ready(&row, 1120001));
+        assert!(!sharing_principal_floor_observation_ready(&row, 999999));
+        assert!(!sharing_principal_floor_observation_ready(
+            &SharingPrincipalFloorRow {
+                ready: 1,
+                oldest_heartbeat: None
+            },
+            1000000
+        ));
+        assert!(!sharing_principal_floor_observation_ready(
+            &SharingPrincipalFloorRow {
+                ready: 0,
+                oldest_heartbeat: Some(1000000)
+            },
+            1000000
+        ));
+    }
+
+    #[tokio::test]
+    async fn sharing_principal_floor_missing_membership_is_unavailable() {
+        assert!(MembershipManager::unavailable()
+            .sharing_session_principal_floor_ready()
+            .await
+            .is_err());
+    }
 
     #[test]
     fn heartbeat_reconciles_addresses_only_for_the_same_live_identity() {

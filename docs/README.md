@@ -524,6 +524,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [SHARED-LIBRARIES-RE-REVIEW.md](features/SHARED-LIBRARIES-RE-REVIEW.md) | Opus re-review of the revised contract; SL-18–24 and links to their corrections. | open |
 | [SHARED-LIBRARIES-REVIEW.md](features/SHARED-LIBRARIES-REVIEW.md) | Opus's original S0 findings; links to the current dispositions and remaining qualification. | open |
 | [SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md](features/SHARED-LIBRARIES-UPGRADE-QUALIFICATION.md) | Which historical production Store reads, writes and cleanup work against the candidate ownership rebuild; reproducible compatibility evidence and upgrade limits. | open |
+| [SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md](features/SHARED-LIBRARIES-REPLICATED-PRINCIPALS.md) | Which replicated session writers/readers use complete canonical ownership, their actual voter regressions, and remaining S3 admission/migration work. | open |
 | [LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md](features/LIVE-TV-CLUSTER-RESOURCE-IMPLEMENTATION.md) | Remove permanent tuner ownership with distributed admission, session recovery, recording claims and safe storage publication. | open |
 | [LIVE-TV-CLUSTER-RESOURCE-REVIEW.md](features/LIVE-TV-CLUSTER-RESOURCE-REVIEW.md) | Design review findings and accepted corrections for distributed tuner access. | done |
 | [LIVE-TV-CLUSTER-RESOURCE-STATUS.md](features/LIVE-TV-CLUSTER-RESOURCE-STATUS.md) | Current implementation progress, decisions, commits, review and fast-lane evidence. | live |
