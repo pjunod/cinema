@@ -21,6 +21,7 @@ test("shared browse carries lossless compound references and never emits a local
  assert.equal(h.route(h.href(ref,"library")+"?q=title%2Bspace").q,"title+space");
  assert.throws(()=>h.route(h.href(ref,"library")+"?q=x&q=y"));
  assert.ok(!href.includes("#/item/"));assert.ok(!href.includes("#/library/"));
+ assert.equal(h.id("0"),"0");assert.equal(h.route(h.href({...ref,library_id:"0",item_id:"0"})).reference.item_id,"0");
  for(const id of [7,"01","-1","9223372036854775808","1/2"])assert.throws(()=>h.id(id));
  for(const hash of [href+"/extra",href.replace(ref.import_id,"%2f"),"#/shared/library/7",href.replace(ref.item_id,"01")])assert.throws(()=>h.route(hash));
 });

@@ -103,7 +103,10 @@ pub(crate) fn admin_router() -> Router<AppState> {
         .route("/sharing/imports", get(imports).post(create_import))
         .route("/sharing/imports/{id}/re-pair", post(re_pair))
         .route("/sharing/imports/{id}/rotate", post(rotate_import))
-        .route("/sharing/imports/{id}/assignments", put(assignments))
+        .route(
+            "/sharing/imports/{id}/assignments",
+            get(assignment_snapshot).put(assignments),
+        )
         .route("/sharing/imports/{id}/endpoints", put(import_endpoints))
         .route("/sharing/imports/{id}", delete(disconnect))
         .layer(axum::middleware::from_fn(private_response))
@@ -654,6 +657,19 @@ async fn imports(
         imports.push(import_status(&state, summary.id).await?);
     }
     Ok(Json(json!({"imports":imports})))
+}
+async fn assignment_snapshot(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(value): Path<String>,
+) -> Result<Json<ImportAssignmentSnapshot>, ApiError> {
+    state
+        .store
+        .sharing_import_assignments(id(&value)?)
+        .await
+        .map_err(authority)?
+        .map(Json)
+        .ok_or_else(|| failure(StatusCode::NOT_FOUND, "sharing_not_found"))
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

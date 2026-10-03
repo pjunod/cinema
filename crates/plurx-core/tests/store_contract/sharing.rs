@@ -307,7 +307,7 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
         };
         let i = NewImport {
             id: import,
-            source,
+            source: source.clone(),
             source_name: "Synthetic source".into(),
             claim_id: Uuid::new_v4(),
             credential: key
@@ -469,6 +469,29 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
                 .expect("synthetic sharing fixture"),
             MutationOutcome::Applied
         );
+        let snapshot = s
+            .sharing_import_assignments(import)
+            .await
+            .expect("complete assignments")
+            .expect("import");
+        assert_eq!(snapshot.import_id, import);
+        assert_eq!(snapshot.server_id, source.server_id);
+        assert_eq!(snapshot.catalogue_epoch, source.catalogue_epoch);
+        assert_eq!(snapshot.lifecycle_generation, 1);
+        assert_eq!(snapshot.expected_assignment_generation, 2);
+        assert_eq!(snapshot.state, "active");
+        assert_eq!(
+            snapshot.assignments,
+            vec![ImportAssignmentGroup {
+                library_id: library.clone(),
+                user_ids: vec![user.id]
+            }]
+        );
+        assert!(s
+            .sharing_import_assignments(Uuid::new_v4())
+            .await
+            .expect("missing snapshot")
+            .is_none());
         let original = s
             .authorize_share_viewer(import, library.clone(), user.id)
             .await
@@ -491,6 +514,13 @@ async fn sharing_import_assignment_cas_and_user_lifetime() {
             .await
             .expect("synthetic sharing fixture")
             .is_none());
+        let empty = s
+            .sharing_import_assignments(import)
+            .await
+            .expect("empty snapshot")
+            .expect("existing import");
+        assert_eq!(empty.expected_assignment_generation, 3);
+        assert!(empty.assignments.is_empty());
         s.assign_share_viewers(import, 3, assignments, 1005)
             .await
             .expect("synthetic sharing fixture");
@@ -958,7 +988,7 @@ async fn sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity() {
         assert_eq!(pending.summary.lifecycle_generation, 3);
         assert_eq!(pending.summary.state, "claiming");
         assert!(pending.summary.remote_grant_id.is_none());
-        assert_eq!(pending.summary.assignment_generation, 2);
+        assert_eq!(pending.summary.assignment_generation, 3);
         assert!(s
             .authorize_share_viewer(id, remote_library.clone(), user.id)
             .await
@@ -1025,6 +1055,26 @@ async fn sharing_endpoint_cas_and_re_pair_preserve_private_viewer_identity() {
                 .await
                 .expect("activate repaired import"),
             MutationOutcome::Applied
+        );
+        assert_eq!(
+            s.assign_share_viewers(id, 2, vec![], 1006)
+                .await
+                .expect("pre-repair stale matrix"),
+            MutationOutcome::Conflict
+        );
+        let repaired = s
+            .sharing_import_assignments(id)
+            .await
+            .expect("repaired matrix")
+            .expect("import");
+        assert_eq!(repaired.expected_assignment_generation, 3);
+        assert_eq!(repaired.lifecycle_generation, 3);
+        assert_eq!(
+            repaired.assignments,
+            vec![ImportAssignmentGroup {
+                library_id: remote_library.clone(),
+                user_ids: vec![user.id]
+            }]
         );
         let settled = s
             .sharing_import(id)

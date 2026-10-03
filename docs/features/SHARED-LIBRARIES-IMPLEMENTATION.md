@@ -377,8 +377,9 @@ A scope mismatch forces current authorization revalidation. Cancel sessions
 whose grant is inactive or whose item's library is no longer allowed; update
 the observed scope generation for unaffected sessions. Scope additions and
 credential rotation do not retire playback. B atomically changes its
-per-import `assignment_generation` on whole-set assignment replacement;
-revalidate affected viewers and cancel only those who lost access.
+per-import `assignment_generation` on whole-set assignment replacement and
+re-pair; a pre-repair matrix cannot save after the import becomes active again.
+Revalidate affected viewers and cancel only those who lost access.
 
 Rotation uses a new B-generated sealed credential and idempotent request ID.
 A atomically swaps its hash while retaining the old hash for **rotation-status
@@ -496,7 +497,7 @@ source move/reconciliation result. Validate JSON schemas before insertion;
 JSON text does not authorize arbitrary endpoints or library IDs. Import
 `lifecycle_generation` changes on disable/revoke/re-pair, fencing old attempts;
 `assignment_generation` owns whole-set CAS, even when the assignment set is
-empty; `endpoint_generation` owns local endpoint-edit CAS. Observed source
+empty, and also advances on re-pair; `endpoint_generation` owns local endpoint-edit CAS. Observed source
 counters are remote observations, never local authorization. All counters
 start at 1, use checked increment, and reject overflow. Invitation
 library IDs are snapshotted choices; recheck existence/type on approval.
@@ -618,6 +619,7 @@ All paths below are under `/api/v1/sharing` and require `AdminUser`:
 | DELETE `/exports/{id}` | Revoke, not merely hide |
 | POST `/imports` | `{invitation, endpoint_overrides?}`; parse, verify pinned identity, persist, claim; return import state, never echo invitation |
 | GET `/imports` | Local import status and pairing code |
+| GET `/imports/{id}/assignments` | Complete bounded current import/Source/epoch/lifecycle/state and `expected_assignment_generation` with grouped Source library strings and exact local user IDs; refuse corrupt/oversized matrices |
 | PUT `/imports/{id}/assignments` | `{expected_assignment_generation, assignments:[{library_id,user_ids}]}`; explicit whole-set replacement |
 | PUT `/imports/{id}/endpoints` | `{expected_endpoint_generation, endpoints, confirm_new_pins:false}`; address edits retain pins; new pins require explicit out-of-band admin confirmation or authenticated manifest proof |
 | POST `/imports/{id}/re-pair` | Explicit verified invitation replacement; lifecycle CAS, retire prior attempts, preserve private history |
@@ -3065,6 +3067,27 @@ opaque cursor encoding/repetition, duplicate items, concurrency and unavailable
 Continue Watching. The complete web lane, its layout/shell checks, all 36
 Settings section cases, and the unchanged type baseline pass.
 
+**Management assignment snapshot candidate:** Administrator GET
+`/api/v1/sharing/imports/{id}/assignments` returns the complete current import/
+Source/epoch/lifecycle/assignment generation and state with grouped Source library
+strings and exact local user integers. One bounded database read distinguishes
+an existing empty matrix from a missing import; it rejects corruption, duplicate
+pairs, more than 64 groups, more than 256 users per group or row overflow.
+Whole-matrix writes remain generation guarded. Re-pair now advances assignment
+generation in the same transaction as lifecycle and endpoint generation, so an
+old matrix cannot save after a repaired import returns to active. Administrator
+Source-library enumeration and client editors remain separate work.
+
+The bounded raw-decoder regression passed (one case, 0.01s). The complete matrix
+and user-lifetime contract passed on memory, pooled SQLite and three actual
+voters (one case, 9.40s), as did the re-pair/private-viewer contract including a
+pre-repair stale Save after activation (one case, 9.31s). The actual HTTP route
+passed its administrator/login isolation, complete/empty/missing import,
+no-store and full lossless response checks (one case, 0.20s). All 33 daemon
+sharing regressions passed (29.12s), with zero ignored cases. The web ID parser
+also accepts canonical zero consistently with SourceId and both native clients;
+its eight browse regressions and unchanged type baseline pass. Pinned feature-enabled core/daemon all-target Clippy passed with denied warnings (1m26s), and all four docs-index cases pass.
+
 **Linux fixture observation correction:** The exact `c220f6270` source archive
 (SHA-256 `0072b4b224ab34d05be670b21a7bcc9bfb6a0cbed8b23d479a7cc0d3c4d36c3f`)
 compiled with pinned Linux Rust 1.97.1, but its CGNAT fixture failed twice while
@@ -3073,7 +3096,15 @@ tracked item paths but omitted the newly tested Continue Watching path, so that
 flag was never attached. The decorator now includes the exact per-import
 Continue Watching route, with a focused path regression. No observation timeout
 or production cancellation code changes. The corrected committed archive still
-requires execution before any Linux runtime qualification claim.
+requires execution before any Linux runtime qualification claim. The corrected
+`4ebb85226` archive (SHA-256
+`d2cd30d31dfab1b67c59b71b1aa25db67834296397f58527814748980cfe7988`)
+compiled in 3m54s, then reached the details fixture and failed because its three
+seeded files reused a unique path (6.38s). Each file now has its own fixture path;
+no production file or serving logic changes. The independent pinned transport
+claim/rotation restart case passed on that archive (one test, zero ignored,
+0.43s). The combined blocked-response fixture still requires an exact corrected
+archive run; neither result proves actual Tailscale or two-NAT operation.
 
 ### 16.8 S7 native file-context foundation
 
