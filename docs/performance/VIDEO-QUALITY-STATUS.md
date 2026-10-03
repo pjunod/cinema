@@ -46,6 +46,29 @@ revision token. It must not consume a viewer session or mark the next item
 watched; use the existing autoplay preference rather than an extra feature
 switch. Preserve delivery-proof granularity in the batching design.
 
+## Final qualification in progress
+
+The one final adversarial review completed on `6cdddaeef`. Its two findings
+were addressed in `827023fd2` (application-owned probe metadata) and
+`09ab30374` (VAAPI source cadence), with normal compile hooks passing.
+
+- The first VAAPI capture completed its encode but refused qualification:
+  actual hvcC constraints were `B0`, while the shared declaration said `90`.
+  `117570654` carries the measured encoder-specific declaration. The diagnostic
+  MP4 also exposed the muxer's default `hev1`; the production encoded-VOD
+  contract is being made explicitly `hvc1`, with argv already hashed in its
+  immutable identity. Only this failed qualification will be repeated.
+- The native C2 proof initially rejected its synthetic source's actual color
+  metadata. The fixture now assigns color facts to the authored frames and
+  reads the real probe document. The corrected proof passed once: three
+  windows × four recipes, complete metrics, source hash and scratch cleanup.
+  Production metadata checks were not relaxed.
+- Packaging first failed when static libvmaf's C++ link closure was absent.
+  `555c7defb` supplies it and the lavfi frame decoder; the failed runtime-assets
+  build is being retried in an isolated, bounded builder on idle nuc3.
+- The fast lane has not started. It follows these failed-check repairs and
+  the durable qualification receipts, so the final candidate gets one run.
+
 ## 1. Integration and compiler
 
 | Fact | Value |

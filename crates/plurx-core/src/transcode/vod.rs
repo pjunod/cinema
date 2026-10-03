@@ -7,6 +7,9 @@ use super::{ResolvedTranscode, TranscodeExecution, BURNED_VIDEO_LABEL};
 
 pub const VOD_AUDIO_RATE: u32 = 48_000;
 pub const VOD_AAC_FRAME_SAMPLES: u64 = 1_024;
+/// The sample entry promised by encoded HEVC HLS presentations. The fMP4
+/// normalizer already promotes/removes in-band parameter sets for this entry.
+pub const VOD_HEVC_SAMPLE_ENTRY: &str = "hvc1";
 
 /// Two seconds of AAC encoder preroll, starting on the film-global AAC
 /// sample lattice. Video is trimmed later, at the requested plan boundary.
@@ -273,6 +276,11 @@ pub fn vod_pipe_args_with_reorder(
     if let Some(index) = args.iter().position(|arg| arg == "-force_key_frames") {
         args[index + 1] = format!("expr:eq(mod(n,{}),0)", grid.frames_per_segment);
     }
+    // MP4 defaults HEVC to hev1. Name the same out-of-band-parameter-set
+    // contract that HLS advertises; this argument is part of VOD identity.
+    if plan.output_contract().output_codec() == "hevc" {
+        args.extend(["-tag:v".to_owned(), VOD_HEVC_SAMPLE_ENTRY.to_owned()]);
+    }
     let reorder = reorder
         && args
             .windows(2)
@@ -338,8 +346,7 @@ pub fn vod_pipe_args_with_reorder(
 mod tests {
     use super::*;
 
-    #[test]
-    fn encoded_vod_recipe_explicitly_excludes_source_chapters() {
+    fn encoded_recipe_fixture(hdr: bool) -> (MediaFile, ResolvedTranscode, TranscodeExecution) {
         let source = crate::domain::MediaFile {
             downloaded_subtitles: Vec::new(),
             id: 1,
@@ -352,11 +359,11 @@ mod tests {
             video_codec: Some("hevc".into()),
             video_codec_tag: None,
             field_order: None,
-            video_profile: Some("Main".into()),
+            video_profile: Some(if hdr { "Main 10" } else { "Main" }.into()),
             width: Some(640),
             height: Some(360),
-            bit_depth: Some(8),
-            hdr: None,
+            bit_depth: Some(if hdr { 10 } else { 8 }),
+            hdr: hdr.then(|| "hdr10".into()),
             hdr_format: None,
             max_cll: None,
             max_fall: None,
@@ -370,12 +377,20 @@ mod tests {
             probed: true,
             dolby_vision: crate::domain::DolbyVisionFacts::default(),
         };
-        let options = crate::transcode::TranscodeOptions::default();
+        let options = crate::transcode::TranscodeOptions {
+            pipeline: if hdr {
+                crate::transcode::Pipeline::Hdr10Passthrough
+            } else {
+                crate::transcode::Pipeline::Cpu
+            },
+            ..Default::default()
+        };
         let facts = crate::transcode::DecodeFacts::from_ffprobe_json(
             &serde_json::json!({"streams":[{
                 "index":0,"codec_type":"video","codec_name":"hevc",
-                "profile":"Main","width":640,"height":360,
-                "pix_fmt":"yuv420p","avg_frame_rate":"24/1",
+                "profile":if hdr {"Main 10"} else {"Main"},"width":640,"height":360,
+                "pix_fmt":if hdr {"yuv420p10le"} else {"yuv420p"},"avg_frame_rate":"24/1",
+                "color_transfer":if hdr {"smpte2084"} else {"bt709"},
                 "r_frame_rate":"24/1","disposition":{"attached_pic":0}
             }]}),
             crate::transcode::DecodeSourceIdentity::from_sha256("a".repeat(64))
@@ -417,6 +432,28 @@ mod tests {
             ".",
         )
         .expect("execution");
+        (source, plan, execution)
+    }
+
+    #[test]
+    fn encoded_vod_hevc_sample_entry_matches_the_hls_parameter_set_contract() {
+        for hdr in [false, true] {
+            let (source, plan, execution) = encoded_recipe_fixture(hdr);
+            let args = vod_pipe_args(
+                &source,
+                &plan,
+                &execution,
+                VodFrameGrid::new(24, 1).expect("grid"),
+                12.0,
+            );
+            assert_eq!(args.windows(2).any(|pair| pair == ["-tag:v", "hvc1"]), hdr);
+            assert!(!args.windows(2).any(|pair| pair == ["-tag:v", "hev1"]));
+        }
+    }
+
+    #[test]
+    fn encoded_vod_recipe_explicitly_excludes_source_chapters() {
+        let (source, plan, execution) = encoded_recipe_fixture(false);
         let args = vod_pipe_args(
             &source,
             &plan,

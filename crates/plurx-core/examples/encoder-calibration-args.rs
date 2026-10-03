@@ -1,7 +1,9 @@
 //! Export production encoder options for offline calibration tools.
 //! This exports arguments, not a capability verdict or a qualified playback plan.
 
-use plurx_core::transcode::{EffectiveRateControl, Encoder, OutputGrade, Pipeline};
+use plurx_core::transcode::{
+    EffectiveRateControl, Encoder, OutputGrade, Pipeline, VOD_HEVC_SAMPLE_ENTRY,
+};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "quality": quality,
             "software_threads": threads,
             "output_grade": grade.name(),
+            "vod_hevc_sample_entry": if grade == OutputGrade::Hdr10 { Some(VOD_HEVC_SAMPLE_ENTRY) } else { None },
             "hdr10_1080_filter": if grade == OutputGrade::Hdr10 {
                 Pipeline::Hdr10Passthrough.filters(Some(1920), 1080, Some("hdr10"))
             } else { None },

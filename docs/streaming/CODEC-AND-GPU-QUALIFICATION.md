@@ -86,6 +86,10 @@ accidentally requires the unrelated Dolby QSV proof. The output remains HEVC Mai
 actual non-packed constraint byte is `B0`, so its declaration is
 `hvc1.2.4.H120.B0`; software/QSV retain their existing measured declarations.
 The selected encoder now informs rolling, cached and VOD presentation facts.
+The diagnostic MP4 also exposed the muxer's default `hev1` entry. Encoded HEVC
+VOD now explicitly writes the advertised `hvc1` entry, through the existing
+parameter-set normalizer. Its actual argv already feeds immutable VOD identity,
+so old and corrected init contracts cannot share a rendition key.
 
 `encoder-calibration-args --grade hdr10 --family vaapi` exports the production
 encoder/upload arguments and 1080p plain-HDR filter for an isolated capture.
