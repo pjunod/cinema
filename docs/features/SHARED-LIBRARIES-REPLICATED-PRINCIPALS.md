@@ -196,6 +196,33 @@ dyn-store lifecycle passed 1/1 in 12.84 seconds; committed successor renewal
 and staged-deadline refusal each passed 1/1 in 9.61 seconds. All-target check
 and denied-warning feature Clippy passed.
 
+## Terminal cleanup preserves principals and maintenance isolates ledgers
+
+Both exact-owner and capability terminal cleanup bind the stored route's
+canonical owner key. On the original schema this uses its real Local user
+projection; on the rebuilt schema it uses `owner_key`. Dependent pointer,
+lease and pin cleanup checks the same ended principal. Shared terminal cleanup
+therefore preserves complete metadata and retires retained authority without a
+Local user adapter.
+
+The maintenance sweep joins expired preparation ledgers to sessions with the
+same owner and playback before retiring them. Pointer, preparation and resolved
+request retention joins likewise include ownership and playback. A corrupt
+Local ledger naming a live Shared incarnation is reaped without ending that
+foreign stream or releasing its lease/pin.
+
+Active handoff arming/completion applies the current Local-user predicate to
+both its mutation and replay readback. This prevents a refused Shared write
+from returning an already-published Shared row as success. Ended terminal
+projection completion remains available for Shared retirement. The candidate
+case covers corruption cleanup, actual Shared exact/capability cleanup, Local
+handoff, Shared handoff refusal and missing-user replay refusal. The candidate
+passed 1/1 with zero ignored in 9.27 seconds. Existing maintenance, lifecycle
+and terminal-ack/takeover cases passed 1/1 each in 9.65, 13.26 and 9.69
+seconds. All-target check passed in 26.73 seconds and denied-warning feature
+Clippy passed in 30.25 seconds. All eleven Hiqlite session safety/decoder unit
+regressions passed with zero ignored.
+
 ## A rebuilt table is not shared admission authority
 
 The schema shape comes from the existing quorum-observed Store-lifetime
@@ -211,8 +238,9 @@ literals, including three unit-test literals and validation-only legacy
 writers. Earlier counts of 65 preceded the pointer/desired-reader conversion.
 These checkpoints cover request, desired, recovery, preparation, activation and
 commit paths; they are not a complete census closure or qualification of all
-seven ownership tables. Terminal and maintenance write predicates still need conversion and
-qualification; shared authority extension remains closed.
+seven ownership tables. The direct numeric runtime owner predicates have been converted; the controlled
+legacy layout helper, original schema and validation-only historical writer
+remain intentional. Shared authority extension remains closed.
 
 ## Exercise production behavior on three voters
 

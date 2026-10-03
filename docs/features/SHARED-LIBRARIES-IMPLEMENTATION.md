@@ -2117,3 +2117,26 @@ successor renewal passed (9.66 seconds), and staged deadline refusal passed
 denied-warning feature Clippy passed. This checkpoint also integrates the
 replicated confirmation/publication and foreign abandoned-activation cleanup
 fences; coordinated installation and Shared admission remain open.
+
+
+**Terminal and maintenance integration checkpoint:** exact-owner and public
+capability terminal cleanup use the actual route's canonical owner key on
+both layouts, including the original Local projection. Shared retirement no
+longer calls the Local numeric adapter. An expired preparation can retire only
+its same-principal, same-playback staged session; canonical pointer, ledger and
+request retention joins cannot borrow another principal's row.
+
+The SQLite corruption/cleanup regression passed in memory and pooled stores
+(0.95 seconds): an expired Local ledger pointing at a Shared route leaves that
+route and its complete lease tuple unchanged, removes the corrupt ledger,
+then legitimate exact-owner and capability cleanup retires only the correct
+grant. The second grant with the same viewer/playback remains active. The
+replicated candidate also verifies preservation of the foreign physical pin.
+
+On the combined tree, pinned all-target compilation passed (26.27 seconds),
+all 17 ownership units passed (18.13 seconds), all six rebuilt-schema actual
+voter regressions passed (64.02 seconds), abandoned-preparation maintenance
+passed (9.61 seconds), and terminal-ack/takeover retention passed (9.70 seconds).
+Denied-warning feature Clippy passed (32.93 seconds); every executed regression
+had zero ignored tests. These are compatibility and ownership-boundary proofs,
+not Shared writer admission or released migration qualification.

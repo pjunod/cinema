@@ -1072,3 +1072,237 @@ async fn sharing_rebuilt_local_renewal_takeover_refuse_shared_and_deleted_owners
         .is_none());
     assert_eq!(request_rows(&client, "SELECT owner_node_id || ':' || fence || ':' || revision || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000160'").await, ["successor-owner:2:3:9000:10"]);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sharing_rebuilt_cleanup_preserves_foreign_preparations_and_retires_shared_routes() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("fixture client");
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-local.sql"))
+        .await
+        .expect("local fixture")
+    {
+        result.expect("local seed");
+    }
+    let statements: Vec<(String, hiqlite::Params)> = MEDIA_SESSION_PRINCIPAL_REBUILD_SCHEMA
+        .split("-- next statement\n")
+        .map(|sql| {
+            (
+                sql.trim().trim_end_matches(';').to_owned(),
+                hiqlite::params!(),
+            )
+        })
+        .collect();
+    for result in client.txn(statements).await.expect("candidate transaction") {
+        result.expect("candidate rebuild");
+    }
+    for result in client
+        .batch(include_str!("../fixtures/session-principal-sharing.sql"))
+        .await
+        .expect("shared fixture")
+    {
+        result.expect("shared seed");
+    }
+    let foreign_session = "00000000-0000-4000-a000-000000000171";
+    let second = "00000000-0000-4000-a000-000000000002";
+    let second_session = "00000000-0000-4000-a000-000000000172";
+    client
+        .execute(
+            "UPDATE media_sessions SET session_id=$1 WHERE incarnation_id=$2",
+            hiqlite::params!(foreign_session, SHARED_ROUTE),
+        )
+        .await
+        .expect("valid shared session identity");
+    client
+        .execute(
+            "UPDATE media_sessions SET session_id=$1 WHERE incarnation_id=$2",
+            hiqlite::params!(second_session, second),
+        )
+        .await
+        .expect("second shared session identity");
+    for incarnation in [SHARED_ROUTE, second] {
+        client.execute("INSERT INTO job_leases(resource,owner_node_id,fence,revision,expires_at_ms,updated_at_ms) VALUES('session:' || $1,'node',1,3,9000,10)", hiqlite::params!(incarnation)).await.expect("shared cleanup lease");
+        client.execute("INSERT INTO cache_consumer_pins(storage_id,recipe_hash,generation_id,consumer_kind,consumer_id,consumer_epoch,expires_at_ms) VALUES('foreign-storage','foreign-recipe','foreign-generation','media_session',$1,1,9000)", hiqlite::params!(incarnation)).await.expect("shared cleanup pin");
+    }
+    client.execute("UPDATE media_session_preparations SET staged_incarnation_id=$1,expected_predecessor_incarnation_id='00000000-0000-4000-a000-000000000170',deadline_ms=2000,updated_at_ms=100 WHERE owner_key='local:1' AND playback_id='playback'", hiqlite::params!(SHARED_ROUTE)).await.expect("corrupt foreign preparation ledger");
+    store
+        .maintain_media_sessions(3000)
+        .await
+        .expect("same-owner maintenance sweep");
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(SHARED_ROUTE)
+            .await
+            .expect("foreign route after sweep")
+            .expect("retained route")
+            .state,
+        "active"
+    );
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_session_preparations WHERE owner_key='local:1'").await, ["0"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(revision AS TEXT) || ':' || expires_at_ms || ':' || updated_at_ms AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["3:9000:10"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_id='00000000-0000-4000-a000-000000000001'").await, ["1"]);
+    client
+        .execute(
+            "UPDATE media_sessions SET publication_ready_at_ms=$1 WHERE incarnation_id=$2",
+            hiqlite::params!(MEDIA_SESSION_PUBLICATION_BLOCKED, SHARED_ROUTE),
+        )
+        .await
+        .expect("unpublished shared fixture");
+    assert!(store
+        .arm_media_session_handoff(
+            SHARED_ROUTE,
+            "node",
+            1,
+            3000 + plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+            3000
+        )
+        .await
+        .expect("closed shared handoff arm")
+        .is_none());
+    assert!(store
+        .complete_media_session_handoff(
+            SHARED_ROUTE,
+            "node",
+            1,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            3000
+        )
+        .await
+        .expect("closed shared handoff completion")
+        .is_none());
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(SHARED_ROUTE)
+            .await
+            .expect("closed shared projection")
+            .expect("retained route")
+            .publication_ready_at_ms,
+        MEDIA_SESSION_PUBLICATION_BLOCKED
+    );
+    let local_current = "00000000-0000-4000-a000-000000000174";
+    current_media_session(
+        &store,
+        1,
+        "handoff-runtime",
+        local_current,
+        "00000000-0000-4000-a000-000000000175",
+        "local handoff authority",
+    )
+    .await;
+    client
+        .execute(
+            "UPDATE media_sessions SET publication_ready_at_ms=$1 WHERE incarnation_id=$2",
+            hiqlite::params!(MEDIA_SESSION_PUBLICATION_BLOCKED, local_current),
+        )
+        .await
+        .expect("unpublished local fixture");
+    assert!(store
+        .arm_media_session_handoff(
+            local_current,
+            "staged-node",
+            1,
+            3000 + plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+            3000
+        )
+        .await
+        .expect("local handoff arm")
+        .is_some());
+    assert!(store
+        .complete_media_session_handoff(
+            local_current,
+            "staged-node",
+            1,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            3000
+        )
+        .await
+        .expect("local handoff complete")
+        .is_some());
+    let shared = PlaybackPrincipal::sharing(
+        uuid::Uuid::parse_str(SHARED_ROUTE).expect("grant"),
+        &"a".repeat(64),
+    )
+    .expect("shared owner");
+    let ended = store
+        .end_media_session_if_owner(&MediaSessionEnd {
+            incarnation_id: SHARED_ROUTE.to_owned(),
+            session_id: foreign_session.to_owned(),
+            expected_owner_node_id: "node".to_owned(),
+            expected_owner_epoch: 1,
+            expected_lease_expires_at_ms: 9000,
+            terminal_reason: "replaced".to_owned(),
+            now_ms: 4000,
+        })
+        .await
+        .expect("shared exact-owner terminal cleanup")
+        .expect("ended shared route");
+    assert_eq!(ended.principal, shared);
+    assert_eq!(ended.state, "ended");
+    assert!(store
+        .media_session_route_for_playback(&shared, "playback")
+        .await
+        .expect("removed shared pointer")
+        .is_none());
+    assert_eq!(request_rows(&client, "SELECT CAST(expires_at_ms AS TEXT) AS value FROM job_leases WHERE resource='session:00000000-0000-4000-a000-000000000001'").await, ["4000"]);
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM cache_consumer_pins WHERE consumer_id='00000000-0000-4000-a000-000000000001'").await, ["0"]);
+    assert!(store
+        .arm_media_session_terminal_projection(
+            SHARED_ROUTE,
+            "node",
+            1,
+            4000 + plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+            4000
+        )
+        .await
+        .expect("shared terminal projection arm")
+        .is_some());
+    assert!(store
+        .complete_media_session_terminal_projection(
+            SHARED_ROUTE,
+            "node",
+            1,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            4000
+        )
+        .await
+        .expect("shared terminal projection completion")
+        .is_some());
+    let second_ended = store
+        .end_media_session(second_session, "replaced", 5000)
+        .await
+        .expect("shared capability terminal cleanup")
+        .expect("second ended shared route");
+    assert_eq!(second_ended.state, "ended");
+    assert_eq!(
+        second_ended.principal.owner_key(),
+        format!("share:{second}:{}", "a".repeat(64))
+    );
+    assert_eq!(request_rows(&client, "SELECT CAST(count(*) AS TEXT) AS value FROM media_playback_pointers WHERE principal_kind='sharing'").await, ["0"]);
+    client
+        .execute("DELETE FROM users WHERE id=1", hiqlite::params!())
+        .await
+        .expect("remove handoff user");
+    client.execute("UPDATE media_sessions SET state='active',terminal_reason=NULL,publication_ready_at_ms=0 WHERE incarnation_id=$1", hiqlite::params!(local_current)).await.expect("orphan already-published local fixture");
+    assert!(store
+        .complete_media_session_handoff(
+            local_current,
+            "staged-node",
+            1,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            6000
+        )
+        .await
+        .expect("deleted local handoff replay refusal")
+        .is_none());
+}
