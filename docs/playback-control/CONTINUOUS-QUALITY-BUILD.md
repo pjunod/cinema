@@ -5249,3 +5249,32 @@ its own backend/proxy/runtime and generated launch file were cleaned.
 Physical iOS evidence remains unmeasured. No units or final adversarial
 review ran. Native policy ownership and the promotion-policy conflict
 remain pending human decisions.
+
+
+### 10.181 · Exact recovery fix qualifies; new full Chrome campaign starts
+
+Exact executable `1a84ce40a` compiled on approved Linux Rust 1.97.1 in
+1 minute 37 seconds. The first fresh-family recovery probe retained its
+FAILED receipt: forced recovery enrolled a 480p/720p family, while the probe
+requested 1080p outside that family and incorrectly demanded a continuous
+1080p receipt. Three parent creates were recorded. That is not an in-family
+continuous regression, nor a pass for the outside-family prepared path.
+
+The corrected probe reads the actual advertised family after recovery. It
+PASSED: playback advanced past old cached runway to 43.791 seconds at the
+saved 720p choice, then its advertised 480p companion presented at 104.159
+seconds on the same recovered session/player, with durable append/
+presentation ownership verified. Exactly two deliberate parent creates
+were observed across the forced daemon-loss recovery. End had zero owned
+FFmpeg children at all 0/1/3/5-second samples while the restarted daemon
+stayed alive. Its owned daemon/browser/runtime were removed. This does not
+claim seamless daemon restart, physical output, multi-node takeover or a
+full restart matrix. Legacy recovery remains authoritative for real failure.
+
+The committed full twenty-change Chrome qualification now runs once on
+`1a84ce40a`, with fifteen manual and five actual Auto changes and unchanged
+limits. Its bounded supervisor records actual producers and copies only
+canonical initialization/early segment artifacts in a 16 MiB budget to
+improve first-switch publication binding. No runtime/result is assumed
+from older source. All 213 PR regression names statically resolved against
+the current tree; none executed. Final adversarial review remains deferred.
