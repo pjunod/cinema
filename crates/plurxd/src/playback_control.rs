@@ -25188,6 +25188,8 @@ mod tests {
         crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             file_id: 5615,
             playback_id: "player-a".to_owned(),
             request_id: None,
@@ -25797,6 +25799,8 @@ mod tests {
             SessionRequest {
                 quality_catalog: None,
                 candidate_context: None,
+                vod_only: false,
+                passive_vod: false,
                 file_id: 1,
                 playback_id: "player-a".to_owned(),
                 request_id: None,

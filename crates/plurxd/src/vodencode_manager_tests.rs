@@ -43,6 +43,8 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: Some("qualification-vod".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -55,6 +57,8 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     let missing = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         file_id: i64::MAX,
         request_id: Some("qualification-vod-missing".into()),
         ..req.clone()
@@ -225,6 +229,8 @@ async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: None,
             previous_session_id: None,
             reopen_reason: None,
@@ -362,6 +368,8 @@ async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     let request = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: None,
         previous_session_id: None,
         reopen_reason: None,
@@ -455,6 +463,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: Some("stored-empty-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -496,6 +506,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
                 request_id: Some("stored-empty-plain".into()),
                 subtitle_burn: None,
                 ..req.clone()
@@ -530,6 +542,8 @@ async fn an_empty_stored_track_starts_an_encoded_session_without_the_overlay() {
             &SessionRequest {
                 quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
                 request_id: Some("stored-empty-control".into()),
                 ..req.clone()
             },
@@ -634,6 +648,8 @@ async fn a_source_encoder_selection_refuses_is_refused_before_any_burn_extractio
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: Some("refused-before-burn".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -718,6 +734,8 @@ async fn the_profile5_pixel_proof_takes_the_class_of_the_caller_waiting_on_it() 
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: Some("profile5-proof-class".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -810,6 +828,8 @@ async fn encoding_shipped_shape() {
     let req = SessionRequest {
         quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
         request_id: Some("encoding-shipped-shape".into()),
         previous_session_id: None,
         reopen_reason: None,
@@ -831,4 +851,33 @@ async fn encoding_shipped_shape() {
     assert!(encoding.admissions.software_in_use() > 0, "the permit holds software capacity");
     drop(permit);
     assert_eq!(encoding.admissions.software_in_use(), 0);
+}
+
+#[tokio::test]
+async fn service_vod_only_refuses_unindexed_copy_before_rolling_allocation() {
+    use plurx_core::store::{SqliteStore, keys};
+    let base = crate::test_tempdir().expect("policy fixture");
+    let source = plurx_core::testfixtures::source("h264");
+    let probe = plurx_core::scan::probe::probe(&source).await.expect("probe");
+    let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+    let file_id = seed_file_with_probe_at(&store, source.to_str().expect("path"), probe).await;
+    store.put_setting(keys::VOD_LIVE_RECOVERY, "true").await.expect("recovery on");
+    let manager = TranscodeManager::new(Arc::clone(&store), base.path().join("manager"), EncoderCaps::default(), Pipeline::Cpu);
+    let mut request = reopen_request(file_id, "service-policy", "unused", "unused");
+    request.request_id = Some("service-vod-only".into());
+    request.previous_session_id = None;
+    request.reopen_reason = None;
+    request.presentation = Presentation::Vod;
+    request.kind = SessionKind::Copy { aac: false, preserve_dolby_vision: false, convert_dolby_vision: false };
+    request.vod_only = true;
+    let error = manager.create_session(&request, "test").await.err().expect("unindexed VOD refusal");
+    assert_eq!(vod_refusal(&error).map(|(code, _)| code), Some("vod_index_pending"), "{error}");
+    assert!(manager.active_session_ids().await.is_empty(), "no rolling worker was allocated");
+    assert!(manager.vod.session_ids().await.is_empty(), "no VOD reader was attached");
+    assert!(manager.live_hls_recovery_enabled().await.expect("setting"), "service policy must not alter native recovery");
+    request.presentation = Presentation::Live;
+    request.request_id = Some("service-forbidden-live".into());
+    let error = manager.create_session(&request, "test").await.err().expect("explicit live also refused");
+    assert_eq!(vod_refusal(&error).map(|(code, _)| code), Some("vod_source_unsupported"));
+    assert!(manager.active_session_ids().await.is_empty());
 }

@@ -2479,6 +2479,8 @@
         let predecessor_request = crate::transcode::SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: fixture.file_id(),
             playback_id: playback_id.to_owned(),

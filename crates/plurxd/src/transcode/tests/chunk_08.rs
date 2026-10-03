@@ -18,6 +18,8 @@
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id,
             playback_id: "pb-1".into(),
@@ -41,6 +43,8 @@
         let shifted = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             audio_offset_ms: 250,
             ..request.clone()
         };
@@ -60,6 +64,8 @@
         let other_player = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             playback_id: "pb-2".into(),
             ..request.clone()
         };
@@ -117,6 +123,8 @@
         let different = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             start_seconds: 600.0,
             ..request.clone()
         };
@@ -130,6 +138,8 @@
         let next = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: Some("req-2".into()),
             start_seconds: 600.0,
             ..request.clone()
@@ -170,6 +180,8 @@
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id,
             playback_id: "pb-race".into(),
@@ -246,6 +258,8 @@
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 999_999, // nothing has this id, so the create fails
             playback_id: "pb-fail".into(),
@@ -268,6 +282,8 @@
         let retry = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             file_id,
             ..request.clone()
         };
@@ -302,6 +318,8 @@
         let original = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id,
             playback_id: "native-replay".into(),
@@ -343,6 +361,8 @@
         let replay = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen
         };
@@ -458,6 +478,8 @@
         let lower = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             kind: SessionKind::Transcode { height: 360 },
             ..reopen_request(
                 51,
@@ -797,6 +819,8 @@
         let foreign = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: Some("renamed-foreign".into()),
             ..request
         };
@@ -1211,6 +1235,8 @@
         let request = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             audio_index: Some(2),
             subtitle_burn: Some(5),
             ..reopen_request(52, "track-player", "stall-track", "track-stall")
@@ -1230,6 +1256,8 @@
         let track_change = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: Some("user-track-change".into()),
             previous_session_id: None,
             reopen_reason: None,
@@ -1454,6 +1482,8 @@
         let device_b = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: Some("device-b-reopen".into()),
             previous_session_id: Some("device-b-session".into()),
             ..request.clone()
@@ -1475,6 +1505,8 @@
         let foreign_user = SessionRequest {
             quality_catalog: None,
             candidate_context: None,
+            vod_only: false,
+            passive_vod: false,
             request_id: Some("foreign-user-reopen".into()),
             ..request
         };

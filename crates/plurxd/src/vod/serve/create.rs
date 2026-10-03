@@ -174,7 +174,7 @@ impl VodServe {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| session.tombstone.is_none())
+            .filter(|(_, session)| session.renewable())
             .map(|(session_id, _)| session_id.clone())
             .collect::<Vec<_>>();
         ids.extend(
@@ -208,6 +208,39 @@ impl VodServe {
         // at `try_create` alone reached no production path at all.
         self.shared.pool.set_global_cap(settings.blocked_get_cap);
         let req = prepared.request;
+        let passive_grant = if req.passive_vod {
+            if !req.vod_only || req.presentation != crate::transcode::Presentation::Vod {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_passive_policy_invalid",
+                    "passive retention requires VOD-only service policy",
+                ));
+            }
+            Some(
+                self.shared
+                    .passive_grants
+                    .reserve(
+                        &session_id,
+                        attribution.supersession_user,
+                        &req.playback_id,
+                        req.request_id.as_deref().unwrap_or(""),
+                        fences.release_fence.is_some(),
+                    )
+                    .map_err(|reason| {
+                        crate::transcode::vod_refusal_error(
+                            match reason {
+                                passive_grant::Refusal::Capacity => "vod_passive_capacity",
+                                passive_grant::Refusal::InvalidIdentity => {
+                                    "vod_passive_policy_invalid"
+                                }
+                                passive_grant::Refusal::Unavailable => "vod_passive_route_expired",
+                            },
+                            "passive VOD route admission refused",
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
         let (aac, preserve_dolby_vision, convert_dolby_vision) = match req.kind {
             SessionKind::Copy {
                 aac,
@@ -494,6 +527,7 @@ impl VodServe {
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
+            passive_grant: passive_grant.clone(),
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
             file: Arc::new(rendition.recipe.file.clone()),
@@ -584,6 +618,12 @@ impl VodServe {
         } else {
             None
         };
+        if passive_grant.as_ref().is_some_and(|grant| !grant.live()) {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_passive_route_expired",
+                "passive route expired during preparation",
+            ));
+        }
         if let Some(previous_readers) = previous_readers.as_mut() {
             previous_readers.remove(&session_id);
             if previous_readers.is_empty() {
