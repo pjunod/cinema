@@ -585,7 +585,7 @@ async function saveJellyfinCompatibility(btn){
   const err=document.getElementById("jellyfin-compatibility-error");if(err)err.textContent="";
   if(btn)btn.disabled=true;
   try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:document.getElementById("jellyfin-compatibility-enabled").checked}}));
+    cacheSettings(await api("/settings",{method:"PUT",body:{jellyfin_compatibility_enabled:(/** @type {HTMLInputElement} */ (document.getElementById("jellyfin-compatibility-enabled"))).checked}}));
     toast("Jellyfin compatibility saved");if(btn)setCardSaved(btn);
   }catch(error){if(err)err.textContent=error.message;if(btn)btn.disabled=false;}
 }
