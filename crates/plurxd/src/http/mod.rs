@@ -8180,6 +8180,54 @@ mod tests {
     /// values; the manager carries the separately validated effective answer
     /// used by sessions.
     #[tokio::test]
+    async fn content_and_reordered_vod_preferences_save_without_readiness_gate() {
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        for (enabled, frames) in [(true, 2), (false, 0)] {
+            let (status, result) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({"content_aware_encoding": enabled, "vod_reorder_frames": frames}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["content_aware_encoding"], enabled);
+            assert_eq!(result["vod_reorder_frames"], frames);
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                    .await
+                    .expect("fixture succeeds")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/settings",
+                Some(&admin),
+                json!({"content_aware_encoding": true, "vod_reorder_frames": 3}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .store
+                .get_setting(plurx_core::store::keys::CONTENT_AWARE_ENCODING)
+                .await
+                .expect("fixture succeeds")
+                .as_deref(),
+            Some("0")
+        );
+    }
+
+    #[tokio::test]
     async fn rate_control_settings_validate_publish_and_restore() {
         use plurx_core::transcode::{EffectiveRateControl, Encoder};
 

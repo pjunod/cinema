@@ -388,11 +388,28 @@ impl TranscodeManager {
     pub async fn effective_rate_control_for_new_offline_package(
         &self,
         file: &plurx_core::domain::MediaFile,
+        target_height: i64,
+        subtitle_burn: bool,
     ) -> Result<EffectiveRateControl, String> {
-        Ok(self.effective_rate_control(
-            self.encoder_for_file(file, crate::process_control::ChildClass::Background)
-                .await?,
-        ))
+        let encoder = self
+            .encoder_for_file(file, crate::process_control::ChildClass::Background)
+            .await?;
+        let baseline = self.effective_rate_control(encoder);
+        if subtitle_burn {
+            return Ok(baseline);
+        }
+        let opts = self.speculative_producer_options(
+            self.rate_control_snapshot(),
+            encoder,
+            file,
+            target_height,
+            None,
+            None,
+        );
+        Ok(self
+            .measured_content_rate(file, &opts, encoder)
+            .await
+            .unwrap_or(baseline))
     }
 
     #[cfg(test)]

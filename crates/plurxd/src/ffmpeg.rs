@@ -236,13 +236,33 @@ impl BoundedDiagnosticChild {
         })
     }
 
-    pub async fn output(mut self) -> std::io::Result<(std::process::ExitStatus, String)> {
+    pub async fn output(self) -> std::io::Result<(std::process::ExitStatus, String)> {
+        self.output_cancellable(&tokio_util::sync::CancellationToken::new())
+            .await
+    }
+
+    /// Cooperative cancellation joins the child before releasing its caller's
+    /// resource permits. Dropping the entire task still retains the reap owner.
+    pub async fn output_cancellable(
+        mut self,
+        cancelled: &tokio_util::sync::CancellationToken,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
         let stderr = self
             .stderr
             .take()
             .ok_or_else(|| std::io::Error::other("extractor stderr was not piped"))?;
         let child = self.child.as_mut().expect("owned extraction child");
-        let (status, diagnostics) = tokio::join!(child.wait(), drain_diagnostics(stderr));
+        let wait = async {
+            tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => {
+                    let _ = child.start_kill();
+                    child.wait().await
+                }
+                status = child.wait() => status,
+            }
+        };
+        let (status, diagnostics) = tokio::join!(wait, drain_diagnostics(stderr));
         let status = status?;
         self.child.take(); // Successful wait, including nonzero exit, proves reap.
         self.child_job.take();
@@ -258,9 +278,23 @@ impl BoundedDiagnosticChild {
     /// disk; stderr is drained concurrently and the child is reaped before an
     /// error is returned.
     pub async fn output_to_bounded_file(
+        self,
+        path: &std::path::Path,
+        max_bytes: u64,
+    ) -> std::io::Result<(std::process::ExitStatus, String)> {
+        self.output_to_bounded_file_cancellable(
+            path,
+            max_bytes,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    pub async fn output_to_bounded_file_cancellable(
         mut self,
         path: &std::path::Path,
         max_bytes: u64,
+        cancelled: &tokio_util::sync::CancellationToken,
     ) -> std::io::Result<(std::process::ExitStatus, String)> {
         let mut stdout = self
             .stdout
@@ -281,7 +315,11 @@ impl BoundedDiagnosticChild {
                 let mut total = 0_u64;
                 let mut buffer = [0_u8; 64 * 1024];
                 let exceeded = loop {
-                    let read = stdout.read(&mut buffer).await?;
+                    let read = tokio::select! {
+                        biased;
+                        _ = cancelled.cancelled() => return Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "analysis cancelled")),
+                        result = stdout.read(&mut buffer) => result?,
+                    };
                     if read == 0 {
                         break false;
                     }
@@ -369,7 +407,7 @@ impl EncodedExecutable {
         Self::capture_at(path).await
     }
 
-    async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
+    pub(crate) async fn capture_at(path: std::path::PathBuf) -> Result<Self, String> {
         let (digest, object_version) = hash_engine_object(&path).await?;
         Ok(Self {
             path,
@@ -5081,6 +5119,49 @@ mod tests {
         let tail = drain_diagnostics(input.as_slice()).await;
         assert_eq!(tail.len(), 8 * 1024);
         assert!(tail.ends_with("terminal filter error"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cooperative_sample_cancellation_reaps_before_returning_capacity() {
+        for pipe in [false, true] {
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.args(["-c", "exec sleep 60"]);
+            let work =
+                crate::process_control::ChildWork::background("sample cancellation regression");
+            let mut owner = if pipe {
+                BoundedDiagnosticChild::spawn_piped_output(&mut command, work)
+            } else {
+                BoundedDiagnosticChild::spawn(&mut command, work)
+            }
+            .expect("fixture succeeds");
+            let (sent, mut received) = tokio::sync::oneshot::channel();
+            owner.reaped = Some(sent);
+            let cancel = tokio_util::sync::CancellationToken::new();
+            cancel.cancel();
+            let directory = tempfile::tempdir().expect("fixture succeeds");
+            if pipe {
+                assert!(owner
+                    .output_to_bounded_file_cancellable(
+                        &directory.path().join("sample"),
+                        1024,
+                        &cancel
+                    )
+                    .await
+                    .is_err());
+            } else {
+                assert!(!owner
+                    .output_cancellable(&cancel)
+                    .await
+                    .expect("fixture succeeds")
+                    .0
+                    .success());
+            }
+            assert!(
+                received.try_recv().is_ok(),
+                "caller capacity is held until child has reaped"
+            );
+        }
     }
 
     #[cfg(unix)]

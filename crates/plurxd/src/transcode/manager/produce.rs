@@ -167,7 +167,7 @@ impl TranscodeManager {
             // proof cache, an ffmpeg pass — to compute a constant.
             false,
         );
-        let opts = self.speculative_producer_options(
+        let mut opts = self.speculative_producer_options(
             policy.rate_control,
             encoder,
             file,
@@ -175,6 +175,24 @@ impl TranscodeManager {
             audio_index,
             subtitle_burn,
         );
+        opts.software_threads = pretranscode_fence
+            .as_ref()
+            .map(|fence| fence.admission.threads as u32)
+            .or_else(|| Some(Workload::of(file, target_height).software_threads() as u32));
+        if let Some(mode) = self
+            .analyze_content_for_producer(
+                file,
+                &opts,
+                encoder,
+                bound_source.as_ref(),
+                pretranscode_fence.as_ref(),
+                cancelled,
+                deadline,
+            )
+            .await
+        {
+            opts.effective_rate_control = mode;
+        }
         // Bind decoder facts and the immutable plan before deriving any cache,
         // singleflight, staging, or publication identity. The held descriptor
         // used here is the same source descriptor later inherited by ffmpeg.
@@ -479,6 +497,31 @@ impl TranscodeManager {
         drop(waiting);
         if cancelled.is_cancelled() {
             return Ok(OfflineProduceOutcome::Yielded("ownership_lost"));
+        }
+        // Offline requests retain their accepted recipe. Their durable worker
+        // can still prepare measured evidence for subsequent requests without
+        // changing this package's immutable rate-control snapshot.
+        if self.content_encoding_enabled().await {
+            if let Ok(libraries) = self.store.list_libraries().await {
+                let roots = libraries
+                    .into_iter()
+                    .flat_map(|library| library.paths)
+                    .collect::<Vec<_>>();
+                if let Some(source) = pretranscode_source_snapshot(file, &roots).await {
+                    let source = Arc::new(source);
+                    let _ = self
+                        .analyze_content_for_producer(
+                            file,
+                            &opts,
+                            encoder,
+                            Some(&source),
+                            None,
+                            cancelled,
+                            deadline,
+                        )
+                        .await;
+                }
+            }
         }
         let mut recovery_began_now = false;
         let mut outcome = OfflineProduceOutcome::HealthRefused;

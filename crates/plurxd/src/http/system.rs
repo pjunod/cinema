@@ -1758,6 +1758,10 @@ pub struct SettingsDto {
     /// Requested N1 rate control. The production-effective value may be VBR
     /// when a family refuses quality mode; `/system` capabilities and boot
     /// logs carry that validation result.
+    pub content_aware_encoding: bool,
+    pub content_encoding_scorer_ready: Option<bool>,
+    pub content_encoding_applicability: serde_json::Value,
+    pub vod_reorder_frames: u8,
     pub transcode_rate_mode: String,
     /// `None` means use the validated family-tuned default.
     pub transcode_quality: Option<u8>,
@@ -2209,6 +2213,16 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         default_sub_lang: prefs.sub_lang,
         sub_mode: prefs.sub_mode.as_str().to_owned(),
         stream_readrate,
+        content_aware_encoding: setting(keys::CONTENT_AWARE_ENCODING).as_deref() == Some("1"),
+        content_encoding_scorer_ready: state.transcode.content_encoding_scorer_ready(),
+        content_encoding_applicability: state
+            .transcode
+            .content_encoding_applicability(&setting(keys::HWACCEL).unwrap_or_default()),
+        vod_reorder_frames: setting(keys::VOD_REORDER_FRAMES)
+            .as_deref()
+            .and_then(|v| v.parse::<u8>().ok())
+            .filter(|v| matches!(v, 0 | 2))
+            .unwrap_or(0),
         transcode_rate_mode,
         transcode_quality,
         hls_readrate,
@@ -2553,6 +2567,8 @@ pub struct UpdateSettings {
     /// sent, both are required so a replicated update is one complete pair.
     /// A quality request is behavior-probed before the effective snapshot
     /// changes; a refused driver remains VBR.
+    pub content_aware_encoding: Option<bool>,
+    pub vod_reorder_frames: Option<u8>,
     pub transcode_rate_mode: Option<String>,
     /// JSON null clears the override back to the family-tuned default.
     #[serde(default, deserialize_with = "deserialize_nullable")]
@@ -2705,6 +2721,8 @@ impl UpdateSettings {
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
             || self.stream_readrate.is_some()
+            || self.content_aware_encoding.is_some()
+            || self.vod_reorder_frames.is_some()
             || self.transcode_rate_mode.is_some()
             || self.transcode_quality.is_some()
             || self.hls_readrate.is_some()
@@ -3010,6 +3028,11 @@ pub async fn update_settings(
     } else {
         None
     };
+    if req.vod_reorder_frames.is_some_and(|v| !matches!(v, 0 | 2)) {
+        return Err(ApiError::BadRequest(
+            "vod_reorder_frames must be 0 or 2".into(),
+        ));
+    }
     let rate_control = match (&req.transcode_rate_mode, req.transcode_quality) {
         (None, None) => None,
         (Some(requested_mode), Some(quality)) => {
@@ -3305,6 +3328,21 @@ pub async fn update_settings(
                 ))
             }
         }
+    }
+    if let Some(enabled) = req.content_aware_encoding {
+        state
+            .store
+            .put_setting(
+                keys::CONTENT_AWARE_ENCODING,
+                if enabled { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(frames) = req.vod_reorder_frames {
+        state
+            .store
+            .put_setting(keys::VOD_REORDER_FRAMES, &frames.to_string())
+            .await?;
     }
     if let Some(values) = &analysis_settings {
         let borrowed = values

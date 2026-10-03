@@ -787,6 +787,8 @@ mod manager_cache;
 #[path = "transcode/manager/candidates.rs"]
 mod manager_candidates;
 pub(crate) use manager_candidates::QUALITY_PLANNING_KEYS;
+#[path = "transcode/content_encoding.rs"]
+mod content_encoding;
 #[path = "transcode/manager/construct.rs"]
 mod manager_construct;
 #[path = "transcode/manager/control.rs"]
