@@ -16,6 +16,7 @@ import okhttp3.ResponseBody
 import retrofit2.Response
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
+import tv.plurx.app.data.PlaybackFileContext
 import tv.plurx.app.data.parseRefusal
 import java.util.Locale
 import kotlin.math.ceil
@@ -126,9 +127,13 @@ internal fun readPGSOverlayManifestResponse(response: Response<ResponseBody>): P
 /** The authenticated manifest and PNG routes, decoded to `Bitmap`s. */
 internal class RetrofitPGSOverlaySource(
     private val api: () -> PlurxApi,
+    private val fileContext: PlaybackFileContext? = null,
 ) : PGSOverlaySource<Bitmap> {
-    override suspend fun manifest(fileId: Long, index: Long): PGSOverlayManifestFetch =
-        readPGSOverlayManifestResponse(api().pgsOverlayManifest(fileId, index))
+    override suspend fun manifest(fileId: Long, index: Long): PGSOverlayManifestFetch {
+        val context = fileContext ?: PlaybackFileContext.local(fileId)
+        context.localId(fileId)
+        return readPGSOverlayManifestResponse(api().pgsOverlayManifestForContext(context, index))
+    }
 
     override suspend fun image(
         fileId: Long,
@@ -137,7 +142,9 @@ internal class RetrofitPGSOverlaySource(
         hash: String,
         object_: PGSOverlayObject,
     ): Bitmap {
-        val response = api().pgsOverlayObject(fileId, index, generation, hash)
+        val context = fileContext ?: PlaybackFileContext.local(fileId)
+        context.localId(fileId)
+        val response = api().pgsOverlayObjectForContext(context, index, generation, hash)
         if (!response.isSuccessful) {
             val code = parseRefusal(response.code(), boundedErrorBody(response))?.code
             error(
@@ -198,6 +205,7 @@ internal fun AndroidPGSOverlayController(
     api: () -> PlurxApi,
     scope: CoroutineScope,
     fileId: Long,
+    fileContext: PlaybackFileContext = PlaybackFileContext.local(fileId),
     sourcePositionMs: () -> Long,
     isPlaying: () -> Boolean,
     playbackSpeed: () -> Float,
@@ -205,7 +213,7 @@ internal fun AndroidPGSOverlayController(
     onStatus: (PGSOverlayStatus) -> Unit,
     onFailure: (String) -> Unit,
 ): PGSOverlayController<Bitmap> = PGSOverlayController(
-    source = RetrofitPGSOverlaySource(api),
+    source = RetrofitPGSOverlaySource(api, fileContext),
     scope = scope,
     fileId = fileId,
     sourcePositionMs = sourcePositionMs,

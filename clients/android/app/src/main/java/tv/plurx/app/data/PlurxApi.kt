@@ -11,6 +11,7 @@ import retrofit2.http.Path
 import retrofit2.http.Query
 import retrofit2.http.QueryMap
 import retrofit2.http.Streaming
+import retrofit2.http.Url
 
 /**
  * plurx native API (`/api/v1`). Base URL is `<origin>/api/v1/`, so paths are
@@ -145,51 +146,48 @@ interface PlurxApi {
     @POST("items/{id}/unscrobble")
     suspend fun markUnwatched(@Path("id") id: Long): MutationResult
 
-    /** Mixed-fleet fallback for nodes that predate caps v2. */
-    @GET("files/{id}/decision")
-    suspend fun decision(
-        @Path("id") id: Long,
-        @QueryMap caps: Map<String, String>,
-    ): Decision
+    /** Legacy signatures retain precise Local IDs. Shared admission needs its own DTO adapter. */
+    suspend fun decision(id: Long, caps: Map<String, String>): Decision =
+        decisionForContext(PlaybackFileContext.local(id), caps)
+    suspend fun decisionV2(id: Long, request: Map<String, String>, body: DecisionCapsReq): Decision =
+        decisionV2ForContext(PlaybackFileContext.local(id), request, body)
+    suspend fun pgsOverlayManifest(id: Long, track: Long): Response<ResponseBody> =
+        pgsOverlayManifestForContext(PlaybackFileContext.local(id), track)
+    suspend fun pgsOverlayObject(id: Long, track: Long, generation: String, hash: String): Response<ResponseBody> =
+        pgsOverlayObjectForContext(PlaybackFileContext.local(id), track, generation, hash)
+    suspend fun createHlsSession(id: Long, body: CreateSessionReq): HlsStart =
+        createHlsSessionForContext(PlaybackFileContext.local(id), body)
 
-    /** The same decision with capabilities in one versioned document. */
-    @POST("files/{id}/decision")
-    suspend fun decisionV2(
-        @Path("id") id: Long,
-        @QueryMap request: Map<String, String>,
-        @Body body: DecisionCapsReq,
-    ): Decision
-
-    /**
-     * A cold PGS artifact answers 202 with a bounded retry hint; a warm one
-     * answers 200 with the versioned source-time manifest. The controller
-     * validates both the status payload and the complete manifest identity.
-     */
-    @GET("files/{id}/subs/{track}/overlay.json")
-    suspend fun pgsOverlayManifest(
-        @Path("id") id: Long,
-        @Path("track") track: Long,
-    ): Response<ResponseBody>
-
-    /**
-     * Immutable PNG object route. Generation and hash are validated before
-     * this method is called, so no server-provided path is interpolated here.
-     */
-    @GET("files/{id}/subs/{track}/overlay/{generation}/objects/{hash}.png")
-    suspend fun pgsOverlayObject(
-        @Path("id") id: Long,
-        @Path("track") track: Long,
-        @Path("generation") generation: String,
-        @Path("hash") hash: String,
-    ): Response<ResponseBody>
-
-    /**
-     * POST rather than the deprecated GET bridge: creating a session spawns a
-     * process and kills its predecessor, and anything entitled to replay a
-     * GET could spawn a second encoder.
-     */
-    @POST("files/{id}/hls/sessions")
-    suspend fun createHlsSession(@Path("id") id: Long, @Body body: CreateSessionReq): HlsStart
+    suspend fun decisionForContext(context: PlaybackFileContext, caps: Map<String, String>): Decision {
+        context.localId() // Never decode a Shared answer into the Local numeric-ID model.
+        return decisionPath(context.apiPath("decision"), caps)
+    }
+    suspend fun decisionV2ForContext(context: PlaybackFileContext, request: Map<String, String>, body: DecisionCapsReq): Decision {
+        context.localId()
+        return decisionV2Path(context.apiPath("decision"), request, body)
+    }
+    suspend fun pgsOverlayManifestForContext(context: PlaybackFileContext, track: Long): Response<ResponseBody> {
+        context.localId()
+        return pgsOverlayManifestPath(context.apiPath("subs/$track/overlay.json"))
+    }
+    suspend fun pgsOverlayObjectForContext(context: PlaybackFileContext, track: Long, generation: String, hash: String): Response<ResponseBody> {
+        context.localId()
+        return pgsOverlayObjectPath(context.apiPath("subs/$track/overlay/$generation/objects/$hash.png"))
+    }
+    suspend fun createHlsSessionForContext(context: PlaybackFileContext, body: CreateSessionReq): HlsStart {
+        context.localId()
+        return createHlsSessionPath(context.apiPath("hls/sessions"), body)
+    }
+    @GET
+    suspend fun decisionPath(@Url path: String, @QueryMap caps: Map<String, String>): Decision
+    @POST
+    suspend fun decisionV2Path(@Url path: String, @QueryMap request: Map<String, String>, @Body body: DecisionCapsReq): Decision
+    @GET
+    suspend fun pgsOverlayManifestPath(@Url path: String): Response<ResponseBody>
+    @GET
+    suspend fun pgsOverlayObjectPath(@Url path: String): Response<ResponseBody>
+    @POST
+    suspend fun createHlsSessionPath(@Url path: String, @Body body: CreateSessionReq): HlsStart
 
     @GET("hls/{session}/status")
     suspend fun hlsSessionStatus(@Path("session") session: String): PlaybackSessionStatus

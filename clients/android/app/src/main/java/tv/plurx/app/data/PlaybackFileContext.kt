@@ -8,6 +8,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import tv.plurx.app.BuildConfig
 import java.util.UUID
+import java.net.URI
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 
 @Serializable
 data class SharedPlaybackReference(
@@ -31,6 +35,12 @@ class PlaybackFileContext private constructor(
         reference.library_id, reference.item_id, sourceFileId, revision, fileBase,
     ).joinToString("|")
 
+    fun localId(expected: Long? = null): Long {
+        require(reference == null)
+        val id = requireNotNull(sourceFileId.toLongOrNull())
+        require(id.toString() == sourceFileId && (expected == null || expected == id))
+        return id
+    }
     private fun requireCurrent() {
         if (reference != null) {
             val bound = requireNotNull(authorization)
@@ -42,16 +52,70 @@ class PlaybackFileContext private constructor(
         require(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}").matches(id))
         return PlaybackFileContext(reference, sourceFileId, revision, fileBase, id, authorization)
     }
-    fun path(resource: String): String {
+    fun path(resource: String, query: Map<String, String> = emptyMap()): String {
         requireCurrent()
         require(Regex("(decision|hls/sessions|direct|stream\\.mp4|subs/[0-9]{1,6}(\\.vtt|/overlay\\.json|/overlay/[0-9a-f]{64}/objects/[0-9a-f]{64}\\.png)?|chapters/[0-9]{1,6}/thumb)").matches(resource))
         if (reference != null && resource in setOf("direct", "stream.mp4")) require(sessionId != null)
-        val session = if (sessionId != null && resource !in setOf("decision", "hls/sessions")) "?session=$sessionId" else ""
-        return "$fileBase/$resource$session"
+        if (reference != null) validateQuery(resource, query)
+        val parameters = query.toMutableMap()
+        if (sessionId != null && resource !in setOf("decision", "hls/sessions")) parameters["session"] = sessionId
+        val encoded = parameters.entries.joinToString("&") { (key, value) -> "${encode(key)}=${encode(value)}" }
+        return "$fileBase/$resource" + if (encoded.isEmpty()) "" else "?$encoded"
     }
-    fun apiPath(resource: String): String = path(resource).removePrefix("/api/v1/")
+    fun apiPath(resource: String, query: Map<String, String> = emptyMap()): String = path(resource, query).removePrefix("/api/v1/")
+    fun translatedDeliveryPath(value: String): String {
+        if (reference == null) return value
+        requireCurrent()
+        val uri = URI(value)
+        require(uri.scheme == null && uri.rawAuthority == null && uri.rawFragment == null)
+        require(uri.rawPath in setOf("$fileBase/direct", "$fileBase/stream.mp4"))
+        val query = linkedMapOf<String, String>()
+        uri.rawQuery?.split('&')?.forEach { pair ->
+            val parts = pair.split('=', limit = 2); require(parts.size == 2)
+            val key = URLDecoder.decode(parts[0], StandardCharsets.UTF_8.toString())
+            val text = URLDecoder.decode(parts[1], StandardCharsets.UTF_8.toString())
+            require(key !in query); query[key] = text
+        }
+        if ("session" in query) require(sessionId != null && query.remove("session") == sessionId)
+        return path(uri.rawPath.removePrefix("$fileBase/"), query)
+    }
 
     companion object {
+        private fun encode(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8.toString()).replace("+", "%20")
+        private fun validateQuery(resource: String, query: Map<String, String>) {
+            val capabilities = setOf("client", "device", "profile", "vcodec", "vmaxheight", "acodec", "container", "maxheight", "hdr", "dv", "dvprofile", "dvhls", "hdr10t")
+            val allowed = when {
+                resource == "decision" -> capabilities + setOf("force", "audio", "subtitle", "audio_offset_ms", "achannels", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus")
+                resource == "stream.mp4" -> capabilities + setOf("force", "audio", "audio_offset_ms", "start", "stream")
+                resource.startsWith("chapters/") -> setOf("v")
+                else -> emptySet()
+            }
+            fun integer(text: String, low: Long, high: Long): Boolean = text.toLongOrNull()?.let { it.toString() == text && it in low..high } == true
+            fun match(text: String, pattern: String): Boolean = Regex(pattern).matches(text)
+            for ((key, text) in query) {
+                require(key in allowed)
+                val valid = when (key) {
+                    "hdr", "dv", "dvhls", "hdr10t" -> text in setOf("0", "1")
+                    "vcodec", "acodec", "container" -> text.length <= 256 && (text.isEmpty() || text.split(',').all { match(it, "[A-Za-z0-9_-]{1,32}") })
+                    "dvprofile" -> text.length <= 64 && (text.isEmpty() || text.split(',').all { integer(it, 0, 255) })
+                    "vmaxheight" -> text.length <= 256 && (text.isEmpty() || text.split(',').all {
+                        val parts = it.split(':'); parts.size == 2 && match(parts[0], "[A-Za-z0-9_-]{1,32}") && integer(parts[1], 1, 65535)
+                    })
+                    "client", "profile" -> match(text, "[A-Za-z0-9_.-]{1,64}")
+                    "device", "capver", "hdrtypes", "dvdecoders", "dvraw", "dvstatus" -> text.length <= 256 && text.none { it.code < 32 || it.code == 127 }
+                    "achannels" -> integer(text, 1, 16)
+                    "force" -> text in setOf("auto", "original", "transcode")
+                    "stream" -> match(text, "[A-Za-z0-9_-]{1,200}")
+                    "start" -> match(text, "(0|[1-9][0-9]{0,12})(\\.[0-9]{1,3})?")
+                    "v" -> match(text, "-?(0|[1-9][0-9]{0,19})")
+                    "subtitle" -> integer(text, -1, 999999)
+                    "audio_offset_ms" -> integer(text, -15000, 15000)
+                    "maxheight" -> integer(text, 0, 65535)
+                    else -> integer(text, 0, 999999)
+                }
+                require(valid)
+            }
+        }
         fun canonicalId(value: String): Boolean = value.toLongOrNull()?.let { it >= 0 && it.toString() == value } == true
         fun canonicalUuid(value: String): Boolean = runCatching { UUID.fromString(value).toString() == value }.getOrDefault(false)
         fun local(id: Long): PlaybackFileContext = local(id.toString())
