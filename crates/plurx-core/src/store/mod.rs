@@ -29,6 +29,8 @@ pub mod sharing_file_locators;
 pub mod sharing_purpose_keys;
 pub use sharing_file_locators::SharingFileLocatorStore;
 pub use sharing_purpose_keys::SharingPurposeKeyStore;
+#[cfg(feature = "hiqlite-store")]
+pub(crate) mod sharing_source_schema;
 pub mod sharing_source_sessions;
 pub use sharing_source_sessions::SharingSourceSessionStore;
 pub mod classification;
@@ -947,8 +949,8 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
-    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_BASELINE_VERSION,
+    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 pub use self::hiqlite::{

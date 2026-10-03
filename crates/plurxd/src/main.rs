@@ -1722,7 +1722,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
     // one of them first.
     let shutdown = ShutdownWatch::observing(shutdown_signal());
 
-    let selected = select_daemon_store(&config)
+    let mut selected = select_daemon_store(&config)
         .await
         .with_context(|| format!("selecting store in {}", config.storage.data_dir.display()))?;
     // Which backend is serving is not otherwise observable. A recovery boot
@@ -1749,6 +1749,12 @@ async fn run(config: Config) -> anyhow::Result<()> {
         if shutdown.is_signalled() {
             tracing::info!("shutdown signal received during store activation; not serving");
             return Ok(());
+        }
+        let source_layout_ready = Box::pin(selected.prepare_source_schema_before_serving())
+            .await
+            .context("qualifying Source schema before serving")?;
+        if !source_layout_ready {
+            tracing::info!(target:"plurx::sharing","Source schema readiness pending; Local serving continues");
         }
         let store = Arc::clone(&selected.store);
         let replication = selected.replication_monitor();
