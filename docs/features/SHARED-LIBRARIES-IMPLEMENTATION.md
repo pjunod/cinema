@@ -3398,9 +3398,19 @@ Pinned Rust 1.97.1 all-target checking and denied-warning Clippy passed on the
 adapter. Five complete decision/start/PGS projection tests and the dedicated
 JSON allocation-budget regression passed with zero ignored tests. The peer
 client regression also passed ten envelope/reference/redirect/body-bound
-cases (one test, zero ignored). The new
-pinned Source/B H1/H2 decision fixture is opt-in and remains unqualified until
-its committed source archive runs in the disposable CGNAT container. Source
+cases (one test, zero ignored). The opt-in pinned Source/B H1/H2 decision
+fixture passed on committed adapter `5fd1b3af16f228829c8d6da8683149517fa813be`,
+from source-only archive SHA-256
+`1585de991b511d1bf954743011211d73642b9a5de739b675c14e51f81f10735e`.
+Pinned Linux compilation passed in 3m47s and the exact regression passed
+(one test, zero ignored, 2.06 seconds): complete engine projection, forged
+locator, changed Source revision, removed viewer assignment and revoked B
+login, over both H1 and H2. Both session tables remained empty. The daemon's
+normal features already include `hiqlite-store`; a daemon-only test profile
+with 256 code-generation units and one build job kept this qualification
+within the isolated compiler's memory allowance. Earlier attempts with
+unneeded contract-helper exports were killed before tests and supply no pass.
+Actual Tailscale, two-NAT and physical media evidence remains open. Source
 starts, receiver sessions, media relay and progress remain separate open work.
 
 ### S7 native artwork integration — physical device evidence remains open
@@ -3508,3 +3518,50 @@ fixture master and heartbeat-coupled fingerprint. These tests do not claim
 physical producer or public network qualification.
 Feature-enabled all-target Clippy with denied warnings also passed (1 minute
 27 seconds), and the documentation index suite passed all four tests.
+
+### S5 B remote activation checkpoint — delivery remains closed
+
+The receiver now has a distinct `remote_source` recipe with complete import,
+Source server/epoch/library/item/file/revision, lifecycle, canonical bounded
+playback request, and a persisted Source request UUID equal to its B incarnation.
+Its request fingerprint includes the complete remote intent and excludes only
+that planned UUID, so an exact request can recover its already-persisted UUID.
+No B media file, decoder or encoder is created by this storage path.
+
+A Store-produced receiver authority captures the current B login, expiry policy,
+user and effective import/library assignment. Its nonserializable handle lasts
+at most five seconds; the committing transaction repeats the login, switch,
+policy and complete scope checks. The existing ordinary Local activation refuses
+`remote_source` recipes. The dedicated receiver activation commits the blocked
+ordinary B session, pointer, lease and exact pending upstream binding atomically.
+Lost authority aborts every activation write. Exact replay checks the stored
+binding; a missing or mismatched binding refuses without repair.
+
+Ordinary retention sweeps keep unresolved upstream bindings, their session and
+request records, and associated lease metadata. Request expiry cannot reacquire
+that incarnation while the binding remains. This records uncertainty; it does
+not prove Source shutdown, renew an expired serving lease, or authorize a new
+Source allocation. Explicit proof-bearing retirement is still required before
+those bindings can be removed by the delivery owner.
+
+The focused SQLite regression passed across in-memory and pooled storage, both
+original and rebuilt principal layouts, and forty current-authority/identity
+cases (one Rust test, zero ignored, 14.17s). The actual three-voter regression
+passed with zero ignored (9.32s), covering atomic admission, replay, revoked
+login/assignment, changed policy/Source epoch, expired unresolved retention,
+refused replacement, and missing-binding refusal. The low-level fixture's
+synthetic request is never dispatched to a Source worker. Pinned Rust 1.97.1
+feature-enabled affected all-target Clippy passed with denied warnings (1m23s).
+The Source unit filter passed seventeen tests, zero ignored (28.32s).
+
+This is the receiver storage/admission checkpoint. The Source-owned live start,
+B ownership/renewal/retirement actor, authenticated stream relay, delivery grants,
+ordered session-bound progress, and client playback remain open. No public
+Shared start is enabled by this checkpoint.
+
+On the same receiver checkpoint, the corrected `purpose` test census passed
+fourteen tests, zero ignored (15.46s); it includes the process-priority purpose
+regression as well as the thirteen sharing/key cases. The registered Local
+rebuilt-principal activation regression passed (0.94s), and the existing actual
+three-voter Source reservation and purpose factory contracts passed with zero
+ignored (11.56s and 9.78s). All four documentation-index tests passed.
