@@ -3819,3 +3819,51 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store
 cargo check --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests
 cargo clippy --locked -p plurx-core -p plurxd --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
 ```
+
+### S5 retained receiver binding reader and Local worker separation
+
+`receiver_source_binding` reads the original retained sealed upstream envelope
+and optional resolved projected response through the current original-login,
+import/library, exact B owner/session/request/pointer and live lease proof. It
+uses one bounded consistent query, limits UUIDs to their canonical 36-byte
+form, envelopes to four KiB and canonical response objects to sixty-four KiB
+before returning private data. An unbound blocked owner returns no binding;
+partial, malformed or oversized binding material refuses without repair. The
+reader neither opens the upstream capability nor establishes Source physical
+authority. The actor must authenticate the retained envelope with its exact
+Upstream AAD and obtain fresh Source evidence before using it.
+
+Both backend `owned_media_sessions` implementations now enumerate only genuine
+Local sessions for the generic Local lease loop. Shared Source principals and
+B `remote_source` recipes belong to their dedicated actors and cannot enter
+Local renewal or stale-recipe settlement. Staged, expired and cleanup ownership
+inventories remain separate; this exclusion is not proof that no actor owns a
+resource. Regression fixtures retain genuine Local visibility, exclude both
+actor classes, and keep Shared expired ownership visible.
+
+Pinned Rust 1.97.1 receiver reader regressions passed three tests with zero
+ignored (19.19 seconds) across both SQLite storage modes and both principal
+layouts. The reader recovers the retained envelope/reply and refuses changed
+assignment, owner and file tuples or malformed/oversized binding material.
+The actual three-voter receiver contract passed (9.56 seconds). The SQLite
+actor inventory regression passed in both memory and pooled storage
+(0.71 seconds), and the actual three-voter Local/Source/B inventory regression
+passed for both principal layouts (17.94 seconds). Affected Core/daemon
+feature-enabled all-target compilation passed in 1 minute 9 seconds; the
+docs index passed four tests and the catalog passed 2702 audited files.
+
+```sh
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_receiver -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib sharing_staged_and_worker_inventory_preserve_distinct_owners -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresolved_retention -- --nocapture
+cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_rebuilt_local_request_writes_preserve_owner_and_refuse_cross_principal_replay -- --nocapture
+```
+
+The existing Local activation/publication contract through `dyn Store` also
+passed (11.52 seconds), and affected feature-enabled Clippy with denied
+warnings passed in 1 minute 28 seconds. The final reader test additionally
+revokes the original login while another valid login remains: that alternate
+login cannot authorize recovery of the retained binding.
+
+Final original-login refusal coverage passed in the same three-test reader
+filter (19.19 seconds), followed by exact-tree affected compilation and Clippy.

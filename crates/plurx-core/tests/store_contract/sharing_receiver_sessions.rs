@@ -381,6 +381,11 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                 .await
                 .expect("current binding proof")
                 .expect("original login");
+            assert!(store
+                .receiver_source_binding(&fresh, &attachment.owner)
+                .await
+                .expect("unbound reader")
+                .is_none());
             let census="SELECT json_array((SELECT json_group_array(json_array(owner_node_id,owner_epoch,publication_ready_at_ms,lease_expires_at_ms,response_json,updated_at_ms)) FROM media_sessions),(SELECT json_group_array(json_array(state,claim_expires_at_ms,response_json,updated_at_ms)) FROM media_session_requests),(SELECT json_group_array(json_array(owner_node_id,fence,revision,expires_at_ms,updated_at_ms)) FROM job_leases),(SELECT json_group_array(json_array(source_session_id,source_incarnation_id,capability_envelope)) FROM sharing_relay_upstream)) AS value";
             let read = || client.query_consistent_map::<SchemaText, _>(census, hiqlite::params!());
             for (change, restore) in [
@@ -480,6 +485,47 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                     .expect("actual attached commit"),
                 ReceiverSourceWrite::Applied
             );
+            let snapshot = store
+                .receiver_source_binding(&fresh, &attachment.owner)
+                .await
+                .expect("actual reader")
+                .expect("retained binding");
+            assert_eq!(
+                snapshot.binding.source_incarnation_id,
+                attachment.binding.source_incarnation_id
+            );
+            assert_eq!(
+                snapshot
+                    .binding
+                    .capability_envelope
+                    .to_persist()
+                    .expect("envelope"),
+                attachment
+                    .binding
+                    .capability_envelope
+                    .to_persist()
+                    .expect("envelope")
+            );
+            assert!(snapshot.response_json.is_none());
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=0",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("reader scope loss");
+            assert!(store
+                .receiver_source_binding(&fresh, &attachment.owner)
+                .await
+                .expect("scope refusal")
+                .is_none());
+            client
+                .execute(
+                    "UPDATE sharing_assignments SET enabled=1",
+                    hiqlite::params!(),
+                )
+                .await
+                .expect("restore scope");
             let before = read()
                 .await
                 .expect("attached census")
@@ -579,6 +625,20 @@ async fn sharing_receiver_three_voters_atomic_admission_replay_scope_and_unresol
                     .expect("actual publication"),
                 ReceiverSourceWrite::Applied
             );
+            let snapshot = store
+                .receiver_source_binding(&fresh, &attachment.owner)
+                .await
+                .expect("published reader")
+                .expect("retained publication");
+            assert_eq!(
+                snapshot.response_json.as_deref(),
+                Some(publication.response_json.as_str())
+            );
+            assert!(store
+                .owned_media_sessions(&attachment.owner.owner_node_id, attachment.owner.now_ms)
+                .await
+                .expect("Local inventory excludes B")
+                .is_empty());
             let before = read()
                 .await
                 .expect("published census")

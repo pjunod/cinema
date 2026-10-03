@@ -10,7 +10,8 @@ use crate::{
     sharing::{invalid, is_hash},
     sharing_receiver_sessions::{
         ReceiverSessionIntent, ReceiverSessionWriteAuthority, ReceiverSourceAttachment,
-        ReceiverSourcePublication, ReceiverSourceRenewal, ReceiverSourceWrite,
+        ReceiverSourceBinding, ReceiverSourceOwner, ReceiverSourcePublication,
+        ReceiverSourceRenewal, ReceiverSourceSnapshot, ReceiverSourceWrite,
     },
 };
 use async_trait::async_trait;
@@ -50,6 +51,12 @@ pub trait SharingReceiverSessionStore: Send + Sync {
         authority: &ReceiverSessionWriteAuthority,
         renewal: &crate::sharing_receiver_sessions::ReceiverPendingRenewal,
     ) -> Result<bool, StoreError>;
+    /// Fresh B-only snapshot; no cleanup, key repair or Source authority.
+    async fn receiver_source_binding(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        owner: &ReceiverSourceOwner,
+    ) -> Result<Option<ReceiverSourceSnapshot>, StoreError>;
     async fn attach_receiver_source(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -68,6 +75,14 @@ pub trait SharingReceiverSessionStore: Send + Sync {
 }
 #[async_trait]
 impl<T: Backend> SharingReceiverSessionStore for T {
+    async fn receiver_source_binding(
+        &self,
+        authority: &ReceiverSessionWriteAuthority,
+        owner: &ReceiverSourceOwner,
+    ) -> Result<Option<ReceiverSourceSnapshot>, StoreError> {
+        read_source(self, authority, owner).await
+    }
+
     async fn attach_receiver_source(
         &self,
         authority: &ReceiverSessionWriteAuthority,
@@ -259,29 +274,13 @@ async fn renew_pending<T: Backend>(
 // Every Source-bound writer repeats the actual B login/policy/import predicate
 // and exact route/request/lease lineage in its transaction. A Source result is
 // caller actor evidence; these guards authorize only B metadata.
-fn source_values(
+
+fn source_owner_values(
     authority: &ReceiverSessionWriteAuthority,
-    attachment: &ReceiverSourceAttachment,
+    owner: &ReceiverSourceOwner,
 ) -> Result<Option<Vec<Value>>, StoreError> {
     let actual = now_ms()?;
-    let owner = &attachment.owner;
-    let binding = &attachment.binding;
     let recipe = &authority.intent.recipe;
-    if binding.capability_envelope.as_stored().len() > 4096 {
-        return Err(invalid());
-    }
-    let envelope = binding
-        .capability_envelope
-        .to_persist()
-        .map_err(|_| invalid())?;
-    // The v1 XChaCha envelope must contain its 24-byte nonce and 16-byte tag.
-    if envelope
-        .rsplit(':')
-        .next()
-        .is_none_or(|body| body.len() < 80)
-    {
-        return Err(invalid());
-    }
     if owner.incarnation_id != recipe.source_request_id
         || owner.session_id.is_nil()
         || !(1..=256).contains(&owner.owner_node_id.len())
@@ -298,12 +297,6 @@ fn source_values(
         || authority
             .login_expires_at_s
             .is_some_and(|deadline| actual / 1000 >= deadline)
-        || binding.reference != recipe.reference
-        || binding.file_id != recipe.file_id
-        || binding.file_revision != recipe.file_revision
-        || binding.source_request_id != recipe.source_request_id
-        || binding.source_session_id.is_nil()
-        || binding.source_incarnation_id.is_nil()
     {
         return Ok(None);
     }
@@ -318,13 +311,131 @@ fn source_values(
         recipe.request_fingerprint()?.into(),
         owner.lease_expires_at_ms.into(),
         actual.into(),
+    ]);
+    Ok(Some(values))
+}
+fn source_envelope(envelope: &crate::secrets::SealedSecret) -> Result<&str, StoreError> {
+    if envelope.as_stored().len() > 4096 {
+        return Err(invalid());
+    }
+    let value = envelope.to_persist().map_err(|_| invalid())?;
+    // v1 XChaCha nonce (24 bytes) plus authentication tag (16 bytes).
+    if value.rsplit(':').next().is_none_or(|body| body.len() < 80) {
+        return Err(invalid());
+    }
+    Ok(value)
+}
+fn source_values(
+    authority: &ReceiverSessionWriteAuthority,
+    attachment: &ReceiverSourceAttachment,
+) -> Result<Option<Vec<Value>>, StoreError> {
+    let binding = &attachment.binding;
+    let recipe = &authority.intent.recipe;
+    let envelope = source_envelope(&binding.capability_envelope)?;
+    if binding.reference != recipe.reference
+        || binding.file_id != recipe.file_id
+        || binding.file_revision != recipe.file_revision
+        || binding.source_request_id != recipe.source_request_id
+        || binding.source_session_id.is_nil()
+        || binding.source_incarnation_id.is_nil()
+    {
+        return Ok(None);
+    }
+    let Some(mut values) = source_owner_values(authority, &attachment.owner)? else {
+        return Ok(None);
+    };
+    values.extend([
         binding.source_session_id.into(),
         binding.source_incarnation_id.into(),
         envelope.to_owned().into(),
         authority.intent.source_position_ms.into(),
-        crate::cluster::coordination::removed_job_owner_key(&owner.owner_node_id).into(),
+        crate::cluster::coordination::removed_job_owner_key(&attachment.owner.owner_node_id).into(),
     ]);
     Ok(Some(values))
+}
+async fn read_source<T: Backend>(
+    store: &T,
+    authority: &ReceiverSessionWriteAuthority,
+    owner: &ReceiverSourceOwner,
+) -> Result<Option<ReceiverSourceSnapshot>, StoreError> {
+    let Some(mut values) = source_owner_values(authority, owner)? else {
+        return Ok(None);
+    };
+    values.extend([
+        authority.intent.source_position_ms.into(),
+        crate::cluster::coordination::removed_job_owner_key(&owner.owner_node_id).into(),
+    ]);
+    // Unknown Source UUIDs come from the guarded row, never synthesized ids.
+    let current = source_current("1=1", &format!("({BLOCKED}) OR ({PUBLISHED})"))
+        .replace("$18", "$15")
+        .replace("$19", "$16");
+    let sql=format!("SELECT json_object('all_null',upstream.source_session_id IS NULL AND upstream.source_incarnation_id IS NULL AND upstream.capability_envelope IS NULL,'source_session_id',CASE WHEN typeof(upstream.source_session_id)='text' AND length(CAST(upstream.source_session_id AS BLOB))<=36 THEN upstream.source_session_id ELSE NULL END,'source_incarnation_id',CASE WHEN typeof(upstream.source_incarnation_id)='text' AND length(CAST(upstream.source_incarnation_id AS BLOB))<=36 THEN upstream.source_incarnation_id ELSE NULL END,'envelope',CASE WHEN typeof(upstream.capability_envelope)='text' AND length(CAST(upstream.capability_envelope AS BLOB))<=4096 THEN upstream.capability_envelope ELSE NULL END,'publication',route.publication_ready_at_ms,'response',CASE WHEN route.publication_ready_at_ms=0 AND typeof(route.response_json)='text' AND length(CAST(route.response_json AS BLOB))<=65536 THEN route.response_json ELSE NULL END) AS payload FROM sharing_relay_upstream upstream JOIN media_sessions route ON route.incarnation_id=upstream.incarnation_id WHERE upstream.incarnation_id=$6 AND ({current}) LIMIT 2");
+    let rows = store.sharing_read(&sql, values).await?;
+    let [row] = rows.as_slice() else {
+        return if rows.is_empty() {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    };
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Row {
+        all_null: i64,
+        source_session_id: Option<String>,
+        source_incarnation_id: Option<String>,
+        envelope: Option<String>,
+        publication: i64,
+        response: Option<String>,
+    }
+    let row: Row = serde_json::from_str(row).map_err(|_| invalid())?;
+    if row.all_null == 1 {
+        return if row.publication == MEDIA_SESSION_PUBLICATION_BLOCKED {
+            Ok(None)
+        } else {
+            Err(invalid())
+        };
+    }
+    if row.all_null != 0 {
+        return Err(invalid());
+    }
+    let uuid = |value: Option<String>| -> Result<uuid::Uuid, StoreError> {
+        let value = value.ok_or_else(invalid)?;
+        let parsed = uuid::Uuid::parse_str(&value).map_err(|_| invalid())?;
+        if parsed.is_nil() || parsed.to_string() != value {
+            return Err(invalid());
+        }
+        Ok(parsed)
+    };
+    let session = uuid(row.source_session_id)?;
+    let incarnation = uuid(row.source_incarnation_id)?;
+    let envelope = crate::secrets::SealedSecret::from_stored(row.envelope.ok_or_else(invalid)?);
+    source_envelope(&envelope)?;
+    let response = match row.publication {
+        MEDIA_SESSION_PUBLICATION_BLOCKED if row.response.is_none() => None,
+        0 => {
+            let text = row.response.ok_or_else(invalid)?;
+            let value: serde_json::Value = serde_json::from_str(&text).map_err(|_| invalid())?;
+            if !value.is_object() || serde_json::to_string(&value).map_err(|_| invalid())? != text {
+                return Err(invalid());
+            }
+            Some(text)
+        }
+        _ => return Err(invalid()),
+    };
+    let recipe = &authority.intent.recipe;
+    Ok(Some(ReceiverSourceSnapshot {
+        binding: ReceiverSourceBinding {
+            reference: recipe.reference.clone(),
+            file_id: recipe.file_id.clone(),
+            file_revision: recipe.file_revision.clone(),
+            source_request_id: recipe.source_request_id,
+            source_session_id: session,
+            source_incarnation_id: incarnation,
+            capability_envelope: envelope,
+        },
+        response_json: response,
+    }))
 }
 
 const ATTACHED: &str =
@@ -1287,6 +1398,119 @@ mod tests {
                         .expect("attach"),
                     ReceiverSourceWrite::Applied
                 );
+                let saved = attachment
+                    .binding
+                    .capability_envelope
+                    .to_persist()
+                    .expect("envelope")
+                    .to_owned();
+                for bad in ["malformed".to_owned(), "x".repeat(4097)] {
+                    store
+                        .sharing_txn(vec![(
+                            "UPDATE sharing_relay_upstream SET capability_envelope=$1".into(),
+                            vec![Value::Text(bad)],
+                        )])
+                        .await
+                        .expect("reader envelope bound fixture");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .is_err());
+                }
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_relay_upstream SET capability_envelope=$1".into(),
+                        vec![Value::Text(saved)],
+                    )])
+                    .await
+                    .expect("restore envelope");
+                let snapshot = store
+                    .receiver_source_binding(&authority, &attachment.owner)
+                    .await
+                    .expect("authorized reader")
+                    .expect("retained binding");
+                assert_eq!(
+                    snapshot.binding.source_session_id,
+                    attachment.binding.source_session_id
+                );
+                assert_eq!(
+                    snapshot
+                        .binding
+                        .capability_envelope
+                        .to_persist()
+                        .expect("envelope"),
+                    attachment
+                        .binding
+                        .capability_envelope
+                        .to_persist()
+                        .expect("envelope")
+                );
+                assert!(snapshot.response_json.is_none());
+                for (change, restore) in [
+                    (
+                        "UPDATE tokens SET token_hash='reader-revoked' WHERE token_hash='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'",
+                        "UPDATE tokens SET token_hash='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' WHERE token_hash='reader-revoked'",
+                    ),
+                    (
+                        "UPDATE sharing_assignments SET enabled=0",
+                        "UPDATE sharing_assignments SET enabled=1",
+                    ),
+                    (
+                        "UPDATE media_sessions SET owner_epoch=owner_epoch+1",
+                        "UPDATE media_sessions SET owner_epoch=owner_epoch-1",
+                    ),
+                    (
+                        "UPDATE sharing_relay_upstream SET remote_file_id='1'",
+                        "UPDATE sharing_relay_upstream SET remote_file_id='0'",
+                    ),
+                ] {
+                    store
+                        .sharing_txn(vec![(change.into(), vec![])])
+                        .await
+                        .expect("reader scope race");
+                    let before = store
+                        .sharing_read(census, vec![])
+                        .await
+                        .expect("before read");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .expect("current refusal")
+                        .is_none());
+                    assert_eq!(
+                        store
+                            .sharing_read(census, vec![])
+                            .await
+                            .expect("unchanged read"),
+                        before
+                    );
+                    store
+                        .sharing_txn(vec![(restore.into(), vec![])])
+                        .await
+                        .expect("restore reader fixture");
+                }
+                for bad in ["", "00000000-0000-0000-0000-000000000000", "malformed"] {
+                    store
+                        .sharing_txn(vec![(
+                            "UPDATE sharing_relay_upstream SET source_session_id=$1".into(),
+                            vec![Value::Text(bad.into())],
+                        )])
+                        .await
+                        .expect("corrupt binding fixture");
+                    assert!(store
+                        .receiver_source_binding(&authority, &attachment.owner)
+                        .await
+                        .is_err());
+                }
+                store
+                    .sharing_txn(vec![(
+                        "UPDATE sharing_relay_upstream SET source_session_id=$1".into(),
+                        vec![Value::Text(
+                            attachment.binding.source_session_id.to_string(),
+                        )],
+                    )])
+                    .await
+                    .expect("restore binding");
                 let before = store
                     .sharing_read(census, vec![])
                     .await
@@ -1382,6 +1606,26 @@ mod tests {
                         .await
                         .expect("publish"),
                     ReceiverSourceWrite::Applied
+                );
+                let snapshot = store
+                    .receiver_source_binding(&authority, &attachment.owner)
+                    .await
+                    .expect("published reader")
+                    .expect("published binding");
+                assert_eq!(
+                    snapshot.response_json.as_deref(),
+                    Some(publication.response_json.as_str())
+                );
+                assert!(
+                    store
+                        .owned_media_sessions(
+                            &attachment.owner.owner_node_id,
+                            attachment.owner.now_ms
+                        )
+                        .await
+                        .expect("Local worker inventory")
+                        .is_empty(),
+                    "B actor must not enter the Local worker loop"
                 );
                 let before = store
                     .sharing_read(census, vec![])
