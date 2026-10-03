@@ -1208,3 +1208,76 @@ unresolved generation-one associations must remain retained and unavailable;
 neither an absent registry nor lease expiry proves that old producers and
 writers have stopped. Crash recovery needs its own qualified shutdown receipt
 or Source process-lifetime guarantee before the feature can be complete.
+
+
+## Deferred Source media preparation and physical copy admission
+
+VOD creation now shares one rendition preparation helper and one final viewer
+attachment transaction. The Local wrapper retains its existing authority
+refusal and attachment semantics. The private `PreparedSourceVodRendition`
+accepts only opaque prepared Source input matching the complete immutable
+assignment; it creates no viewer demand. Its Source cache key includes Source,
+epoch, library, item, file, current revision and the actual recipe key. Local
+and anonymous cache keys remain unchanged. The actor's physical admission,
+fresh blocked activation and attachment handoff remain the next step.
+
+Source preparation bypasses the Local cluster-index repair adapter, whose
+missing-artifact branch can enqueue work even with no viewer. It uses an
+already-present matching local index or refuses. Source HEVC/index prerequisites
+also do not enqueue Local or anonymous preparation. A Source cache with
+materialized output but missing init refuses head regeneration before a child
+launch. Proof-bearing Source burn/artifact work remains open; it cannot inherit
+the ordinary Local extraction path.
+
+Source build uses `open_source_playback_fence`: no-follow directory traversal
+and final open, regular-file checking, and unconditional comparison of actual
+size/mtime with scanner facts. Source spawn checks the held descriptor's
+identity and reopens under the same strict policy. The ordinary Local file
+opening policy is unchanged. Opaque database preparation is a planning witness,
+not evidence of a filesystem identity or a physically running producer.
+
+Source copy reserves four CPU threads under the existing resource governor.
+The command explicitly bounds each input codec, output audio encoder and both
+filter thread settings to one. Four is a conservative pipeline estimate,
+not an OS CPU quota or a profiling claim. A saved software budget below four
+refuses Source copy; Local copy remains unchanged. The real permit transfers
+with the actual child/job into registered lifetime ownership and survives
+process-wait failure and writer settlement until confirmed reap. Physical CPU
+profiling remains an S8 qualification item.
+
+Focused native tests with pinned Rust 1.97.1 passed with zero ignored tests:
+fresh encoded preparation without visible demand or generation child (2.08
+seconds), actual size/mtime/symlink and pre-spawn drift refusals (1.92 seconds),
+actual produced-cache missing-init refusal after process/writer settlement
+(2.09 seconds), and real bounded copy command/admission/registered reap (1.98
+seconds). The copy fixture refuses budget three, admits four, denies another
+allocation while held, produces real MP4 media, and retains the permit after
+output/diagnostic join until successful process wait. The Local cached-read
+admission regression passed in 1.90 seconds and ordinary Shared demand remains
+refused before queue/session allocation. These process fixtures use explicit
+Source physical namespaces; they do not mint a Shared viewer or qualify the
+pending actor handoff.
+
+```sh
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_deferred_rendition_preparation_creates_no_visible_demand_or_child -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_physical_build_and_spawn_refuse_identity_drift_and_symlinks -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_missing_cached_init_refuses_before_head_regeneration -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_copy_actual_cpu_admission_and_bounded_argv_retain_until_reap -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_after_reap -- --nocapture
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd shared_vod_demand_refuses_before_pool_queue_or_session_allocation
+```
+
+Initial cached readiness must retain exact registered producer/confirmed
+receipt lineage, immutable cache identity and current complete file/floor
+proof. Untracked cold or restarted Source caches remain unavailable until
+separate qualification. Neither cache files nor row/registry absence prove
+physical settlement. Assigned obligations remain held on abrupt restart.
+
+On the combined `75882facb` purpose-aware coordinator base, all six owned
+Source physical/deferred tests passed in 6.23 seconds, Local cached admission
+in 1.83 seconds, and the ordinary Shared no-allocation refusal in 0.15 seconds,
+each with zero ignored tests. Daemon feature all-target check passed in 1 minute
+5 seconds and denied-warning feature Clippy in 1 minute 19 seconds. Catalogue
+lint and all four documentation-index tests passed. This receipt covers the
+physical prerequisites above; Source actor attachment, publication and durable
+post-reap settlement remain unqualified by these fixtures.
