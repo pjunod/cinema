@@ -1464,7 +1464,7 @@ implied by the build handoff.
 | S1 | merged into effort | [PR #746](http://192.168.4.7:3000/noirr/plurx/pulls/746), `aaafc1a0f5` | SQLite v92 / Hiqlite v70; purpose-bound secrets; pairing/rotation/assignment transactions. Five store contracts, 11 sharing unit tests, schema migration parity and 31 import-inventory tests passed; workspace Clippy and catalog lint passed. Run 3890 and the final Effort development gate passed on the exact candidate; landed in the effort as `971265536a` with all seven regression fields. |
 | S2 | implementation in progress; topology qualification open | [draft PR #759](http://192.168.4.7:3000/noirr/plurx/pulls/759) | Dedicated loopback TLS transport, pinned direct dialing and fixed Tailscale DNS, isolated peer/admin routes, durable claim/rotation recovery, authenticated endpoint refresh and advisory Developer switch implemented. Two-NAT, shared-machine Serve and Docker isolation/egress receipts remain open; S2 is not complete. |
 | S3 | not started | — | — |
-| S4 | catalogue primitives and private history implemented; qualification pending | `codex/sharing-s4-catalogue` | Signed live-list boundaries, closed source references and bounded batch inputs; receiver-only ordered watch transactions. Runtime catalogue/routes/revisions/cache/artwork and real scan liveness remain open. |
+| S4 | source catalogue and private history candidates implemented; qualification pending | `codex/sharing-s4-catalogue` | Consistent live keysets and batch metadata, candidate order maintenance and durable item identities, peer metadata routes and receiver-only ordered history. Viewer/cache/artwork/details, activation floor and qualification remain open. |
 | S5 | not started | — | — |
 | S6 | not started | — | — |
 | S7 | not started | — | — |
@@ -1775,3 +1775,88 @@ metadata/art caches, batch concurrency, source revalidation of Continue
 Watching, and measured paging under actual continuous scan writes. Cursor
 unit tests that advance revisions are not the scan-liveness receipt. S4 is
 partial; no Tailscale, playback, client or promotion qualification is claimed.
+
+
+### 16.6 Parallel S4 source catalogue and item identity candidate
+
+**Built, awaiting activation:** the [source Store](../../crates/plurx-core/src/store/sharing_catalogue_source.rs)
+reads active credential/grant, current library membership, revision and page in
+one consistent SQL boundary. It uses fixed BINARY indexes and numeric item
+IDs with tuple seeks; child order includes numeric season/episode keys and
+explicit NULL ordering. Pages are bounded to 201 rows including lookahead.
+Batch requests retain at most 200 IDs and return no metadata for missing or
+out-of-scope IDs. The [peer routes](../../crates/plurxd/src/http/shared_library.rs)
+compose the existing private listener guard and expose closed library/item
+metadata, children, batches and signed live cursors. Internal artwork names
+cannot be serialized by these records. The routes refuse service while
+catalogue order or item identity maintenance is absent or an import is active.
+
+The [candidate order DDL](../../crates/plurx-core/src/store/sharing_catalogue_schema.sql)
+indexes title and child order and maintains revisions on library/item insert,
+item deletion, library moves and actual sort/parent/kind/ordinal changes.
+Descriptions, artwork and analysis updates do not advance order revisions.
+The finite production writer census covers ordinary media writes in
+`sqlite/media.rs` and `hiqlite_media.rs`, lease-fenced scanner/publication
+writes in `sqlite/publication.rs` and `hiqlite_publication.rs`, reconciliation
+and pruning in those same modules, and explicit-ID backend import in
+`hiqlite_import.rs`. Old table rebuild migrations and test SQL are not runtime
+writers. Membership/order maintenance is implemented in storage triggers, so
+the enumerated writer paths do not have independent counter updates to omit.
+
+An actual SQLite `insert_item` → delete highest item → unrelated `insert_item`
+reproduced ID reuse (`old=1`, `new=1`). Because shared references and retained
+private history bind source server/epoch/item IDs, reuse would make retained
+state refer to another title. The [candidate allocator DDL](../../crates/plurx-core/src/store/item_identity_schema.sql)
+keeps a durable high-water mark and rejects every implicit or explicit insert
+at or below it outside a dedicated fresh-target import mode. Ordinary writers
+allocate the next ID within the insert statement. The replicated fenced
+writer replaces random high-i64 allocation with a consistent candidate read
+and an atomic lease-checked insertion; competing allocation rolls back and
+retries at most four times. Failed inserts do not spend an ID. All inserts
+observe explicit source IDs. The immutable import actor additionally preserves
+a source watermark above live IDs; interrupted imports retain unavailable
+import mode and require the existing discard-incoming-target recovery.
+Catalogue triggers suppress derived revision changes during import and seed
+missing older-backup revisions only after parity succeeds.
+
+**Observed:** eight focused core tests passed with zero failures/ignored tests
+(2.80 seconds), including actual metadata writes while 5,000 finite items are
+paged to exhaustion on memory and disk SQLite. This is a live-list receipt;
+it is not snapshot isolation. Isolated native test-process measurements were
+0.10 seconds and 24,690,688-byte peak RSS for the 40,000-reference dedup
+fixture, and 1.85 seconds and 41,500,672-byte peak RSS for the complete live
+scan fixture. These include the test runtime, source fixtures and SQLite;
+they do not attribute heap bytes solely to retained references. Two additional
+contracts passed on three actual Hiqlite voters (18.95 seconds, zero ignored):
+current scope removal, live boundary continuation after metadata/sort changes,
+per-ID batch denial, a real prepared SQLite backup with spent watermark 1000,
+post-import monotone allocation, deleted-highest allocation, stale scanner
+lease refusal, old writer refusal and concurrent distinct IDs.
+
+```sh
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --lib sharing_catalogue -- --nocapture
+cargo test --locked --offline -p plurx-core --features hiqlite-contract-tests --test store_contract sharing_catalogue_ -- --nocapture
+cargo test --locked --offline -p plurxd --bin plurxd sharing_catalogue_http_ -- --nocapture
+cargo clippy --locked --offline -p plurxd -p plurx-core --all-targets --features plurx-core/hiqlite-contract-tests -- -D warnings
+```
+
+Two daemon HTTP regressions also passed (0.18 seconds, zero ignored):
+unknown/duplicate/oversized query rejection and live-grant/maintenance
+refusal on every catalogue route, with private headers and no out-of-scope
+names or source paths.
+
+All core/daemon targets passed denied-warning Clippy (1 minute 42 seconds).
+Documentation indexing passed four tests and catalog lint passed (28 points,
+35 checks and 2,609 audited files).
+
+**Still owed:** the schema remains candidate-only and uninstalled. Activation
+requires coordinated migration versions and the separate
+`sharing_catalogue_item_identity_v1` floor on every active voter and learner;
+the old random explicit publication writer must not remain admitted.
+No capability is advertised by this candidate. Rejoin/promotion must treat an
+installed allocator table conservatively as requiring the new floor. Viewer
+routes, closed playable-file details, bounded receiver metadata/art caches,
+current source revalidation of Continue Watching, scoped artwork and blocked
+body revocation remain open. The earlier private-watch Store still requires
+live login and current foreign item membership at its HTTP caller. This is
+not S4 completion, playback admission or Tailscale/promotion qualification.

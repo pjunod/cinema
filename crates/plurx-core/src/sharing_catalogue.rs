@@ -15,7 +15,7 @@ pub const MAX_PAGE_SIZE: usize = 200;
 pub const MAX_BATCH_ITEMS: usize = 200;
 pub const MAX_CURSOR_BYTES: usize = 4096;
 pub const CURSOR_TTL_MS: i64 = 5 * 60 * 1000;
-const MAX_SORT_KEY_BYTES: usize = 512;
+const MAX_SORT_KEY_BYTES: usize = 544;
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -280,6 +280,68 @@ impl BrowseSeen {
     pub fn is_empty(&self) -> bool {
         self.references.is_empty()
     }
+}
+
+/// Source-only presentation fields. Filesystem and account data have no wire slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceCatalogueItem {
+    pub item_id: SourceId,
+    pub library_id: SourceId,
+    pub parent_id: Option<SourceId>,
+    pub kind: SourceItemKind,
+    pub title: String,
+    pub sort_title: String,
+    pub year: Option<i32>,
+    pub overview: Option<String>,
+    pub genres: Vec<String>,
+    pub season_number: Option<i32>,
+    pub episode_number: Option<i32>,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceItemKind {
+    Movie,
+    Show,
+    Season,
+    Episode,
+}
+impl SourceCatalogueItem {
+    pub fn validate(&self) -> Result<(), CatalogueError> {
+        if self.title.len() > 512
+            || self.sort_title.len() > 512
+            || self.overview.as_ref().is_some_and(|v| v.len() > 8192)
+            || self.genres.len() > 64
+            || self.genres.iter().any(|v| v.len() > 128)
+        {
+            return Err(CatalogueError::Invalid);
+        }
+        Ok(())
+    }
+}
+#[derive(Clone)]
+pub struct CataloguePageRequest {
+    pub credential_hash: String,
+    pub grant_id: Uuid,
+    pub library_id: SourceId,
+    pub parent_id: Option<SourceId>,
+    pub query: String,
+    pub boundary: Option<CatalogueBoundary>,
+    pub limit: usize,
+}
+/// Internal records deliberately do not implement Serialize: local artwork names
+/// must be converted to grant-bound resources before a peer sees presentation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceCatalogueRecord {
+    pub item: SourceCatalogueItem,
+    pub boundary_sort_key: String,
+    pub poster_filename: Option<String>,
+    pub backdrop_filename: Option<String>,
+}
+#[derive(Debug)]
+pub struct SourceCataloguePage {
+    pub records: Vec<SourceCatalogueRecord>,
+    pub counters: CatalogueCounters,
+    pub has_more: bool,
 }
 
 #[cfg(test)]
