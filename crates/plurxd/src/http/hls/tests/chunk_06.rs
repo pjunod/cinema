@@ -2631,6 +2631,7 @@
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             playback_id: playback_id.clone(),
             ..staged_candidate_request()
         };

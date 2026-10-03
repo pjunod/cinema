@@ -1,6 +1,6 @@
 # ADR-J0-1 — retain passive VOD routes after reader idle reap
 
-**Status:** proposed; physical reproduction retained, recovery policy unproved · **Date:** 2026-10-02 EDT · **Deciders:** Jellyfin compatibility implementation and task review.
+**Status:** proposed; native lifecycle spike tested, physical recovery pending · **Date:** 2026-10-02 EDT · **Deciders:** Jellyfin compatibility implementation and task review.
 
 Companion to [the build contract](JELLYFIN-COMPATIBILITY-BUILD.md) (required
 behavior) and [execution status](JELLYFIN-COMPATIBILITY-STATUS.md) (measured
@@ -130,3 +130,28 @@ Implement and compile explicit patches at these boundaries. First reproduce the
 owner-loop failure with a controllable clock, then prove quota/cancellation and
 fence races before physical recovery verification. A successful policy helper
 alone cannot satisfy the integrated owner-loop or physical acceptance rows.
+
+## Native spike evidence — actual owner renewal and fragment recovery
+
+The candidate implementation reserves bounded metadata before VOD rendition
+admission, detaches the idle reader under its existing lifecycle gate, and
+keeps a live grant visible to owner renewal. Exact presence renews metadata
+without allocating a reader or advancing the delivered frontier. Expiry,
+replacement and terminal release retire the grant; a cached recipe cannot
+mint a replacement grant during resurrection. Native HTTP continues to ignore
+both internal service policies.
+
+On Rust 1.97.1, the focused `cargo test -p plurxd --bin plurxd passive_ --
+--nocapture` run passed ten tests. Seven cover the new policy: three admission
+and identity tests, two reader lifecycle tests, the actual owner loop with
+reader-free renewal and expiry, and the public fragment handler recovering
+from a real indexed fixture. The latter drains video bytes, observes a real
+frontier advance, retains the same durable incarnation and owner epoch, then
+proves terminal release rejects a late GET. The remaining three are existing
+passive-control regressions. The three `vod_only` regressions and the existing
+`idle_reap_and_same_id_resurrection_are_one_reader_transition` also passed.
+
+This proves native metadata, renewal and HTTP recovery boundaries. It does
+not yet prove authenticated facade presence, actual remote worker dispatch,
+disable/drain and renewal-ambiguity races, or physical recovery beyond the
+300-second reader lifetime. Those acceptance items remain open.

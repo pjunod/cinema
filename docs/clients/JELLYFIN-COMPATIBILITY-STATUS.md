@@ -237,8 +237,8 @@ negative duration on valid copy and encoded recipes, typed
 
 The preceding tests are native service evidence, not a new compatibility adapter or a proof
 that an external client will request the resurrection path. The per-create
-VOD-only policy is implemented and tested below; actual worker execution and
-passive retention remain unproved. Test linking
+VOD-only policy is implemented and tested below; actual worker execution remains unproved. The passive retention
+spike now has the native evidence recorded below; physical recovery is pending. Test linking
 reported the macOS compact-unwind size warning; execution passed. Workspace
 Clippy with `-D warnings`, formatting, catalog lint and served JavaScript
 syntax passed through the normal tracked hook.
@@ -302,7 +302,14 @@ The internal per-create `vod_only` policy now refuses unindexed copy before
 rolling allocation with recovery globally enabled. Three focused regressions
 prove that refusal, worker/durable JSON preservation and distinct identity,
 and native HTTP ignoring the client-supplied policy knob. Actual worker
-dispatch and passive route retention remain separate unproved seams.
+dispatch remains unproved. The passive route spike now passes ten focused
+regressions, including real reader detach/resurrection, current-play identity,
+quotas, terminal/replacement fencing, reader-free owner renewal and expiry,
+and a public fragment GET against real indexed media retaining the same
+durable incarnation and owner epoch. Native HTTP defaults and the existing
+idle-reap/resurrection race also pass. Physical long-pause recovery and the
+remaining facade/worker/race boundaries are still pending; see the
+[passive lifetime ADR](JELLYFIN-PASSIVE-VOD-ROUTE-LIFETIME.md#native-spike-evidence--actual-owner-renewal-and-fragment-recovery).
 
 ## 4. Milestone admission — J0 remains open
 

@@ -446,6 +446,7 @@ use crate::queue_fixture::QueueFixture;
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 1,
             playback_id: playback_id.to_string(),
@@ -672,6 +673,7 @@ use crate::queue_fixture::QueueFixture;
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                passive_grant: None,
                 rendition: Some(rendition),
                 rendition_key,
                 file,
@@ -721,6 +723,7 @@ use crate::queue_fixture::QueueFixture;
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
+                passive_grant: None,
                 rendition: None,
                 rendition_key,
                 file,

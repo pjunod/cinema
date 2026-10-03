@@ -240,6 +240,9 @@ impl VodServe {
                     cause
                 }
             };
+            if let Some(grant) = session.passive_grant.take() {
+                grant.release();
+            }
             // Idempotent, and correct on the refinement branch too: the slot
             // was already aborted when the provisional tombstone was written.
             session.abort_staged_preparation();
@@ -397,6 +400,7 @@ impl VodServe {
             return Err(VodSupersedeError::Deadline);
         }
         let mut work = Vec::new();
+        let mut ended = 0;
         for (id, lifecycle, incarnation) in victims {
             let Some(session) = sessions.get_mut(&id) else {
                 continue;
@@ -408,6 +412,10 @@ impl VodServe {
                 continue;
             }
             session.tombstone = Some(Terminal::Superseded);
+            ended += 1;
+            if let Some(grant) = session.passive_grant.take() {
+                grant.release();
+            }
             session.abort_staged_preparation();
             let cleanup = Arc::new(TerminalCleanup::new());
             session.terminal_cleanup = Some(Arc::clone(&cleanup));
@@ -430,7 +438,6 @@ impl VodServe {
             ));
         }
         drop(sessions);
-        let ended = work.len();
         for (id, cleanup, rendition, file_id, height, kind) in work {
             self.spawn_terminal_cleanup(
                 id,
@@ -487,7 +494,7 @@ impl VodServe {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| session.tombstone.is_none())
+            .filter(|(_, session)| session.renewable())
             .map(|(id, _)| id.clone())
             .collect()
     }
@@ -501,6 +508,9 @@ impl VodServe {
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
                 return None;
+            }
+            if let Some(grant) = session.passive_grant.as_ref() {
+                return grant.frontier();
             }
             session.live_rendition().map(Arc::clone)?
         };

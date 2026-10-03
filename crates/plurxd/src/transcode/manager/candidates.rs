@@ -685,6 +685,7 @@ mod snapshot_catalog_regression {
             quality_catalog: None,
             candidate_context: Some(Box::new(context)),
             vod_only: false,
+            passive_vod: false,
             file_id: id,
             playback_id: "binding-regression".to_owned(),
             request_id: None,

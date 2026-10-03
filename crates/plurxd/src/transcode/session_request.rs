@@ -504,6 +504,9 @@ pub struct SessionRequest {
     /// not allocate the rolling recovery engine, even when globally enabled.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) vod_only: bool,
+    /// Trusted passive route retention, independently selected by service ingress.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) passive_vod: bool,
     pub file_id: i64,
     /// Stable for one player instance; the supersession key.
     pub playback_id: String,
@@ -876,6 +879,11 @@ impl SessionRequest {
         };
         let kind = if self.vod_only {
             format!("{kind}+vod-only")
+        } else {
+            kind
+        };
+        let kind = if self.passive_vod {
+            format!("{kind}+passive-vod-600-64-4096")
         } else {
             kind
         };

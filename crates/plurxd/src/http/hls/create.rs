@@ -208,6 +208,7 @@ impl CreateSession {
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             file_id,
             playback_id: self.playback_id,
             request_id: self.request_id,

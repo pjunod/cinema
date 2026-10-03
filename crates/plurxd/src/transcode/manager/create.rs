@@ -477,6 +477,19 @@ impl TranscodeManager {
         self.validate_candidate_planning_binding(req, replacement_deadline)
             .await?;
 
+        if req.passive_vod
+            && (!req.vod_only
+                || req.presentation != Presentation::Vod
+                || req
+                    .request_id
+                    .as_deref()
+                    .is_none_or(|id| id.trim().is_empty()))
+        {
+            return Err(vod_refusal_error(
+                "vod_passive_policy_invalid",
+                "passive retention requires VOD-only policy and request identity",
+            ));
+        }
         if req.vod_only && req.presentation != Presentation::Vod {
             return Err(vod_refusal_error(
                 "vod_source_unsupported",

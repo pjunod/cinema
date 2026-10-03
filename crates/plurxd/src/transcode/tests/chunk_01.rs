@@ -1958,6 +1958,7 @@
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "cap-probe".to_owned(),
@@ -2028,6 +2029,7 @@
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 1,
             playback_id: "snapshot-probe".to_owned(),
@@ -3103,6 +3105,7 @@
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             control_sequence: None,
             file_id: 5,
             playback_id: "player".into(),
@@ -3124,6 +3127,7 @@
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             hdr10: true,
             ..request.clone()
         };

@@ -239,6 +239,23 @@ impl VodServe {
             }
         }
 
+        let expired_grants = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
+                .iter()
+                .filter(|(_, session)| {
+                    session.tombstone.is_none()
+                        && session
+                            .passive_grant
+                            .as_ref()
+                            .is_some_and(|grant| !grant.live())
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>()
+        };
+        for id in expired_grants {
+            self.begin_end(&id, Terminal::PauseExpired).await;
+        }
         let now = Instant::now();
         // Idle live sessions vanish — tombstone-free, because an idle reap is
         // the one ending a session may come back from (via the durable route
@@ -249,6 +266,7 @@ impl VodServe {
                 .iter()
                 .filter(|(_, session)| {
                     session.tombstone.is_none()
+                        && session.rendition.is_some()
                         && now.duration_since(*session.last_touch.lock().expect("touch lock"))
                             > SESSION_IDLE_TTL
                 })
@@ -266,7 +284,21 @@ impl VodServe {
                             > SESSION_IDLE_TTL
                 });
                 if still_expired {
-                    sessions.remove(&id).and_then(|session| session.rendition)
+                    let retained = sessions.get_mut(&id).filter(|session| {
+                        session
+                            .passive_grant
+                            .as_ref()
+                            .is_some_and(|grant| grant.live())
+                    });
+                    if let Some(session) = retained {
+                        // Stale response owners cannot publish after this detach.
+                        session.abort_staged_preparation();
+                        session.incarnation = Arc::new(());
+                        session.marker_destinations.clear();
+                        session.rendition.take()
+                    } else {
+                        sessions.remove(&id).and_then(|session| session.rendition)
+                    }
                 } else {
                     None
                 }

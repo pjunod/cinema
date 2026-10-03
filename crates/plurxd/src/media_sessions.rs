@@ -1274,7 +1274,9 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
 }
 
 fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
-    (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
+    (!request.passive_vod
+        || (request.vod_only && request.request_id.as_deref().is_some_and(|id| !id.trim().is_empty())))
+        && (!request.vod_only || request.presentation == crate::transcode::Presentation::Vod)
         && request.file_id > 0
         && !request.playback_id.trim().is_empty()
         && request.playback_id.len() <= 128
@@ -5457,6 +5459,7 @@ pub(crate) fn takeover_eligible_route(session_id: &str, incarnation_id: &str) ->
             quality_catalog: None,
             candidate_context: None,
             vod_only: false,
+            passive_vod: false,
             request_id: Some(incarnation_id.to_owned()),
             presentation: crate::transcode::Presentation::Live,
             ..base.request
@@ -5899,6 +5902,7 @@ mod tests {
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
+                passive_vod: false,
                 control_sequence: None,
                 file_id: 11,
                 playback_id: "player-a".to_owned(),
@@ -6923,6 +6927,7 @@ mod tests {
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
+                passive_vod: false,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7070,6 +7075,7 @@ mod tests {
                 quality_catalog: None,
                 candidate_context: None,
                 vod_only: false,
+                passive_vod: false,
                 presentation: crate::transcode::Presentation::Vod,
                 ..eligible.request.clone()
             },
@@ -7967,6 +7973,7 @@ mod tests {
         let native = valid_start_request();
         let native_value = serde_json::to_value(&native).expect("native envelope");
         assert!(native_value["request"].get("vod_only").is_none());
+        assert!(native_value["request"].get("passive_vod").is_none());
         let legacy: RemoteStartRequest =
             serde_json::from_value(native_value).expect("legacy recipe");
         assert!(!legacy.request.vod_only);
@@ -7977,6 +7984,7 @@ mod tests {
         );
         let mut service = native.clone();
         service.request.vod_only = true;
+        service.request.passive_vod = true;
         assert_ne!(
             native.request.durable_intent_fingerprint(native.user_id),
             service.request.durable_intent_fingerprint(service.user_id)
@@ -7985,6 +7993,10 @@ mod tests {
         let mut recovered: RemoteStartRequest =
             serde_json::from_slice(&encoded).expect("policy round trip");
         assert!(recovered.request.vod_only);
+        assert!(recovered.request.passive_vod);
+        let mut invalid = recovered.clone();
+        invalid.request.vod_only = false;
+        assert!(!invalid.is_valid());
         assert!(recovered.is_valid());
         recovered.request.presentation = crate::transcode::Presentation::Live;
         assert!(!recovered.is_valid());

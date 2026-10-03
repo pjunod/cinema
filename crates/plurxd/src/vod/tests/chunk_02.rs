@@ -2422,6 +2422,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
@@ -2557,6 +2558,7 @@
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
+                passive_grant: None,
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
                 file: Arc::new(rendition.recipe.file.clone()),
