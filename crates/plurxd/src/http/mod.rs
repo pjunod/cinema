@@ -2522,6 +2522,11 @@ async fn mutable_media_serving_gate(
 }
 
 #[cfg(test)]
+pub(crate) fn source_actor_test_state() -> AppState {
+    tests::test_state_without_router()
+}
+
+#[cfg(test)]
 mod tests {
     use std::io::Write;
     use std::sync::Arc;
@@ -4763,9 +4768,14 @@ mod tests {
     /// server into a condition a request cannot create, like a pre-transcode
     /// pass already running.
     pub(super) fn test_app_with_state() -> (Router, AppState) {
+        let state = test_state_without_router();
+        (router(state.clone()), state)
+    }
+
+    pub(super) fn test_state_without_router() -> AppState {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-test-{}", uuid::Uuid::new_v4()));
-        let state = AppState::new(
+        AppState::new(
             "test".into(),
             Arc::new(store),
             test_dirs(&base),
@@ -4773,8 +4783,7 @@ mod tests {
             Default::default(),
             Default::default(),
             Arc::new(crate::logbuf::LogBuffer::new(64)),
-        );
-        (router(state.clone()), state)
+        )
     }
 
     // HTTP scan fixtures run the production durable consumer independently.

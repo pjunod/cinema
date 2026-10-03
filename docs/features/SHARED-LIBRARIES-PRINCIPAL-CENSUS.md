@@ -1304,3 +1304,51 @@ cargo test --locked -p plurx-core --features hiqlite-contract-tests --lib store:
 cargo check --locked -p plurx-core --features hiqlite-contract-tests --all-targets
 cargo clippy --locked -p plurx-core --features hiqlite-contract-tests --all-targets -- -D warnings
 ```
+
+### Actual first-copy physical preadmission
+
+The private copy-only candidate accepts opaque prepared Source playback and its
+complete dispatch assignment. It acquires the real four-thread copy permit
+under the existing saved resource policy before preparing a pending rendition.
+The same absolute start deadline bounds preparation; the physical admission
+window is at most the existing five-second queue allowance. The pending object
+owns that permit without installing a viewer, reader, durable route or producer.
+Dropping it returns the physical reservation only and cannot release Source
+accounting. Encoded, burn, Direct and progressive actor lanes remain closed.
+
+The actual fixture selects the production standalone one-voter Store, supplies
+its actual master and MembershipManager, and seeds explicit current fixture
+capabilities for the exact candidate schema. It writes real scanned FFmpeg
+media facts, obtains the current authorized witness and stored key envelope,
+runs the actual Source planning engine, then claims and assigns through the
+current opaque membership observation. With preadmission held it checks four
+CPU threads in use, no visible VOD session, empty pending rendition readers,
+child PID zero, an absent ProducerSlot and no durable route. Drop returns CPU
+use to zero before its proven never-activated fixture cleanup.
+
+This test runs on the normal stack with boxed preparation subfutures; the
+actual Source preparation future is 21,528 bytes and the copy preadmission
+future is 512 bytes. Its scan fixture includes actual chapters. An earlier
+chapterless scan correctly exposed the common decision's Local probe fallback:
+it changed the stored witness and the final revision guard refused the old
+revision. The separate Source stored-evidence policy must be integrated before
+production actor qualification; this fixture does not authorize live fallback
+probing before physical admission.
+
+```sh
+cargo test --locked -p plurxd --features plurx-core/hiqlite-contract-tests --bin plurxd source_copy_preadmission_owns_real_capacity_before_activation_and_queue -- --nocapture
+```
+
+On `266b7e720` plus this candidate, the actual one-voter regression passed one
+test, zero ignored, in 9.88 seconds. Actor registry insertion, first blocked
+activation, admitted driver attachment, readiness publication and terminal
+post-reap release remain separate unimplemented handoffs in this receipt.
+
+The exact daemon feature all-target check passed in 49.70 seconds and
+feature denied-warning Clippy in 1 minute 31 seconds. Catalogue lint,
+formatting, diff checks and all four documentation-index tests passed. The
+fixture's capability and manual candidate-schema seeding are explicit test
+setup, not evidence for production installation or heartbeat advertisement.
+The existing complete Source-engine preparation regression passed in 0.85
+seconds and the actual saved VOD/admission start-budget regression in 0.15
+seconds, each one test with zero ignored.

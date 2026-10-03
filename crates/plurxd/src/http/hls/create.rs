@@ -4192,7 +4192,9 @@ pub(crate) async fn prepare_source_playback(
         sharing_catalogue_details::CatalogueRevisionKey,
         store::sharing_catalogue_details::SourceDetailsRead,
     };
-    let refused = || {
+    let refused = |_stage: &str| {
+        #[cfg(test)]
+        eprintln!("Source preparation refused at {_stage}");
         ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
             "sharing_playback_authority_unavailable",
@@ -4212,7 +4214,7 @@ pub(crate) async fn prepare_source_playback(
             .as_deref()
             .is_some_and(|value| value != "vod")
     {
-        return Err(refused());
+        return Err(refused("initial_body_switch"));
     }
     if let Some(intent) = body.intent.as_ref() {
         intent
@@ -4224,15 +4226,15 @@ pub(crate) async fn prepare_source_playback(
         .as_ref()
         .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
         .cloned()
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused("caps"))?;
     super::super::stream::validate_device_caps(&caps)?;
     let (hash, grant) = super::super::shared_library::authority(state, headers).await?;
     let viewer = headers
         .get("cinemashare-viewer")
         .and_then(|value| value.to_str().ok())
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused("viewer_header"))?;
     let principal = plurx_core::playback_principal::PlaybackPrincipal::sharing(grant, viewer)
-        .map_err(|_| refused())?;
+        .map_err(|_| refused("viewer_shape"))?;
     let read_witness = || {
         state.store.source_item_file_witness(
             &hash,
@@ -4242,7 +4244,7 @@ pub(crate) async fn prepare_source_playback(
         )
     };
     let SourceDetailsRead::Authorized(witness) = read_witness().await? else {
-        return Err(refused());
+        return Err(refused("current_witness"));
     };
     if !witness.matches_source_file(
         target.server_id,
@@ -4251,13 +4253,13 @@ pub(crate) async fn prepare_source_playback(
         &target.item_id,
         &target.file_id,
     ) {
-        return Err(refused());
+        return Err(refused("witness_tuple"));
     }
     let envelope = state
         .store
         .source_catalogue_revision_key(target.server_id, target.catalogue_epoch)
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused("key_absent"))?;
     let key = CatalogueRevisionKey::open(
         &state.sharing.key,
         plurx_core::sharing::SharingIdentity {
@@ -4268,7 +4270,7 @@ pub(crate) async fn prepare_source_playback(
         &envelope,
     )?;
     if key.file_revision(&witness)? != target.revision {
-        return Err(refused());
+        return Err(refused("revision"));
     }
     // The ordinary file/planning store is entered only after the current grant
     // query produced this exact Source tuple. Foreign B IDs never reach it.
@@ -4276,12 +4278,12 @@ pub(crate) async fn prepare_source_playback(
         .file_id
         .as_str()
         .parse::<i64>()
-        .map_err(|_| refused())?;
+        .map_err(|_| refused("file_id"))?;
     let snapshot = state
         .store
         .playback_planning_snapshot(file_id, &crate::transcode::QUALITY_PLANNING_KEYS)
         .await?
-        .ok_or_else(refused)?;
+        .ok_or_else(|| refused("planning_snapshot"))?;
     let file = snapshot.file.clone();
     let q = super::super::stream::Caps {
         caps_v2: Some(caps.clone()),
@@ -4331,7 +4333,7 @@ pub(crate) async fn prepare_source_playback(
         ));
     }
     let SourceDetailsRead::Authorized(current) = read_witness().await? else {
-        return Err(refused());
+        return Err(refused("final_witness"));
     };
     if !current.matches_source_file(
         target.server_id,
@@ -4343,7 +4345,7 @@ pub(crate) async fn prepare_source_playback(
         || !crate::sharing::enabled(state.store.as_ref()).await?
         || super::super::shared_library::authority(state, headers).await? != (hash.clone(), grant)
     {
-        return Err(refused());
+        return Err(refused("final_tuple_revision_switch_grant"));
     }
     Ok(PreparedSourcePlayback {
         target,
