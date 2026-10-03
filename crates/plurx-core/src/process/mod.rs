@@ -70,7 +70,7 @@ pub fn spawn_job_owned(
 /// | `transcode.rs` | 1 | stdout and stderr |
 /// | `subtitles.rs` | 1 | whole-track status and stderr |
 /// | `live_tv.rs` | 1 | status and stderr |
-/// | `live_tv/caption_audit_tests.rs` | 1 | status, stdout and stderr |
+/// | `live_tv/caption_probe.rs` | 1 | status, stdout and stderr |
 /// | `subtitle_ride_along.rs` | 1 | status, stdout and stderr |
 ///
 /// Subtitle window extraction uses the bounded diagnostic child instead of
@@ -414,7 +414,7 @@ mod tests {
         let expected = BTreeMap::from([
             ("ffmpeg.rs".to_owned(), 4),
             ("live_tv.rs".to_owned(), 1),
-            ("live_tv/caption_audit_tests.rs".to_owned(), 1),
+            ("live_tv/caption_probe.rs".to_owned(), 1),
             ("pipeprobe.rs".to_owned(), 2),
             ("subtitle_ride_along.rs".to_owned(), 1),
             ("subtitles.rs".to_owned(), 1),
